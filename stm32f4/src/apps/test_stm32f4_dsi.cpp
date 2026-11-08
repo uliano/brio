@@ -107,6 +107,7 @@
 #include "stm32f4/clock.hpp"
 #include "stm32f4/dma2d.hpp"
 #include "stm32f4/dsi.hpp"
+#include "stm32f4/dwt.hpp"
 #include "stm32f4/exti.hpp"
 #include "stm32f4/fmc.hpp"
 #include "stm32f4/i2c.hpp"
@@ -119,6 +120,7 @@
 #include "kernel/borrowed.hpp"
 #include "util/i2c_bus.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000>;
@@ -299,36 +301,19 @@ constexpr PanelFacts known_panels[] = {
 };
 constexpr uint8_t unknown_panel = 0xFF;
 
-// ---- the rulers -----------------------------------------------------------------------
+// ---- the ruler ------------------------------------------------------------------------
 
-uint32_t systick_period() { return SysTick->LOAD + 1u; }
+/// The DWT's cycle counter, started in main(): microseconds for the
+/// link's waits and a refresh, the windows of a second or three (far under
+/// the counter's 23.8 s wrap), and the shared waits' (util/test_wait.hpp).
+/// Letter n's ninety seconds go on the kernel tick.
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 
-/// Microseconds of kernel time from the tick and SysTick's own counter,
-/// read coherently.
-uint32_t micros() {
-    uint32_t t1, t2, v;
-    do {
-        t1 = Ticker::ticks();
-        v = SysTick->VAL;
-        t2 = Ticker::ticks();
-    } while (t1 != t2);
-    const uint32_t period = systick_period();
-    return t1 * 1000u + ((period - 1u - v) * 1000u) / period;
-}
-
-uint32_t millis() { return P::now(); }
-
-void wait_ms(uint32_t ms) {
-    const uint32_t start = millis();
-    while (millis() - start < ms) {
-    }
-}
-
-void wait_us(uint32_t us) {
-    const uint32_t t0 = micros();
-    while (micros() - t0 < us) {
-    }
-}
+constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
 
 const char* status_name(DsiStatus s) {
     switch (s) {
@@ -382,9 +367,9 @@ uint32_t settles = 0;
 void panel_reset() {
     PanelReset::output();
     PanelReset::clear();
-    wait_ms(20);
+    brio::spin_us<Ruler>(20'000);
     PanelReset::set();
-    wait_ms(150);
+    brio::spin_us<Ruler>(150'000);
 }
 
 /// One register of the panel, read back through the link: the byte, or
@@ -445,7 +430,7 @@ DsiStatus panel_whole_window() { return panel_window(0, panel_width - 1u, 0, pan
 /// block. The memory writes themselves are the adapted command mode's.
 DsiStatus panel_init() {
     DsiStatus st = Dsi::dcs_write(dcs_slpout);
-    wait_ms(120);
+    brio::spin_us<Ruler>(120'000);
     if (st == DsiStatus::ok) {
         st = Dsi::dcs_write(dcs_colmod, colmod_24bit);
     }
@@ -464,7 +449,7 @@ DsiStatus panel_init() {
     if (st == DsiStatus::ok) {
         st = Dsi::dcs_write(dcs_wrdisbv, 0xFF);
     }
-    wait_ms(20);
+    brio::spin_us<Ruler>(20'000);
     return st;
 }
 
@@ -522,9 +507,9 @@ bool ltdc_show32() { return ltdc_show(LtdcPixelFormat::argb8888, sdram_base + fb
 void ltdc_stop() {
     if (Ltdc::enabled() && !Dsi::in_command_mode()) {
         const uint32_t target = line_events + 1u;
-        const uint32_t deadline = millis() + 60u;
-        while (line_events < target && static_cast<int32_t>(millis() - deadline) < 0) {
-        }
+        // A frame is under 20 ms; 60 ms is the time-out, and a frame that
+        // never came leaves the disable where it would have landed anyway.
+        (void)brio::wait_until<Ruler>([target] { return line_events >= target; }, 60'000);
     }
     Ltdc::disable();
     Ltdc::interrupt(LtdcEvent::line, false);
@@ -536,15 +521,13 @@ void ltdc_stop() {
 /// time it took, or 0 when the end of refresh never came.
 uint32_t refresh(uint32_t timeout_ms = 100) {
     Dsi::clear_wrapper_flags(DSI_WISR_ERIF);
-    const uint32_t t0 = micros();
-    const uint32_t deadline = millis() + timeout_ms;
+    const uint32_t t0 = Ruler::now();
     Dsi::ltdc_flow(true);
-    while ((Dsi::wrapper_flags() & DSI_WISR_ERIF) == 0u) {
-        if (static_cast<int32_t>(millis() - deadline) > 0) {
-            return 0u;
-        }
+    if (!brio::wait_until<Ruler>([] { return (Dsi::wrapper_flags() & DSI_WISR_ERIF) != 0u; },
+                                 timeout_ms * 1000u)) {
+        return 0u;
     }
-    const uint32_t took = micros() - t0;
+    const uint32_t took = (Ruler::now() - t0) / cycles_per_us;
     return took == 0u ? 1u : took;
 }
 
@@ -553,7 +536,7 @@ uint32_t refresh(uint32_t timeout_ms = 100) {
 /// control error, at the first bus turnaround after a reset on either
 /// side - measured), and the error registers read clear.
 void link_settle() {
-    wait_ms(20);
+    brio::spin_us<Ruler>(20'000);
     uint8_t b = 0;
     (void)Dsi::dcs_read(dcs_rdid1, &b, 1);
     settled_errors |= Dsi::errors0();
@@ -595,16 +578,16 @@ bool paint_bars32() { return paint_bars(sdram_base + fb32_offset, Dma2dOutputCol
 bool link_up() {
     Dsi::clock(true);
     Dsi::disable();
-    uint32_t t0 = micros();
+    uint32_t t0 = Ruler::now();
     if (!Dsi::regulator(true)) {
         return false;
     }
-    boot.regulator_us = micros() - t0;
-    t0 = micros();
+    boot.regulator_us = (Ruler::now() - t0) / cycles_per_us;
+    t0 = Ruler::now();
     if (!Dsi::pll(SysClock::root_hz, dsi_cfg.pll)) {
         return false;
     }
-    boot.lock_us = micros() - t0;
+    boot.lock_us = (Ruler::now() - t0) / cycles_per_us;
     if (!Dsi::phy(dsi_cfg.phy, dsi_cfg.bit_rate_hz) || !Dsi::host(dsi_cfg.host)) {
         return false;
     }
@@ -713,7 +696,7 @@ void tb_regulator_pll() {
     Dsi::disable();
     Dsi::clear_wrapper_flags(DSI_WISR_PLLUIF | DSI_WISR_PLLLIF);
     Dsi::pll_off();
-    wait_us(50);
+    brio::spin_us<Ruler>(50);
     const bool unlocked = !Dsi::pll_locked();
     const uint32_t flags_off = Dsi::wrapper_flags();
     print(serial, "  PLL off: locked ", Dsi::pll_locked() ? "yes" : "no", ", WISR ", hex(flags_off),
@@ -727,9 +710,9 @@ void tb_regulator_pll() {
                   refused && !Dsi::pll_on());
 
     Dsi::clear_wrapper_flags(DSI_WISR_PLLLIF);
-    uint32_t t0 = micros();
+    uint32_t t0 = Ruler::now();
     const bool relocked = Dsi::pll(SysClock::root_hz, dsi_cfg.pll);
-    const uint32_t relock_us = micros() - t0;
+    const uint32_t relock_us = (Ruler::now() - t0) / cycles_per_us;
     const uint32_t flags_on = Dsi::wrapper_flags();
     print(serial, "  PLL back: locked in ", relock_us, " us, WISR ", hex(flags_on), crlf);
     bench.verdict("the PLL relocks, in under 200 us, and the lock flag rises",
@@ -738,12 +721,12 @@ void tb_regulator_pll() {
     // The regulator too: off, the D-PHY with it, and back.
     Dsi::pll_off();
     (void)Dsi::regulator(false);
-    wait_us(100);
+    brio::spin_us<Ruler>(100);
     const bool reg_down = !Dsi::regulator_ready();
     Dsi::clear_wrapper_flags(DSI_WISR_RRIF);
-    t0 = micros();
+    t0 = Ruler::now();
     const bool reg_up = Dsi::regulator(true);
-    const uint32_t reg_us = micros() - t0;
+    const uint32_t reg_us = (Ruler::now() - t0) / cycles_per_us;
     const uint32_t reg_flags = Dsi::wrapper_flags();
     print(serial, "  regulator off: ready ", reg_down ? "no" : "STILL", "; on again in ", reg_us, " us, WISR ",
           hex(reg_flags), crlf);
@@ -839,7 +822,7 @@ void tc_refusals() {
 // =============================================================================
 
 void td_phy() {
-    wait_ms(30);
+    brio::spin_us<Ruler>(30'000);
     const DsiLaneStatus s = Dsi::lane_status();
     print(serial, "  lanes with no refresh in flight: clock stop ", s.clock_stop ? "1" : "0", " ulps ",
           s.clock_ulps ? "1" : "0", "; data0 stop ", s.data0_stop ? "1" : "0", " ulps ", s.data0_ulps ? "1" : "0",
@@ -948,10 +931,10 @@ void tf_registers() {
     // value straight after a write and the new one a frame later.
     (void)Dsi::dcs_write(dcs_wrdisbv, 0x80);
     const uint8_t bv80_now = panel_read(dcs_rddisbv);
-    wait_ms(40);
+    brio::spin_us<Ruler>(40'000);
     const uint8_t bv80 = panel_read(dcs_rddisbv);
     (void)Dsi::dcs_write(dcs_wrdisbv, 0xFF);
-    wait_ms(40);
+    brio::spin_us<Ruler>(40'000);
     const uint8_t bvff = panel_read(dcs_rddisbv);
     (void)Dsi::dcs_write(dcs_wrctrld, 0x00);
     const uint8_t cd0 = panel_read(dcs_rdctrld);
@@ -965,19 +948,19 @@ void tf_registers() {
 
     // The display off and on, sleep in and out: RDDPM's two bits.
     (void)Dsi::dcs_write(dcs_dispoff);
-    wait_ms(40);
+    brio::spin_us<Ruler>(40'000);
     const uint8_t pm_off = panel_read(dcs_rddpm);
     (void)Dsi::dcs_write(dcs_dispon);
-    wait_ms(40);
+    brio::spin_us<Ruler>(40'000);
     const uint8_t pm_on = panel_read(dcs_rddpm);
     print(serial, "  DISPOFF -> RDDPM ", hex(pm_off), "; DISPON -> ", hex(pm_on), crlf);
     bench.verdict("DISPOFF and DISPON show in the power mode's DISON bit",
                   (pm_off & rddpm_dison) == 0u && (pm_on & rddpm_dison) != 0u);
     (void)Dsi::dcs_write(dcs_slpin);
-    wait_ms(120);
+    brio::spin_us<Ruler>(120'000);
     const uint8_t pm_sleep = panel_read(dcs_rddpm);
     (void)Dsi::dcs_write(dcs_slpout);
-    wait_ms(120);
+    brio::spin_us<Ruler>(120'000);
     const uint8_t pm_awake = panel_read(dcs_rddpm);
     print(serial, "  SLPIN -> RDDPM ", hex(pm_sleep), "; SLPOUT -> ", hex(pm_awake), crlf);
     bench.verdict("SLPIN and SLPOUT show in the power mode's SLPOUT bit, 120 ms apart",
@@ -999,13 +982,13 @@ void tg_errors() {
     // A forced acknowledge error stands in ISR0, and the read that shows it
     // clears it (18.13.2). The store into FIR takes a moment to show.
     Dsi::force_errors(DSI_FIR0_FAE0, 0u);
-    wait_us(20);
+    brio::spin_us<Ruler>(20);
     const uint32_t first = Dsi::errors0();
     const uint32_t second = Dsi::errors0();
     print(serial, "  FIR0.FAE0: ISR0 reads ", hex(first), " then ", hex(second), crlf);
     bench.verdict("a forced error appears in ISR0 and the read clears it", (first & DSI_ISR0_AE0) != 0u && second == 0u);
     Dsi::force_errors(0u, DSI_FIR1_FTOHSTX);
-    wait_us(20);
+    brio::spin_us<Ruler>(20);
     const uint32_t f1 = Dsi::errors1();
     const uint32_t f1b = Dsi::errors1();
     bench.verdict("the same in ISR1", (f1 & DSI_ISR1_TOHSTX) != 0u && f1b == 0u);
@@ -1016,11 +999,11 @@ void tg_errors() {
     Dsi::error_interrupts(DSI_IER0_AE1IE, 0u);
     Dsi::enable_interrupt();
     Dsi::force_errors(DSI_FIR0_FAE1, 0u);
-    wait_us(100);
+    brio::spin_us<Ruler>(100);
     const uint32_t entries = dsi_irq_entries;
     const uint32_t seen = dsi_irq_errors0;
     Dsi::force_errors(DSI_FIR0_FAE2, 0u);   // not enabled: no entry
-    wait_us(100);
+    brio::spin_us<Ruler>(100);
     const uint32_t entries_masked = dsi_irq_entries;
     const uint32_t leftover = Dsi::errors0();
     Dsi::error_interrupts(0u, 0u);
@@ -1043,10 +1026,10 @@ void tg_errors() {
     Dsi::wrapper_interrupts(DSI_WISR_PLLLIF | DSI_WISR_PLLUIF);
     Dsi::enable_interrupt();
     Dsi::pll_off();
-    wait_us(100);
+    brio::spin_us<Ruler>(100);
     const uint32_t after_off = dsi_irq_wrapper;
     (void)Dsi::pll(SysClock::root_hz, dsi_cfg.pll);
-    wait_us(100);
+    brio::spin_us<Ruler>(100);
     const uint32_t after_on = dsi_irq_wrapper;
     Dsi::wrapper_interrupts(0u);
     Dsi::disable_interrupt();
@@ -1065,7 +1048,7 @@ void tg_errors() {
     Dsi::wrapper_interrupts(DSI_WISR_ERIF);
     Dsi::enable_interrupt();
     Dsi::ltdc_flow(true);
-    wait_ms(40);
+    brio::spin_us<Ruler>(40'000);
     Dsi::wrapper_interrupts(0u);
     Dsi::disable_interrupt();
     print(serial, "  a refresh with ERIE: ", dsi_irq_entries, " entr", dsi_irq_entries == 1u ? "y" : "ies", ", the body saw ",
@@ -1100,9 +1083,7 @@ void th_video_mode() {
     (void)Dsi::errors1();
     Ltdc::clear(ltdc_error_events);
     line_events = 0;
-    const uint32_t t0 = millis();
-    while (millis() - t0 < 1000u) {
-    }
+    brio::spin_us<Ruler>(1'000'000);
     const uint32_t frames = line_events;
     const uint32_t e1 = Dsi::errors1();
     const bool underrun = Ltdc::flag(LtdcEvent::fifo_underrun);
@@ -1123,12 +1104,12 @@ void th_video_mode() {
 
     // The read that runs out: the LTDC stopped in video mode.
     ltdc_stop();
-    wait_ms(30);
+    brio::spin_us<Ruler>(30'000);
     uint8_t id2 = 0xEE;
     const DsiStatus stopped = Dsi::dcs_read(dcs_rdid1, &id2, 1);
     const uint32_t gpsr_after = Dsi::regs().GPSR;
     (void)ltdc_show16();
-    wait_ms(40);
+    brio::spin_us<Ruler>(40'000);
     const uint32_t gpsr_running = Dsi::regs().GPSR;
     id2 = 0xEE;
     const DsiStatus running = Dsi::dcs_read(dcs_rdid1, &id2, 1);
@@ -1140,13 +1121,13 @@ void th_video_mode() {
 
     // The pattern generator: the host's own bars with the LTDC stopped.
     ltdc_stop();
-    wait_ms(30);
+    brio::spin_us<Ruler>(30'000);
     (void)Dsi::errors1();
     Dsi::pattern(DsiPattern::vertical_bars);
-    wait_ms(500);
+    brio::spin_us<Ruler>(500'000);
     const uint32_t e1v = Dsi::errors1();
     Dsi::pattern(DsiPattern::horizontal_bars);
-    wait_ms(500);
+    brio::spin_us<Ruler>(500'000);
     const uint32_t e1h = Dsi::errors1();
     Dsi::pattern(DsiPattern::off);
     print(serial, "  the pattern generator, vertical then horizontal bars, half a second each: ISR1 ", hex(e1v), " then ",
@@ -1203,8 +1184,8 @@ void ti_adapted_command_mode() {
 
     // A second of refreshes back to back.
     uint32_t count = 0;
-    const uint32_t t0 = millis();
-    while (millis() - t0 < 1000u) {
+    const uint32_t t0 = Ruler::now();
+    while (Ruler::now() - t0 < brio::us_cycles<Ruler>(1'000'000)) {
         if (refresh() != 0u) {
             ++count;
         }
@@ -1292,7 +1273,7 @@ void tj_tearing() {
     // The panel's TE output on PJ2: counted on EXTI line 2 for half a
     // second, and by the wrapper from the same pin.
     (void)Dsi::dcs_write(dcs_teon, 0x00);
-    wait_ms(30);
+    brio::spin_us<Ruler>(30'000);
     (void)TeInt::select();
     (void)TeInt::configure(ExtiSense::rising);
     (void)TeInt::clear();
@@ -1301,8 +1282,8 @@ void tj_tearing() {
     Nvic::enable(TeInt::irq());
     Dsi::clear_wrapper_flags(DSI_WISR_TEIF);
     uint32_t te_flags = 0;
-    uint32_t t0 = millis();
-    while (millis() - t0 < 500u) {
+    uint32_t t0 = Ruler::now();
+    while (Ruler::now() - t0 < brio::us_cycles<Ruler>(500'000)) {
         if ((Dsi::wrapper_flags() & DSI_WISR_TEIF) != 0u) {
             te_flags = te_flags + 1u;
             Dsi::clear_wrapper_flags(DSI_WISR_TEIF);
@@ -1325,8 +1306,8 @@ void tj_tearing() {
     Dsi::clear_wrapper_flags(DSI_WISR_ERIF);
     uint32_t refreshes = 0;
     te_edges = 0;
-    t0 = millis();
-    while (millis() - t0 < 1000u) {
+    t0 = Ruler::now();
+    while (Ruler::now() - t0 < brio::us_cycles<Ruler>(1'000'000)) {
         if ((Dsi::wrapper_flags() & DSI_WISR_ERIF) != 0u) {
             refreshes = refreshes + 1u;
             Dsi::clear_wrapper_flags(DSI_WISR_ERIF);
@@ -1347,12 +1328,12 @@ void tj_tearing() {
     Nvic::disable(TeInt::irq());
     (void)TeInt::arm(false);
     (void)Dsi::dcs_write(dcs_teoff);
-    wait_ms(30);
+    brio::spin_us<Ruler>(30'000);
     te_edges = 0;
     (void)TeInt::clear();
     (void)TeInt::arm(true);
     Nvic::enable(TeInt::irq());
-    wait_ms(200);
+    brio::spin_us<Ruler>(200'000);
     Nvic::disable(TeInt::irq());
     (void)TeInt::arm(false);
     print(serial, "  TEOFF, 200 ms: ", te_edges, " edges", crlf);
@@ -1366,10 +1347,10 @@ void tj_tearing() {
 void tk_wrapper_packets() {
     const uint8_t before = panel_read(dcs_rddpm);
     Dsi::shutdown(true);
-    wait_ms(60);
+    brio::spin_us<Ruler>(60'000);
     const uint8_t down = panel_read(dcs_rddpm);
     Dsi::shutdown(false);
-    wait_ms(60);
+    brio::spin_us<Ruler>(60'000);
     const uint8_t up = panel_read(dcs_rddpm);
     print(serial, "  RDDPM ", hex(before), "; WCR.SHTDN set (shutdown peripheral): ", hex(down),
           "; cleared (turn on peripheral): ", hex(up), crlf);
@@ -1379,11 +1360,11 @@ void tk_wrapper_packets() {
     bench.verdict("the shutdown and turn-on packets go out, the panel answering throughout",
                   (before & rddpm_dison) != 0u && (up & rddpm_dison) != 0u && Dsi::errors0() == 0u && Dsi::errors1() == 0u);
     Dsi::eight_colours(true);
-    wait_ms(60);
+    brio::spin_us<Ruler>(60'000);
     const uint32_t e1 = Dsi::errors1();
     const uint8_t eight = panel_read(dcs_rddpm);
     Dsi::eight_colours(false);
-    wait_ms(60);
+    brio::spin_us<Ruler>(60'000);
     const uint8_t errors = panel_read(dcs_rdnumed);
     print(serial, "  WCR.COLM set (colour mode on): RDDPM ", hex(eight), ", ISR1 ", hex(e1), "; cleared; the panel's error count ",
           errors, crlf);
@@ -1395,12 +1376,12 @@ void tk_wrapper_packets() {
 // =============================================================================
 
 void tl_ulps() {
-    wait_ms(30);
+    brio::spin_us<Ruler>(30'000);
     Dsi::ulps(false, true, true);
-    wait_us(200);
+    brio::spin_us<Ruler>(200);
     const DsiLaneStatus in = Dsi::lane_status();
     Dsi::ulps(false, true, false);
-    wait_ms(2);
+    brio::spin_us<Ruler>(2'000);
     Dsi::regs().PUCR = 0u;
     const DsiLaneStatus out = Dsi::lane_status();
     print(serial, "  ULPS requested on the data lanes: data0 ulps ", in.data0_ulps ? "1" : "0", " stop ", in.data0_stop ? "1" : "0",
@@ -1426,14 +1407,14 @@ void tm_picture() {
     const bool shown = refresh() != 0u;
     bench.verdict("eight colour bars painted by the accelerator and refreshed into the panel", painted && shown);
     print(serial, "  eight bars, white to black, for two seconds; then a bar slides along the bottom", crlf);
-    wait_ms(2000);
+    brio::spin_us<Ruler>(2'000'000);
     const uint16_t strip_y = static_cast<uint16_t>(panel_height - 40u);
     const Dma2dOutput strip{.address = sdram_base + fb16_offset + 2u * strip_y * panel_width,
                             .line_offset = 0,
                             .format = Dma2dOutputColor::rgb565};
     uint32_t steps = 0;
-    const uint32_t start = millis();
-    while (millis() - start < 3000u) {
+    const uint32_t start = Ruler::now();
+    while (Ruler::now() - start < brio::us_cycles<Ruler>(3'000'000)) {
         const uint16_t x = static_cast<uint16_t>((steps * 4u) % (panel_width - 40u));
         (void)Dma2d::fill(strip, argb8888(255, 0, 0, 0), Dma2dArea{.pixels = panel_width, .lines = 40});
         (void)Dma2d::wait();
@@ -1472,10 +1453,9 @@ uint8_t touch_read(uint8_t reg, uint8_t* into, uint8_t n) {
     if (Touch::start(r)) {
         return Touch::status();
     }
-    for (uint32_t spins = 8'000'000u; spins != 0u; --spins) {
-        if (touch_done) {
-            return Touch::status();
-        }
+    // Six bytes at 100 kHz take under a millisecond; 10 ms is the time-out.
+    if (brio::wait_until<Ruler>([] { return touch_done; }, 10'000)) {
+        return Touch::status();
     }
     return 0xFF;
 }
@@ -1570,7 +1550,7 @@ void tn_finger_square() {
     constexpr uint8_t targets = 10;
     Tap taps[targets];
     uint8_t n = 0;
-    uint32_t seed = 0x2545F491u ^ millis();
+    uint32_t seed = 0x2545F491u ^ P::now();
     const auto rnd = [&seed](uint32_t m) {
         seed ^= seed << 13;
         seed ^= seed >> 17;
@@ -1601,9 +1581,9 @@ void tn_finger_square() {
     uint8_t idle_run = 0;
     bool down = false;
     uint8_t best = 0;
-    const uint32_t start = millis();
-    while (n < targets && millis() - start < 90'000u) {
-        const uint32_t t = millis();
+    const uint32_t start = P::now();   // the kernel tick, a millisecond: 90 s is past the ruler
+    while (n < targets && P::now() - start < 90'000u) {
+        const uint32_t t = P::now();
         const uint8_t st = touch_read(touch_td_status, td, 5);
         if (st != i2c_ok) {
             ++errors;
@@ -1650,7 +1630,7 @@ void tn_finger_square() {
                 idle_run = 0;
             }
         }
-        while (millis() - t < 10u) {
+        while (P::now() - t < 10u) {   // a sample every 10 ms
         }
     }
 
@@ -1763,6 +1743,7 @@ int main() {
     boot.byte_clock_pllr = brio::Dsi::byte_clock_from_pllr();
 
     const bool clock_ok = SysClock::init();
+    (void)brio::CycleCounter::init();   // every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0)
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
     brio::enable_interrupts();

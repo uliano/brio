@@ -69,8 +69,8 @@
 //      touching no stream, `dma` refused on the engineless one), the last
 //      written byte of a write-then-read refused on the pump and under `dma`,
 //      the next write byte for byte after any refusal, and a START parked
-//      behind a held SDA taken by the clear start() opens with; declined by
-//      name where nothing answers 0x3A
+//      behind a held SDA taken by the clear start() opens with; a failure
+//      where nothing answers 0x3A (the self-link's wires are this board's)
 //   q  THE PUMP'S ENTRIES on the self-link: the event vector's entries counted
 //      per Request shape, identities; a late entry staged with the vector's
 //      line off (the last byte and STOPF up together, TXIS beside a NACK's
@@ -125,6 +125,7 @@
 #include "util/i2c_bus.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #include "../../../avrxt/src/apps/twi_link_client.hpp"
@@ -138,6 +139,17 @@ namespace {
 using namespace brio;
 
 using P = Stm32f4Platform<>;
+
+/// The DWT's cycle counter as a CycleRuler (util/bench.hpp), started at the
+/// top of main(): one load a read, legal with interrupts masked. It counts
+/// the core clock, whose boot rate hz() names; under letter n's DynamicClock
+/// (the core at 48 and 16 MHz) a budget on it lasts longer in wall time,
+/// which a time-out may and no span this suite times does.
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 
 // ---- the console ---------------------------------------------------------------------
 
@@ -274,7 +286,8 @@ constexpr uint8_t parked = 0xFF;
 
 /// One tenure, driven by hand (the arbiter skipped, as i2c-bus.md allows a
 /// device that owns a bus alone). Returns the status the engine ended with,
-/// or `parked`; the wait is bounded.
+/// or `parked`; the wait is bounded at 200 ms, five times the longest a peer
+/// is told to hold a tenure here (40 ms at its address, letter n).
 /// THE ENGINE: `dma` on the engined host, which is what DmaHost is in this
 /// suite for, and `interrupt` on the plain one, unless the caller names it.
 template <typename Bus>
@@ -298,10 +311,8 @@ uint8_t tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uin
     if (Bus::start(r)) {
         return Bus::status();   // the synchronous refusal
     }
-    for (uint32_t spins = 8'000'000u; spins != 0u; --spins) {
-        if (xfer_done) {
-            return Bus::status();
-        }
+    if (brio::wait_until<Ruler>([] { return xfer_done; }, 200'000u)) {
+        return Bus::status();
     }
     return parked;
 }
@@ -575,8 +586,9 @@ void td_refusals() {
                                                    .second_enable = true}) &&
                       fmpi2c_oa2_compared_bits(FmpI2cOa2Mask::low_2) == 5u &&
                       (S::oar2() & (7u << 8)) == (2u << 8));
-    bench.verdict("a mask code past the three bits is refused",
-                  !fmpi2c_oa2_mask_valid(static_cast<FmpI2cOa2Mask>(8)));
+    // A constant of the arithmetic: the compiler checks it.
+    static_assert(!fmpi2c_oa2_mask_valid(static_cast<FmpI2cOa2Mask>(8)),
+                  "a mask code past the three bits is refused");
 
     // CR2's own gate: nothing of it may move while START stands.
     S::enable();
@@ -792,17 +804,21 @@ SclReading count_scl() {
 /// transmit interrupt, one every 87 us at 115200 and some hundred cycles an
 /// entry, lands inside a clock count and dates its last edge late (one run of
 /// the Fm+ row in 43 read 210 cycles of mean gap for 179). The longest line
-/// here takes 30 ms; the bound is its double and more. The tick stays on: its
-/// entry inside a count is reported by `ticked`, and the told row takes such a
-/// count again.
-void console_quiet() {
-    const uint32_t t0 = Ticker::ticks();
-    while (!Serial::tx_idle() && Ticker::ticks() - t0 < 100u) {
+/// here takes 30 ms, inside the drain's 200 ms; a console that has not
+/// drained by then skips the letter rather than judge a lengthened count.
+/// The tick stays on: its entry inside a count is reported by `ticked`, and
+/// the told row takes such a count again.
+bool console_quiet() {
+    if (brio::console_drain<Ruler, Serial>()) {
+        return true;
     }
+    bench.skip("the console did not drain: the timed count would carry its interrupt");
+    return false;
 }
 
+/// One probe with SCL counted; the caller has drained the console
+/// (console_quiet()) and prints nothing between that and this.
 SclReading timed_probe(uint8_t addr, FmpI2cSpeed s) {
-    console_quiet();
     Host::Request r{};
     r.addr = addr;
     r.speed = s;
@@ -855,6 +871,11 @@ void tf_speeds() {
                 print(serial, "  ", rows[k].name, " ", speed_name(i), ": refused at this kernel "
                       "clock (ES0298 2.12.2)", crlf);
                 continue;
+            }
+            if (!console_quiet()) {
+                Host::fast_plus_drive(false);
+                (void)host_ready();
+                return;
             }
             const SclReading r = timed_probe(0x42, s);
             const uint8_t st = Host::status();
@@ -936,6 +957,11 @@ void tf_speeds() {
             continue;
         }
         Host::fast_plus_drive(true);
+        if (!console_quiet()) {
+            Host::fast_plus_drive(false);
+            (void)host_ready();
+            return;
+        }
         // The tick's window is seven gaps in a tick of 180000 cycles: 7 per cent
         // of the counts at 100 kHz, under 1 at 1 MHz. Three tries, a lengthened
         // count judged only after the third, one count in some three thousand
@@ -977,7 +1003,12 @@ void tf_speeds() {
             ClassicHost::Request rq{};
             rq.addr = 0x42;
             rq.speed = s;
-            console_quiet();
+            if (!console_quiet()) {
+                classic_host_live = false;
+                ClassicHost::release();
+                (void)host_ready();
+                return;
+            }
             xfer_done = false;
             if (ClassicHost::start(rq)) {
                 classic_ran = false;
@@ -1085,26 +1116,33 @@ void tg_timeouts() {
     const uint32_t t0 = SysTick->VAL;
     (void)S::timeouts(a, true, true, b, true);
     uint32_t waited = 0;
-    bool fired = false;
-    for (uint32_t spins = 2'000'000u; spins != 0u; --spins) {
-        if (S::flag(FmpI2cFlag::timeout)) {
+    // Bounded at 1 ms: twenty spans of the 50 us asked, and under SysTick's
+    // period, so the VAL difference stays exact.
+    const bool fired = brio::wait_until<Ruler>(
+        [&] {
+            if (!S::flag(FmpI2cFlag::timeout)) {
+                return false;
+            }
             waited = since(t0, SysTick->VAL, period);
-            fired = true;
-            break;
-        }
-    }
+            return true;
+        },
+        1'000u);
     // And once the span has elapsed the condition STANDS: the flag is a
     // level dressed as an event, so clearing it on a bus that is still idle
     // brings it straight back.
     S::clear(FmpI2cClear::timeout);
     const uint32_t t1 = SysTick->VAL;
     uint32_t again = 0;
-    for (uint32_t spins = 2'000'000u; spins != 0u; --spins) {
-        if (S::flag(FmpI2cFlag::timeout)) {
+    // The same bound; `again` stays 0 on a time-out, which the verdict reads.
+    (void)brio::wait_until<Ruler>(
+        [&] {
+            if (!S::flag(FmpI2cFlag::timeout)) {
+                return false;
+            }
             again = since(t1, SysTick->VAL, period);
-            break;
-        }
-    }
+            return true;
+        },
+        1'000u);
     print(serial, "  TIDLE armed at ", fmpi2c_timeout_us(ker, a, true), " us: the flag ",
           fired ? "came" : "DID NOT COME", " after ", waited, " core cycles = ",
           waited / cycles_per_us, ".", (waited % cycles_per_us) * 10u / cycles_per_us,
@@ -1125,8 +1163,8 @@ void tg_timeouts() {
     arm_log();
     S::clear(FmpI2cClear::timeout);
     S::interrupt(FmpI2cInterrupt::error, true);
-    for (uint32_t spins = 400'000u; spins != 0u && er_n == 0u; --spins) {
-    }
+    // A hundred spans of the 50 us asked; er_n, read next, is the verdict.
+    (void)brio::wait_until<Ruler>([] { return er_n != 0u; }, 5'000u);
     const uint8_t errors = er_n;
     const bool swept = !S::flag(FmpI2cFlag::timeout) || er_n > errors;
     print(serial, "  with ERRIE armed the same time-out reached the ERROR vector ", errors,
@@ -1140,12 +1178,11 @@ void tg_timeouts() {
     // idle bus never is - so the same code with TIDLE clear must stay quiet.
     (void)S::timeouts(a, false, true, b, true);
     S::clear(FmpI2cClear::timeout);
-    bool quiet = true;
-    for (uint32_t spins = 2'000'000u; spins != 0u && quiet; --spins) {
-        if (S::flag(FmpI2cFlag::timeout)) {
-            quiet = false;
-        }
-    }
+    // 100 ms, past the span the same code counts as a held clock: 2048
+    // kernel periods a step against the idle mode's 4, so 512 times the
+    // 50 us asked, about 26 ms.
+    const bool quiet =
+        !brio::wait_until<Ruler>([] { return S::flag(FmpI2cFlag::timeout); }, 100'000u);
     print(serial, "  the same code with TIDLE clear - the SCL-low time-out - stayed ",
           quiet ? "quiet" : "SET", " over the same wait", crlf);
     bench.verdict("the two modes of TIMEOUTA are two different watchers: one sees an idle bus, "
@@ -1465,12 +1502,11 @@ void tk_recovery() {
     bench.verdict("... and the pads come back to the peripheral",
                   probe(0x42) == i2c_nack_addr);
 
+    // Printed and not judged, one board being one specimen: the tenures above
+    // are what this letter judges, whatever BERR did meanwhile.
     print(serial, "  bus errors seen and ignored since init(): ", Host::spurious_bus_errors(),
           " (ES0298 2.12.3: in controller mode a BERR is spurious or harmless, and the tenure "
           "runs on)", crlf);
-    bench.verdict("every tenure above completed whatever BERR did - the count is printed and "
-                  "not judged, one board being one specimen",
-                  true);
 }
 
 // =============================================================================
@@ -1496,8 +1532,16 @@ void tl_client() {
     bench.verdict("A CLIENT NEEDS TIMINGR TOO: SDADEL and SCLDEL are the hold and setup delays "
                   "a target applies, solved here against the FASTEST bus it expects to sit on",
                   S::timing_reg() != 0u);
+    // Both halves of 23.4.8's rule: NOSTRETCH set (with PE down, its write
+    // gate) and the verb refuses, SBC left clear; NOSTRETCH clear again and
+    // the verb takes it.
+    (void)S::disable();
+    const bool stretch_given_up = S::no_stretch(true);
+    const bool refused_bc = stretch_given_up && !Peer::byte_control(true) && !S::byte_control();
+    (void)S::no_stretch(false);
+    S::enable();
     bench.verdict("byte control is refused with the clock stretch given up and accepted with it",
-                  Peer::byte_control(true));
+                  refused_bc && Peer::byte_control(true) && S::byte_control());
 
     // Nothing addresses this target - there is no controller on the wire -
     // so the two bodies must report `none` and change nothing.
@@ -1741,10 +1785,11 @@ void tm_self_link() {
     }
     const uint8_t found = probe(self_addr);
     if (!far_up || found != i2c_ok) {
-        // A board without the two wires: nothing answers, and the letter
-        // says so instead of failing.
-        print(serial, "  nothing answers ", hex(self_addr), " (status ", found,
-              "): this board does not wire I2C1 to FMPI2C1 - the letter declines by name", crlf);
+        // The two wires are this board's bench (the header): nothing
+        // answering is a dead link, and a dead link fails.
+        print(serial, "  nothing answers ", hex(self_addr), " (status ", found, ")", crlf);
+        bench.verdict("I2C1 answers at 0x3A over the self-link's two wires (PB8/PB9 to PC6/PC7)",
+                      false);
         ClassicTarget::release();
         Far::live = false;
         (void)host_ready();
@@ -1985,11 +2030,10 @@ using Core48 = Clock<ClockSource::pll_hse, 48'000'000, 8'000'000, HseMode::bypas
 using Core16 = Clock<ClockSource::hsi, 16'000'000>;
 using Cores = DynamicClock<Rates<SysClock, Core48, Core16>, Ticker, Serial, Host>;
 
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() - t0 < ms) {
-    }
-}
+/// A fixed span of `ms` on the kernel tick, the shared wait with a condition
+/// that never holds. The tick and not the ruler: the DynamicClock above
+/// rebases the ticker, so the span holds at every core rate.
+void wait_ms(uint32_t ms) { (void)brio::wait_ticks<P>([] { return false; }, ms); }
 
 struct LinkPort {
     static uint8_t tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx,
@@ -2144,7 +2188,14 @@ void tn_partner() {
     bench.verdict("the arbiter answers it with i2c_timeout, at its 20 ms limit (19..22 ms)",
                   kl::Probe::n == 1u && kl::Probe::replies[0] == i2c_timeout &&
                       replied_at >= 19u && replied_at <= 22u);
-    bench.verdict("and the same host carries the command channel again", need_twi_peer());
+    // One command attempt and no init(): need_twi_peer() and Link::command()
+    // both bring the host up again, which would judge init() and not the
+    // recover() the arbiter's timeout ran.
+    {
+        static const uint8_t none[1] = {0};
+        bench.verdict("and the same host carries the command channel again",
+                      Link::command_once(Op::ping, none, 0));
+    }
 
     // ---- TIMEOUTA, the SMBus clock-low watcher, against a held clock ----
     // Letter g showed it quiet on an idle bus; here the peer holds SCL low
@@ -2276,7 +2327,9 @@ constexpr uint8_t trial_value(uint16_t k, uint8_t i) {
     return static_cast<uint8_t>(0x35u + 0x4Bu * k + 0x1Du * i + ((i * i) >> 3));
 }
 
-/// THE BOUND ON ONE TENURE, in ticks of 1 ms. On the wire: nine clocks for the
+/// THE BOUND ON ONE TENURE, in milliseconds: ticks of the 1 kHz kernel tick
+/// where a wait counts them, a thousand microseconds each on the ruler where
+/// brio::wait_until() does. On the wire: nine clocks for the
 /// address and for each byte, at the speed's period - a rate that letter f
 /// measures within 7 per cent of the speed at 100 kHz and 400 kHz on this
 /// kernel clock - plus the START and the STOP, under a period each. The
@@ -2934,20 +2987,8 @@ void tp_refusals() {
 // q - THE PUMP'S ENTRIES, counted, and a late entry (the self-link)
 // =============================================================================
 
-/// A wait on the tick, bounded: true when `done` came true inside `ms`.
-template <typename Done>
-bool wait_until(Done done, uint32_t ms) {
-    const uint32_t t0 = Ticker::ticks();
-    while (!done()) {
-        if (Ticker::ticks() - t0 >= ms) {
-            return false;
-        }
-    }
-    return true;
-}
-
-/// The far end up and the plain host over it; false, said by name, on a board
-/// without the two wires, as letter m does.
+/// The far end up and the plain host over it; false and a failed verdict
+/// where nothing answers, as letter m does: the two wires are this board's.
 bool far_ready() {
     Far::live = true;
     Far::refuse_at = 0;
@@ -2959,8 +3000,9 @@ bool far_ready() {
     }
     const uint8_t found = probe(self_addr);
     if (!far_up || found != i2c_ok) {
-        print(serial, "  nothing answers ", hex(self_addr), " (status ", found,
-              "): this board does not wire I2C1 to FMPI2C1 - the letter declines by name", crlf);
+        print(serial, "  nothing answers ", hex(self_addr), " (status ", found, ")", crlf);
+        bench.verdict("I2C1 answers at 0x3A over the self-link's two wires (PB8/PB9 to PC6/PC7)",
+                      false);
         ClassicTarget::release();
         Far::live = false;
         (void)host_ready();
@@ -3047,12 +3089,14 @@ void late_read(uint8_t n, FmpI2cSpeed speed, LateRow& row) {
         Nvic::disable(S::event_irq);
     }
     (void)Host::start(r);
-    const bool fell = wait_until([] { return (S::interrupts() & FmpI2cInterrupt::rx) == 0u; }, limit);
+    const bool fell = brio::wait_until<Ruler>(
+        [] { return (S::interrupts() & FmpI2cInterrupt::rx) == 0u; }, limit * 1000u);
     Nvic::disable(S::event_irq);
     constexpr uint32_t both = FmpI2cFlag::stop | FmpI2cFlag::rxne;
-    const bool up = fell && wait_until([] { return (S::flags() & both) == both; }, limit);
+    const bool up =
+        fell && brio::wait_until<Ruler>([] { return (S::flags() & both) == both; }, limit * 1000u);
     Nvic::enable(S::event_irq);
-    const bool done = wait_until([] { return xfer_done; }, limit);
+    const bool done = brio::wait_until<Ruler>([] { return xfer_done; }, limit * 1000u);
     (void)delay_us(clock, 100u);
     bool exact = done && Host::status() == i2c_ok && ev_total == n &&
                  (S::flags() & FmpI2cFlag::rxne) == 0u;
@@ -3096,10 +3140,10 @@ void late_refusal(uint8_t tx, uint8_t rx, uint8_t at, I2cEngine e, FmpI2cSpeed s
     Nvic::disable(S::event_irq);
     (void)Bus::start(r);
     constexpr uint32_t both = FmpI2cFlag::stop | FmpI2cFlag::nack;
-    const bool up = wait_until([] { return (S::flags() & both) == both; }, limit);
+    const bool up = brio::wait_until<Ruler>([] { return (S::flags() & both) == both; }, limit * 1000u);
     const uint32_t f = S::flags();
     Nvic::enable(S::event_irq);
-    const bool done = wait_until([] { return xfer_done; }, limit);
+    const bool done = brio::wait_until<Ruler>([] { return xfer_done; }, limit * 1000u);
     (void)delay_us(clock, 100u);
     const uint8_t want = at == 0u ? i2c_nack_addr : i2c_nack_data;
     bool exact = done && Bus::status() == want && ev_total == 1u && in[0] == 0xEEu;
@@ -3402,7 +3446,8 @@ void proof_read(uint8_t addr, uint8_t n, FmpI2cSpeed speed, bool starve, Value v
     (void)DmaHost::start(r);
     if (starve) {
         if (n > 1u) {
-            (void)wait_until([] { return RxEngine::remaining() <= 1u; }, trial_limit_ms(n, speed));
+            (void)brio::wait_until<Ruler>([] { return RxEngine::remaining() <= 1u; },
+                                          trial_limit_ms(n, speed) * 1000u);
         }
         S::dma_receive(false);
     }
@@ -3458,10 +3503,10 @@ void stream_lag(uint8_t addr, FmpI2cSpeed speed, Value value, Spin spin, LagRow&
     (void)DmaHost::start(r);
     S::dma_receive(false);
     const uint32_t limit = trial_limit_ms(1, speed);
-    (void)wait_until([&spin] {
+    (void)brio::wait_until<Ruler>([&spin] {
         spin();
         return (S::flags() & FmpI2cFlag::rxne) != 0u;
-    }, limit);
+    }, limit * 1000u);
     using RxRegs = DmaStream<RxEngine::controller, RxEngine::stream>;
     const uint32_t period = systick_period();
     const uint32_t tick = Ticker::ticks();
@@ -3486,7 +3531,7 @@ void stream_lag(uint8_t addr, FmpI2cSpeed speed, Value value, Spin spin, LagRow&
     }
     const bool ticked = Ticker::ticks() != tick;
     Nvic::enable(S::event_irq);
-    (void)wait_until([] { return xfer_done; }, limit);
+    (void)brio::wait_until<Ruler>([] { return xfer_done; }, limit * 1000u);
     if (!xfer_done || in != value(0)) {
         row.wrong = row.wrong + 1u;
     }
@@ -3541,10 +3586,10 @@ void beat_stop(uint8_t addr, FmpI2cSpeed speed, uint32_t turns, Value value, Spi
     (void)DmaHost::start(r);
     S::dma_receive(false);
     const uint32_t limit = trial_limit_ms(1, speed);
-    (void)wait_until([&spin] {
+    (void)brio::wait_until<Ruler>([&spin] {
         spin();
         return (S::flags() & FmpI2cFlag::rxne) != 0u;
-    }, limit);
+    }, limit * 1000u);
     uint8_t first = 0;
     uint32_t dma_flags = 0;
     uint16_t count = 0;
@@ -3576,7 +3621,7 @@ void beat_stop(uint8_t addr, FmpI2cSpeed speed, uint32_t turns, Value value, Spi
     row.tc_down = row.tc_down + ((dma_flags & DmaFlag::complete) == 0u ? 1u : 0u);
     row.en_turns = en_reads > row.en_turns ? en_reads : row.en_turns;
     Nvic::enable(S::event_irq);
-    (void)wait_until([] { return xfer_done; }, limit);
+    (void)brio::wait_until<Ruler>([] { return xfer_done; }, limit * 1000u);
     if (!xfer_done || cell != want) {
         row.wrong = row.wrong + 1u;
     }
@@ -3617,22 +3662,24 @@ bool stray_row(bool enable_first, bool& left) {
     (void)DmaHost::start(r);
     S::dma_receive(false);
     const uint32_t limit = trial_limit_ms(1, r.speed);
-    (void)wait_until([] { return (S::flags() & FmpI2cFlag::rxne) != 0u; }, limit);
+    (void)brio::wait_until<Ruler>([] { return (S::flags() & FmpI2cFlag::rxne) != 0u; }, limit * 1000u);
     {
         InterruptGuard guard;
         const uint32_t request = S::regs().CR1 | FMPI2C_CR1_RXDMAEN;
         const uint32_t cleared = RxRegs::regs().CR & ~DMA_SxCR_EN;
         S::regs().CR1 = request;
         RxRegs::regs().CR = cleared;
-        for (uint32_t i = 200'000u; i != 0u && RxRegs::enabled(); --i) {   // abort()'s bound
-        }
+        // EN falls once the beat under way is done (RM0390 9.3.15), a few bus
+        // cycles; 1 ms is the bound, on the ruler that runs masked. A stream
+        // still enabled after it is what the rows below then read.
+        (void)brio::wait_until<Ruler>([] { return !RxRegs::enabled(); }, 1'000u);
         left = (S::flags() & FmpI2cFlag::rxne) != 0u;
         if (enable_first) {
             S::dma_receive(false);
         }
     }
     Nvic::enable(S::event_irq);
-    (void)wait_until([] { return xfer_done; }, limit);
+    (void)brio::wait_until<Ruler>([] { return xfer_done; }, limit * 1000u);
     RxEngine::stop();
     (void)RxEngine::start(std::span<uint8_t>(scratch, 2u));
     burn(100);
@@ -3726,13 +3773,18 @@ void tr_stream_proof() {
     }
     const uint16_t a0 = LoadStream::count();
     const uint32_t b0 = SysTick->VAL;
-    while (LoadStream::count() == a0) {
-    }
+    // A beat every 10 of TIM2's clock is 20 core cycles; 100 us is the bound,
+    // under SysTick's period so the VAL difference stays exact.
+    const bool beat = brio::wait_until<Ruler>([a0] { return LoadStream::count() != a0; }, 100u);
     const uint32_t b1 = SysTick->VAL;
     load_off();
     lag_print("400 kHz, a very_high stream, a beat every 10 of TIM2's clock", lag_above);
-    print(serial, "    that stream moved a beat in ", since(b0, b1, systick_period()),
-          " core cycles at the sample", crlf);
+    if (beat) {
+        print(serial, "    that stream moved a beat in ", since(b0, b1, systick_period()),
+              " core cycles at the sample", crlf);
+    } else {
+        print(serial, "    that stream moved NO beat in 100 us at the sample", crlf);
+    }
     bench.verdict("the lag rows' reads are exact",
                   lag_copies.wrong == 0u && lag_quiet.wrong == 0u && lag_above.wrong == 0u);
 
@@ -3826,7 +3878,7 @@ void tr_stream_proof() {
             xfer_done = false;
             (void)DmaHost::start(r);
             S::dma_transmit(false);
-            (void)wait_until([] { return xfer_done; }, trial_limit_ms(4, v));
+            (void)brio::wait_until<Ruler>([] { return xfer_done; }, trial_limit_ms(4, v) * 1000u);
             stop_watch.on = false;
             stop_watch.raise_tx = false;
             stop_watch.raise_turns = -1;
@@ -4045,7 +4097,6 @@ void tu_load() {
     if (!far_ready()) {
         return;
     }
-    (void)CycleCounter::init();
     Dma<1>::init();
     dma_host_live = true;
     const bool up = DmaHost::init(clock, base_config);
@@ -4132,7 +4183,6 @@ void tv_all_of_apb1() {
     if (!far_ready()) {
         return;
     }
-    (void)CycleCounter::init();
     Dma<1>::init();
     dma_host_live = true;
     const bool up = DmaHost::init(clock, base_config);
@@ -4205,11 +4255,6 @@ void ts_stream_proof_fm() {
     if (!need_twi_peer()) {
         return;
     }
-    // Letter u's loads below time their beats on the cycle counter
-    // (paced_beats()) and the vector's body is stamped on it; the second
-    // set runs without letter u, so this letter starts the counter
-    // itself - a stopped counter spins paced_beats() forever.
-    (void)CycleCounter::init();
     Dma<1>::init();
     const FmpI2cSpeed v = FmpI2cSpeed::fast_plus_1m;
     constexpr uint8_t seed = 0x40;
@@ -4483,6 +4528,10 @@ int main() {
     boot.wupen_readback = brio::FmpI2c<1>::regs().CR1;
     brio::FmpI2c<1>::regs().CR1 = 0;
 
+    // Every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0):
+    // started once, before any letter reads the ruler - letter u's loads
+    // time their beats on it (paced_beats()) in either set.
+    (void)brio::CycleCounter::init();
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);

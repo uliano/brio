@@ -33,7 +33,7 @@ RM0444 Rev 6 - CRC ch. 14, the AHB enable and reset
 ES0548 Rev 3: no item touches the CRC - a statement about the document,
 not a claim about the silicon. Driver: `stm32g0/crc.hpp`; the presence
 and mask facts come from `stm32g0/device_tables.hpp` (the reserve: the table of what each part has, read off the device header).
-Bench suite: `test_stm32_crc` (6 letters, 33 verdicts, wireless;
+Bench suite: `test_stm32_crc` (6 letters, 32 verdicts, wireless;
 a letter is one command key of the suite's console and the group of verdicts it runs). Family fixture
 `test/family_stm32g0/crc.cpp` plus two negatives under
 `brio check stm32g0`.
@@ -190,9 +190,11 @@ themselves.
 0xE7676EC0 over the check string), and **CRC_IDR survives both a
 `CR.RESET` and a whole reconfiguration** - 14.4.2's sentence, measured.
 
-**14.3.3's "least significant bits" is literal AND THE REST IS NOT
-ZERO**: a 7-bit polynomial leaves DR = 0x75 of which 0x75 is the result,
-so `value_masked()` is a real verb and not a formality.
+**14.3.3's "least significant bits" is literal**: a 7-bit polynomial
+leaves DR = 0x75, which is the check string's CRC-7, and the bits above
+it read zero there. The chapter does not promise those bits, so
+`value_masked()` masks them; the suite prints them rather than judging
+them.
 
 **A polynomial changed mid-calculation gives the checksum of nothing** -
 neither polynomial's answer - which is 14.3.3's "cannot be performed"

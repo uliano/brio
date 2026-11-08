@@ -441,7 +441,9 @@ pull-up cannot give - and its CAN2_RX on PB5):
   the block's arithmetic, not a bus's: no transceiver is specified there.
 - **The pair's filter block.** CAN_FMR.CAN2SB reads 14 out of reset, so
   CAN1 owns banks 0..13 and CAN2 banks 14..27; the split reads back
-  where it is written, each instance is refused a bank on the other's
+  where it is written in filter initialization mode (FINIT set) - written
+  with FINIT clear it does not take, CAN2SB reading 14 after a write of
+  20, while `start_bank()` answers true - each instance is refused a bank on the other's
   side, and a frame round-trips on CAN2 through a bank of CAN1's block
   with CAN1 itself in sleep. **The filter match index CAN2 reports is
   relative to its own range**: a frame caught by bank 14, the first of
@@ -450,6 +452,12 @@ pull-up cannot give - and its CAN2_RX on PB5):
 ## Not covered yet
 
 Driver gaps:
+- **`start_bank()` outside filter initialization mode**: the verb writes
+  CAN2SB whatever FINIT holds and answers true, and the silicon keeps the
+  old split when FINIT is clear (measured on the STM32F446RE). The verb
+  should refuse there, or open and close the filter initialization around
+  its write; until it does, a caller writes the split between
+  `filter_init(true)` and `filter_init(false)`.
 - **Everything about a real bus**: arbitration between two nodes, an
   acknowledge from a peer, a remote frame answered, the error counters
   moving under real traffic, the wake-up from bus activity (AWUM and the

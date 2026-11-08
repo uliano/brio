@@ -81,6 +81,7 @@
 
 #include "stm32f4/clock.hpp"
 #include "stm32f4/dma2d.hpp"
+#include "stm32f4/dwt.hpp"
 #include "stm32f4/fmc.hpp"
 #include "stm32f4/ltdc.hpp"
 #include "stm32f4/nvic.hpp"
@@ -89,6 +90,7 @@
 #include "stm32f4/ticker.hpp"
 #include "stm32f4/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000>;
@@ -242,27 +244,20 @@ const LtdcFramebuffer<uint32_t> fb32a{Sdram::at<uint32_t>(fb32a_offset), panel_w
 const LtdcFramebuffer<uint32_t> fb32b{Sdram::at<uint32_t>(fb32b_offset), panel_width,
                                       panel_height, 0};
 
-// ---- the rulers -----------------------------------------------------------------------
+// ---- the ruler ------------------------------------------------------------------------
 
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
+constexpr uint32_t cycles_per_ms = SysClock::hz / 1000u;
 
-uint32_t systick_period() { return SysTick->LOAD + 1u; }
-uint32_t cycle_stamp() { return SysTick->VAL; }
-
-/// SysTick counts DOWN, so a later sample is a smaller number - unless
-/// the period wrapped, which at 1000 Hz means the span was longer than a
-/// millisecond and is not to be trusted.
-uint32_t val_delta(uint32_t first, uint32_t second) {
-    return first >= second ? first - second : first + systick_period() - second;
-}
-
-uint32_t millis() { return P::now(); }
-
-void wait_ms(uint32_t ms) {
-    const uint32_t start = millis();
-    while (millis() - start < ms) {
-    }
-}
+/// The DWT's cycle counter, started in main(): core cycles for a register
+/// read, milliseconds for the frame clock and the windows (the longest,
+/// three seconds, far under the counter's 23.8 s wrap), and the shared
+/// waits' (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 
 // ---- what the registers held before this program touched them --------------------------
 
@@ -346,15 +341,14 @@ void panel_bus() {
     S::enable();
 }
 
-/// One frame out on the single line, waited to the last edge.
+/// One frame out on the single line, waited to the last edge. A frame
+/// at SCK = 90 MHz / 32 is 2.8 us; 100 us is each time-out. The panel
+/// cannot answer, so a stuck frame is judged where the panel shows it -
+/// its tearing-effect output in letter c - and the answers are dropped.
 void panel_frame(uint8_t v) {
     S::data(v);
-    uint32_t spins = 400'000u;
-    while (!S::tx_empty() && spins-- != 0u) {
-    }
-    spins = 400'000u;
-    while (S::busy() && spins-- != 0u) {
-    }
+    (void)brio::wait_until<Ruler>([] { return S::tx_empty(); }, 100);
+    (void)brio::wait_until<Ruler>([] { return !S::busy(); }, 100);
 }
 
 /// One command and its parameters: the command byte with the
@@ -428,11 +422,11 @@ uint16_t panel_sequence(const uint8_t* table, uint16_t length) {
 uint16_t panel_init() {
     panel_bus();
     uint16_t sent = panel_sequence(panel_setup, sizeof(panel_setup));
-    wait_ms(200);
+    brio::spin_us<Ruler>(200'000);
     sent = static_cast<uint16_t>(sent + panel_sequence(panel_gamma, sizeof(panel_gamma)));
     panel_write(0x11u, nullptr, 0);   // sleep out
     ++sent;
-    wait_ms(200);
+    brio::spin_us<Ruler>(200'000);
     panel_write(0x29u, nullptr, 0);   // display on
     ++sent;
     panel_write(0x2Cu, nullptr, 0);   // memory write, where the sequence ends
@@ -482,13 +476,9 @@ bool display_ready() {
 /// program has. False if the controller is not running.
 bool wait_frames(uint32_t frames) {
     const uint32_t target = line_events + frames;
-    const uint32_t deadline = millis() + frames * (frame_period_us / 1000u + 2u) + 50u;
-    while (line_events < target) {
-        if (static_cast<int32_t>(millis() - deadline) > 0) {
-            return false;
-        }
-    }
-    return true;
+    // Each frame its period and two milliseconds more, and 50 ms besides.
+    return brio::wait_until<Ruler>([target] { return line_events >= target; },
+                                   frames * (frame_period_us / 1000u + 2u) * 1000u + 50'000u);
 }
 
 // =============================================================================
@@ -622,10 +612,10 @@ void tb_pixel_clock() {
     Ltdc::enable_interrupt();
     line_events = 0;
     const bool armed = wait_frames(2);
-    const uint32_t t0 = millis();
+    const uint32_t t0 = P::now();          // the kernel tick: SysTick's millisecond
     const uint32_t n0 = line_events;
     const bool ran = wait_frames(128);
-    const uint32_t elapsed = millis() - t0;
+    const uint32_t elapsed = P::now() - t0;
     const uint32_t frames = line_events - n0;
     Ltdc::interrupt(LtdcEvent::line, false);
     Ltdc::disable_interrupt();
@@ -745,12 +735,12 @@ void td_panel() {
     LcdTe::input(PinPull::down);
     const uint8_t te_on[1] = {0x00};
     panel_write(0x35u, te_on, 1);
-    wait_ms(50);
+    brio::spin_us<Ruler>(50'000);
 
     uint32_t edges = 0;
     bool previous = LcdTe::read();
-    const uint32_t start = millis();
-    while (millis() - start < 500u) {
+    const uint32_t start = Ruler::now();
+    while (Ruler::now() - start < brio::us_cycles<Ruler>(500'000)) {
         const bool now = LcdTe::read();
         if (now != previous) {
             ++edges;
@@ -871,11 +861,11 @@ void tf_position() {
     // What one read of a pixel-clock-domain register costs: 16.3.2's
     // seven PCLK2 periods plus five LCD_CLK ones, which at 6 MHz is
     // most of it.
-    const uint32_t before = cycle_stamp();
+    const uint32_t before = Ruler::now();
     for (uint32_t i = 0; i < 16u; ++i) {
         (void)Ltdc::position();
     }
-    const uint32_t spent = val_delta(before, cycle_stamp());
+    const uint32_t spent = Ruler::now() - before;
     print(serial, "  sixteen reads of CPSR cost ", spent, " core cycles: ", spent / 16u,
           " a read, ", (spent / 16u) / cycles_per_us, ".",
           ((spent / 16u) % cycles_per_us) * 10u / cycles_per_us, " us", crlf);
@@ -893,8 +883,8 @@ void tf_position() {
     uint32_t past_the_frame = 0;
     bool moved = false;
     LtdcPosition previous = Ltdc::position();
-    const uint32_t start = millis();
-    while (millis() - start < 200u) {
+    const uint32_t start = Ruler::now();
+    while (Ruler::now() - start < brio::us_cycles<Ruler>(200'000)) {
         const LtdcPosition p = Ltdc::position();
         if (p.x != previous.x || p.y != previous.y) {
             moved = true;
@@ -925,8 +915,8 @@ void tf_position() {
     // CDSR: the four signals, seen in both states over a frame.
     uint8_t seen_high = 0;
     uint8_t seen_low = 0;
-    const uint32_t status_start = millis();
-    while (millis() - status_start < 100u) {
+    const uint32_t status_start = Ruler::now();
+    while (Ruler::now() - status_start < brio::us_cycles<Ruler>(100'000)) {
         const LtdcDisplayStatus s = Ltdc::display_status();
         const uint8_t bits = static_cast<uint8_t>((s.hsync ? 1u : 0u) | (s.vsync ? 2u : 0u) |
                                                   (s.horizontal_data_enable ? 4u : 0u) |
@@ -957,10 +947,10 @@ void tg_line_event() {
     Ltdc::interrupt(LtdcEvent::line, true);
     Ltdc::enable_interrupt();
     const bool ran = wait_frames(4);
-    const uint32_t t0 = millis();
+    const uint32_t t0 = Ruler::now();
     const uint32_t n0 = line_events;
     const bool more = wait_frames(64);
-    const uint32_t elapsed = millis() - t0;
+    const uint32_t elapsed = (Ruler::now() - t0) / cycles_per_ms;
     const uint32_t frames = line_events - n0;
     const uint16_t landed = line_event_y;
     Ltdc::interrupt(LtdcEvent::line, false);
@@ -989,9 +979,9 @@ void tg_line_event() {
     Ltdc::enable_interrupt();
     LtdcLayer<1>::constant_alpha(254);
     Ltdc::reload(LtdcReload::vertical_blanking);
-    const uint32_t deadline = millis() + 200u;
-    while (reload_events == 0u && static_cast<int32_t>(millis() - deadline) < 0) {
-    }
+    // A vertical-blanking reload comes within a frame; 200 ms is the
+    // time-out, and the count read after it is what the verdict judges.
+    (void)brio::wait_until<Ruler>([] { return reload_events != 0u; }, 200'000);
     const uint32_t reloads = reload_events;
     Ltdc::interrupt(LtdcEvent::register_reload, false);
     Ltdc::disable_interrupt();
@@ -1040,11 +1030,11 @@ void th_shadow() {
     // fifteen of them - and the CLAIM is only that it is never longer
     // than one frame.
     LtdcLayer<1>::constant_alpha(0x40);
-    const uint32_t t0 = millis();
+    const uint32_t t0 = Ruler::now();
     Ltdc::reload(LtdcReload::vertical_blanking);
     const bool pending_at_once = Ltdc::reload_pending();
     const bool took = Ltdc::wait_reload();
-    const uint32_t spent_ms = millis() - t0;
+    const uint32_t spent_ms = (Ruler::now() - t0) / cycles_per_ms;
     const uint8_t alpha_now = LtdcLayer<1>::constant_alpha();
     print(serial, "  the vertical-blanking reload took ", spent_ms, " ms of the ",
           frame_period_us / 1000u, " a frame lasts (pending straight after the store: ",
@@ -1141,7 +1131,7 @@ void ti_one_layer() {
     Ltdc::clear(ltdc_error_events);
     Ltdc::interrupt(LtdcEvent::fifo_underrun, true);
     Ltdc::enable_error_interrupt();
-    wait_ms(3u * frame_period_us / 1000u + 2u);
+    brio::spin_us<Ruler>((3u * frame_period_us / 1000u + 2u) * 1000u);
     Ltdc::disable_error_interrupt();
     Ltdc::interrupt(LtdcEvent::fifo_underrun, false);
     const uint32_t taken = error_events;
@@ -1186,7 +1176,7 @@ uint32_t fill_pixels_per_us(uint32_t repeats) {
                           .line_offset = 0,
                           .format = Dma2dOutputColor::argb8888};
     const Dma2dArea area{.pixels = pixels, .lines = lines};
-    const uint32_t t0 = millis();
+    const uint32_t t0 = Ruler::now();
     uint32_t done = 0;
     for (uint32_t i = 0; i < repeats; ++i) {
         if (!Dma2d::fill(out, 0xFF20'4060UL, area)) {
@@ -1197,7 +1187,7 @@ uint32_t fill_pixels_per_us(uint32_t repeats) {
         }
         ++done;
     }
-    const uint32_t elapsed = millis() - t0;
+    const uint32_t elapsed = (Ruler::now() - t0) / cycles_per_ms;
     if (elapsed == 0u || done == 0u) {
         return 0u;
     }
@@ -1824,9 +1814,9 @@ void tn_picture() {
     Ltdc::interrupt(LtdcEvent::line, true);
     Ltdc::enable_interrupt();
     uint32_t steps = 0;
-    const uint32_t start = millis();
+    const uint32_t start = Ruler::now();
     uint32_t previous_frame = line_events;
-    while (millis() - start < 3000u) {
+    while (Ruler::now() - start < brio::us_cycles<Ruler>(3'000'000)) {
         if (line_events == previous_frame) {
             continue;
         }
@@ -1916,6 +1906,7 @@ int main() {
     boot.d2opfccr = brio::Dma2d::regs().OPFCCR;
 
     const bool clock_ok = SysClock::init();
+    (void)brio::CycleCounter::init();   // every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0)
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
 

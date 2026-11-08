@@ -42,9 +42,10 @@
 //   streams, the error vector always; every BERR counted (spurious_bus_errors(): ES0298 2.11.1 says
 //   a controller's can be spurious) and never a status. start()
 //   WAITS in the caller: for the last tenure's STOP to leave the wire (CR1
-//   STOP standing, at most 5 ms) and for BUSY (100 us), each a count of
-//   delay_us(1) turns, then a PE cycle only if the speed moves, the event
-//   vector's enable, and LAST the CR1 read-modify-write that sets START.
+//   STOP standing, at most 5 ms) and for BUSY (100 us), each timed on the
+//   DWT's cycle counter (stm32f4/i2c.hpp's wait_for_us()), then a PE cycle
+//   only if the speed moves, the event vector's enable, and LAST the CR1
+//   read-modify-write that sets START.
 //   THE PREDICTION: strict at every speed, path and pass; a preemption
 //   inside start() lands in a wait or before the START store and lengthens
 //   the gap between tenures (a wait it lands in lasts longer, never
@@ -177,6 +178,7 @@
 #include "util/i2c_bus.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // THE PROTOCOL HEADERS ARE SHARED, NOT COPIED: the far board's instrument
@@ -212,7 +214,13 @@ namespace {
 using namespace brio;
 
 using P = Stm32f4RubatoPlatform<>;
-using Ruler = CycleCounter;
+/// The DWT's cycle counter as a CycleRuler (util/bench.hpp): one load a
+/// read, legal masked; main() starts it before anything reads it.
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 constexpr uint32_t core_hz = SysClock::hz;
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
 
@@ -602,10 +610,12 @@ extern "C" void BRIO_SUITE_RX_DMA_HANDLER() {
 }
 
 int main() {
+    // Every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0):
+    // started once, before any letter or the shared body reads the ruler.
+    ruler_ok = brio::CycleCounter::init();
     clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     tick_ok = brio::Ticker::init(clock);
-    ruler_ok = Ruler::init();
     brio::Dma<1>::init();
     host_ok = On::init();
     Pulse::init();

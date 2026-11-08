@@ -145,6 +145,7 @@
 #include "util/line_reader.hpp"
 #include "util/print.hpp"
 #include "util/spi_bus.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // THE PROTOCOL HEADERS ARE SHARED, NOT COPIED: the far board's two
@@ -162,7 +163,15 @@ namespace {
 using namespace brio;
 
 using P = Stm32f4RubatoPlatform<>;
-using Ruler = CycleCounter;
+/// The ruler: the DWT's cycle counter at the core's rate, started once in
+/// main() - the shared body's Ruler::now() and util/test_wait.hpp's waits
+/// (it counts with interrupts masked and through a Sleep, and stops only
+/// in a Stop, which no letter here enters: stm32f4/dwt.hpp).
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 constexpr uint32_t core_hz = SysClock::hz;
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
 
@@ -345,41 +354,40 @@ void release() {
     U1Rx::release();
 }
 
+/// One byte out at 115200. TXE is waited for 50 ms, some six hundred
+/// frames: a transmitter stuck that long loses the byte, and the peer's
+/// missing ack says so.
 void put1(uint8_t b) {
-    const uint32_t t0 = Ticker::millis();
-    while (!U1::tx_empty() && Ticker::millis() - t0 < 50u) {
-    }
+    (void)brio::wait_until<Ruler>([] { return U1::tx_empty(); }, 50'000);
     U1::write_word(b);
 }
 
-void wait_tc() {
-    const uint32_t t0 = Ticker::millis();
-    while (!U1::tx_complete() && Ticker::millis() - t0 < 50u) {
-    }
-}
+/// The last frame off the wire, 50 ms at most (as put1()).
+void wait_tc() { (void)brio::wait_until<Ruler>([] { return U1::tx_complete(); }, 50'000); }
 
 /// A frame, polled: a character every 87 us at 115200, and the longest
 /// preemption here is a few thousand cycles - tens of microseconds - so the
 /// receive register is always read before the next character lands.
 bool recv_frame(link::Frame& out, uint16_t ms) {
-    const uint32_t t0 = Ticker::millis();
     dec.reset();
-    while (Ticker::millis() - t0 < ms) {
-        const uint32_t st = U1::status();
-        if ((st & UsartFlag::rxne) == 0u) {
-            continue;
-        }
-        const uint8_t b = U1::read_data();
-        if ((st & (UsartFlag::fe | UsartFlag::pe | UsartFlag::ne)) != 0u) {
-            dec.reset();
-            continue;
-        }
-        if (dec.feed(b) == link::Decoder::Result::frame) {
-            out = dec.frame();
-            return true;
-        }
-    }
-    return false;
+    return brio::wait_until<Ruler>(
+        [&out] {
+            const uint32_t st = U1::status();
+            if ((st & UsartFlag::rxne) == 0u) {
+                return false;
+            }
+            const uint8_t b = U1::read_data();
+            if ((st & (UsartFlag::fe | UsartFlag::pe | UsartFlag::ne)) != 0u) {
+                dec.reset();
+                return false;
+            }
+            if (dec.feed(b) == link::Decoder::Result::frame) {
+                out = dec.frame();
+                return true;
+            }
+            return false;
+        },
+        static_cast<uint32_t>(ms) * 1000u);
 }
 
 bool command_once(link::Op op, const uint8_t* p, uint8_t len, uint16_t ms) {
@@ -996,7 +1004,7 @@ int main() {
     clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     tick_ok = brio::Ticker::init(clock);
-    ruler_ok = Ruler::init();
+    ruler_ok = CycleCounter::init();  // every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0)
     brio::Dma<1>::init();
     brio::Dma<2>::init();
     CsPin::output(true);

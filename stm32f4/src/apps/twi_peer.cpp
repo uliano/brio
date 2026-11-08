@@ -125,14 +125,16 @@
 #include <stdint.h>
 
 #include "stm32f4/clock.hpp"
-#include "stm32f4/delay.hpp"
+#include "stm32f4/dwt.hpp"
 #include "stm32f4/flash.hpp"
 #include "stm32f4/i2c.hpp"
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/pin.hpp"
+#include "stm32f4/platform.hpp"
 #include "stm32f4/ticker.hpp"
 #include "stm32f4/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
 // register, and every architecture on this link compiles the same file.
@@ -200,25 +202,31 @@ volatile uint8_t host_status = i2c_ok;
 
 // ---- waits ----------------------------------------------------------------------
 
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
+/// The DWT's cycle counter as a CycleRuler (util/bench.hpp), started at the
+/// top of main(): the commanded holds (at most 65535 us, far inside the
+/// ruler's half wrap of 11.9 s) are spun on it with brio::spin_us().
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 
-/// A microsecond hold of arbitrary length: delay_us is capped below one
-/// SysTick period BY DESIGN, and this instrument's commanded stretches
-/// (milliseconds per byte) are exactly the blocking waits that cap exists
-/// to keep out of KERNEL programs - this is not one, so the hold is spent
-/// in chunks the cap admits.
-void hold_us(uint32_t us) {
-    while (us >= 500u) {
-        (void)delay_us(clock, 500u);
-        us -= 500u;
+/// The tick the protocol's deadlines are counted on: SysTick at 1 kHz, so a
+/// tick is a millisecond and Ticker::millis() is ticks times one.
+using P = Stm32f4Platform<>;
+static_assert(P::ticks_per_second == 1000u, "a protocol deadline counts ticks as milliseconds");
+
+/// A wait for done() under a protocol deadline of `ms` from now, as this
+/// instrument has always counted one: over once `ms` whole ticks have
+/// passed, a deadline of zero over at once. brio::wait_ticks() gives up only
+/// after MORE than its budget, so the budget is one tick less. True when
+/// done() held.
+template <typename F>
+bool within_ms(uint32_t ms, F&& done) {
+    if (ms == 0u) {
+        return done();
     }
-    if (us != 0u) {
-        (void)delay_us(clock, us);
-    }
+    return brio::wait_ticks<P>(done, ms - 1u);
 }
 
 /// The low byte of SR1 - SB, ADDR, BTF, ADD10, STOPF, RxNE and TxE -
@@ -479,7 +487,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
             // as BTF does - and the commanded hold is spent here as well
             // as before every data byte, because the LAST byte's hold
             // falls after the controller's own tenure is over.
-            if (a.hold_us) hold_us(a.hold_us);
+            if (a.hold_us) spin_us<Ruler>(a.hold_us);
             const bool reads = Client::answer_address();
             serving_ = reads;
             given = 0;
@@ -491,7 +499,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
             continue;
         }
         if (Client::data_ready()) {
-            if (a.hold_us) hold_us(a.hold_us);
+            if (a.hold_us) spin_us<Ruler>(a.hold_us);
             const uint8_t v = Client::take();
             if (!first_taken) {
                 r.first = v;
@@ -530,7 +538,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
         // raises AF and no BTF, so nothing is loaded behind it.
         if (serving_ && Client::data_wanted() &&
             (given == 0u || (Raw::status1() & I2cFlag::byte_finished) != 0u)) {
-            if (a.hold_us) hold_us(a.hold_us);
+            if (a.hold_us) spin_us<Ruler>(a.hold_us);
             Client::give(fixed_byte ? a.seed : twilink::pattern_value(a.pattern, a.seed, tx));
             ++tx;
             ++given;
@@ -591,20 +599,13 @@ twilink::Report run_arb(const twilink::Params& a) {
 
     // The rendezvous: the DUT makes the bus busy and this end catches it.
     const uint32_t t0 = Ticker::millis();
-    bool armed = false;
-    while (Ticker::millis() - t0 < a.ms) {
-        if (Raw::busy()) {
-            armed = true;
-            break;
-        }
-    }
-    if (!armed) {
+    if (!within_ms(a.ms, [] { return Raw::busy(); })) {
         r.flags |= twilink::report_timed_out;
         host_live = false;
         (void)go_command();
         return r;
     }
-    if (a.aux16) hold_us(a.aux16);
+    if (a.aux16) spin_us<Ruler>(a.aux16);
 
     static uint8_t burst[32];
     const uint8_t n = a.count < sizeof burst ? static_cast<uint8_t>(a.count)
@@ -626,8 +627,10 @@ twilink::Report run_arb(const twilink::Params& a) {
         host_status = Host::status();
         host_done = true;
     } else {
-        while (!host_done && Ticker::millis() - t0 < a.ms) {
-        }
+        // What is left of the action's deadline, counted from its start;
+        // host_done below is the answer.
+        const uint32_t spent = Ticker::millis() - t0;
+        (void)within_ms(spent < a.ms ? a.ms - spent : 0u, [] { return host_done; });
     }
     if (!host_done) {
         r.flags |= twilink::report_timed_out;
@@ -646,12 +649,10 @@ twilink::Report run_arb(const twilink::Params& a) {
     // measured from the far end: an address NACKed here and then NO STOP
     // on the wire, SCL and SDA left high with every other controller's bus
     // monitor still BUSY. Waited for, bounded by two ticks of the
-    // millisecond clock (a bit period at 100 kHz is ten microseconds).
-    {
-        const uint32_t s0 = Ticker::millis();
-        while (Raw::stopping() && Ticker::millis() - s0 < 2u) {
-        }
-    }
+    // millisecond clock (a bit period at 100 kHz is ten microseconds); a
+    // STOP still standing after them is dropped: go_command() resets the
+    // block either way, and the DUT's own deadline judges the wire.
+    (void)within_ms(2u, [] { return !Raw::stopping(); });
     host_live = false;
     (void)go_command();
     return r;
@@ -669,21 +670,21 @@ twilink::Report run_hold_sda(const twilink::Params& a) {
     SdaPin::output(false, {.open_drain = true});
     r.flags |= twilink::report_host_ran;
 
-    const uint32_t t0 = Ticker::millis();
     uint16_t falls = 0;
     bool prev = SclPin::read();
-    uint16_t guard = 0;
-    for (;;) {
+    // SCL's falling edges counted in the wait's own condition, each turn two
+    // pad reads and the tick's load: the deadline is seen on the turn it
+    // passes, not after a count of turns.
+    const bool released = within_ms(a.ms, [&] {
         const bool now = SclPin::read();
         if (prev && !now) {
             ++falls;
-            if (a.aux8 != 0 && falls >= a.aux8) break;
         }
         prev = now;
-        if (++guard == 0 && Ticker::millis() - t0 >= a.ms) {
-            r.flags |= twilink::report_timed_out;
-            break;
-        }
+        return a.aux8 != 0 && falls >= a.aux8;
+    });
+    if (!released) {
+        r.flags |= twilink::report_timed_out;
     }
     SdaPin::input(PinPull::up);
     r.count = falls;
@@ -701,7 +702,8 @@ twilink::Report run_quiet(const twilink::Params& a) {
     Client::release();
     SclPin::input(PinPull::up);
     SdaPin::input(PinPull::up);
-    wait_ms(a.ms);
+    // A fixed span: the condition never holds, and the answer says nothing.
+    (void)within_ms(a.ms, [] { return false; });
     r.count = 1;
     return r;
 }
@@ -817,6 +819,9 @@ extern "C" void I2C1_ER_IRQHandler() {
 }
 
 int main() {
+    // Every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0):
+    // the ruler the commanded holds are spun on.
+    (void)brio::CycleCounter::init();
     const bool clock_ok = SysClock::init();
     const bool console_ok = Console::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);

@@ -246,12 +246,15 @@ afterwards.
 
 ## Bench findings
 
-`test_stm32_exti`, 10 letters, 95 verdicts, wireless (a letter is one
+`test_stm32_exti`, 10 letters, 94 verdicts, wireless (a letter is one
 command key of the suite's console and the group of verdicts it runs).
 Pads PA0/PB0 (line
 0), PB3 (line 3), PD4 (line 4), PB7 (line 7), PA8 (line 8), PC13 (the
 user button, read only); the console (PA2/PA3), LD4 (PA5), SWD (PA13/PA14), the LSE
-pads (PC14/PC15) and the HSE pads (PF0/PF1) are all avoided.
+pads (PC14/PC15) and the HSE pads (PF0/PF1) are all avoided. On the desk
+PB3 is also the SPI SCK wire to the paired board, so letter b asks
+whether it follows its own pull before moving it, and skips its PB3 legs
+when something outside holds it.
 
 **The stimulus, measured before anything rests on it.** All five pads
 follow their own internal pull (input mode, PUPDR up then down, read

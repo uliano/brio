@@ -38,7 +38,9 @@
 //      the reset values behind it
 //   b  the eight baud rates, timed with no device selected
 //   c  what the driver refuses, and that a refusal writes nothing
-//   d  the mode fault: SSI driven low under software management
+//   d  the mode fault: SSI driven low under software management; the
+//      clearing sequence from a fresh fault, three accesses between its
+//      steps printed, and clear_mode_fault()
 //   e  the overrun and its two-read clearing sequence
 //   f  the gyroscope answers: WHO_AM_I, single byte
 //   g  the gyroscope at each of the eight rates - which it answers
@@ -76,7 +78,8 @@
 //      I2S face and no extension block, the request cells, reset values
 //   b  the eight baud rates, timed with the select high
 //   c  what the driver refuses, and that a refusal writes nothing
-//   d  the mode fault: SSI driven low, then A REAL DEMOTION - this host's
+//   d  the mode fault: SSI driven low, the clearing sequence and
+//      clear_mode_fault() as on the F429, then A REAL DEMOTION - this host's
 //      NSS a hardware input and the peer pulling the wire low (ss_pulse)
 //   e  the overrun and its two-read clearing sequence
 //   n  the peer's command channel, its ident and ten frames
@@ -151,6 +154,7 @@
 
 #include "stm32f4/clock.hpp"
 #include "stm32f4/dma.hpp"
+#include "stm32f4/dwt.hpp"
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/spi.hpp"
 #include "stm32f4/ticker.hpp"
@@ -163,7 +167,123 @@
 #include "util/power.hpp"
 #include "util/print.hpp"
 #include "util/spi_bus.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
+
+// =============================================================================
+// Letter d's clearing sequences, the same on both boards
+// =============================================================================
+//
+// WHICH SEQUENCE PUTS MODF DOWN, AND WHEN. The chapter names two steps, an SR
+// access while MODF stands and then a CR1 write (clear_mode_fault()'s comment
+// quotes it). Each attempt below starts from a fresh fault - the block's RCC
+// reset, a software-managed host at PCLK/64, SSI dropped, MODF waited for -
+// with interrupts masked around the sequence, and differs only in what happens
+// between the two steps: nothing, which is the chapter's sequence done
+// strictly and the one judged; then a CR1 read (the shape `CR1 = CR1` compiles
+// to), a CR2 read and a second SR read, each printed as a measurement - the
+// chapter does not say what an access between the steps does, and brio
+// depends on no answer to it once the driver writes the strict sequence. The
+// flag comes down some APB cycles after the CR1 write, not on the read that
+// follows it, so each attempt counts the SR reads until MODF reads clear, and
+// the strict one is judged against the verb's own bound on its re-reads
+// (S::mode_fault_settle_reads). Then whether a write raising MSTR, SSI and SPE
+// takes, which SPE never does while the flag stands; then the verb itself, on
+// a fresh fault, unmasked as a program calls it.
+
+namespace modf_clear {
+
+/// A fresh mode fault on S. True when MODF rose: it rises some tens of core
+/// cycles after the store that drops SSI (letter d's latency print), so the
+/// 100 us budget is a time-out only.
+template <typename S, typename Ruler>
+bool raise() {
+    S::reset();
+    (void)S::configure(brio::SpiConfig{.clock = brio::SpiClock::div64,
+                                       .nss = brio::SpiNss::software});
+    S::enable();
+    S::software_select(true);
+    return brio::wait_until<Ruler>([] { return S::mode_fault(); }, 100);
+}
+
+struct Attempt {
+    bool raised = false;   ///< the fault stood before the sequence
+    bool down = false;     ///< MODF read clear within read_cap reads after the CR1 write
+    uint16_t reads = 0;    ///< SR reads after the CR1 write, the one that found it clear included
+    bool took = false;     ///< a write raising MSTR, SSI and SPE took after the sequence
+};
+
+/// The most SR reads an attempt spends waiting for the flag to come down: far
+/// past the verb's bound, so a slow clear is counted rather than cut short.
+constexpr uint16_t read_cap = 1000;
+
+/// One attempt from a fresh fault. `Between`: 0 nothing, 1 a CR1 read, 2 a CR2
+/// read, 3 a second SR read, between the SR read and the CR1 write.
+template <typename S, typename Ruler, typename CriticalSection, uint8_t Between>
+Attempt attempt() {
+    Attempt a{};
+    a.raised = raise<S, Ruler>();
+    {
+        CriticalSection cs;
+        auto& r = S::regs();
+        const uint32_t c = r.CR1;
+        (void)r.SR;   // step one
+        if constexpr (Between == 1u) {
+            (void)r.CR1;
+        } else if constexpr (Between == 2u) {
+            (void)r.CR2;
+        } else if constexpr (Between == 3u) {
+            (void)r.SR;
+        }
+        r.CR1 = c;    // step two
+        while (a.reads < read_cap && !a.down) {
+            ++a.reads;
+            a.down = (r.SR & SPI_SR_MODF) == 0u;
+        }
+    }
+    S::regs().CR1 = S::regs().CR1 | SPI_CR1_SSI | SPI_CR1_MSTR | SPI_CR1_SPE;
+    a.took = (S::regs().CR1 & SPI_CR1_SPE) != 0u;
+    return a;
+}
+
+template <typename Out>
+void print_attempt(const Out& out, const char* between, const Attempt& a) {
+    brio::print(out, "  ", between, ": MODF ",
+                !a.raised ? "was not raised" : a.down ? "cleared" : "LEFT STANDING", " after ",
+                a.reads, " SR read(s), and a write raising MSTR, SSI and SPE ",
+                a.took ? "took" : "did not take", brio::crlf);
+}
+
+/// The block: the strict sequence and the verb judged, the three accesses
+/// between the steps printed. Leaves the block reset; the caller reconfigures.
+template <typename S, typename Ruler, typename CriticalSection, typename Out, typename Bench>
+void judge(const Out& out, Bench& bench) {
+    const Attempt strict = attempt<S, Ruler, CriticalSection, 0>();
+    const Attempt cr1 = attempt<S, Ruler, CriticalSection, 1>();
+    const Attempt cr2 = attempt<S, Ruler, CriticalSection, 2>();
+    const Attempt sr = attempt<S, Ruler, CriticalSection, 3>();
+    const bool verb_raised = raise<S, Ruler>();
+    const bool verb_answer = S::clear_mode_fault();
+    const bool verb_down = !S::mode_fault();
+    S::reset();
+    print_attempt(out, "the SR read, then the CR1 write, nothing between (judged)", strict);
+    print_attempt(out, "measured: a CR1 read between the two steps", cr1);
+    print_attempt(out, "measured: a CR2 read between the two steps", cr2);
+    print_attempt(out, "measured: a second SR read between the two steps", sr);
+    brio::print(out, "  clear_mode_fault() on a fresh fault: ",
+                !verb_raised ? "found no fault" : verb_answer ? "answered true" : "answered FALSE",
+                ", MODF ", verb_down ? "clear" : "STANDING", " after it", brio::crlf);
+    bench.verdict("MODF HAS A WAY DOWN IN SOFTWARE: the SR access followed by the CR1 write, with "
+                  "no other access to the block between them, clears the flag within the verb's "
+                  "bound of SR re-reads, and a write raising SPE takes after it",
+                  strict.raised && strict.down && strict.reads <= S::mode_fault_settle_reads &&
+                      strict.took);
+    bench.verdict("clear_mode_fault(), which keeps the two steps adjacent, clears a fresh fault and "
+                  "says so",
+                  verb_raised && verb_answer && verb_down);
+}
+
+}   // namespace modf_clear
 
 #if defined(STM32F446xx)
 
@@ -176,7 +296,6 @@
 #include "stm32f4/delay.hpp"
 #include "stm32f4/exti.hpp"
 #include "stm32f4/pin.hpp"
-#include "stm32f4/dwt.hpp"
 #include "stm32f4/tim.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
@@ -254,44 +373,23 @@ volatile uint16_t sel_falls = 0;
 
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
 
-uint32_t systick_period() { return SysTick->LOAD + 1u; }
+/// The suite's ruler: the DWT's cycle counter, started once in main(). It
+/// counts the core's cycles, masked or not, through a Sleep too, and stops
+/// only in a Stop, which no letter here enters (stm32f4/dwt.hpp).
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 
-/// A core-cycle stamp that survives the SysTick period: the millisecond
-/// tick times the period, plus how far into this period the counter has
-/// come - read tick, VAL, tick again, and retry when the tick moved.
-uint32_t cycle_stamp() {
-    for (;;) {
-        const uint32_t t0 = Ticker::ticks();
-        const uint32_t v = SysTick->VAL;
-        const uint32_t t1 = Ticker::ticks();
-        if (t0 == t1) {
-            return t0 * systick_period() + (systick_period() - v);
-        }
-    }
-}
-
-uint32_t cycles_since(uint32_t stamp) { return cycle_stamp() - stamp; }
-
-void spin_us(uint32_t us) {
-    const uint32_t t0 = cycle_stamp();
-    while (cycles_since(t0) < us * cycles_per_us) {
-    }
-}
-
-void settle_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
-void settle() { settle_ms(spilink::settle_ms); }
+/// The protocol's settle after each command window (spi_link.hpp).
+void settle() { brio::spin_us<Ruler>(spilink::settle_ms * 1000u); }
 
 /// A measurement window the console's transmit interrupt walks through is not
-/// a measurement: drain, then two more milliseconds for the last character.
-void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    settle_ms(2);
-}
+/// a measurement: drain first. The answer is dropped here: a wedged console
+/// only lengthens what follows, and the windows a derived bound judges act on
+/// it themselves.
+void console_drain() { (void)brio::console_drain<Ruler, Serial>(); }
 
 // ---- what the registers held before this program touched them ---------------------
 
@@ -369,7 +467,7 @@ bool link_quiet = false;
 /// for these windows (a null PinRef in the Request) and pays 30 us on each
 /// side of them, so the client's run sees the select fall well before the
 /// first clock and rise well after the last.
-void link_hold() { spin_us(30); }
+void link_hold() { brio::spin_us<Ruler>(30); }
 
 /// One protocol window: prime, select, hold, the transaction, hold,
 /// deselect. THE MODE IS PRIMED BEFORE THE SELECT FALLS - a CPOL flip
@@ -459,7 +557,7 @@ bool command(Op op, const uint8_t* p = no_payload, uint8_t len = 0) {
             }
         }
         (void)link_command_mode();
-        settle_ms(400);
+        brio::spin_us<Ruler>(400'000);
     }
     if (link_quiet) {
         return false;
@@ -505,7 +603,7 @@ bool peer_report(spilink::Report& r) {
             r = spilink::get_report(f.data);
             return true;
         }
-        settle_ms(60);
+        brio::spin_us<Ruler>(60'000);
     }
     return false;
 }
@@ -584,11 +682,9 @@ bool dma_xfer(const uint8_t* tx, uint8_t* rx, uint16_t n, SpiClock rate, SpiMode
     r.bits = SpiDataSize::bits8;
     r.engine = SpiEngine::dma;
     host_done = false;
-    bool done = DmaHost::start(r);
-    const uint32_t t0 = Ticker::millis();
-    while (!done && !host_done && Ticker::millis() - t0 < 100u) {
-    }
-    done = done || host_done;
+    // 100 ms: at most 32 frames at PCLK1/256, 1.5 ms, are what the vector waits on.
+    const bool done =
+        DmaHost::start(r) || brio::wait_until<Ruler>([] { return host_done; }, 100'000);
     link_hold();
     CsPin::set();
     DmaHost::release();
@@ -771,18 +867,20 @@ void ta_block() {
 /// Clock `n` frames with the select high, polled, and report the core
 /// cycles the run took: the bus is driven and the peer, unselected,
 /// listens to none of it.
+/// Zero when a frame's RXNE never came: 1 ms is some eleven frames at
+/// PCLK1/256, the slowest code.
 uint32_t timed_frames(SpiClock c, uint16_t n) {
     Host::prime(SpiMode::mode0, c);
     S::flush_rx();
-    const uint32_t t0 = cycle_stamp();
+    bool came = true;
+    const uint32_t t0 = Ruler::now();
     for (uint16_t i = 0; i < n; ++i) {
         S::data(0xA5u);
-        uint32_t spins = 400'000u;
-        while (!S::rx_ready() && spins-- != 0u) {
-        }
+        came = brio::wait_until<Ruler>([] { return S::rx_ready(); }, 1'000) && came;
         (void)S::data();
     }
-    return cycles_since(t0);
+    const uint32_t took = Ruler::now() - t0;
+    return came ? took : 0u;
 }
 
 void tb_rates() {
@@ -804,9 +902,17 @@ void tb_rates() {
     uint32_t highest = 0;
     uint8_t shown = 0;
     uint32_t slowest_error_permille = 0;
+    // The eight codes timed first and printed after: a console line going out
+    // beside a run would put its interrupt inside the time.
+    if (!brio::console_drain<Ruler, Serial>()) {
+        bench.skip("the console did not drain: the timed runs would carry its interrupt");
+        return;
+    }
+    for (uint8_t code = 0; code < 8u; ++code) {
+        took[code] = timed_frames(static_cast<SpiClock>(code), frames);
+    }
     for (uint8_t code = 0; code < 8u; ++code) {
         const SpiClock c = static_cast<SpiClock>(code);
-        took[code] = timed_frames(c, frames);
         const uint32_t stated = spi_sck_hz(Host::reference_hz(), c);
         const uint32_t per_frame_ns = (took[code] * 1000u) / (frames * cycles_per_us);
         const uint32_t wire_ns =
@@ -916,26 +1022,27 @@ void td_mode_fault() {
     // timed rather than assumed.
     S::software_select(true);   // SSI low
     const uint32_t immediate = S::status();
-    uint32_t t0 = cycle_stamp();
-    uint32_t spins = 100'000u;
-    while (!S::mode_fault() && spins-- != 0u) {
-    }
-    const uint32_t latency = cycles_since(t0);
+    // 100 us: a time-out only, the flag rising some tens of core cycles after
+    // the store (the print). The reading is late by at most one poll turn.
+    const std::optional<uint32_t> rose =
+        brio::cycles_until<Ruler>([] { return S::mode_fault(); }, 100);
     const uint32_t sr = S::status();
     const uint32_t cr1 = S::regs().CR1;
     print(serial, "  SSI driven low: SR on the very next read ", hex(immediate), ", then ", hex(sr),
-          " after ", latency, " core cycles; CR1 ", hex(cr1), crlf);
+          " after ", rose ? *rose : 0u, " core cycles", rose ? "" : " (NEVER ROSE)", "; CR1 ",
+          hex(cr1), crlf);
     bench.verdict("MODF rises when SSI goes low under software management",
                   (sr & SPI_SR_MODF) != 0u);
     bench.verdict("... and the silicon has cleared SPE and MSTR with it, demoting the host",
                   (cr1 & SPI_CR1_SPE) == 0u && (cr1 & SPI_CR1_MSTR) == 0u);
     S::regs().CR1 = cr1 | SPI_CR1_SSI;   // the clearing sequence's CR1 write
-    bench.verdict("the SR access then the CR1 write clears it", [] {
-        uint32_t left = 100'000u;
-        while (S::mode_fault() && left-- != 0u) {
-        }
-        return !S::mode_fault();
-    }());
+    // 100 us: a time-out only, the clear landing some tens of core cycles after
+    // the write (the F429's half of this letter prints it).
+    bench.verdict("the SR access then the CR1 write clears it",
+                  brio::wait_until<Ruler>([] { return !S::mode_fault(); }, 100));
+
+    // The sequences from a fresh fault each, and the verb (modf_clear above).
+    modf_clear::judge<S, Ruler, P::CriticalSection>(serial, bench);
     (void)link_command_mode();
 
     // THE REAL DEMOTION: the peer drives the shared select wire low from its
@@ -962,9 +1069,9 @@ void td_mode_fault() {
     S::enable();
     const bool armed = cfg_ok && S::enabled() && !S::mode_fault() &&
                        (S::regs().CR1 & SPI_CR1_MSTR) != 0u;
-    t0 = Ticker::millis();
-    while (!S::mode_fault() && Ticker::millis() - t0 < 200u) {
-    }
+    const uint32_t t0 = Ticker::millis();
+    // 200 ms: the peer takes the wire 30 ms after its ack window (aux8).
+    (void)brio::wait_until<Ruler>([] { return S::mode_fault(); }, 200'000);   // judged below
     const uint32_t waited = Ticker::millis() - t0;
     const uint32_t sr2 = S::status();
     const uint32_t cr1b = S::regs().CR1;
@@ -976,9 +1083,12 @@ void td_mode_fault() {
                   "and MSTR cleared by the silicon",
                   (sr2 & SPI_SR_MODF) != 0u && (cr1b & SPI_CR1_SPE) == 0u &&
                       (cr1b & SPI_CR1_MSTR) == 0u);
-    S::clear_mode_fault();
+    // The answer is not judged here: the verb is judged on a fresh fault above,
+    // the peer may still hold the wire, and link_command_mode() below resets
+    // and reconfigures the block whatever the flag says.
+    (void)S::clear_mode_fault();
     Host::claim_nss_pad(false);
-    settle_ms(10);   // the pulse is over and the peer back on its dark client
+    brio::spin_us<Ruler>(10'000);   // the pulse is over and the peer back on its dark client
     (void)link_command_mode();
     spilink::Report r{};
     const bool rep = peer_report(r);
@@ -1000,13 +1110,13 @@ void te_overrun() {
     bench.verdict("no overrun stands on a drained receiver", !S::overrun());
     // Three frames clocked with the select high and none read: the second
     // cannot land.
+    // 1 ms a wait: a frame at PCLK1/64 is 11 us. A time-out only, judged by
+    // the OVR verdict below.
     for (uint8_t i = 0; i < 3u; ++i) {
         S::data(static_cast<uint8_t>(0x10u + i));
-        uint32_t spins = 400'000u;
-        while (!S::tx_empty() && spins-- != 0u) {
-        }
+        (void)brio::wait_until<Ruler>([] { return S::tx_empty(); }, 1'000);
     }
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     print(serial, "  three frames clocked, none read: SR ", hex(S::status()), crlf);
     bench.verdict("OVR rises when a frame arrives on an unread receiver", S::overrun());
     (void)S::regs().DR;   // 26.3.10: the DR read alone does NOT clear it
@@ -1028,7 +1138,7 @@ void tn_peer_link() {
     if (!need_peer()) {
         return;
     }
-    bench.verdict("the peer answers a ping over the four wires", true);
+    bench.verdict("the peer answers a ping over the four wires", command(Op::ping));
     spilink::Ident d{};
     const bool got = peer_ident(d);
     if (got) {
@@ -1545,11 +1655,11 @@ void tq_peer_kernel() {
         q.clock = link_clock;
         const bool ended = Host::start(q);
         const uint8_t status = Host::status();
-        settle_ms(2);
+        brio::spin_us<Ruler>(2'000);
         const uint16_t refused_falls = sel_falls;
         q.engine = SpiEngine::polled;
         (void)Host::start(q);
-        settle_ms(2);
+        brio::spin_us<Ruler>(2'000);
         const uint16_t polled_falls = static_cast<uint16_t>(sel_falls - refused_falls);
         (void)SelWatch::arm(false);
         Nvic::disable(SelWatch::irq());
@@ -1904,15 +2014,13 @@ Outcome run(const Ext& e) {
         dma_completions = 0;
         dma_blocks = 0;
         const uint32_t tick0 = Ticker::ticks();
-        const uint32_t t0 = cycle_stamp();
-        bool done = DmaHost::start(r);
+        const uint32_t t0 = Ruler::now();
+        const bool done = DmaHost::start(r);
         o.inside = done;
-        const uint32_t m0 = Ticker::millis();
-        while (!done && !host_done && Ticker::millis() - m0 < 200u) {
-        }
-        o.cycles = cycles_since(t0);
+        // 200 ms: 64 16-bit frames at PCLK1/256 are 5.8 ms.
+        o.clocked = done || brio::wait_until<Ruler>([] { return host_done; }, 200'000);
+        o.cycles = Ruler::now() - t0;
         o.ticked = Ticker::ticks() != tick0;
-        o.clocked = done || host_done;
         o.completions = dma_completions;
         o.blocks = dma_blocks;
         link_hold();
@@ -1933,14 +2041,11 @@ Outcome run(const Ext& e) {
         r.bits = bits;
         r.engine = SpiEngine::polled;
         const uint32_t tick0 = Ticker::ticks();
-        const uint32_t t0 = cycle_stamp();
-        bool done = Host::start(r);
-        const uint32_t m0 = Ticker::millis();
-        while (!done && !host_done && Ticker::millis() - m0 < 200u) {
-        }
-        o.cycles = cycles_since(t0);
+        const uint32_t t0 = Ruler::now();
+        // A polled request ends inside start(): nothing to wait for after it.
+        o.clocked = Host::start(r);
+        o.cycles = Ruler::now() - t0;
         o.ticked = Ticker::ticks() != tick0;
-        o.clocked = done || host_done;
         link_hold();
         CsPin::set();
     }
@@ -2039,8 +2144,8 @@ bool climb(Ext e) {
 /// zero otherwise, the window that failed named first. WHAT LENGTHENS A WINDOW
 /// IS NOT JUDGED: at PCLK1/2 the difference is 32 x 128 = 4096 cycles, so a
 /// handler of 41 cycles in the shorter window alone is the -1 % of wire_ok().
-/// The console is drained first, and a pair a tick landed in, printed, is run
-/// again. The two windows last 50 us at PCLK1/2 against a 1 ms tick, so one
+/// The console is drained first (a console that will not drain times nothing:
+/// zero), and a pair a tick landed in, printed, is run again. The two windows last 50 us at PCLK1/2 against a 1 ms tick, so one
 /// pair in twenty takes one and four tries leave one chance in 160 000 of a
 /// tick still judged; at PCLK1/8 they last some 200 us, one pair in five and
 /// one in 600 in four tries, and there a tick of 76 cycles is 0.5 % of the
@@ -2051,7 +2156,9 @@ uint32_t frame_permille(Ext e) {
     Ext longer = e;
     longer.count = 48;
     longer.seed_a = static_cast<uint8_t>(e.seed_a + 3u);
-    console_drain();
+    if (!brio::console_drain<Ruler, Serial>()) {
+        return 0u;
+    }
     Outcome a{};
     Outcome b{};
     for (uint8_t attempt = 0; attempt < 4u; ++attempt) {
@@ -2299,6 +2406,12 @@ Crc run_crc(bool wide, uint16_t poly, SpiClock rate, uint8_t spare, bool corrupt
             uint8_t seed_a, uint8_t seed_b, bool one_in_flight = false,
             uint32_t next_delay = 0) {
     Crc c{};
+    // The window's CRCNEXT store has a frame of room at most (letter t walks
+    // it), and a console interrupt inside the window would take it: the
+    // console drained before the peer is commanded, nothing printed until the
+    // window has closed. The answer is dropped: a wedged console shows as a
+    // CRC exchange that fails, never as a hang.
+    console_drain();
     constexpr uint16_t n = 16;
     spilink::Params a{};
     a.cfg = spilink::Cfg{.apply = 1, .mode = 0, .dord = 0, .regime = spilink::regime_buffer_wait};
@@ -2337,12 +2450,11 @@ Crc run_crc(bool wide, uint16_t poly, SpiClock rate, uint8_t spare, bool corrupt
     link_hold();
     bool frames = true;
     bool crc_came = true;
+    // 1 ms a frame: a 16-bit frame at PCLK1/256 is 91 us.
     auto frame_back = [&](bool crc_frame) -> uint16_t {
-        uint32_t spins = 400'000u;
-        while (!S::rx_ready() && --spins != 0u) {   // a time-out leaves 0, never a wrap
-        }
+        const bool here = brio::wait_until<Ruler>([] { return S::rx_ready(); }, 1'000);
         bool& came = crc_frame ? crc_came : frames;
-        came = came && spins != 0u;
+        came = came && here;
         return S::data(bits);
     };
     auto frame_at = [&](uint16_t i) -> uint16_t {
@@ -2375,9 +2487,8 @@ Crc run_crc(bool wide, uint16_t poly, SpiClock rate, uint8_t spare, bool corrupt
                     spin_loops(next_delay);
                     S::crc_next();
                     walk_next = SysTick->VAL;
-                    uint32_t spins = 400'000u;
-                    while (!S::rx_ready() && --spins != 0u) {
-                    }
+                    // A time-out only: frame_back() below judges the frame.
+                    (void)brio::wait_until<Ruler>([] { return S::rx_ready(); }, 1'000);
                     walk_rxne = SysTick->VAL;
                 } else {
                     S::data(frame_at(i));
@@ -2398,9 +2509,9 @@ Crc run_crc(bool wide, uint16_t poly, SpiClock rate, uint8_t spare, bool corrupt
             keep(i, frame_back(false));
         }
         S::data(frame_at(static_cast<uint16_t>(n - 2u)));
-        uint32_t spins = 400'000u;
-        while (!S::tx_empty() && spins-- != 0u) {
-        }
+        // A time-out only: TXE comes at the frame's first bit, and the frames
+        // after it are judged by frame_back().
+        (void)brio::wait_until<Ruler>([] { return S::tx_empty(); }, 1'000);
         S::data(frame_at(static_cast<uint16_t>(n - 1u)));
         S::crc_next();
         keep(static_cast<uint16_t>(n - 2u), frame_back(false));
@@ -2709,13 +2820,9 @@ SsmLeg ssm_leg(bool select_it, uint8_t seed_a, uint8_t seed_b) {
         in_[i] = 0xEE;
     }
     SsmClient::enable();
-    const uint32_t m0 = Ticker::millis();
-    while (Ticker::millis() - m0 < a.aux8 + 100u) {
-        if (!CsPin::read()) {
-            L.fell = true;
-            break;
-        }
-    }
+    // The peer's lead-in and 100 ms more: the select falls when its burst opens.
+    L.fell = brio::wait_until<Ruler>([] { return !CsPin::read(); },
+                                     (a.aux8 + 100u) * 1000u);
     if (select_it && L.fell) {
         SsmClient::select(true);
     }
@@ -2791,29 +2898,27 @@ void tf_select() {
     hc.nss = SpiNss::hardware_output;
     const bool cfg_ok = S::configure(hc);
     Host::claim_nss_pad(true);
-    spin_us(30);
+    brio::spin_us<Ruler>(30);
     const bool high_before = CsPin::read();
     S::enable();
-    spin_us(30);
+    brio::spin_us<Ruler>(30);
     const bool low_enabled = !CsPin::read();
     uint16_t moved = 0;
+    // 1 ms a wait: a frame at PCLK1/64 is 11 us. TXE's wait is a time-out only
+    // (the frame it lets out is RXNE's); a frame whose RXNE never comes ends
+    // the run short, which `moved` says.
     for (; moved < a.count; ++moved) {
-        uint32_t spins = 200'000u;
-        while (!S::tx_empty() && spins-- != 0u) {
-        }
+        (void)brio::wait_until<Ruler>([] { return S::tx_empty(); }, 1'000);
         S::data(out_[moved]);
-        spins = 200'000u;
-        while (!S::rx_ready() && spins-- != 0u) {
-        }
-        if (spins == UINT32_MAX) {
+        if (!brio::wait_until<Ruler>([] { return S::rx_ready(); }, 1'000)) {
             break;
         }
         in_[moved] = S::data8();
     }
-    spin_us(30);
+    brio::spin_us<Ruler>(30);
     const bool low_after_frames = !CsPin::read();
     (void)S::disable();
-    spin_us(30);
+    brio::spin_us<Ruler>(30);
     const bool high_disabled = CsPin::read();
     Host::claim_nss_pad(false);
     (void)link_command_mode();
@@ -2891,7 +2996,6 @@ void tg_stall_irqs() {
     if (!need_peer()) {
         return;
     }
-    (void)CycleCounter::init();
 
     // ---- 1. a stall made by another chip, with ERRIE on the same fault ----
     // 2048 frames at PCLK1/256 (175.8 kHz, 45.5 us a frame) are 93.2 ms on
@@ -2964,7 +3068,7 @@ void tg_stall_irqs() {
                   "request (26.5's error interrupt)",
                   probe_err_count == 1u && (probe_err_sr & SPI_SR_MODF) != 0u &&
                       fault_us < end_us);
-    settle_ms(10);
+    brio::spin_us<Ruler>(10'000);
     (void)link_command_mode();
     spilink::Report pr{};
     const bool prep = peer_report(pr);
@@ -3240,7 +3344,6 @@ void th_handler_gap() {
     if (!need_peer()) {
         return;
     }
-    (void)CycleCounter::init();
     Tim<7>::init();
     (void)TimPeriodicTick<Tim<7>>::setup(0, 449);   // 90 MHz / 450 = 200 kHz
     Tim<7>::enable(false);
@@ -3389,10 +3492,8 @@ Window run(uint8_t cmd_len, uint16_t len, SpiClock rate, uint8_t seed, bool read
     host_done = false;
     const bool done = DmaHost::start(r);
     o.inside = done;
-    const uint32_t m0 = Ticker::millis();
-    while (!done && !host_done && Ticker::millis() - m0 < 200u) {
-    }
-    o.clocked = done || host_done;
+    // 200 ms: 40 frames at PCLK1/256 are 1.8 ms.
+    o.clocked = done || brio::wait_until<Ruler>([] { return host_done; }, 200'000);
     o.completions = dma_completions;
     o.blocks = dma_blocks;
     o.dc_up = DcPad::read_out();
@@ -3475,7 +3576,7 @@ Refusal refuse(typename H::Request q) {
     way::watch_sck(true);
     f.ended = H::start(q);
     f.status = H::status();
-    settle_ms(1);
+    brio::spin_us<Ruler>(1'000);
     way::watch_sck(false);
     (void)SelWatch::arm(false);
     (void)SelWatch::clear();
@@ -3625,9 +3726,8 @@ void ts_named() {
     const uint8_t late_polled_status = DmaHost::status();
     const bool busy_regs = S::regs().CR1 == busy_cr1;
     const bool busy_dc_low = !named::DcPad::read_out();
-    const uint32_t m0 = Ticker::millis();
-    while (!host_done && Ticker::millis() - m0 < 50u) {
-    }
+    // 50 ms against the block's 3 ms; host_done is judged below.
+    (void)brio::wait_until<Ruler>([] { return host_done; }, 50'000);
     (void)SelWatch::arm(false);
     Nvic::disable(SelWatch::irq());
     (void)SelWatch::clear();
@@ -3799,8 +3899,9 @@ bool once(uint8_t w, SpiMode m, SpiClock c, PinRef cs, bool& high, bool& up) {
     host_done = false;
     watching = true;
     const bool inside = H::start(r);
-    const uint32_t m0 = Ticker::millis();
-    while (!inside && !host_done && Ticker::millis() - m0 < 20u) {
+    // 20 ms: two frames at PCLK/256 are some 100 us; the answer is the return below.
+    if (!inside) {
+        (void)brio::wait_until<Ruler>([] { return host_done; }, 20'000);
     }
     watching = false;
     high = pad_high;
@@ -3899,7 +4000,6 @@ bool report(const char* name, uint32_t ratio, uint32_t& worst_over) {
 
 void tE_wire_ended() {
     using namespace wire_end;
-    (void)CycleCounter::init();
     for (uint8_t i = 0; i < 8u; ++i) {
         out[i] = static_cast<uint8_t>(0xA5u ^ (i * 11u));
     }
@@ -3928,8 +4028,9 @@ void tE_wire_ended() {
                                                     SpiClock::div256, Select::ref());
     const bool stage_inside = DmaHost::start(stage);
     Sck2::output(true);
-    const uint32_t m0 = Ticker::millis();
-    while (!stage_inside && !host_done && Ticker::millis() - m0 < 20u) {
+    // 20 ms: the vector's bound runs out in microseconds; host_done is judged below.
+    if (!stage_inside) {
+        (void)brio::wait_until<Ruler>([] { return host_done; }, 20'000);
     }
     const uint8_t stage_status = DmaHost::status();
     const bool stage_up = Select::read_out();
@@ -3980,7 +4081,6 @@ void tE_wire_ended() {
 
 void tj_count() {
     static constexpr uint8_t one_command[1] = {0x5A};
-    (void)CycleCounter::init();
     (void)link_command_mode();
     Host::Request rq{};
     rq.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(one_command));
@@ -4108,14 +4208,14 @@ void host_up(SpiMode mode, SpiClock rate = way_rate) {
     dma_host_live = true;
     (void)DmaHost::init(clock, peer_link_config<DmaHost>());
     DmaHost::prime(mode, rate);
-    settle_ms(1);
+    brio::spin_us<Ruler>(1'000);
 }
 
 /// Letter's pull on SCK, which the next init() takes away with the pad's
 /// function: what makes the pad's being undriven with SPE clear an edge.
 void pull_sck_down() {
     Pin<link_pins.sck.port, link_pins.sck.pin>::pull(PinPull::down);
-    settle_ms(1);
+    brio::spin_us<Ruler>(1'000);
 }
 
 /// SCK's edges counted over one call: the pad is an input to the EXTI whatever
@@ -4169,10 +4269,7 @@ Failed run_stalled(Shape shape, PinRef cs, SpiMode mode, SpiClock rate = way_rat
 /// The completion, however it comes: `ended` when start() already answered, or
 /// the vector's answer within `ms`.
 bool completed_within(bool ended, uint32_t ms) {
-    const uint32_t m0 = Ticker::millis();
-    while (!ended && !host_done && Ticker::millis() - m0 < ms) {
-    }
-    return ended || host_done;
+    return ended || brio::wait_until<Ruler>([] { return host_done; }, ms * 1000u);
 }
 
 /// A block whose buffer gives a bus error, and the vector's answer.
@@ -4309,7 +4406,6 @@ void tk_way_back() {
     if (!need_peer()) {
         return;
     }
-    (void)CycleCounter::init();
     print(serial, "  a stall: 32 frames at PCLK1/32, the enable taken down under the host first", crlf);
 
     // ---- a stall on each path, the next request exact --------------------------
@@ -4344,8 +4440,9 @@ void tk_way_back() {
                   armed && f_read.ended && f_read.status == spi_stalled && f_read.released &&
                       way::exact(n_read, false));
 
-    // One command frame is polled only below the engines' cost: at PCLK1/8 it is
-    // 256 cycles against 430, at PCLK1/32 it would ride a block of its own.
+    // A request naming the engines runs its command phase in the loop inside
+    // start(), before its data block goes to the streams (the class comment of
+    // SpiHost), so a stall staged under it ends inside start() at any rate.
     armed = way::arm_peer(a, 0x47, SpiMode::mode3);
     way::host_up(SpiMode::mode3, SpiClock::div8);
     way::pull_sck_down();
@@ -4392,7 +4489,7 @@ void tk_way_back() {
     way::host_up(SpiMode::mode0);
     const way::Failed e_rx = way::run_faulted(false, {}, SpiMode::mode0);
     const uint32_t rx_vector = vector_cycles;
-    settle_ms(2);
+    brio::spin_us<Ruler>(2'000);
     const bool stood = S::rx_ready();
     const way::Window n_rx = way::next_window(a, SpiMode::mode0, false);
     way::print_failed("a receive buffer in reserved space, no select", e_rx);
@@ -4409,7 +4506,7 @@ void tk_way_back() {
     (void)link_command_mode();
     way::host_up(SpiMode::mode0);
     const way::Failed e_sel = way::run_faulted(false, CsPin::ref(), SpiMode::mode0);
-    settle_ms(1);
+    brio::spin_us<Ruler>(1'000);
     way::print_failed("a receive buffer in reserved space, the select named", e_sel);
     DmaHost::release();
     dma_host_live = false;
@@ -4648,6 +4745,7 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
+    (void)brio::CycleCounter::init();  // every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0)
     brio::enable_interrupts();
     brio::Dma<1>::init();
 
@@ -4781,30 +4879,14 @@ volatile bool dma_host_live = false;
 
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
 
-uint32_t systick_period() { return SysTick->LOAD + 1u; }
-
-/// A core-cycle stamp that survives the SysTick period: the millisecond
-/// tick times the period, plus how far into this period the counter has
-/// come. Read tick, VAL, tick again - and retry when the tick moved
-/// between the two, which is the only race there is.
-uint32_t cycle_stamp() {
-    for (;;) {
-        const uint32_t t0 = Ticker::ticks();
-        const uint32_t v = SysTick->VAL;
-        const uint32_t t1 = Ticker::ticks();
-        if (t0 == t1) {
-            return t0 * systick_period() + (systick_period() - v);
-        }
-    }
-}
-
-uint32_t cycles_since(uint32_t stamp) { return cycle_stamp() - stamp; }
-
-void spin_us(uint32_t us) {
-    const uint32_t t0 = cycle_stamp();
-    while (cycles_since(t0) < us * cycles_per_us) {
-    }
-}
+/// The suite's ruler: the DWT's cycle counter, started once in main(). It
+/// counts the core's cycles, masked or not, through a Sleep too, and stops
+/// only in a Stop, which no letter here enters (stm32f4/dwt.hpp).
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 
 bool same(const uint8_t* a, const uint8_t* b, uint16_t n) {
     for (uint16_t i = 0; i < n; ++i) {
@@ -4942,18 +5024,20 @@ void ta_block() {
 /// Clock `n` frames with nothing selected, polled, and report the core
 /// cycles the run took. Both chip selects stay high, so the bus is driven
 /// and nobody listens.
+/// Zero when a frame's RXNE never came: 1 ms is some twenty-two frames at
+/// PCLK2/256, the slowest code.
 uint32_t timed_frames(SpiClock c, uint16_t n) {
     Host::prime(gyro_mode, c);
     S::flush_rx();
-    const uint32_t t0 = cycle_stamp();
+    bool came = true;
+    const uint32_t t0 = Ruler::now();
     for (uint16_t i = 0; i < n; ++i) {
         S::data(0xA5u);
-        uint32_t spins = 400'000u;
-        while (!S::rx_ready() && spins-- != 0u) {
-        }
+        came = brio::wait_until<Ruler>([] { return S::rx_ready(); }, 1'000) && came;
         (void)S::data();
     }
-    return cycles_since(t0);
+    const uint32_t took = Ruler::now() - t0;
+    return came ? took : 0u;
 }
 
 void tb_rates() {
@@ -4968,9 +5052,17 @@ void tb_rates() {
     uint32_t lowest = 0xFFFFFFFFu;
     uint32_t highest = 0;
     uint32_t slowest_error_permille = 0;
+    // The eight codes timed first and printed after: a console line going out
+    // beside a run would put its interrupt inside the time.
+    if (!brio::console_drain<Ruler, Serial>()) {
+        bench.skip("the console did not drain: the timed runs would carry its interrupt");
+        return;
+    }
+    for (uint8_t code = 0; code < 8u; ++code) {
+        took[code] = timed_frames(static_cast<SpiClock>(code), frames);
+    }
     for (uint8_t code = 0; code < 8u; ++code) {
         const SpiClock c = static_cast<SpiClock>(code);
-        took[code] = timed_frames(c, frames);
         const uint32_t stated = spi_sck_hz(Host::reference_hz(), c);
         const uint32_t per_frame_ns = (took[code] * 1000u) / (frames * cycles_per_us);
         // Eight bits at the stated rate, in nanoseconds.
@@ -5084,15 +5176,15 @@ void td_mode_fault() {
     // is measured rather than assumed.
     S::software_select(true);   // SSI low
     const uint32_t immediate = S::status();
-    const uint32_t t0 = cycle_stamp();
-    uint32_t spins = 100'000u;
-    while (!S::mode_fault() && spins-- != 0u) {
-    }
-    const uint32_t latency = cycles_since(t0);
+    // 100 us: a time-out only, the flag rising some tens of core cycles after
+    // the store (the print). The reading is late by at most one poll turn.
+    const std::optional<uint32_t> rose =
+        brio::cycles_until<Ruler>([] { return S::mode_fault(); }, 100);
     const uint32_t sr = S::status();
     const uint32_t cr1 = S::regs().CR1;
     print(serial, "  SSI driven low: SR on the very next read ", hex(immediate), ", then ",
-          hex(sr), " after ", latency, " core cycles; CR1 ", hex(cr1), crlf);
+          hex(sr), " after ", rose ? *rose : 0u, " core cycles", rose ? "" : " (NEVER ROSE)",
+          "; CR1 ", hex(cr1), crlf);
     bench.verdict("MODF rises when SSI goes low under software management", (sr & SPI_SR_MODF) != 0u);
     bench.verdict("... and the silicon has cleared SPE and MSTR with it, demoting the host",
                   (cr1 & SPI_CR1_SPE) == 0u && (cr1 & SPI_CR1_MSTR) == 0u);
@@ -5107,15 +5199,18 @@ void td_mode_fault() {
     // same store because the value it writes back is the one MODF left.
     S::regs().CR1 = cr1 | SPI_CR1_SSI;   // step two, and the select back up
     const uint32_t straight_after = S::status();
-    const uint32_t t1 = cycle_stamp();
-    spins = 100'000u;
-    while (S::mode_fault() && spins-- != 0u) {
-    }
-    const uint32_t clear_latency = cycles_since(t1);
+    // 100 us: a time-out only, the clear landing some tens of core cycles
+    // after the write (the print).
+    const std::optional<uint32_t> cleared =
+        brio::cycles_until<Ruler>([] { return !S::mode_fault(); }, 100);
     print(serial, "  after the SR read and the CR1 write: SR ", hex(straight_after), ", then ",
-          hex(S::status()), " ", clear_latency, " core cycles later - the clear lands a beat "
-          "late for the same reason the flag did", crlf);
-    bench.verdict("the SR access then the CR1 write clears it", !S::mode_fault());
+          hex(S::status()), " ", cleared ? *cleared : 0u, " core cycles later",
+          cleared ? "" : " (NEVER CLEARED)",
+          " - the clear lands a beat late for the same reason the flag did", crlf);
+    bench.verdict("the SR access then the CR1 write clears it", cleared.has_value());
+
+    // The sequences from a fresh fault each, and the verb (modf_clear above).
+    modf_clear::judge<S, Ruler, P::CriticalSection>(serial, bench);
     const bool back = host_ready();
     bench.verdict("and the host is a host again after the reconfiguration",
                   back && (S::regs().CR1 & SPI_CR1_MSTR) != 0u && S::enabled());
@@ -5137,13 +5232,13 @@ void te_overrun() {
     S::flush_rx();
     bench.verdict("no overrun stands on a drained receiver", !S::overrun());
     // Two frames clocked out and neither read: the second cannot land.
+    // 1 ms a wait: a frame at PCLK2/64 is 5.7 us. A time-out only, judged by
+    // the OVR verdict below.
     for (uint8_t i = 0; i < 3u; ++i) {
         S::data(static_cast<uint8_t>(0x10u + i));
-        uint32_t spins = 400'000u;
-        while (!S::tx_empty() && spins-- != 0u) {
-        }
+        (void)brio::wait_until<Ruler>([] { return S::tx_empty(); }, 1'000);
     }
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     print(serial, "  three frames clocked, none read: SR ", hex(S::status()), crlf);
     bench.verdict("OVR rises when a frame arrives on an unread receiver", S::overrun());
     // 28.3.10: the DR read alone does NOT clear it.
@@ -5155,9 +5250,12 @@ void te_overrun() {
     bench.verdict("the clearing sequence is a DR read FOLLOWED BY an SR read, and the DR read "
                   "alone is not enough",
                   !S::overrun());
-    bench.verdict("... and what the receive buffer holds is the FIRST frame that arrived, not "
-                  "the last: subsequent ones are lost (28.3.10)",
-                  true);
+    // Printed, not judged: with both selects high nothing drives MISO, so the
+    // three frames read alike and which one stood cannot be told here.
+    print(serial, "  (no verdict on which frame the receive buffer kept: 28.3.10 says the "
+                  "first, the later ones lost; the frames here carry no data to tell them "
+                  "apart)",
+          crlf);
     (void)host_ready();
 }
 
@@ -5546,9 +5644,8 @@ void tk_engines() {
     a.clock = gyro_rate;
     a.engine = SpiEngine::dma;
     const bool async = DmaHost::start(a);
-    uint32_t spins = 2'000'000u;
-    while (GyroCs::read_out() == false && spins-- != 0u) {
-    }
+    // 10 ms against two frames at 5.6 MHz; the select's latch is judged below.
+    (void)brio::wait_until<Ruler>([] { return GyroCs::read_out(); }, 10'000);
     print(serial, "  the same read asynchronously: ", hex(who[0]), " (start() returned ",
           async ? "true" : "false", ", the select came back up ",
           GyroCs::read_out() ? "yes" : "NO", ")", crlf);
@@ -5574,12 +5671,14 @@ void tk_engines() {
         b.mode = gyro_mode;
         b.clock = c;
         b.engine = SpiEngine::dma;
-        const uint32_t t0 = cycle_stamp();
+        const uint32_t t0 = Ruler::now();
         const bool inside = DmaHost::start(b);
-        uint32_t wait_spins = 8'000'000u;
-        while (!inside && GyroCs::read_out() == false && wait_spins-- != 0u) {
+        // 10 ms against 65 frames at PCLK2/256, 1.5 ms. Printed, not judged: a
+        // block that never ends prints the budget.
+        if (!inside) {
+            (void)brio::wait_until<Ruler>([] { return GyroCs::read_out(); }, 10'000);
         }
-        const uint32_t took = cycles_since(t0);
+        const uint32_t took = Ruler::now() - t0;
         const uint32_t stated = spi_sck_hz(DmaHost::reference_hz(), c);
         const uint32_t ns_per_frame = (took * 1000u) / (65u * cycles_per_us);
         print(serial, "  64 frames at SCK ", stated / 1000u, " kHz: ", took / cycles_per_us,
@@ -5670,15 +5769,13 @@ void begin(SpiMode mode, SpiClock rate) {
     S::enable();
 }
 
-/// One frame out on the single line, waited to the last edge.
+/// One frame out on the single line, waited to the last edge: 1 ms a wait
+/// against a frame of 1.4 us at the letter's rate, a time-out only, the
+/// device's answer judging the line.
 void write_frame(uint8_t v) {
     S::data(v);
-    uint32_t spins = 400'000u;
-    while (!S::tx_empty() && spins-- != 0u) {
-    }
-    spins = 400'000u;
-    while (S::busy() && spins-- != 0u) {
-    }
+    (void)brio::wait_until<Ruler>([] { return S::tx_empty(); }, 1'000);
+    (void)brio::wait_until<Ruler>([] { return !S::busy(); }, 1'000);
 }
 
 /// The receive phase: BIDIOE clear makes a MASTER clock continuously the
@@ -5707,9 +5804,9 @@ void read_frames(uint8_t* into, uint8_t n) {
         if (i + 1u == n) {
             S::regs().CR1 &= ~SPI_CR1_SPE;
         }
-        uint32_t spins = 400'000u;
-        while (!S::rx_ready() && spins-- != 0u) {
-        }
+        // A time-out only (1 ms against a frame of 1.4 us): the bytes read
+        // are judged against the device's.
+        (void)brio::wait_until<Ruler>([] { return S::rx_ready(); }, 1'000);
         into[i] = static_cast<uint8_t>(S::data());
     }
     S::regs().CR1 &= ~SPI_CR1_SPE;
@@ -6029,6 +6126,7 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
+    (void)brio::CycleCounter::init();  // every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0)
     brio::enable_interrupts();
 
     const bool host_ok = host_ready();

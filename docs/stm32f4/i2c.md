@@ -591,7 +591,7 @@ Bus::unstick();      // the WIRE: nine clocks and a STOP by hand;
 ## Bench findings
 
 `test_stm32f4_i2c` on the STM32F429I-DISC1, I2C3 on PA8/PC9 against the
-board's STMPE811 touch controller. `z` holds 64 verdicts here. 63 have run on
+board's STMPE811 touch controller. `z` holds 59 verdicts here. 58 have run on
 this board, and the other, letter `c`'s refusal of the reserved addresses, on the
 Nucleo-F446RE alone ("Not covered yet").
 
@@ -694,7 +694,7 @@ same letter shows the mechanism each Request names on the streams
 chip's own FMPI2C1 on PC6/PC7 - two wires and a 2.2 kOhm pull-up on each
 line - served from its own vectors as a register file (an identity at
 0x00, a reset command at 0x03, a scratch register at 0x04, a pointer the
-first written byte sets), at 0x2C. `z` is 82 verdicts: every letter of
+first written byte sets), at 0x2C. `z` is 77 verdicts: every letter of
 the DISC1's runs against it, and four more - with a partner board, an
 STM32G0 on the same two nodes, on its dark console (a program that stays off
 the bus), since letter d's
@@ -826,7 +826,10 @@ under `z`, fifteen runs). Three streams every 5, asking 5400 beats in 100 us aga
 stream is not served at all while the load stands. A read of one's wire ended with the byte in DR, 1500 of 1500. Nothing answered ahead of the
 stream, 0 of 1500, and when the load came off the read and the read of eight behind it were exact,
 1500 of 1500 each. Three every 12 and the copies, 2243 to 2247 beats: 2998 of the 3000 reads of one had the
-wire over first, 3410 of 9000 reads of all lengths ran past the first bound, all answered and all exact. What
+wire over first, 3410 of 9000 reads of all lengths ran past the first bound, all answered and all exact;
+on a later image, in five runs of ten, two or three reads went unanswered past the wait's last bound
+(the row stops at its third), each recovered with the next read whole, every answered read exact - so the
+letter judges the answered reads and prints the unanswered ones. What
 such a load can do to the core is in [dma.md](dma.md)'s "Not covered yet".
 
 Runs of two and eight on the same three streams every 5, starved from their start or from
@@ -1142,7 +1145,7 @@ among the preemptive kernel's; its twin over the FMPI2C1 is
 
 `test_stm32f4_i2c` on the 32F469IDISCOVERY, I2C1 on PB8/PB9 under the
 board's 1.5 k pull-ups, against the MB1166's FocalTech touch controller,
-reset through the panel's shared line PH7. `z` holds 64 verdicts here. 63 have
+reset through the panel's shared line PH7. `z` holds 59 verdicts here. 58 have
 run on this board, and letter `c`'s refusal of the reserved addresses on the
 Nucleo-F446RE alone ("Not covered yet"); one letter more, run by its own key and not
 under `z`, wants a finger.

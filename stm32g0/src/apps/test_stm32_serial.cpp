@@ -149,7 +149,7 @@
 //      the far chip against a 1 Mbaud reference either side, the far
 //      blast on the polled receiver, the interrupt receiver and the
 //      receive engine
-//   3  the frame matrix across the wire, a refusal SKIPPED with its reason
+//   3  the frame matrix across the wire, a refusal skipped with its reason
 //   4  the receiver's errors from a foreign sender: PE, the FE onset, ORE
 //      with the FIFO, the start bit's vote, the break with and without
 //      LIN, the FIFO's per-entry flags drained late, the task's counters
@@ -238,6 +238,7 @@
 #include "stm32g0/usart.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "util/test_wait.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: the far board's usart_peer
 // compiles the same file.
@@ -347,12 +348,9 @@ constexpr bool board_lse_fitted = true;
 /// pads are not this package's - one string, three users, because on the
 /// part that prints it every byte of prose is flash it has not got.
 [[maybe_unused]] constexpr const char* ck_pad_skip =
-    "  SKIPPED, no verdict claimed: this leg drives USART1_RTS_DE_CK (and "
-    "CTS) on PB3/PB4 at AF4, which is the 48- and 64-pin packages' row. The "
-    "USART pads this suite knows for the 32-pin one are USART1_TX/RX on "
-    "PA9/PA10 at AF1, USART2 and LPUART1 on PA2/PA3, and IR_OUT on PB9 - no "
-    "CK, no DE, no flow control - so no pad is claimed and nothing is "
-    "measured.";
+    "this leg drives USART1_RTS_DE_CK (and CTS) on PB3/PB4 at AF4, and this "
+    "package is declared without them (has_u1_ck_pads), so no pad is claimed "
+    "and nothing is measured";
 
 /// The lowest-numbered instance this part makes BASIC: USART4 on the
 /// G0B1 (of six), USART3 on the G071 (of four), USART2 on the G031 (of
@@ -456,28 +454,40 @@ void stopwatch_up() {
     (void)Stopwatch::configure({.prescaler = 0, .period = 0xFFFF'FFFFu});
     Stopwatch::enable(true);
 }
-inline uint32_t now() { return Stopwatch::count(); }
-inline uint32_t since(uint32_t t0) { return now() - t0; }
+
+/// THE RULER of every wait and span in this suite (util/test_wait.hpp's
+/// CycleRuler): TIM2, which main() starts before the menu and no letter
+/// reprograms - one count a CPU cycle at the PLL's 64 MHz. Not the kernel
+/// tick's cycles(): the bit-banged frames, the pad stamps and the waits
+/// inside them run with interrupts masked, where TIM2 keeps counting and a
+/// count composed across SysTick's reload loses every period after the
+/// first. Like every clock of the core it stops in a Stop, and no wait on
+/// it spans one (the Stop letters time their sleep on the RTC).
+struct Ruler {
+    static uint32_t now() { return Stopwatch::count(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
+
 inline uint32_t to_us(uint32_t cycles) { return cycles / cycles_per_us; }
+
+/// The bit-banged line's pacer: a span in ruler cycles, the resolution the
+/// instrument places its edges, pulses and idle frames at (a microsecond
+/// grain would round a bit of 8 Mbaud away). Not a time-out: those are
+/// brio::wait_until().
 inline void spin_cycles(uint32_t c) {
-    const uint32_t t0 = now();
-    while (since(t0) < c) {
+    const uint32_t t0 = Ruler::now();
+    while (Ruler::now() - t0 < c) {
     }
 }
-inline void spin_us(uint32_t us) { spin_cycles(us * cycles_per_us); }
 
 void feed() { Iwdg::refresh(); }
 
 /// A measurement window a transmit interrupt walks through is not a
-/// measurement.
-void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    for (uint32_t i = 0; i < 8'000'000UL && (Usart<2>::status() & UsartFlag::tc) == 0u;
-         ++i) {
-    }
-    spin_us(2000);
-}
+/// measurement. The answer is dropped here: a wedged console only
+/// lengthens what follows, and the windows a derived bound judges call
+/// brio::console_drain() themselves and act on its answer.
+void console_drain() { (void)brio::console_drain<Ruler, Serial>(); }
 
 bool within(uint32_t v, uint32_t lo, uint32_t hi) { return v >= lo && v <= hi; }
 
@@ -500,26 +510,26 @@ uint32_t permille_off(uint32_t v, uint32_t want) {
 template <class Pin>
 bool pull_walks() {
     Pin::input(PinPull::up);
-    spin_us(300);
+    spin_us<Ruler>(300);
     const bool high = Pin::read();
     Pin::pull(PinPull::down);
-    spin_us(300);
+    spin_us<Ruler>(300);
     const bool low = Pin::read();
     Pin::pull(PinPull::up);
-    spin_us(300);
+    spin_us<Ruler>(300);
     return high && !low;
 }
 
 template <class Pin>
 bool pull_walks_under(PinFunction fn, bool open_drain) {
     Pin::function(fn, {.pull = PinPull::up, .open_drain = open_drain});
-    spin_us(300);
+    spin_us<Ruler>(300);
     const bool high = Pin::read();
     Pin::pull(PinPull::down);
-    spin_us(300);
+    spin_us<Ruler>(300);
     const bool low = Pin::read();
     Pin::pull(PinPull::up);
-    spin_us(300);
+    spin_us<Ruler>(300);
     return high && !low;
 }
 
@@ -660,31 +670,28 @@ void loop_down() {
     CtsPin::release();
 }
 
-/// Wait for a status bit, bounded. Every wait in this suite is bounded:
-/// the IWDG would turn an unbounded one into a reboot, which costs a
-/// whole run to learn one letter is wrong.
-bool wait_flag(uint32_t mask, uint32_t us = 300000) {
-    const uint32_t t0 = now();
-    while ((U1::status() & mask) == 0u) {
-        if (to_us(since(t0)) > us) {
-            return false;
-        }
-    }
-    return true;
+/// The condition a wait on USART1's status asks: any bit of `mask` up.
+/// Every wait in this suite is bounded (brio::wait_until): the IWDG would
+/// turn an unbounded one into a reboot, which costs a whole run to learn
+/// one letter is wrong.
+auto u1_flag(uint32_t mask) {
+    return [mask] { return (U1::status() & mask) != 0u; };
 }
+
+/// The time-out of a wait for room in TDR or for TC: 300 ms, thirty
+/// characters of the slowest frame a letter sends (twelve baud periods at
+/// 1200, 10 ms).
+constexpr uint32_t flag_budget_us = 300'000;
 
 /// Send one word and wait for the loop to bring it back. Nothing when
 /// the receiver never saw it.
 std::optional<uint16_t> loop_word(uint16_t v, uint32_t timeout_us = 20000) {
-    if (!wait_flag(UsartFlag::txe, timeout_us)) {
+    if (!wait_until<Ruler>(u1_flag(UsartFlag::txe), timeout_us)) {
         return std::nullopt;
     }
     U1::write_word(v);
-    const uint32_t t0 = now();
-    while ((U1::status() & UsartFlag::rxne) == 0u) {
-        if (to_us(since(t0)) > timeout_us) {
-            return std::nullopt;
-        }
+    if (!wait_until<Ruler>(u1_flag(UsartFlag::rxne), timeout_us)) {
+        return std::nullopt;
     }
     return U1::read_word();
 }
@@ -766,30 +773,30 @@ uint32_t res_wire_permille(uint32_t baud, uint32_t bits = 10u, uint32_t frames =
     const uint32_t budget = static_cast<uint32_t>(wire * 2u) + SysClock::hz / 50u;
     const uint32_t bit = SysClock::hz / baud;
     // The idle frame TE sends, and anything an earlier step left, off the
-    // wire first.
-    const uint32_t w0 = now();
-    while ((R::status() & UsartFlag::tc) == 0u && since(w0) < budget) {
-    }
+    // wire first. Dropped on its budget: a line that never drains times
+    // out the run below too, which answers 0.
+    (void)wait_until<Ruler>([] { return (R::status() & UsartFlag::tc) != 0u; },
+                            to_us(budget));
     spin_cycles(2u * bits * bit);
     auto run = [&]() -> uint32_t {
-        uint32_t t0 = now();
+        uint32_t t0 = Ruler::now();
         for (uint32_t i = 0; i < frames; ++i) {
             while ((R::status() & UsartFlag::txe) == 0u) {
-                if (since(t0) > budget) {
+                if (Ruler::now() - t0 > budget) {
                     return 0;
                 }
             }
             if (i == 0u) {
-                t0 = now();
+                t0 = Ruler::now();
             }
             R::write_data(static_cast<uint8_t>(i * 37u + 11u));
         }
         while ((R::status() & UsartFlag::tc) == 0u) {
-            if (since(t0) > budget) {
+            if (Ruler::now() - t0 > budget) {
                 return 0;
             }
         }
-        return since(t0);
+        return Ruler::now() - t0;
     };
     uint32_t took = 0;
     if (wire < SysClock::hz / 100u) {
@@ -821,19 +828,19 @@ uint32_t port_wire_permille(uint32_t baud, uint32_t frames = 1024u) {
     const uint64_t wire = static_cast<uint64_t>(frames) * 10u * SysClock::hz / baud;
     const uint32_t budget = static_cast<uint32_t>(wire * 2u) + SysClock::hz / 50u;
     uint32_t queued = 0;
-    const uint32_t t0 = now();
-    while (queued < frames && since(t0) < budget) {
+    const uint32_t t0 = Ruler::now();
+    while (queued < frames && Ruler::now() - t0 < budget) {
         const uint32_t want = frames - queued;
         queued += Port::write_bulk(
             {out, want < sizeof out ? want : static_cast<uint32_t>(sizeof out)});
         while (Port::read_bulk(sink) != 0u) {
         }
     }
-    while (!Port::tx_idle() && since(t0) < budget) {
+    while (!Port::tx_idle() && Ruler::now() - t0 < budget) {
         while (Port::read_bulk(sink) != 0u) {
         }
     }
-    const uint32_t took = since(t0);
+    const uint32_t took = Ruler::now() - t0;
     spin_cycles(static_cast<uint32_t>(20ull * 10u * SysClock::hz / baud));
     while (Port::read_bulk(sink) != 0u) {
     }
@@ -910,14 +917,14 @@ void bang_frame(const BitPlan& p, const BangOptions& o = {}) {
     const uint32_t sixteenth = bit / 16u;
     InterruptGuard guard;
     RxPin::pull(o.invert ? PinPull::down : PinPull::up);
-    const uint32_t t0 = now();
+    const uint32_t t0 = Ruler::now();
     // One idle bit before the start, so a receiver that has just been
     // enabled sees a real falling edge.
-    while (since(t0) < bit) {
+    while (Ruler::now() - t0 < bit) {
     }
     for (uint8_t i = 0; i < p.count; ++i) {
         const uint32_t at = bit * (i + 1u);
-        while (since(t0) < at) {
+        while (Ruler::now() - t0 < at) {
         }
         bool level = ((p.bits >> i) & 1u) != 0u;
         if (o.short_stop && i == p.count - 1u) {
@@ -930,16 +937,16 @@ void bang_frame(const BitPlan& p, const BangOptions& o = {}) {
         if (o.glitch_bit >= 0 && i == o.glitch_bit && o.glitch_len != 0u) {
             const uint32_t g0 = at + sixteenth * o.glitch_at;
             const uint32_t g1 = g0 + sixteenth * o.glitch_len;
-            while (since(t0) < g0) {
+            while (Ruler::now() - t0 < g0) {
             }
             RxPin::pull(PinPull::down);
-            while (since(t0) < g1) {
+            while (Ruler::now() - t0 < g1) {
             }
             RxPin::pull(level ? PinPull::up : PinPull::down);
         }
     }
     const uint32_t end = bit * (p.count + 1u);
-    while (since(t0) < end) {
+    while (Ruler::now() - t0 < end) {
     }
     RxPin::pull(o.invert ? PinPull::down : PinPull::up);
 }
@@ -949,14 +956,14 @@ void bang_break(uint32_t baud, uint8_t bits) {
     const uint32_t bit = SysClock::hz / baud;
     InterruptGuard guard;
     RxPin::pull(PinPull::up);
-    const uint32_t t0 = now();
-    while (since(t0) < bit) {
+    const uint32_t t0 = Ruler::now();
+    while (Ruler::now() - t0 < bit) {
     }
     RxPin::pull(PinPull::down);
-    while (since(t0) < bit * (1u + bits)) {
+    while (Ruler::now() - t0 < bit * (1u + bits)) {
     }
     RxPin::pull(PinPull::up);
-    while (since(t0) < bit * (3u + bits)) {
+    while (Ruler::now() - t0 < bit * (3u + bits)) {
     }
 }
 
@@ -1038,21 +1045,23 @@ ZeroLow zero_low_cycles(const PinSel& sel, uint16_t brr, UsartPrescaler presc) {
     R::clear_flags(UsartClear::all);
     {
         InterruptGuard guard;
-        while ((R::status() & UsartFlag::txe) == 0u) {
+        // TXE stands from the enable on; a register that never empties
+        // writes nothing, and the frame not seen is the answer.
+        if (wait_until<Ruler>([] { return (R::status() & UsartFlag::txe) != 0u; }, 1'000)) {
+            const uint32_t t0 = Ruler::now();
+            R::write_data(0x00);
+            while (Pad::read() && to_us(Ruler::now() - t0) < 300000u) {
+            }
+            const uint32_t fall = Ruler::now();
+            z.saw_frame = !Pad::read();
+            while (!Pad::read() && to_us(Ruler::now() - fall) < 300000u) {
+            }
+            z.cycles = Ruler::now() - fall;
+            // The frame's stop bit after its nine zeroes: 160 us a bit at
+            // /16, 300 ms the same margin as the pad's waits.
+            z.complete = wait_until<Ruler>(
+                [] { return (R::status() & UsartFlag::tc) != 0u; }, 300'000);
         }
-        const uint32_t t0 = now();
-        R::write_data(0x00);
-        while (Pad::read() && to_us(since(t0)) < 300000u) {
-        }
-        const uint32_t fall = now();
-        z.saw_frame = !Pad::read();
-        while (!Pad::read() && to_us(since(fall)) < 300000u) {
-        }
-        z.cycles = since(fall);
-        uint32_t spins = 20'000'000u;
-        while ((R::status() & UsartFlag::tc) == 0u && spins-- != 0u) {
-        }
-        z.complete = (R::status() & UsartFlag::tc) != 0u;
     }
     R::enable(false);
     R::reset();
@@ -1134,8 +1143,6 @@ void ta_basic_prescaler() {
             print(serial, "  THE FINDING: on a BASIC instance the PRESC FIELD "
                           "TAKES THE VALUE AND THE DIVIDER IS NOT THERE - same "
                           "bit period at /1 and /16", crlf);
-            bench.verdict("a BASIC instance implements the prescaler REGISTER and "
-                          "not the prescaler", true);
         } else if (!basic16.saw_frame) {
             print(serial, "  THE FINDING, and it is worse than a missing divider: "
                           "a BASIC instance takes the PRESC value, reads it back, "
@@ -1145,16 +1152,19 @@ void ta_basic_prescaler() {
                           "transmitter, which is why the driver REFUSES the write "
                           "on such an instance rather than trusting the readback",
                   crlf);
-            bench.verdict("a non-zero PRESC on a BASIC instance is not ignored - "
-                          "it silences the transmitter, and prescaler() refusing "
-                          "there is the only safe reading", basic1.saw_frame);
         } else {
             print(serial, "  the BASIC instance's bit period MOVED with PRESC, "
-                          "which table 184 does not predict; recorded as measured",
-                  crlf);
-            bench.verdict("the BASIC instance's prescaler behaviour is measured "
-                          "and printed either way", basic1.saw_frame);
+                          "which table 184 does not predict", crlf);
         }
+        // One verdict over the three readings: the frame at /1 is the
+        // control, and table 184's "no prescaler" holds when the /16 frame
+        // is either /1's length (no divider) or never leaves the pad - the
+        // two shapes prescaler()'s refusal on a BASIC instance covers.
+        bench.verdict("a BASIC instance's PRESC is not a divider: with the same BRR the /16 "
+                      "frame is the /1 frame's length or never leaves the pad, so prescaler() "
+                      "refusing there is the only safe reading",
+                      basic1.saw_frame &&
+                          (!basic16.saw_frame || basic16.cycles < basic1.cycles * 2u));
         print(serial, "  ES0548 2.11.2 is the DOCUMENTATION erratum saying some "
                       "manual revisions omit that the prescaler is not on every "
                       "instance; RM0444 Rev 6's own table 184 carries it, and the "
@@ -1162,13 +1172,11 @@ void ta_basic_prescaler() {
                       "readback", crlf);
         U4Pin::release();
     } else {
-        print(serial,
-              "  SKIPPED, no verdict claimed: whether a BASIC instance's PRESC "
-              "field DIVIDES is measured on a zero character's low time, and "
-              "this part's only BASIC instance is USART2 - the console. Its "
-              "pad is the ST-LINK's virtual COM port, so the frame would land "
-              "in this report; the READBACK half of the finding is in the "
-              "table above.", crlf);
+        bench.skip("whether a BASIC instance's PRESC field DIVIDES is measured on a "
+                   "zero character's low time, and this part's only BASIC instance is "
+                   "USART2 - the console. Its pad is the ST-LINK's virtual COM port, so "
+                   "the frame would land in this report; the READBACK half of the "
+                   "finding is in the table above.");
     }
 }
 
@@ -1190,7 +1198,7 @@ void ta_instances() {
     console_drain();
     rowset[1] = usart_row<2>("USART2");
     (void)Serial::init(clock, 115200);
-    spin_us(2000);
+    spin_us<Ruler>(2000);
     rowset[2] = usart_row<3>("USART3");
     rowset[3] = usart_row<4>("USART4");
     rowset[4] = usart_row<5>("USART5");
@@ -1462,16 +1470,17 @@ void tb_loop() {
     (void)loop_up({.baud = 9600});
     U1::clear_flags(UsartClear::all);
     U1::send_break();
-    const uint32_t t0 = now();
+    // The break character back within 5 ms (it is 1.4 ms at 9600), SBKF
+    // watched on the way. Dropped on its budget: a break that never comes
+    // back reads RDR empty, no FE, and the verdict below fails on it.
     bool sbkf_seen = false;
-    while (to_us(since(t0)) < 5000u) {
-        if ((U1::status() & UsartFlag::sbkf) != 0u) {
-            sbkf_seen = true;
-        }
-        if ((U1::status() & UsartFlag::rxne) != 0u) {
-            break;
-        }
-    }
+    (void)wait_until<Ruler>(
+        [&] {
+            const uint32_t s = U1::status();
+            sbkf_seen = sbkf_seen || (s & UsartFlag::sbkf) != 0u;
+            return (s & UsartFlag::rxne) != 0u;
+        },
+        5000);
     const uint32_t st = U1::status();
     const uint16_t brk = U1::read_word();
     print(serial, "  SBKRQ: SBKF seen ", sbkf_seen ? "yes" : "no",
@@ -1718,16 +1727,20 @@ bool console_kernel(UsartClock c, uint32_t ker_hz) {
 [[maybe_unused]] uint32_t console_wire_permille() {
     static constexpr char line[] = "  (64 frames on the console's own wire, timed to its stop bit)\r\n";
     static_assert(sizeof line - 1u == 64u);
-    console_drain();
-    const uint32_t t0 = now();
+    // The window times the console's own line, so it opens on an idle
+    // wire or not at all: 0 is a reading wire_ok() refuses.
+    if (!brio::console_drain<Ruler, Serial>()) {
+        return 0;
+    }
+    const uint32_t t0 = Ruler::now();
     uint32_t queued = 0;
-    while (queued < 64u && since(t0) < SysClock::hz / 20u) {
+    while (queued < 64u && Ruler::now() - t0 < SysClock::hz / 20u) {
         queued += Serial::write_bulk(
             {reinterpret_cast<const uint8_t*>(line) + queued, 64u - queued});
     }
-    while (!Serial::tx_idle() && since(t0) < SysClock::hz / 20u) {
+    while (!Serial::tx_idle() && Ruler::now() - t0 < SysClock::hz / 20u) {
     }
-    const uint32_t took = since(t0);
+    const uint32_t took = Ruler::now() - t0;
     const uint64_t wire = 64ull * 10u * SysClock::hz / 115200u;
     return static_cast<uint32_t>(1000ull * took / wire);
 }
@@ -1744,7 +1757,7 @@ void td_console_kernel() {
         const uint16_t brr_pclk = Usart<2>::brr();
 
         const bool to_hsi = console_kernel(UsartClock::hsi16, 16'000'000u);
-        spin_us(2000);
+        spin_us<Ruler>(2000);
         const uint32_t pm_hsi = console_wire_permille();
         print(serial, "  the console is now on HSI16: BRR ", Usart<2>::brr(),
               " where PCLK wanted ", brr_pclk, ", and this line came out at "
@@ -1755,7 +1768,7 @@ void td_console_kernel() {
             Serial::noise_errors() + Serial::hw_overruns());
 
         const bool to_sysclk = console_kernel(UsartClock::sysclk, SysClock::hz);
-        spin_us(2000);
+        spin_us<Ruler>(2000);
         const uint32_t pm_sys = console_wire_permille();
         print(serial, "  and now on SYSCLK: BRR ", Usart<2>::brr(),
               " - the same 64 MHz PCLK divides, by a different route; the line "
@@ -1765,7 +1778,7 @@ void td_console_kernel() {
             Serial::noise_errors() + Serial::hw_overruns());
 
         const bool back = console_kernel(UsartClock::pclk, SysClock::pclk_hz);
-        spin_us(2000);
+        spin_us<Ruler>(2000);
         const uint32_t pm_pclk = console_wire_permille();
         print(serial, "  and back on PCLK: BRR ", Usart<2>::brr(), "; the line above in ",
               pm_pclk, " thousandths", crlf);
@@ -1781,13 +1794,11 @@ void td_console_kernel() {
                           Serial::frame_errors() == 0u &&
                           Serial::hw_overruns() == 0u);
     } else {
-        print(serial,
-              "  SKIPPED, no verdict claimed: this part makes USART2 a BASIC "
-              "instance, so the console has NO kernel-clock multiplexer to be "
-              "moved on (usart_has_clock_select(2) is false - the device "
-              "header declares no RCC_CCIPR_USART2SEL_Pos) and it runs on "
-              "PCLK, full stop. USART1's own multiplexer is exercised below.",
-              crlf);
+        bench.skip("this part makes USART2 a BASIC instance, so the console has NO "
+                   "kernel-clock multiplexer to be moved on (usart_has_clock_select(2) "
+                   "is false - the device header declares no RCC_CCIPR_USART2SEL_Pos) "
+                   "and it runs on PCLK, full stop. USART1's own multiplexer is "
+                   "exercised below.");
     }
 }
 
@@ -1799,8 +1810,8 @@ void td_lse_legs() {
     if constexpr (fitted) {
         const bool lse_running = RtcDomain::lse_ready();
         if (!lse_running) {
-            print(serial, "  the LSE crystal is not running: the two LSE legs "
-                          "are DECLINED and nothing pretends otherwise", crlf);
+            bench.skip("the LSE crystal is not running: the two LSE legs need it as "
+                       "USART1's kernel clock");
             return;
         }
         (void)loop_up({.baud = 2048, .kernel = UsartClock::lse});
@@ -1828,11 +1839,8 @@ void td_lse_legs() {
                       "its trim is in the reading)",
                       wire_ok(lse_pm) && wire_ok(lse8_pm));
     } else {
-        print(serial,
-              "  SKIPPED, no verdict claimed: a USART clocked by the 32768 Hz "
-              "crystal needs one to be running, and THIS BOARD'S LSE DOES NOT "
-              "START (measured over fifteen seconds at both drive settings, "
-              "LSERDY never rose).", crlf);
+        bench.skip("a USART clocked by the 32768 Hz crystal needs one, and this "
+                   "board is declared without it (board_lse_fitted)");
     }
 }
 
@@ -1904,7 +1912,7 @@ void te_fifo() {
     // A fresh loop for the depth counts, and TE's idle frame off the wire
     // first: it holds the shift register, and the count below wants it free.
     (void)loop_up({.baud = 115200, .fifo = true});
-    spin_us(300);
+    spin_us<Ruler>(300);
 
     // Fill the transmit FIFO and watch TXFE fall and rise. 33.5.4: with
     // FIFOEN the TXE bit means TXFNF, "the FIFO is not full".
@@ -1928,9 +1936,7 @@ void te_fifo() {
     // first one lost. 33.5.4 says as much in its RXFTCFG = 101 note -
     // "the next received data is not set the overrun flag" - and this is
     // that sentence turned into a count.
-    uint32_t t0 = now();
-    while (to_us(since(t0)) < 5000u) {
-    }
+    spin_us<Ruler>(5000);
     const uint32_t st_nine = U1::status();
     const bool rxff = (st_nine & UsartFlag::rxff) != 0u;
     const bool ore_nine = (st_nine & UsartFlag::ore) != 0u;
@@ -1953,12 +1959,11 @@ void te_fifo() {
     // NEW one is dropped, which is what an overrun means here.
     U1::clear_flags(UsartClear::all);
     for (uint8_t i = 0; i < 12u; ++i) {
-        (void)wait_flag(UsartFlag::txfnf);
+        // A dropped wait writes anyway: the count drained below shows a lost one.
+        (void)wait_until<Ruler>(u1_flag(UsartFlag::txfnf), flag_budget_us);
         U1::write_data(static_cast<uint8_t>(0x50u + i));
     }
-    t0 = now();
-    while (to_us(since(t0)) < 8000u) {
-    }
+    spin_us<Ruler>(8000);
     const bool ore = (U1::status() & UsartFlag::ore) != 0u;
     uint8_t over[16];
     uint8_t no = 0;
@@ -1995,12 +2000,11 @@ void te_fifo() {
         uint8_t sent = 0;
         uint8_t at = 0;
         while (sent < 8u) {
-            (void)wait_flag(UsartFlag::txfnf);
+            // A dropped wait writes anyway: RXFT then rises late, which the count refuses.
+            (void)wait_until<Ruler>(u1_flag(UsartFlag::txfnf), flag_budget_us);
             U1::write_data(static_cast<uint8_t>(0x50u + sent));
             ++sent;
-            const uint32_t t = now();
-            while (to_us(since(t)) < 200u) {
-            }
+            spin_us<Ruler>(200);
             if (at == 0u && (U1::status() & UsartFlag::rxft) != 0u) {
                 at = sent;
             }
@@ -2028,12 +2032,11 @@ void te_fifo() {
     U1::enable(true);
     U1::clear_flags(UsartClear::all);
     for (uint8_t i = 0; i < 11u; ++i) {
-        (void)wait_flag(UsartFlag::txfnf);
+        // A dropped wait writes anyway: the read-back below shows it.
+        (void)wait_until<Ruler>(u1_flag(UsartFlag::txfnf), flag_budget_us);
         U1::write_data(static_cast<uint8_t>(0x60u + i));
     }
-    t0 = now();
-    while (to_us(since(t0)) < 6000u) {
-    }
+    spin_us<Ruler>(6000);
     const bool no_ore = (U1::status() & UsartFlag::ore) == 0u;
     uint8_t got[12];
     uint8_t m = 0;
@@ -2064,14 +2067,15 @@ void te_fifo() {
     for (uint32_t i = 0; i < sizeof block; ++i) {
         block[i] = static_cast<uint8_t>(i);
     }
-    console_drain();
-    const uint32_t plain_t0 = now();
+    // The block is timed on the wire against a derived bound: the window
+    // opens with the console quiet, or that verdict skips.
+    const bool plain_quiet = brio::console_drain<Ruler, Serial>();
+    const uint32_t plain_t0 = Ruler::now();
     (void)LoopUart::write_bulk(block);
-    uint32_t spins = 0;
-    while (!LoopUart::tx_idle() && spins++ < 4'000'000u) {
-    }
-    const uint32_t plain_took = since(plain_t0);
-    spin_us(3000);
+    // 256 frames at 115200 are 22 ms; 100 ms is the budget.
+    const bool plain_done = wait_until<Ruler>([] { return LoopUart::tx_idle(); }, 100'000);
+    const uint32_t plain_took = Ruler::now() - plain_t0;
+    spin_us<Ruler>(3000);
     const uint32_t plain_irqs = loop_irqs;
     uint8_t sink[300];
     const uint32_t plain_got = LoopUart::read_bulk(sink);
@@ -2089,14 +2093,12 @@ void te_fifo() {
     loop_mode = 2;
     const bool fifo_up = LoopFifoUart::init(clock, 115200);
     TxPin::function(u1_tx.function, {.pull = PinPull::up, .open_drain = true});
-    console_drain();
-    const uint32_t fifo_t0 = now();
+    const bool fifo_quiet = brio::console_drain<Ruler, Serial>();
+    const uint32_t fifo_t0 = Ruler::now();
     (void)LoopFifoUart::write_bulk(block);
-    spins = 0;
-    while (!LoopFifoUart::tx_idle() && spins++ < 4'000'000u) {
-    }
-    const uint32_t fifo_took = since(fifo_t0);
-    spin_us(3000);
+    const bool fifo_done = wait_until<Ruler>([] { return LoopFifoUart::tx_idle(); }, 100'000);
+    const uint32_t fifo_took = Ruler::now() - fifo_t0;
+    spin_us<Ruler>(3000);
     const uint32_t fifo_irqs = loop_irqs;
     const uint32_t fifo_got = LoopFifoUart::read_bulk(sink);
     bool fifo_exact = fifo_got == sizeof block;
@@ -2120,9 +2122,15 @@ void te_fifo() {
     bench.verdict("the task carries the block byte-exact both ways, with the "
                   "SAME public verbs and one option between them",
                   plain_up && fifo_up && plain_exact && fifo_exact);
-    bench.verdict("and both transports keep the wire busy: the 256-byte block in its "
-                  "wire time at 115200, -1 % to +3 %, no gap between frames worth a "
-                  "per cent", wire_ok(plain_pm) && wire_ok(fifo_task_pm));
+    if (plain_quiet && fifo_quiet) {
+        bench.verdict("and both transports keep the wire busy: the 256-byte block in its "
+                      "wire time at 115200, -1 % to +3 %, no gap between frames worth a "
+                      "per cent", plain_done && fifo_done && wire_ok(plain_pm) &&
+                                      wire_ok(fifo_task_pm));
+    } else {
+        bench.skip("the console did not drain: the block's wire time would carry its "
+                   "interrupt");
+    }
     print(serial, "  ON A SINGLE WIRE THE TWO SIDES OF A BYTE ARE ONE EVENT, so what "
           "the FIFO buys shows only where BOTH sides ride a level: the transmitter "
           "refills eight places when the FIFO runs empty and the receiver drains "
@@ -2151,14 +2159,12 @@ std::optional<uint16_t> bang_and_read(const BitPlan& p, uint32_t& flags,
     (void)U1::read_word();
     U1::clear_flags(UsartClear::all);
     bang_frame(p, o);
-    const uint32_t t0 = now();
-    while ((U1::status() & UsartFlag::rxne) == 0u) {
-        if (to_us(since(t0)) > 20000u) {
-            flags = U1::status() & UsartFlag::receive_errors;
-            return std::nullopt;
-        }
-    }
+    // The frame is whole when bang_frame() returns: 20 ms is RXNE's margin.
+    const bool arrived = wait_until<Ruler>(u1_flag(UsartFlag::rxne), 20000);
     flags = U1::status() & UsartFlag::receive_errors;
+    if (!arrived) {
+        return std::nullopt;
+    }
     return U1::read_word();
 }
 
@@ -2283,10 +2289,14 @@ void tf_bitbang() {
           "); the same glitch in the FIRST half spoiled ", first_half_bad,
           " (flags ", hex(first_flags), "); 0x96 came back as ", corrupted,
           " where it was spoiled", crlf);
-    bench.verdict("2.11.1's own description is staged and its CONTROL is "
-                  "staged with it - whatever the outcome, the two halves of "
-                  "the stop bit were given the same glitch",
-                  true);
+    // The erratum's half is printed (the outcome is the die's, below); the
+    // control is judged: a glitch from 1/16 to 5/16 of the stop bit lies
+    // clear of the three samples at 8/16..10/16 and of the stop bit's
+    // second half, so no receiver may spoil a frame for it.
+    bench.verdict("2.11.1's CONTROL is clean: the same quarter-bit glitch in the FIRST "
+                  "half of the stop bit, clear of the samples, spoiled none of the 8 "
+                  "frames",
+                  first_half_bad == 0u);
     if (second_half_bad > first_half_bad) {
         print(serial, "  the erratum REPRODUCES: the second half is where a "
                       "sub-half-bit glitch reaches the byte", crlf);
@@ -2412,12 +2422,8 @@ void tg_autobaud() {
         U1::clear_flags(UsartClear::all);
         const BitPlan p = frame_plan(truth, c.pattern, c.bits, UartParity::none, 1);
         bang_frame(p);
-        const uint32_t t0 = now();
-        while ((U1::status() & UsartFlag::abrf) == 0u) {
-            if (to_us(since(t0)) > 30000u) {
-                break;
-            }
-        }
+        // Dropped on its budget: the ISR read next carries ABRF's answer.
+        (void)wait_until<Ruler>(u1_flag(UsartFlag::abrf), 30000);
         const uint32_t st = U1::status();
         const uint16_t brr = U1::brr();
         const uint32_t off = permille_off(brr, truth_brr);
@@ -2447,12 +2453,8 @@ void tg_autobaud() {
     U1::clear_flags(UsartClear::all);
     const BitPlan wrong = frame_plan(truth, 0x00, 8, UartParity::none, 1);
     bang_frame(wrong);
-    const uint32_t t1 = now();
-    while ((U1::status() & (UsartFlag::abrf | UsartFlag::abre)) == 0u) {
-        if (to_us(since(t1)) > 30000u) {
-            break;
-        }
-    }
+    // Dropped on its budget: the ISR read next carries ABRE's answer.
+    (void)wait_until<Ruler>(u1_flag(UsartFlag::abrf | UsartFlag::abre), 30000);
     const uint32_t st_bad = U1::status();
     print(serial, "  mode 3 given a 0x00 instead of a 0x55: ABRE ",
           (st_bad & UsartFlag::abre) ? "set" : "clear", ", ABRF ",
@@ -2489,19 +2491,19 @@ void th_lin() {
     TxPin::function(u1_tx.function);
     U1::enable(true);
     console_drain();
-    spin_us(3000);
+    spin_us<Ruler>(3000);
 
     uint32_t low_cycles = 0;
     {
         InterruptGuard guard;
         U1::send_break();
-        const uint32_t t0 = now();
-        while (TxPin::read() && to_us(since(t0)) < 20000u) {
+        const uint32_t t0 = Ruler::now();
+        while (TxPin::read() && to_us(Ruler::now() - t0) < 20000u) {
         }
-        const uint32_t fall = now();
-        while (!TxPin::read() && to_us(since(fall)) < 20000u) {
+        const uint32_t fall = Ruler::now();
+        while (!TxPin::read() && to_us(Ruler::now() - fall) < 20000u) {
         }
-        low_cycles = since(fall);
+        low_cycles = Ruler::now() - fall;
     }
     const uint32_t low_bits_x10 = (low_cycles * 10u) / bit_cycles;
     print(serial, "  LINEN + SBKRQ at 2400 baud: the pad was low for ",
@@ -2537,9 +2539,9 @@ void th_lin() {
         RxPin::function(u1_rx.function, {.pull = PinPull::up});
         U1::enable(true);
         U1::clear_flags(UsartClear::all);
-        spin_us(3000);
+        spin_us<Ruler>(3000);
         bang_break(lin_baud, c.bits);
-        spin_us(3000);
+        spin_us<Ruler>(3000);
         const bool lbdf = (U1::status() & UsartFlag::lbdf) != 0u;
         print(serial, "  ", c.name, ": LBDF ", lbdf ? "set" : "clear",
               " (expected ", c.expect ? "set" : "clear", ")", crlf);
@@ -2585,19 +2587,20 @@ void ti_mute_modbus() {
     bang_frame(frame_plan(mb, 0x41, 8, UartParity::none, 1));
     (void)U1::read_word();
     U1::request(UsartRequest::mute);
-    spin_us(200);
+    spin_us<Ruler>(200);
     const bool muted_now = U1::muted();
     // A muted receiver reports nothing at all (33.5.10's own list).
     bang_frame(frame_plan(mb, 0x42, 8, UartParity::none, 1));
-    spin_us(2000);
+    spin_us<Ruler>(2000);
     const bool silent = (U1::status() & UsartFlag::rxne) == 0u;
     // One frame of idle wakes it.
     bang_idle(mb, 12);
     const bool awake = !U1::muted();
     bang_frame(frame_plan(mb, 0x43, 8, UartParity::none, 1));
     const std::optional<uint16_t> after =
-        wait_flag(UsartFlag::rxne, 20000) ? std::optional<uint16_t>(U1::read_word())
-                                          : std::nullopt;
+        wait_until<Ruler>(u1_flag(UsartFlag::rxne), 20000)
+            ? std::optional<uint16_t>(U1::read_word())
+            : std::nullopt;
     print(serial, "  idle-line mute: RWU after MMRQ ", muted_now ? "set" : "clear",
           ", the muted character was ", silent ? "silent" : "REPORTED",
           ", RWU after an idle frame ", awake ? "clear" : "STILL SET",
@@ -2623,12 +2626,12 @@ void ti_mute_modbus() {
         U1::enable(true);
         U1::clear_flags(UsartClear::all);
         U1::request(UsartRequest::mute);
-        spin_us(200);
+        spin_us<Ruler>(200);
         bang_frame(frame_plan(mb, c.miss, 8, UartParity::none, 1));
-        spin_us(2000);
+        spin_us<Ruler>(2000);
         const bool still_mute = U1::muted() && (U1::status() & UsartFlag::rxne) == 0u;
         bang_frame(frame_plan(mb, c.match, 8, UartParity::none, 1));
-        const bool woke = wait_flag(UsartFlag::rxne, 20000) && !U1::muted();
+        const bool woke = wait_until<Ruler>(u1_flag(UsartFlag::rxne), 20000) && !U1::muted();
         const uint16_t addr_byte = U1::read_word();
         print(serial, "  ", c.name, ": a non-matching address left it ",
               still_mute ? "muted" : "AWAKE", ", the matching one woke it ",
@@ -2655,10 +2658,11 @@ void ti_mute_modbus() {
     U1::clear_flags(UsartClear::all);
     bang_frame(frame_plan(mb, 0x7E, 8, UartParity::none, 1));
     (void)U1::read_word();
-    const uint32_t t_stop = now();
-    while ((U1::status() & UsartFlag::rtof) == 0u && to_us(since(t_stop)) < 60000u) {
-    }
-    const uint32_t rto_cycles = since(t_stop);
+    // RTOF timed from the read, 60 ms at most (22 bit times are 9.2 ms);
+    // on the budget the span reads the whole 60 ms and the verdict below
+    // finds RTOF down.
+    const uint32_t rto_cycles =
+        cycles_until<Ruler>(u1_flag(UsartFlag::rtof), 60000).value_or(60000u * cycles_per_us);
     const uint32_t rto_bits_x10 = (rto_cycles * 10u) / bit_cycles;
     print(serial, "  RTO = 22 bit times at 2400 baud: RTOF rose ",
           to_us(rto_cycles), " us after the character was read = ",
@@ -2677,13 +2681,12 @@ void ti_mute_modbus() {
     // very same CR2.ADD the mute address used - which is why a program
     // cannot have both at two values, and this driver says so.
     feed();
-    // THE COMPARATOR IS GATED BY ITS OWN INTERRUPT ENABLE, which is
-    // this letter's finding and cost its first version a false failure:
-    // with CMIE clear the LF arrives and CMF stays down; with CMIE set
-    // (and the NVIC line still disabled, so nothing is served) the same
-    // LF raises it. 33.5.11 names the flag and the interrupt in one
-    // breath and 33.8.9's CMF description reads like a plain flag, which
-    // is the reading the silicon refuses.
+    // CMIE DOES NOT GATE THE COMPARATOR: 33.8.9 describes CMF as a plain
+    // flag, and the silicon agrees once the flag is read after RXNE (a
+    // flag read before the frame has finished is not a reading). 33.5.11
+    // names the flag and the interrupt in one breath, so the leg asks both
+    // ways - CMIE clear, then CMIE set with the NVIC line still disabled,
+    // so nothing is served - and prints which raised it.
     bool cm_without_ie = false;
     bool cm_with_ie = false;
     bool cr_quiet = false;
@@ -2696,12 +2699,14 @@ void ti_mute_modbus() {
         }
         U1::enable(true);
         U1::clear_flags(UsartClear::all);
+        // Both waits dropped on their budgets: a character that never came
+        // leaves CMF down and RDR empty, which the verdicts below refuse.
         bang_frame(frame_plan(mb, 0x0D, 8, UartParity::none, 1));   // CR
-        (void)wait_flag(UsartFlag::rxne, 20000);
+        (void)wait_until<Ruler>(u1_flag(UsartFlag::rxne), 20000);
         const bool quiet = (U1::status() & UsartFlag::cmf) == 0u;
         (void)U1::read_word();
         bang_frame(frame_plan(mb, 0x0A, 8, UartParity::none, 1));   // LF
-        (void)wait_flag(UsartFlag::rxne, 20000);
+        (void)wait_until<Ruler>(u1_flag(UsartFlag::rxne), 20000);
         const bool matched = (U1::status() & UsartFlag::cmf) != 0u;
         (void)U1::read_word();
         U1::clear_flags(UsartClear::cmf);
@@ -2830,9 +2835,9 @@ uint32_t edge_probe_pulses(uint8_t n) {
     const uint32_t before = edge_count_reset();
     for (uint8_t i = 0; i < n; ++i) {
         Pb3::output(false);
-        spin_us(300);
+        spin_us<Ruler>(300);
         Pb3::set();
-        spin_us(300);
+        spin_us<Ruler>(300);
     }
     Pb3::input(PinPull::none);
     return edge_count_reset() - before;
@@ -2884,16 +2889,16 @@ void probe_exti_dma_trigger() {
     Pb3::output(true);
     (void)Exti::clear(3);
     Pb3::output(false);
-    spin_us(300);
+    spin_us<Ruler>(300);
     Pb3::set();
-    spin_us(300);
+    spin_us<Ruler>(300);
     const bool exti_saw_the_pad = Exti::rising_pending(3);
     (void)Exti::clear(3);
     Pb3::input(PinPull::none);
     const uint32_t before_sw = edge_count_reset();
     for (uint8_t i = 0; i < 4u; ++i) {
         (void)Exti::trigger(3);
-        spin_us(300);
+        spin_us<Ruler>(300);
         (void)Exti::clear(3);
     }
     const uint32_t on_swier = edge_count_reset() - before_sw;
@@ -2947,13 +2952,11 @@ bool need_exti_dma() {
         return true;
     }
     const auto id = brio::DeviceIdcode::read();
-    print(serial,
-          "  SKIPPED, no verdict claimed: this letter counts edges with a "
-          "DMAMUX request generator triggered by an EXTI line, and the boot "
-          "probe found that path dead in both mask arrangements on DEV_ID ",
-          hex(id.dev_id), " REV_ID ", hex(id.rev_id),
-          " - the shape ES0418 2.2.4 describes for the G071, with no "
-          "workaround; the boot probe above says what THIS die did.", crlf);
+    bench.skip("this check counts edges with a DMAMUX request generator triggered by an "
+               "EXTI line, and the boot probe found that path dead in both mask "
+               "arrangements - the shape ES0418 2.2.4 describes for the G071, with no "
+               "workaround; the boot probe says what this die did");
+    print(serial, "    on DEV_ID ", hex(id.dev_id), " REV_ID ", hex(id.rev_id), crlf);
     return false;
 }
 
@@ -3026,19 +3029,20 @@ void tj_smartcard() {
         (void)U1::guard_time(gt);
         U1::enable(true);
         U1::clear_flags(UsartClear::all);
-        (void)wait_flag(UsartFlag::txe);
-        const uint32_t t0 = now();
+        // A dropped wait writes anyway: TC's span below shows it.
+        (void)wait_until<Ruler>(u1_flag(UsartFlag::txe), flag_budget_us);
+        const uint32_t t0 = Ruler::now();
         U1::write_word(0x55);
         bool saw_tcbgt_before_tc = false;
         while ((U1::status() & UsartFlag::tc) == 0u) {
             if ((U1::status() & UsartFlag::tcbgt) != 0u) {
                 saw_tcbgt_before_tc = true;
             }
-            if (to_us(since(t0)) > 200000u) {
+            if (to_us(Ruler::now() - t0) > 200000u) {
                 break;
             }
         }
-        const uint32_t took = since(t0);
+        const uint32_t took = Ruler::now() - t0;
         if (leg == 0u) {
             tc_no_gt = took;
         } else {
@@ -3088,7 +3092,7 @@ void tj_smartcard() {
         }
         console_drain();
         const uint32_t a = edge_count_reset();
-        spin_us(100000);
+        spin_us<Ruler>(100000);
         const uint32_t b = edge_count_reset();
         edge_counter_down(3);
         const uint32_t edges = b - a;
@@ -3102,7 +3106,7 @@ void tj_smartcard() {
         }
     }
     if constexpr (!has_u1_ck_pads) {
-        print(serial, ck_pad_skip, crlf);
+        bench.skip(ck_pad_skip);
     } else if (need_exti_dma()) {
         bench.verdict("the smartcard clock is the kernel rate over TWICE the "
                       "prescaler - four rungs of the ladder, counted by a DMA "
@@ -3130,23 +3134,24 @@ void tj_smartcard() {
     uint32_t st_after = 0;
     {
         InterruptGuard guard;
-        (void)wait_flag(UsartFlag::txe);
-        const uint32_t t0 = now();
+        // A dropped wait writes anyway: no start bit, no retry counted.
+        (void)wait_until<Ruler>(u1_flag(UsartFlag::txe), flag_budget_us);
+        const uint32_t t0 = Ruler::now();
         U1::write_word(0x66);
         // Wait for the start bit, then out to the middle of the 1.5 stop
         // bit: start + 9 data/parity bits, plus half of the stop.
-        while (TxPin::read() && to_us(since(t0)) < 20000u) {
+        while (TxPin::read() && to_us(Ruler::now() - t0) < 20000u) {
         }
-        const uint32_t fall = now();
-        while (since(fall) < bit_cycles * 10u + bit_cycles / 2u) {
+        const uint32_t fall = Ruler::now();
+        while (Ruler::now() - fall < bit_cycles * 10u + bit_cycles / 2u) {
         }
         TxPin::pull(PinPull::down);          // the card says NACK
         spin_cycles(bit_cycles);
         TxPin::pull(PinPull::up);
         // Count the falling edges that follow: each retry is a frame.
-        uint32_t deadline = now();
+        uint32_t deadline = Ruler::now();
         bool low = false;
-        while (to_us(since(deadline)) < 60000u) {
+        while (to_us(Ruler::now() - deadline) < 60000u) {
             const bool level = TxPin::read();
             if (!level && !low) {
                 ++frames;
@@ -3176,27 +3181,22 @@ void tj_smartcard() {
     U1::enable(true);
     U1::clear_flags(UsartClear::all);
     for (uint8_t i = 0; i < 4u; ++i) {
-        (void)wait_flag(UsartFlag::txe);
+        // Both waits dropped on their budgets: what came back is not
+        // judged here, only EOBF after the four.
+        (void)wait_until<Ruler>(u1_flag(UsartFlag::txe), flag_budget_us);
         U1::write_word(static_cast<uint16_t>(0x70u + i));
-        const uint32_t t0 = now();
-        while ((U1::status() & UsartFlag::rxne) == 0u && to_us(since(t0)) < 60000u) {
-        }
+        (void)wait_until<Ruler>(u1_flag(UsartFlag::rxne), 60000);
         (void)U1::read_word();
     }
     const bool eobf = (U1::status() & UsartFlag::eobf) != 0u;
     print(serial, "  BLEN = 0 (a block of four characters) after four "
           "characters round the wire: EOBF ", eobf ? "set" : "clear", crlf);
-    if (eobf) {
-        bench.verdict("BLEN + 4 characters raise the end-of-block flag", true);
-    } else {
-        print(serial, "  DECLINED AND NOT FAKED: 33.8.7 says the block "
-                      "counter is RESET while the USART transmits (TXE = 0), "
-                      "and on a wire whose transmitter is its own sender the "
-                      "counter never leaves that state - a real card is what "
-                      "would settle it", crlf);
-        bench.verdict("block mode is staged and its outcome is stated either "
-                      "way", true);
-    }
+    // Printed, never judged: 33.8.7 resets the block counter while the
+    // USART transmits (TXE = 0), so on a wire whose transmitter is its own
+    // sender the manual promises no outcome either way.
+    bench.skip("smartcard block mode: 33.8.7 resets the block counter while the USART "
+               "transmits (TXE = 0), and on a wire whose transmitter is its own sender "
+               "that is always - a real card would settle it");
     U1::clear_flags(UsartClear::eobf);
 
     loop_down();
@@ -3212,21 +3212,22 @@ void tj_smartcard() {
 /// is easy to get backwards.
 uint32_t irda_pulse_cycles(uint16_t value) {
     InterruptGuard guard;
-    (void)wait_flag(UsartFlag::txe);
-    const uint32_t t0 = now();
+    // A dropped wait writes anyway: no pulse, and the waits below answer 0.
+    (void)wait_until<Ruler>(u1_flag(UsartFlag::txe), flag_budget_us);
+    const uint32_t t0 = Ruler::now();
     U1::write_word(value);
     while (!TxPin::read()) {
-        if (to_us(since(t0)) > 100000u) {
+        if (to_us(Ruler::now() - t0) > 100000u) {
             return 0;
         }
     }
-    const uint32_t rise = now();
+    const uint32_t rise = Ruler::now();
     while (TxPin::read()) {
-        if (to_us(since(rise)) > 100000u) {
+        if (to_us(Ruler::now() - rise) > 100000u) {
             return 0;
         }
     }
-    return since(rise);
+    return Ruler::now() - rise;
 }
 
 void tk_irda() {
@@ -3243,7 +3244,7 @@ void tk_irda() {
     U1::enable(true);
     U1::clear_flags(UsartClear::all);
     console_drain();
-    spin_us(3000);
+    spin_us<Ruler>(3000);
 
     const uint32_t pulse = irda_pulse_cycles(0x00);
     const uint32_t sixteenths_x10 = (pulse * 160u) / bit_cycles;
@@ -3274,7 +3275,7 @@ void tk_irda() {
     const bool lp_ok = U1::irda({.low_power = true, .prescaler = 64});
     U1::enable(true);
     U1::clear_flags(UsartClear::all);
-    spin_us(3000);
+    spin_us<Ruler>(3000);
     const uint32_t lp_pulse = irda_pulse_cycles(0x00);
     const uint32_t ir_lp_pm = res_wire_permille<U1>(ir_baud);
     const uint32_t lp_clock = lp_ker / 64u;               // 62.5 kHz
@@ -3314,8 +3315,8 @@ void tk_irda() {
         {
             InterruptGuard guard;
             RxPin::pull(PinPull::up);
-            const uint32_t t0 = now();
-            while (since(t0) < bit_cycles) {
+            const uint32_t t0 = Ruler::now();
+            while (Ruler::now() - t0 < bit_cycles) {
             }
             for (uint8_t i = 0; i < 10u; ++i) {
                 // bit i: the start bit (a zero), eight data bits LSB
@@ -3329,22 +3330,19 @@ void tk_irda() {
                     zero = ((datum >> (i - 1u)) & 1u) == 0u;
                 }
                 const uint32_t at = t0 + bit_cycles * (i + 1u);
-                while (static_cast<int32_t>(now() - at) < 0) {
+                while (static_cast<int32_t>(Ruler::now() - at) < 0) {
                 }
                 if (zero) {
                     RxPin::pull(PinPull::down);
-                    while (static_cast<int32_t>(now() - (at + (bit_cycles * 3u) / 16u)) < 0) {
+                    while (static_cast<int32_t>(Ruler::now() - (at + (bit_cycles * 3u) / 16u)) < 0) {
                     }
                     RxPin::pull(PinPull::up);
                 }
             }
-            while (since(t0) < bit_cycles * 12u) {
+            while (Ruler::now() - t0 < bit_cycles * 12u) {
             }
         }
-        const uint32_t t1 = now();
-        while ((U1::status() & UsartFlag::rxne) == 0u && to_us(since(t1)) < 20000u) {
-        }
-        if ((U1::status() & UsartFlag::rxne) != 0u) {
+        if (wait_until<Ruler>(u1_flag(UsartFlag::rxne), 20000)) {
             const uint16_t v = U1::read_word();
             if (v == datum) {
                 ++decoded_ok;
@@ -3376,11 +3374,11 @@ void tk_irda() {
     {
         InterruptGuard guard;
         RxPin::pull(PinPull::up);
-        spin_us(2000);
+        spin_us<Ruler>(2000);
         RxPin::pull(PinPull::down);
-        spin_us(psc_period_us / 2u);          // half a PSC period: always rejected
+        spin_us<Ruler>(psc_period_us / 2u);          // half a PSC period: always rejected
         RxPin::pull(PinPull::up);
-        spin_us(4000);
+        spin_us<Ruler>(4000);
     }
     const bool short_rejected = (U1::status() & UsartFlag::rxne) == 0u &&
                                 (U1::status() & UsartFlag::receive_errors) == 0u;
@@ -3409,7 +3407,7 @@ void tk_irda() {
 template <bool pads = has_u1_ck_pads>
 void tl_de_rts_cts() {
     if constexpr (!pads) {
-        print(serial, ck_pad_skip, crlf);
+        bench.skip(ck_pad_skip);
         return;
     } else {
         constexpr uint32_t de_baud = 2400;
@@ -3424,18 +3422,19 @@ void tl_de_rts_cts() {
         DePin::function(u1_de.function);
         U1::enable(true);
         console_drain();
-        spin_us(3000);
+        spin_us<Ruler>(3000);
         {
             InterruptGuard guard;
-            (void)wait_flag(UsartFlag::txe);
+            // A dropped wait writes anyway: no DE edge, and the span fails the bound.
+            (void)wait_until<Ruler>(u1_flag(UsartFlag::txe), flag_budget_us);
             U1::write_word(0xFF);
-            const uint32_t t0 = now();
-            while (!DePin::read() && to_us(since(t0)) < 50000u) {
+            const uint32_t t0 = Ruler::now();
+            while (!DePin::read() && to_us(Ruler::now() - t0) < 50000u) {
             }
-            const uint32_t de_rise = now();
-            while (TxPin::read() && to_us(since(de_rise)) < 50000u) {
+            const uint32_t de_rise = Ruler::now();
+            while (TxPin::read() && to_us(Ruler::now() - de_rise) < 50000u) {
             }
-            assert_cycles = since(de_rise);
+            assert_cycles = Ruler::now() - de_rise;
         }
         const uint32_t assert_sixteenths = (assert_cycles * 16u) / de_bit;
         print(serial, "  DEAT = 16 sample times at 2400 baud: DE rose ",
@@ -3456,14 +3455,15 @@ void tl_de_rts_cts() {
         U1::enable(true);
         DePin::function(u1_de.function);
         U1::clear_flags(UsartClear::all);
-        spin_us(2000);
+        spin_us<Ruler>(2000);
         const bool rts_idle = DePin::read();
-        (void)wait_flag(UsartFlag::txe);
+        // A dropped wait writes anyway: RTS stays low and the verdict refuses it.
+        (void)wait_until<Ruler>(u1_flag(UsartFlag::txe), flag_budget_us);
         U1::write_word(0x11);
-        spin_us(3000);
+        spin_us<Ruler>(3000);
         const bool rts_full = DePin::read();
         (void)U1::read_word();
-        spin_us(500);
+        spin_us<Ruler>(500);
         const bool rts_free = DePin::read();
         print(serial, "  RTS on PB3: idle ", rts_idle ? "high" : "low",
               ", with a character unread ", rts_full ? "high" : "low",
@@ -3483,21 +3483,22 @@ void tl_de_rts_cts() {
         U1::enable(true);
         CtsPin::function(u1_cts.function, {.pull = PinPull::up});   // CTS high: stop
         U1::clear_flags(UsartClear::all);
-        spin_us(2000);
-        (void)wait_flag(UsartFlag::txe);
+        spin_us<Ruler>(2000);
+        // Dropped waits write anyway: the stall reading and the count below show it.
+        (void)wait_until<Ruler>(u1_flag(UsartFlag::txe), flag_budget_us);
         U1::write_word(0x22);
-        (void)wait_flag(UsartFlag::txe);
+        (void)wait_until<Ruler>(u1_flag(UsartFlag::txe), flag_budget_us);
         U1::write_word(0x23);     // this one must wait for CTS
-        spin_us(8000);
+        spin_us<Ruler>(8000);
         const uint32_t st_stalled = U1::status();
         const bool stalled = (st_stalled & UsartFlag::txe) == 0u;
         CtsPin::pull(PinPull::down);                                 // CTS low: go
-        spin_us(8000);
+        spin_us<Ruler>(8000);
         uint8_t arrived = 0;
         while ((U1::status() & UsartFlag::rxne) != 0u && arrived < 4u) {
             (void)U1::read_word();
             ++arrived;
-            spin_us(200);
+            spin_us<Ruler>(200);
         }
         print(serial, "  CTS held high: ISR ", hex(st_stalled),
               "; released, ", arrived, " characters arrived", crlf);
@@ -3569,12 +3570,12 @@ void tl_pads() {
     (void)U1::configure({}, usart_brr(SysClock::pclk_hz, 9600).value());
     TxPin::function(u1_tx.function);
     U1::enable(true);
-    spin_us(2000);
+    spin_us<Ruler>(2000);
     const bool idle_plain = TxPin::read();
     U1::enable(false);
     (void)U1::invert(true, false, false);
     U1::enable(true);
-    spin_us(2000);
+    spin_us<Ruler>(2000);
     const bool idle_txinv = TxPin::read();
     print(serial, "  TXINV on a push-pull transmitter: the resting pad is ",
           idle_plain ? "high" : "low", " normally and ",
@@ -3636,7 +3637,7 @@ template <bool pads = has_u1_ck_pads>
 void tm_synchronous() {
     feed();
     if constexpr (!pads) {
-        print(serial, ck_pad_skip, crlf);
+        bench.skip(ck_pad_skip);
         return;
     } else {
         constexpr uint32_t sync_baud = 9600;
@@ -3656,7 +3657,7 @@ void tm_synchronous() {
             TxPin::function(u1_tx.function);
             DePin::function(u1_de.function);   // USART1_RTS_DE_CK, the CK output
             U1::enable(true);
-            spin_us(2000);
+            spin_us<Ruler>(2000);
             const bool idle_level = DePin::read();
             // The CK pulses, counted where the EXTI path into the DMAMUX
             // is this die's (exti_dma_ok).
@@ -3668,11 +3669,12 @@ void tm_synchronous() {
                     console_drain();
                     const uint32_t a = edge_count_reset();
                     for (uint8_t i = 0; i < 8u; ++i) {
-                        (void)wait_flag(UsartFlag::txe);
+                        // Dropped waits write anyway: the edge count below shows it.
+                        (void)wait_until<Ruler>(u1_flag(UsartFlag::txe), flag_budget_us);
                         U1::write_word(static_cast<uint16_t>(0x80u + i));
                     }
-                    (void)wait_flag(UsartFlag::tc);
-                    spin_us(2000);
+                    (void)wait_until<Ruler>(u1_flag(UsartFlag::tc), flag_budget_us);
+                    spin_us<Ruler>(2000);
                     const uint32_t b = edge_count_reset();
                     edge_counter_down(3);
                     const uint32_t edges = b - a;
@@ -3705,11 +3707,10 @@ void tm_synchronous() {
         bench.verdict("and the synchronous frames run at the rate asked: 96 frames in "
                       "their wire time at 9600 in each of the three arrangements, -1 % to "
                       "+3 %", sync_wire.ok);
-        print(serial, "  THE DATA PATH IS DECLINED and not faked: a synchronous "
-              "link needs something at the other end to clock, and this desk has "
-              "one board. The SLAVE half (CR2.SLVEN, DIS_NSS and the underrun "
-              "flag) is register verbs and no measurement, and its doc says so.",
-              crlf);
+        bench.skip("the synchronous DATA path: a link needs a second node on CK, TX and "
+                   "RX, and the wires this desk carries between its boards are the SPI "
+                   "and I2C links. The SLAVE half (CR2.SLVEN, DIS_NSS and the underrun "
+                   "flag) is register verbs and no measurement.");
         DePin::release();
         loop_down();
     }
@@ -3757,18 +3758,12 @@ bool lp_loop_up(const PinSel& sel, uint32_t baud, UsartClock kernel,
 
 template <typename L>
 std::optional<uint16_t> lp_word(uint16_t v, uint32_t timeout_us) {
-    uint32_t t0 = now();
-    while ((L::status() & UsartFlag::txe) == 0u) {
-        if (to_us(since(t0)) > timeout_us) {
-            return std::nullopt;
-        }
+    if (!wait_until<Ruler>([] { return (L::status() & UsartFlag::txe) != 0u; }, timeout_us)) {
+        return std::nullopt;
     }
     L::write_word(v);
-    t0 = now();
-    while ((L::status() & UsartFlag::rxne) == 0u) {
-        if (to_us(since(t0)) > timeout_us) {
-            return std::nullopt;
-        }
+    if (!wait_until<Ruler>([] { return (L::status() & UsartFlag::rxne) != 0u; }, timeout_us)) {
+        return std::nullopt;
     }
     return L::read_word();
 }
@@ -3813,13 +3808,10 @@ void tn_lpuart2() {
         bench.verdict("... at the rate asked: 1024 frames in their wire time at 115200, "
                       "-1 % to +3 %", wire_ok(l2_pm));
     } else {
-        print(serial,
-              "  SKIPPED, no verdict claimed: a second single wire on PC6 at "
-              "AF3 needs an LPUART2, which this part has not got "
-              "(lpuart_present(2) is false - the reserve finds no LPUART2_BASE "
-              "in the device header, and USART2's vector is therefore USART2's "
-              "alone).",
-              crlf);
+        bench.skip("a second single wire on PC6 at AF3 needs an LPUART2, which this "
+                   "part has not got (lpuart_present(2) is false - the reserve finds "
+                   "no LPUART2_BASE in the device header, and USART2's vector is "
+                   "therefore USART2's alone).");
     }
 }
 
@@ -3845,14 +3837,12 @@ void quiet_lpuart2() {
 template <bool pad = has_lpuart_own_pad>
 void tn_lpuart_wire() {
     if constexpr (!pad) {
-        print(serial,
-              "  SKIPPED, no verdict claimed: LPUART1's single wire, its "
-              "kernel-clock ladder, its FIFO, its prescaler and its interrupt "
-              "all need a pad of its own, and the only LPUART1 pads this "
-              "package bonds are PA2/PA3 at AF6 - the console's. The vector "
-              "itself is not shared here at all: with no USART3 to share it "
-              "with, LPUART1 has a line of its own (the reserve derives the "
-              "name, and this suite binds it).", crlf);
+        bench.skip("LPUART1's single wire, its kernel-clock ladder, its FIFO, its "
+                   "prescaler and its interrupt all need a pad of its own, and the only "
+                   "LPUART1 pads this package bonds are PA2/PA3 at AF6 - the console's. "
+                   "The vector itself is not shared here at all: with no USART3 to "
+                   "share it with, LPUART1 has a line of its own (the reserve derives "
+                   "the name, and this suite binds it).");
         return;
     } else {
         // LPUART1's own single wire on PC1, on each of its kernel clocks.
@@ -3875,8 +3865,7 @@ void tn_lpuart_wire() {
         for (const LpCase& c : lpcases) {
             feed();
             if (c.kernel == UsartClock::lse && !lse_running) {
-                print(serial, "  ", c.name, ": DECLINED, the crystal is not running",
-                      crlf);
+                bench.skip(c.name, ": the crystal is not running");
                 continue;
             }
             ++lp_tried;
@@ -3974,11 +3963,12 @@ void tn_lpuart_wire() {
         lpuart_live = true;
         Nvic::enable(L1::irq());
         console_drain();
-        uint32_t lp_spins = 4'000'000u;
-        while ((L1::status() & UsartFlag::txe) == 0u && lp_spins-- != 0u) {
-        }
+        // Dropped on its budget: a character never written is never served,
+        // and the count below refuses it.
+        (void)wait_until<Ruler>([] { return (L1::status() & UsartFlag::txe) != 0u; },
+                                flag_budget_us);
         L1::write_word(0x77);
-        spin_us(4000);
+        spin_us<Ruler>(4000);
         const uint32_t served = lpuart_irqs;
         Nvic::disable(L1::irq());
         lpuart_live = false;
@@ -4070,10 +4060,10 @@ bool pad_is_drivable() {
         return true;
     }
     Pad::input(PinPull::down);
-    spin_us(300);
+    spin_us<Ruler>(300);
     const bool held_up = Pad::read();
     Pad::output(false);
-    spin_us(300);
+    spin_us<Ruler>(300);
     const bool sinks = !Pad::read();
     Pad::input(PinPull::none);
     return held_up && sinks;
@@ -4131,7 +4121,7 @@ void to_irtim() {
     } else {
         console_drain();
         const uint32_t a = edge_count_reset();
-        spin_us(100000);
+        spin_us<Ruler>(100000);
         const uint32_t b = edge_count_reset();
         edge_counter_down(9);
         const uint32_t edges = b - a;
@@ -4153,10 +4143,10 @@ void to_irtim() {
     Tim<17>::set_count(0);
     Tim<16>::set_count(0);
     Irtim::polarity(false);
-    spin_us(500);
+    spin_us<Ruler>(500);
     const bool idle_normal = IrPin::read();
     Irtim::polarity(true);
-    spin_us(500);
+    spin_us<Ruler>(500);
     const bool idle_inverted = IrPin::read();
     print(serial, "  IR_POL: the resting pad is ", idle_normal ? "high" : "low",
           " normally and ", idle_inverted ? "high" : "low", " inverted", crlf);
@@ -4183,7 +4173,7 @@ void to_irtim() {
         // Idle first: the transmit line rests HIGH, so the carrier is
         // passed continuously.
         const uint32_t i0 = edge_count_reset();
-        spin_us(20000);
+        spin_us<Ruler>(20000);
         const uint32_t i1 = edge_count_reset();
         const uint32_t idle_edges = i1 - i0;
         // Then a 0x00, which holds the line low for the start bit and
@@ -4191,14 +4181,15 @@ void to_irtim() {
         const uint32_t b0 = edge_count_reset();
         uint32_t env_t0 = 0;
         for (uint8_t i = 0; i < 20u; ++i) {
-            (void)wait_flag(UsartFlag::txe);
+            // Dropped waits write anyway: the edge count and the span below show it.
+            (void)wait_until<Ruler>(u1_flag(UsartFlag::txe), flag_budget_us);
             if (i == 0u) {
-                env_t0 = now();
+                env_t0 = Ruler::now();
             }
             U1::write_word(0x00);
         }
-        (void)wait_flag(UsartFlag::tc);
-        const uint32_t env_took = since(env_t0);
+        (void)wait_until<Ruler>(u1_flag(UsartFlag::tc), flag_budget_us);
+        const uint32_t env_took = Ruler::now() - env_t0;
         const uint32_t b1 = edge_count_reset();
         edge_counter_down(9);
         const uint32_t sent_edges = b1 - b0;
@@ -4310,9 +4301,9 @@ void host_announce(const char* op, uint8_t mode, uint32_t baud, const char* fmt,
               " ", count, crlf);
     }
     console_drain();
-    host_window_t0 = now();
+    host_window_t0 = Ruler::now();
     host_window_ms = window_ms;
-    spin_us(50000);
+    spin_us<Ruler>(50000);
 }
 
 /// Back to 115200 8N1 and quiet, so a report is not read as payload.
@@ -4325,7 +4316,7 @@ void host_announce(const char* op, uint8_t mode, uint32_t baud, const char* fmt,
 /// while the host is still sending.) The drain happens AFTER the half
 /// second of silence, so nothing is still arriving when it runs.
 void host_settle() {
-    spin_us(20000);
+    spin_us<Ruler>(20000);
     (void)Serial::set_baud(SysClock::pclk_hz, 115200);
     // THE WHOLE ANNOUNCED WINDOW IS WAITED OUT, AND THEN SOME. The
     // script's contract is that it runs the op for LESS than the window,
@@ -4337,7 +4328,7 @@ void host_settle() {
     // characters at 115200, and the leg after it lost its own HOST line.
     // Nine hundred milliseconds past the window is the margin.
     const uint32_t due = host_window_ms + 900u;
-    while (to_us(since(host_window_t0)) < due * 1000u) {
+    while (to_us(Ruler::now() - host_window_t0) < due * 1000u) {
         feed();
     }
     uint8_t junk[64];
@@ -4370,10 +4361,8 @@ void ty_streaming() {
         feed();
         if constexpr (!console_mux) {
             if (l.kernel != UsartClock::pclk) {
-                print(serial, "  ", l.name, " at ", l.baud,
-                      " baud: SKIPPED, no verdict claimed - this part makes "
-                      "USART2 a BASIC instance and it has no kernel clock but "
-                      "PCLK", crlf);
+                bench.skip(l.name, ": this part makes USART2 a BASIC instance and it "
+                                   "has no kernel clock but PCLK");
                 continue;
             }
         }
@@ -4404,8 +4393,8 @@ void ty_streaming() {
         uint32_t got = 0;
         uint32_t bad = 0;
         uint8_t chunk[64];
-        const uint32_t t0 = now();
-        while (to_us(since(t0)) < 500000u) {
+        const uint32_t t0 = Ruler::now();
+        while (to_us(Ruler::now() - t0) < 500000u) {
             const uint32_t n = Serial::read_bulk(chunk);
             for (uint32_t i = 0; i < n; ++i) {
                 if (chunk[i] != lfsr_next()) {
@@ -4468,8 +4457,8 @@ void ty_streaming() {
         uint32_t fifo_got = 0;
         uint32_t fifo_bad = 0;
         uint8_t chunk[64];
-        const uint32_t t0 = now();
-        while (to_us(since(t0)) < 500000u) {
+        const uint32_t t0 = Ruler::now();
+        while (to_us(Ruler::now() - t0) < 500000u) {
             const uint32_t n = Serial::read_bulk(chunk);
             for (uint32_t i = 0; i < n; ++i) {
                 if (chunk[i] != lfsr_next()) {
@@ -4495,9 +4484,8 @@ void ty_streaming() {
               " wrong, hardware overruns ", fifo_hw, crlf);
         fifo_ok = fifo_got >= 2000u && fifo_bad == 0u;
     } else {
-        print(serial, "  SKIPPED, no verdict claimed: the console is a BASIC "
-                      "instance on this part and has no FIFO to turn on.",
-              crlf);
+        bench.skip("the console is a BASIC instance on this part and has no FIFO to "
+                   "turn on.");
     }
     bench.verdict("the console streams byte-exact from the host on every "
                   "kernel clock it can take",
@@ -4548,30 +4536,23 @@ void tw_wake() {
           crlf);
     feed();
     if constexpr (!stageable) {
-        print(serial,
-              "  SKIPPED, no verdict claimed: this letter needs a console "
-              "that can wake from Stop AND a wall clock to time the Stop "
-              "with, and here it is short of ",
-              usart_exti_line(2) == 0xFFu
-                  ? "the first: the console is USART2, which this part makes "
-                    "a BASIC instance - table 184's last row, and the "
-                    "reserve's usart_exti_line(2) is 0xFF, so there is no "
-                    "wake to arm and no EXTI line to arm it on. "
-                  : "",
-              board_lse_fitted
-                  ? ""
-                  : "the second: this board is declared without a running "
-                    "LSE crystal, so there is neither a wall to measure "
-                    "the Stop against nor an RTC wake-up timer to end it. ",
-              "ES0548 2.2.4's staging - and ES0487's twin, which this suite "
-              "has not read - wants both, so it is not attempted.", crlf);
+        bench.skip("this letter needs a console that can wake from Stop AND a wall clock "
+                   "to time the Stop with - ES0548 2.2.4's staging wants both - and here "
+                   "it is short of ",
+                   usart_exti_line(2) == 0xFFu
+                       ? "the first: the console is USART2, which this part makes a "
+                         "BASIC instance (usart_exti_line(2) is 0xFF), so there is no "
+                         "wake to arm and no EXTI line to arm it on"
+                       : "the second: this board is declared without a running LSE "
+                         "crystal, so there is neither a wall to time the Stop against "
+                         "nor an RTC wake-up timer to end it");
         return;
     } else {
         const bool wall_ok = RtcDomain::selected() == RtcClockSource::lse &&
                              RtcDomain::lse_ready();
         if (!wall_ok) {
-            print(serial, "  the RTC is not on the crystal: this letter would "
-                          "have no wall clock and is DECLINED", crlf);
+            print(serial, "  the RTC is not on the crystal: this letter has no wall "
+                          "clock to time the Stop with", crlf);
             bench.verdict("the wake letter needs the RTC wall clock", false);
             return;
         }
@@ -4609,11 +4590,10 @@ void tw_wake() {
                 (void)Usart<2>::wake_line(true);
                 Usart<2>::enable(true);
             }
-            // 33.5.21: REACK must be checked before the Stop is entered.
-            uint32_t spins = 200000;
-            while ((Usart<2>::status() & UsartFlag::reack) == 0u && spins-- != 0u) {
-            }
-            const bool reack = (Usart<2>::status() & UsartFlag::reack) != 0u;
+            // 33.5.21: REACK must be checked before the Stop is entered. It
+            // follows the enable by a few kernel clocks; 10 ms is the budget.
+            const bool reack = wait_until<Ruler>(
+                [] { return (Usart<2>::status() & UsartFlag::reack) != 0u; }, 10'000);
             Usart<2>::clear_flags(UsartClear::all);
             Serial::clear_errors();
             uint8_t junk[16];
@@ -4647,8 +4627,8 @@ void tw_wake() {
             // Whatever arrived while the core was down.
             uint8_t got[8];
             uint32_t n = 0;
-            const uint32_t t0 = now();
-            while (to_us(since(t0)) < 200000u && n < sizeof got) {
+            const uint32_t t0 = Ruler::now();
+            while (to_us(Ruler::now() - t0) < 200000u && n < sizeof got) {
                 uint8_t b = 0;
                 if (Serial::read_byte(b)) {
                     got[n++] = b;
@@ -4851,20 +4831,19 @@ void lp_console_lse_isr() {
 /// through a different alternate function - clocked by the 32768 Hz LSE.
 /// A TEMPLATE so that a board with no crystal carries neither the leg nor
 /// its console's two rings. It answers "nothing to hold against it": true
-/// when the leg ran and was exact, and true when it never ran at all.
+/// when the leg ran and was exact, and true when it never ran at all - a
+/// leg that never ran says so as a skip.
 template <bool fitted = board_lse_fitted>
 bool tv_lse_leg() {
     if constexpr (!fitted) {
-        print(serial,
-              "  SKIPPED, no verdict claimed: an LPUART console clocked by "
-              "the 32768 Hz crystal needs one to be running, and THIS BOARD "
-              "IS DECLARED WITHOUT ONE. The HSI16 leg below is the same "
-              "console on the same pads and runs.", crlf);
+        bench.skip("an LPUART console clocked by the 32768 Hz crystal needs one, and "
+                   "this board is declared without it. The HSI16 leg below is the same "
+                   "console on the same pads and runs.");
         return true;
     } else {
         if (!RtcDomain::lse_ready()) {
-            print(serial, "  no crystal running: the LSE console leg is "
-                          "DECLINED and nothing pretends otherwise", crlf);
+            bench.skip("no crystal running: the LSE console leg needs it as LPUART1's "
+                       "kernel clock");
             return true;
         }
         // LEG ONE: LPUART1 on PA2/PA3 AF6 - the console's OWN pads, which
@@ -4879,12 +4858,12 @@ bool tv_lse_leg() {
         const bool lse_up = LpConsoleLse::init(clock, 9600);
         lfsr_reset();
         uint8_t chunk[32];
-        uint32_t t0 = now();
+        uint32_t t0 = Ruler::now();
         // THE WINDOW OUTLASTS THE HOST'S PUMP ON PURPOSE (the script pumps
         // for window - 500 ms and starts 140 ms after reading the HOST
         // line): a board that stops listening first leaves the tail of the
         // stream to arrive on a console that has moved back to 115200.
-        while (to_us(since(t0)) < 1200000u) {
+        while (to_us(Ruler::now() - t0) < 1200000u) {
             const uint32_t n = LpConsoleLse::read_bulk(chunk);
             for (uint32_t i = 0; i < n; ++i) {
                 if (chunk[i] != lfsr_next()) {
@@ -4914,15 +4893,14 @@ bool tv_lse_leg() {
 template <bool fitted = board_lse_fitted>
 void tv_stop_leg() {
     if constexpr (!fitted) {
-        print(serial,
-              "  SKIPPED, no verdict claimed: an LPUART woken out of Stop by "
-              "a start bit needs the 32768 Hz crystal as its kernel clock - "
-              "no other clock of this part survives a Stop for it - and this "
-              "board is declared without one.", crlf);
+        bench.skip("an LPUART woken out of Stop by a start bit needs the 32768 Hz "
+                   "crystal as its kernel clock - no other clock of this part survives "
+                   "a Stop for it - and this board is declared without one.");
         return;
     } else {
         if (RtcDomain::selected() != RtcClockSource::lse) {
-            print(serial, "  no RTC wall clock: the Stop leg is DECLINED", crlf);
+            bench.skip("no RTC wall clock on the crystal: the Stop leg needs it to time "
+                       "the Stop");
             return;
         }
         host_announce("poke", 0, 9600, "8N1", 1500, 4);
@@ -4934,9 +4912,11 @@ void tv_stop_leg() {
         (void)L1::wake_line(true);
         Pin<'A', 3>::function(PinFunction::af6, {.pull = PinPull::up});
         L1::enable(true);
-        uint32_t spins = 200000;
-        while ((L1::status() & UsartFlag::reack) == 0u && spins-- != 0u) {
-        }
+        // REACK before the Stop (33.5.21), a few LSE periods after the
+        // enable. Dropped on its 10 ms budget: a receiver that never
+        // acknowledged wakes nothing, and the verdict below says so.
+        (void)wait_until<Ruler>([] { return (L1::status() & UsartFlag::reack) != 0u; },
+                                10'000);
         L1::clear_flags(UsartClear::all);
         (void)Rtc::set_wakeup(RtcWakeupClock::ck_spre, 1, true);
         Rtc::clear_flags(RtcFlag::wakeup);
@@ -4964,13 +4944,9 @@ void tv_stop_leg() {
         // on a 32768 Hz kernel a frame is a whole millisecond: reading RDR
         // the instant the WFI returns reads an empty register and calls a
         // working wake a lost byte. So the character is waited for, bounded.
-        bool rxne = (st & UsartFlag::rxne) != 0u;
-        {
-            const uint32_t t_rx = now();
-            while (!rxne && to_us(since(t_rx)) < 50000u) {
-                rxne = (L1::status() & UsartFlag::rxne) != 0u;
-            }
-        }
+        const bool rxne = (st & UsartFlag::rxne) != 0u ||
+                          wait_until<Ruler>(
+                              [] { return (L1::status() & UsartFlag::rxne) != 0u; }, 50000);
         const uint16_t byte = rxne ? L1::read_word() : 0u;
         (void)L1::wake_line(false);
         L1::enable(false);
@@ -5006,8 +4982,8 @@ void tv_lpuart_console() {
     lp_console_mode = 2;
     const bool hsi_up = LpConsoleHsi::init(clock, 115200);
     lfsr_reset();
-    uint32_t t0 = now();
-    while (to_us(since(t0)) < 1000000u) {
+    uint32_t t0 = Ruler::now();
+    while (to_us(Ruler::now() - t0) < 1000000u) {
         const uint32_t n = LpConsoleHsi::read_bulk(chunk);
         for (uint32_t i = 0; i < n; ++i) {
             if (chunk[i] != lfsr_next()) {
@@ -5128,8 +5104,8 @@ int32_t burst_edge(const uint8_t* src, uint32_t n, uint32_t baud, uint32_t& got,
     wrong = 0;
     U1::clear_flags(UsartClear::tc);
     uint32_t queued = 0;
-    const uint32_t t0 = now();
-    while (queued < n && since(t0) < 40u * frame * n) {
+    const uint32_t t0 = Ruler::now();
+    while (queued < n && Ruler::now() - t0 < 40u * frame * n) {
         queued += T::write_bulk({src + queued, n - queued});
         if (rx_edges != seen) {
             seen = rx_edges;
@@ -5138,14 +5114,14 @@ int32_t burst_edge(const uint8_t* src, uint32_t n, uint32_t baud, uint32_t& got,
     }
     for (;;) {
         if (!tc_seen && T::tx_idle()) {
-            tc_at = now();
+            tc_at = Ruler::now();
             tc_seen = true;
         }
         if (rx_edges != seen) {
             seen = rx_edges;
             got += drain_into<T>(src, n, at, wrong);
         }
-        if ((tc_seen && since(tc_at) > 6u * frame) || since(t0) > 40u * frame * n) {
+        if ((tc_seen && Ruler::now() - tc_at > 6u * frame) || Ruler::now() - t0 > 40u * frame * n) {
             break;
         }
     }
@@ -5169,7 +5145,7 @@ void tp_receive() {
     uint32_t wrong = 0;
     const int32_t paced_tail = burst_edge<PacedLoop>(stream, 17, baud, got, wrong);
     const uint32_t paced_irqs = loop_irqs;
-    spin_us(10000);   // ten milliseconds of silence after the burst
+    spin_us<Ruler>(10000);   // ten milliseconds of silence after the burst
     const uint32_t quiet_irqs = loop_irqs - paced_irqs;
     print(serial, "  the paced receiver, 17 bytes at 115200: ", got, " back (", wrong,
           " wrong) in ", paced_irqs, " USART1 entries; the last edge ", paced_tail,
@@ -5197,24 +5173,24 @@ void tp_receive() {
         read = 0;
         at = 0;
         wrong = 0;
+        // Every wait here dropped on its budget, a hundred frames (8.7 ms):
+        // a byte not queued or a break not sent is a byte or a skip the
+        // counts below refuse.
+        constexpr uint32_t budget_us = 100u * frame / cycles_per_us;
         auto wire_idle = [&] {
-            const uint32_t t1 = now();
-            while (!T::tx_idle() && since(t1) < 100u * frame) {
-            }
+            (void)wait_until<Ruler>([] { return T::tx_idle(); }, budget_us);
             spin_cycles(2u * frame);
         };
         for (uint32_t i = 0; i < slots; ++i) {
             if (is_hit(i)) {
-                const uint32_t t1 = now();
-                while (!T::tx_idle() && since(t1) < 100u * frame) {
-                }
+                (void)wait_until<Ruler>([] { return T::tx_idle(); }, budget_us);
                 if (read_between) {
                     spin_cycles(2u * frame);   // the tail's time-out
                     read += drain_into<T>(kept, n, at, wrong);
                 }
                 U1::send_break();
-                while ((U1::status() & UsartFlag::sbkf) != 0u && since(t1) < 100u * frame) {
-                }
+                (void)wait_until<Ruler>([] { return (U1::status() & UsartFlag::sbkf) == 0u; },
+                                        budget_us);
                 spin_cycles(2u * frame);
                 if (read_between) {
                     wire_idle();
@@ -5224,8 +5200,7 @@ void tp_receive() {
             }
             const uint8_t b = stream[i];
             kept[n++] = b;
-            while (T::write_bulk({&b, 1}) == 0u) {
-            }
+            (void)wait_until<Ruler>([&b] { return T::write_bulk({&b, 1}) != 0u; }, budget_us);
         }
         wire_idle();
         spin_cycles(2u * frame);
@@ -5347,10 +5322,17 @@ void tx_idle_on_pad(const char* name, uint8_t mode, uint32_t& early, uint32_t& l
     uint32_t falls = 0;
     uint32_t idle_at = 0;
     bool idle_seen = false;
+    // THE WINDOW IS THE TRANSMITTER'S ALONE. The letter drains the console
+    // before it, and the kernel tick is held off for its 12.5 ms
+    // (Ticker::pause(): the handler not entered, the tick count standing,
+    // which nothing in this suite reads across the window), so no handler
+    // outside the transport stands between an edge and the poll that
+    // stamps it: the 1/32-bit margin the letter judges is the poll's.
+    Ticker::pause();
     (void)T::write_bulk({ones, sizeof ones});
-    const uint32_t t0 = now();
-    while (since(t0) < 12u * 10u * bit) {
-        const uint32_t t = now();
+    const uint32_t t0 = Ruler::now();
+    while (Ruler::now() - t0 < 12u * 10u * bit) {
+        const uint32_t t = Ruler::now();
         if (Exti::falling_pending(9)) {
             Exti::clear_falling(1u << 9);
             if (falls == 0u) {
@@ -5364,6 +5346,7 @@ void tx_idle_on_pad(const char* name, uint8_t mode, uint32_t& early, uint32_t& l
             idle_seen = true;
         }
     }
+    Ticker::resume();
     const uint32_t stop_end = last_fall + 10u * bit;
     early = idle_seen && idle_at < stop_end ? stop_end - idle_at : 0u;
     late = idle_seen && idle_at >= stop_end ? idle_at - stop_end : 0u;
@@ -5382,13 +5365,18 @@ void tx_idle_on_pad(const char* name, uint8_t mode, uint32_t& early, uint32_t& l
 
 void tq_tx_idle() {
     feed();
-    console_drain();
     constexpr uint32_t bit = SysClock::hz / 9600u;
     uint32_t early = 0;
     uint32_t late = 0;
     bool ok = false;
     uint32_t pad_plain = 0;
     uint32_t pad_engine = 0;
+    // Each pad window opens on a quiet console, or the letter stops: the
+    // console's transmit interrupt inside it would stamp an edge late.
+    if (!brio::console_drain<Ruler, Serial>()) {
+        bench.skip("the console did not drain: the pad window would carry its interrupt");
+        return;
+    }
     tx_idle_on_pad<PlainSender>("the interrupt transmitter, 8 frames at 9600", mode_plain_tx,
                                 early, late, ok, pad_plain);
     // The edge is seen by a poll of a few tens of cycles, so the stop
@@ -5397,6 +5385,10 @@ void tq_tx_idle() {
                   "the last stop bit's end, and within a bit time after it",
                   ok && early <= bit / 32u && late <= bit);
     feed();
+    if (!brio::console_drain<Ruler, Serial>()) {
+        bench.skip("the console did not drain: the pad window would carry its interrupt");
+        return;
+    }
     tx_idle_on_pad<EngineSender>("the transmit engine, 8 frames at 9600", mode_engine_tx,
                                  early, late, ok, pad_engine);
     bench.verdict("and on the transmit engine: TC cleared when the block starts, so "
@@ -5482,26 +5474,19 @@ void link_task_down() {
     }
 }
 
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 <= ms) {
-    }
-}
-
-void wait_us(uint32_t us) { spin_us(us); }
-
+/// One word out on the link: room in the transmit FIFO waited for, 50 ms
+/// at most (a frame at the command rate is 87 us), then written - a word
+/// written into a full FIFO is lost, and the far end's checksum or count
+/// is what says so.
 void put1(uint16_t b) {
-    const uint32_t t0 = Ticker::millis();
-    while (!U1::flag(UsartFlag::txfnf) && Ticker::millis() - t0 < 50u) {
-    }
+    (void)wait_until<Ruler>([] { return U1::flag(UsartFlag::txfnf); }, 50'000);
     U1::write_word(b);
 }
 
-void wait_tc() {
-    const uint32_t t0 = Ticker::millis();
-    while (!U1::flag(UsartFlag::tc) && Ticker::millis() - t0 < 50u) {
-    }
-}
+/// The link's last frame off the wire (TC), 50 ms at most. Dropped on its
+/// budget: what follows waits for the far end's answer, and a frame that
+/// never left gets none.
+void wait_tc() { (void)wait_until<Ruler>([] { return U1::flag(UsartFlag::tc); }, 50'000); }
 
 void u1_flush() {
     U1::request(UsartRequest::flush_receive);
@@ -5588,7 +5573,7 @@ bool dut_link(const link::Cfg& c, bool lin = false, bool one_bit = false,
         return false;
     }
     U1::enable(true);
-    wait_us(2u * (1'000'000u / c.rate) + 20u);
+    spin_us<Ruler>(2u * (1'000'000u / c.rate) + 20u);
     U1Tx::function(PinFunction::af1, {.speed = PinSpeed::very_high});
     U1Rx::function(PinFunction::af1, {.pull = PinPull::up});
     u1_flush();
@@ -5621,7 +5606,7 @@ bool tracker_up() {
     if (!RtcDomain::lse_ready() || !Tracker::start(clock)) {
         return false;   // the domain's crystal is main()'s to start; without it, no tracker
     }
-    wait_ms(Tracker::entries_ms + 50u);   // the ring filled once
+    spin_us<Ruler>((Tracker::entries_ms + 50u) * 1000u);   // the ring filled once
     return true;
 }
 
@@ -5689,7 +5674,7 @@ bool command(link::Op op, const uint8_t* p = no_payload, uint8_t len = 0, uint16
             return true;
         }
         (void)link_command_mode();
-        wait_ms(70);
+        spin_us<Ruler>(70'000);
     }
     if (!link_quiet) {
         print(serial, "    LINK FAILURE op ", hex(link::byte_of(op)),
@@ -5733,7 +5718,7 @@ bool peer_report(link::Report& r, uint16_t after_ms) {
     link_task_down();
     (void)link_command_mode();
     if (after_ms != 0u) {
-        wait_ms(after_ms);
+        spin_us<Ruler>(static_cast<uint32_t>(after_ms) * 1000u);
     }
     for (uint8_t k = 0; k < 4u; ++k) {
         link::Frame f;
@@ -5752,7 +5737,7 @@ bool peer_report(link::Report& r, uint16_t after_ms) {
             }
             return true;
         }
-        wait_ms(40);
+        spin_us<Ruler>(40'000);
     }
     return false;
 }
@@ -5769,21 +5754,22 @@ bool peer_act(link::Op op, const link::Params& a, const uint8_t* extra = nullptr
     if (!command(op, p, static_cast<uint8_t>(link::params_size + n))) {
         return false;
     }
-    wait_us(static_cast<uint32_t>(link::settle_ms) * 1000u);
+    spin_us<Ruler>(static_cast<uint32_t>(link::settle_ms) * 1000u);
     return true;
 }
 
-/// A verdict, unless the leg was refused: then SKIP, counting nothing.
+/// A verdict, unless the leg was refused: then a skip (peer_report() has
+/// printed which op the far silicon refused).
 void judge(const char* name, bool ok) {
     if (leg_refused) {
-        print(serial, "  SKIP  ", name, " (the peer refused the leg)", crlf);
+        bench.skip(name, " (the peer refused the leg)");
         return;
     }
     bench.verdict(name, ok);
 }
 void judge(const char* name, const char* suffix, bool ok) {
     if (leg_refused) {
-        print(serial, "  SKIP  ", name, suffix, " (the peer refused the leg)", crlf);
+        bench.skip(name, suffix);
         return;
     }
     bench.verdict(name, suffix, ok);
@@ -5798,13 +5784,19 @@ uint16_t bound_ms(uint32_t rate, uint32_t frames) {
 
 /// The peer opens its receive window settle_ms + 2 ms after its ack and
 /// flushes what this end's reconfiguration left on the line.
-void wait_for_peer_window() { wait_ms(6); }
+void wait_for_peer_window() { spin_us<Ruler>(6'000); }
 
 /// `n` frames back to back: TDR written while the transmit FIFO has room,
 /// eight frames ahead of the shifter, so the line never idles.
 void dut_blast(uint16_t n, uint16_t mask) {
     for (uint16_t i = 0; i < n; ++i) {
-        while (!U1::flag(UsartFlag::txfnf)) {
+        // The FIFO's room asked first, so a word with room costs one load:
+        // the wait is entered only on a full FIFO, 50 ms at most - a
+        // transmitter that takes nothing ends the blast short, which the
+        // far count shows.
+        if (!U1::flag(UsartFlag::txfnf) &&
+            !wait_until<Ruler>([] { return U1::flag(UsartFlag::txfnf); }, 50'000)) {
+            break;
         }
         U1::write_word(static_cast<uint16_t>((0x55u + i) & mask));
     }
@@ -5898,9 +5890,9 @@ Calib calibrate(const link::Cfg& c, uint16_t n) {
         return k;
     }
     wait_for_peer_window();
-    const uint32_t t0 = ::now();
+    const uint32_t t0 = Ruler::now();
     dut_blast(n, c.bits >= link::bits9_low ? 0x1FFu : c.bits == 7u ? 0x7Fu : 0xFFu);
-    const std::optional<int32_t> hsi = hsi_over(::now() - t0);
+    const std::optional<int32_t> hsi = hsi_over(Ruler::now() - t0);
     k.hsi_ok = hsi.has_value();
     k.hsi = hsi.value_or(0);
     link::Report r{};
@@ -6033,7 +6025,7 @@ void t1_link() {
     bench.verdict("a bad checksum comes back as a NAK", recv_frame(bad, 120) && bad.op == link::Op::nak);
     for (uint8_t i = 0; i < 12u; ++i) put1(static_cast<uint8_t>(0x11u * i));
     wait_tc();
-    wait_ms(120);
+    spin_us<Ruler>(120'000);
     (void)link_command_mode();
     bench.verdict("the link recovers after a desync", command(link::Op::ping));
 
@@ -6148,7 +6140,10 @@ uint16_t echo_mismatches(uint16_t n, uint16_t mask) {
     wait_for_peer_window();
     for (uint16_t i = 0; i < n; ++i) {
         const uint16_t v = static_cast<uint16_t>((0x5Au + i * 37u) & mask);
-        while (!U1::flag(UsartFlag::txfnf)) {
+        // A word with no room in 50 ms is a mismatch: nothing was sent.
+        if (!wait_until<Ruler>([] { return U1::flag(UsartFlag::txfnf); }, 50'000)) {
+            ++bad;
+            continue;
         }
         U1::write_word(v);
         bool ok = false;
@@ -6359,7 +6354,7 @@ void t3_frames() {
         c.parity = fc.parity;
         c.stop = fc.stop;
         if (!dut_setup(c)) {
-            print(serial, "  SKIP  ", fc.name, " (this USART has no word length for it, RM0444 33.5.5)", crlf);
+            bench.skip(fc.name, " (this USART has no word length for it, RM0444 33.5.5)");
             continue;
         }
         link::Params a{};
@@ -6483,7 +6478,7 @@ void t4_errors() {
         a.value = 0xB0;
         const bool acted = peer_act(link::Op::blast, a);
         const bool up = acted && dut_link(pc);
-        wait_ms(6 + 3);
+        spin_us<Ruler>((6u + 3u) * 1000u);
         const uint32_t st = U1::status();
         const Drain d = collect(5);
         link::Report r{};
@@ -6578,7 +6573,7 @@ void t4_errors() {
         dc.parity = 1;
         const bool acted = peer_act(link::Op::send, a);
         const bool up = acted && dut_link(dc);
-        wait_ms(6 + 3);
+        spin_us<Ruler>((6u + 3u) * 1000u);
         uint8_t entries = 0, flagged = 0;
         USART_TypeDef& u = U1::regs();
         while ((u.ISR & UsartFlag::rxne) != 0u && entries < 16u) {
@@ -6622,7 +6617,7 @@ void t4_errors() {
         loop_mode = mode_link_irq;
         // 8E1: CR1.M counts the parity bit, a nine-bit word (33.5.5).
         const bool up = acted && LinkIrq::init(clock, 115'200, {.bits = UartBits::nine, .parity = UartParity::even});
-        wait_ms(20);
+        spin_us<Ruler>(20'000);
         const uint32_t pending = LinkIrq::rx_pending();
         const uint8_t pe = LinkIrq::parity_errors();
         link_task_down();
@@ -6642,7 +6637,7 @@ void t4_errors() {
         link_task_down();
         loop_mode = mode_link_irq;
         const bool up = acted && LinkIrq::init(clock, 115'200);
-        wait_ms(20);
+        spin_us<Ruler>(20'000);
         const uint32_t pending = LinkIrq::rx_pending();
         const uint8_t fe = LinkIrq::frame_errors();
         link_task_down();
@@ -6721,16 +6716,18 @@ bool wire_up(uint32_t baud, bool swapped) {
 /// One received word within `us`, polled; nothing on a time-out. The
 /// word's errors in `err`.
 std::optional<uint16_t> wire_word(uint32_t us, uint32_t& err) {
-    const uint32_t t0 = now();
-    while (to_us(since(t0)) < us) {
-        const uint32_t st = U1::status();
-        if ((st & UsartFlag::rxne) != 0u) {
-            err = st & UsartFlag::receive_errors;
-            U1::clear_flags(st & UsartClear::receive_errors);   // before the pop
-            return U1::read_word();
-        }
+    uint32_t st = 0;
+    if (!wait_until<Ruler>(
+            [&st] {
+                st = U1::status();
+                return (st & UsartFlag::rxne) != 0u;
+            },
+            us)) {
+        return std::nullopt;
     }
-    return std::nullopt;
+    err = st & UsartFlag::receive_errors;
+    U1::clear_flags(st & UsartClear::receive_errors);   // before the pop
+    return U1::read_word();
 }
 
 // ---------------------------------------------------------------------------
@@ -7190,11 +7187,18 @@ struct RingLeg {
     uint16_t peer_count = 0;
     uint32_t entries = 0;      ///< USART1's vector entries over the leg
     uint32_t parks = 0;        ///< the watch taken down
-    uint32_t marks = 0;        ///< the ring's half and full marks the bytes crossed
+    uint32_t marks = 0;        ///< the receive channel's entries with a half or full mark up
     uint32_t looks = 0;        ///< the looks at the ring that found it empty
     uint32_t unseen = 0;       ///< runs with a gap in them and the epoch not moved
     bool thread_ended = false; ///< the load that does not end still up when the thread ended it
 };
+
+/// The receive channel's marks, COUNTED where they arrive: every entry of
+/// DMA1's channel 2/3 line under a link mode that finds channel 3's half or
+/// full flag up (dma23_link()). A count of the bytes delivered would miss
+/// the marks of every byte a lapped ring lost - the very legs that starve
+/// it - and set the bound below short of the entries those marks cost.
+volatile uint32_t link_marks = 0;
 
 // The pair in a load that does not end until the thread ends it: each copy started again from
 // its own completion's vector, never the thread, so a vector that holds the thread out cannot
@@ -7290,6 +7294,7 @@ RingLeg ring_leg_on(uint32_t rate, uint16_t pair, bool low, uint8_t mode, RingLo
     const uint32_t skips0 = Port::rx_skips();
     uint32_t seen_skips = skips0;
     loop_irqs = 0;
+    link_marks = 0;
     const uint32_t t0 = Ticker::millis();
     uint32_t next_pair = t0;
     uint32_t last_byte = t0;
@@ -7338,7 +7343,10 @@ RingLeg ring_leg_on(uint32_t rate, uint16_t pair, bool low, uint8_t mode, RingLo
             ++l.pairs;
         }
     }
-    for (uint32_t spins = 1'000'000u; pair != 0u && !(CopyA::poll() && CopyB::poll()) && spins != 0u; --spins) {
+    // The last pair's end, 10 ms at most (a 2 KB copy is some 25 000 cycles):
+    // dropped on its budget, the stop() below takes a pair still running.
+    if (pair != 0u) {
+        (void)wait_until<Ruler>([] { return CopyA::poll() && CopyB::poll(); }, 10'000);
     }
     if (l.pair != 0u) {
         CopyA::stop();
@@ -7349,7 +7357,7 @@ RingLeg ring_leg_on(uint32_t rate, uint16_t pair, bool low, uint8_t mode, RingLo
     l.c.close();
     l.entries = loop_irqs;
     l.parks = Port::rx_parks();
-    l.marks = l.c.got / (link_ring / 2u) + 1u;
+    l.marks = link_marks;
     l.skips = Port::rx_skips() - skips0;
     l.ore = Port::hw_overruns();
     l.kicks = Port::rx_kicks();
@@ -7595,7 +7603,7 @@ void t8_wire() {
             // end's stop bit low under it (measured: the far receiver lost
             // step and answered inside this end's next frame). Two bit
             // times, the far end's own guard's half.
-            spin_us(2'000'000u / rate + 1u);
+            spin_us<Ruler>(2'000'000u / rate + 1u);
         }
         link::Report r{};
         (void)link_command_mode();
@@ -7640,8 +7648,10 @@ void t8_wire() {
               " (errors ", hex(e1), "), the 0xFF frame ", hit ? hex(static_cast<uint32_t>(*hit)) : hex(0u),
               " (errors ", hex(e2), "); the far end heard ", r.count, crlf);
         judge("the trigger frame is heard whole", up && trig && (*trig & 0xFFu) == 0xA5u && e1 == 0u);
+        // The 0xFF must COME BACK: a frame never heard proves no collision,
+        // only a silent wire.
         judge("THE WIRED AND: the far frame pulled the shared wire under this end's 0xFF, which came back "
-              "changed or with an error", up && r.count >= 1u && (!hit || (*hit & 0xFFu) != 0xFFu || e2 != 0u));
+              "changed or with an error", up && r.count >= 1u && hit && ((*hit & 0xFFu) != 0xFFu || e2 != 0u));
     }
     link_release();
 }
@@ -7889,7 +7899,7 @@ AbrLeg abr_leg(AutoBaudMode m, uint8_t pattern, uint32_t rate, bool over8, uint1
     if (over8) {
         told.flags = link::flag_clk2x;
     }
-    const uint32_t t0 = ::now();
+    const uint32_t t0 = Ruler::now();
     const bool acted = peer_act(link::Op::send, a);
     l.up = acted && dut_link(told, false, false, m) && U1::oversampling() == over8;
     uint16_t words[8] = {};
@@ -7908,7 +7918,7 @@ AbrLeg abr_leg(AutoBaudMode m, uint8_t pattern, uint32_t rate, bool over8, uint1
     }
     l.isr = U1::status();
     const uint16_t brr = U1::brr();
-    const std::optional<int32_t> hsi = hsi_over(::now() - t0);
+    const std::optional<int32_t> hsi = hsi_over(Ruler::now() - t0);
     link::Report r{};
     (void)peer_report(r, 0);
     l.got_x2 = bit_x2_of(brr, over8);
@@ -7986,14 +7996,15 @@ SentBreak sent_break(uint32_t rate, bool lin) {
         return b;
     }
     wait_for_peer_window();
-    const uint32_t t0 = ::now();
+    const uint32_t t0 = Ruler::now();
     U1::send_break();
-    const uint32_t t1 = Ticker::millis();
-    while ((U1::status() & UsartFlag::sbkf) != 0u && Ticker::millis() - t1 < 20u) {
-    }
+    // SBKF down once the break (13 bit times) has gone, 20 ms at most.
+    // Dropped on its budget: the far receiver's reading of the break and
+    // the sync is the verdict.
+    (void)wait_until<Ruler>([] { return (U1::status() & UsartFlag::sbkf) == 0u; }, 20'000);
     U1::write_word(0x55);
     wait_tc();
-    const std::optional<int32_t> hsi = hsi_over(::now() - t0);
+    const std::optional<int32_t> hsi = hsi_over(Ruler::now() - t0);
     link::Report r{};
     if (!peer_report(r, 5)) {
         return b;
@@ -8147,7 +8158,7 @@ void t0_autobaud_lin() {
         a.ms = 200;
         link::Cfg told{};
         told.rate = 19'200;
-        const uint32_t t0 = ::now();
+        const uint32_t t0 = Ruler::now();
         const bool acted = peer_act(link::Op::autobaud_tx, a);
         const bool up = acted && dut_link(told, true, false, before ? AutoBaudMode::frame_55 : AutoBaudMode::off);
         bool lbdf = false, armed = before;
@@ -8167,7 +8178,7 @@ void t0_autobaud_lin() {
         const Drain d = lbdf ? collect(40, 5) : collect(20, 5);
         const uint32_t st = U1::status();
         const uint16_t brr = U1::brr();
-        const std::optional<int32_t> hsi = hsi_over(::now() - t0);
+        const std::optional<int32_t> hsi = hsi_over(Ruler::now() - t0);
         link::Report r{};
         (void)peer_report(r, 0);
         const uint32_t got = bit_x2_of(brr, false);
@@ -8342,7 +8353,7 @@ void rs485_leg(const char* name, uint8_t mode, uint8_t deat, uint8_t dedt, bool 
         loop = b.loop;
         if (!b.seen) ++unseen;
         if (!b.held) ++edges_bad;
-        wait_ms(1);
+        spin_us<Ruler>(1'000);
     }
     Task::release();
     loop_mode = 0;
@@ -8405,7 +8416,8 @@ PadPulse ir_first_pulse(uint8_t v) {
     const uint32_t mask = TxPin::mask;
     const uint32_t idle = idr & mask;
     p.idle_high = idle != 0u;
-    (void)wait_flag(UsartFlag::txe);
+    // A dropped wait writes anyway: no pulse, and the waits below answer unseen.
+    (void)wait_until<Ruler>(u1_flag(UsartFlag::txe), flag_budget_us);
     U1::write_word(v);
     // Two tight loops of one load and one compare each, the stamps taken
     // as each ends: the width is good to a loop's period, the same either
@@ -8725,7 +8737,7 @@ bool mute_link(const link::Cfg& c, const MuteConfig& m) {
     U1::enable(false);
     const bool ok = U1::mute_mode(m);
     U1::enable(true);
-    wait_us(2u * (1'000'000u / c.rate) + 20u);
+    spin_us<Ruler>(2u * (1'000'000u / c.rate) + 20u);
     u1_flush();
     return ok;
 }
@@ -8765,7 +8777,7 @@ void ts_mute() {
     c.rate = 115'200;
     {
         const bool up = mute_link(c, {.wake = MuteWake::idle_line});
-        wait_ms(2);   // some twenty idle frames
+        spin_us<Ruler>(2'000);   // some twenty idle frames
         U1::request(UsartRequest::mute);
         const bool rwu = U1::muted();
         print(serial, "  MMRQ written on a line idle for 2 ms: RWU ", rwu ? "SET" : "clear", crlf);
@@ -8946,10 +8958,10 @@ WakeLeg wake_leg(uint32_t rate, UsartClock kernel, UsartWakeSource src, uint8_t 
         U1::enable(true);
         U1Tx::function(PinFunction::af1, {.speed = PinSpeed::very_high});
         U1Rx::function(PinFunction::af1, {.pull = PinPull::up});
-        uint32_t spins = 200000;
-        while ((U1::status() & UsartFlag::reack) == 0u && spins-- != 0u) {
-        }
-        ok = ok && (U1::status() & UsartFlag::reack) != 0u;
+        // REACK before the Stop (33.5.21), a few kernel clocks after the
+        // enable; 10 ms is the budget.
+        ok = ok && wait_until<Ruler>([] { return (U1::status() & UsartFlag::reack) != 0u; },
+                                     10'000);
         if (ok && src == UsartWakeSource::address_match) {
             U1::request(UsartRequest::mute);
         }
@@ -8961,8 +8973,7 @@ WakeLeg wake_leg(uint32_t rate, UsartClock kernel, UsartWakeSource src, uint8_t 
         }
         // The console's last line out first: a Stop stops PCLK, and a
         // transmitter frozen mid-character garbles what the host reads.
-        for (uint32_t spins = 2'000'000u; !Serial::tx_idle() && spins != 0u; --spins) {
-        }
+        console_drain();
         link_wakes = 0;
         link_wake_armed = 1;
         Nvic::enable(U1::irq());
@@ -9061,10 +9072,10 @@ TaskWakeLeg task_wake_leg(bool mute) {
                                           .address = 0x5})
                          : U1::character_match(0x05));
         U1::enable(true);
-        uint32_t spins = 200000;
-        while ((U1::status() & UsartFlag::reack) == 0u && spins-- != 0u) {
-        }
-        ok = ok && (U1::status() & UsartFlag::reack) != 0u;
+        // REACK before the Stop (33.5.21), a few kernel clocks after the
+        // enable; 10 ms is the budget.
+        ok = ok && wait_until<Ruler>([] { return (U1::status() & UsartFlag::reack) != 0u; },
+                                     10'000);
         if (ok && mute) {
             U1::request(UsartRequest::mute);
         }
@@ -9075,8 +9086,7 @@ TaskWakeLeg task_wake_leg(bool mute) {
             wake_task_live = false;
             return t;
         }
-        for (uint32_t spins = 2'000'000u; !Serial::tx_idle() && spins != 0u; --spins) {
-        }
+        console_drain();
         (void)Rtc::set_wakeup(RtcWakeupClock::ck_spre, 1, true);
         Rtc::clear_flags(RtcFlag::wakeup);
         feed();
@@ -9092,7 +9102,7 @@ TaskWakeLeg task_wake_leg(bool mute) {
         feed();
         // What the TASK received: its ring, read after the far send is
         // certainly over (eight frames at 2400 are 33.3 ms).
-        wait_ms(200);
+        spin_us<Ruler>(200'000);
         t.w.wuf = WakeTask::wakes();
         uint8_t b = 0;
         while (t.w.n < sizeof t.got && WakeTask::read_byte(b)) {
@@ -9115,8 +9125,8 @@ void print_wake(const char* name, const WakeLeg& w) {
 template <bool stageable = board_lse_fitted && (usart_exti_line(1) != 0xFF)>
 void tu_stop_wake() {
     if constexpr (!stageable) {
-        print(serial, "  SKIPPED, no verdict claimed: USART1's wake from Stop needs its EXTI line and the RTC "
-                      "on the crystal as the backstop", crlf);
+        bench.skip("USART1's wake from Stop needs its EXTI line and the RTC on the crystal "
+                   "as the backstop");
         return;
     } else {
         if (!(RtcDomain::selected() == RtcClockSource::lse && RtcDomain::lse_ready())) {
@@ -9347,7 +9357,7 @@ void tx_bridge() {
               l.c.gaps, " gaps (", l.c.lost, " bytes), ", l.c.bad, " corrupt, ", l.c.unplaced, " unplaced; skips ",
               l.skips, ", ORE ", l.ore, ", FE ", l.fe, crlf);
         if (l.c.got == 0u) {
-            print(serial, "  SKIP  the host pumped nothing: run this letter from brio stress", crlf);
+            bench.skip("the host pumped nothing: run this letter from brio stress");
             continue;
         }
         // Bursts of 200 bytes with a millisecond between them carry 200
@@ -9498,6 +9508,15 @@ bool dma23_transport(uint8_t m, bool& edge) {
 template <bool on = image_has_link>
 bool dma23_link(uint8_t m) {
     if constexpr (on) {
+        if (m == mode_link_dma || m == mode_link_dma8 || m == mode_link_low ||
+            m == mode_link_low8) {
+            // Read before dma_isr() clears them (the ring arms both): a half
+            // or full mark of LinkRxEngine's channel 3, the unit
+            // ring_entry_bound() counts.
+            if (DmaChannel<1, 3>::flag(DmaFlag::half | DmaFlag::complete)) {
+                link_marks = link_marks + 1u;
+            }
+        }
         switch (m) {
             case mode_link_dma: (void)LinkDma::dma_isr(); return true;
             case mode_link_dma8: (void)LinkDma8::dma_isr(); return true;
@@ -9619,7 +9638,7 @@ extern "C" void USART1_IRQHandler() {
     bool edge = false;
     if (usart1_transport(m, edge) || usart1_link(m) || usart1_rs485(m)) {
         if (edge) {
-            rx_edge_at = now();
+            rx_edge_at = Ruler::now();
             rx_edges = rx_edges + 1u;
         }
         return;
@@ -9641,7 +9660,7 @@ extern "C" void BRIO_STM32G0_DMA1_CH4_UP_HANDLER() {
         brio::Nvic::disable(brio::dma_channel_irq(1, 4));
     }
     if (edge) {
-        rx_edge_at = now();
+        rx_edge_at = Ruler::now();
         rx_edges = rx_edges + 1u;
     }
 }
@@ -9660,7 +9679,7 @@ extern "C" void DMA1_Channel2_3_IRQHandler() {
         brio::Nvic::disable(DMA1_Channel2_3_IRQn);
     }
     if (edge) {
-        rx_edge_at = now();
+        rx_edge_at = Ruler::now();
         rx_edges = rx_edges + 1u;
     }
 }

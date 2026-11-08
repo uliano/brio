@@ -71,6 +71,7 @@
 #include "kernel/panic.hpp"
 #include "stm32f4/clock.hpp"
 #include "stm32f4/delay.hpp"
+#include "stm32f4/dwt.hpp"
 #include "stm32f4/flash.hpp"
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/pin.hpp"
@@ -84,6 +85,7 @@
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 #include "rt/selftest.hpp"
 
@@ -123,12 +125,34 @@ TestBench<Serial> bench;
 
 std::optional<PanicRecord> boot_record;
 
+/// The ruler of the suite's time-outs: the DWT's cycle counter, started in
+/// main(). It counts while interrupts are masked and through a Sleep
+/// (stm32f4/dwt.hpp).
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
+
 /// Let the console's own transmitter fall silent: its interrupt would
-/// otherwise wake every idle() below.
+/// otherwise wake every idle() below. A wedged console (false after
+/// 200 ms) shows as an idle() woken early, which the letters judge, so
+/// the answer is dropped here.
 void console_drain() {
-    const uint32_t t0 = Ticker::ticks();
-    while (!Serial::tx_idle() && Ticker::ticks() - t0 < 200u) {
+    (void)brio::console_drain<Ruler, Serial>();
+}
+
+/// The records test_stm32f4_reset's legs leave for the boot after them
+/// (its leg_panic() and its fault legs): a board flashed with this suite
+/// while one of them was pending boots holding it.
+bool left_by_reset_suite(const PanicRecord& r) {
+    const auto code = static_cast<PanicCode>(r.code);
+    if (code == PanicCode::assert_failed) {
+        return r.context == 0x5Au;
     }
+    return code == PanicCode::kernel_fault &&
+           (r.context == 0x77u || r.context == 0x66u || r.context == 0xB5u ||
+            r.context == 0xA1u);
 }
 
 // =============================================================================
@@ -154,7 +178,14 @@ void ta_boot() {
     bench.verdict("the flash size register says 2048 KB", flash_size_kbytes() == 2048u);
 #endif
     bench.verdict("the unique id is not blank", (uid.word[0] | uid.word[1] | uid.word[2]) != 0u);
-    bench.verdict("no breadcrumb is pending on a clean start", !boot_record);
+    if (boot_record && left_by_reset_suite(*boot_record)) {
+        print(serial, "  a breadcrumb was pending at this boot: code ", boot_record->code,
+              " context ", hex(boot_record->context), crlf);
+        bench.skip("the pending record is one test_stm32f4_reset's legs leave: this boot "
+                   "is not a clean start");
+    } else {
+        bench.verdict("no breadcrumb is pending on a clean start", !boot_record);
+    }
 }
 
 // =============================================================================
@@ -433,8 +464,8 @@ AwakeEntry awake_entry() {
     for (int i = 0; i < 8; ++i) {
         const uint32_t t = Ticker::ticks();
         (void)place_tick_edge(200u, reload);
-        while (Ticker::ticks() == t) {
-        }
+        // A tick is 1 ms; a lost one only spoils the printed figure.
+        (void)brio::wait_until<Ruler>([&] { return Ticker::ticks() != t; }, 5'000);
         const uint32_t to_loop = since_tick_edge(SysTick->VAL);
         const uint32_t entry = since_tick_edge(tick_entry);
         if (entry < a.tick_entry) {
@@ -453,8 +484,9 @@ AwakeEntry awake_entry() {
         (void)Edge::set_compare(0, 200u);
         Edge::interrupts(Edge::compare_interrupt(0), true);
         Edge::enable(true);
-        while (edge_hits == h0) {
-        }
+        // The compare lands 200 cycles on; a lost one only spoils the
+        // printed figure.
+        (void)brio::wait_until<Ruler>([&] { return edge_hits != h0; }, 5'000);
         const uint32_t to_loop = Edge::count() - 200u;
         const uint32_t entry = edge_entry - 200u;
         if (entry < a.line_entry) {
@@ -514,8 +546,8 @@ void rescue_down() {
 }
 
 void tw_edge() {
-    bench.verdict("TIM9 counts HCLK (the placed line's edge is in core cycles)",
-                  Edge::clock_hz(clock) == SysClock::hz);
+    static_assert(Edge::clock_hz(clock) == SysClock::hz,
+                  "TIM9 counts HCLK (the placed line's edge is in core cycles)");
     rescue_up();
     console_drain();
 
@@ -591,7 +623,10 @@ void tk_turns() {
     // Turns over 100 quiet ticks: the tick is the only interrupt.
     const uint32_t t = Ticker::ticks();
     uint32_t turns = 0;
-    while (Ticker::ticks() - t < 100u) {
+    // Bounded on the DWT too (it counts through the idle()'s Sleep): 100
+    // ticks are 100 ms, and a stopped tick ends the loop at 200 ms.
+    const uint32_t d0 = Ruler::now();
+    while (Ticker::ticks() - t < 100u && Ruler::now() - d0 < brio::us_cycles<Ruler>(200'000)) {
         kernel_turn();
         ++turns;
     }
@@ -659,7 +694,9 @@ void tc_ticker() {
     const uint32_t target = 200;
     const uint32_t period = reload + 1u;
     uint32_t t1 = Ticker::ticks();
-    while (Ticker::ticks() == t1) {
+    if (!brio::wait_until<Ruler>([&] { return Ticker::ticks() != t1; }, 5'000)) {
+        bench.verdict("the tick advanced within 5 ms", false);
+        return;
     }
     t1 = Ticker::ticks();
     uint32_t last = SysTick->VAL;
@@ -845,6 +882,7 @@ int main() {
     boot_record = brio::take_panic_record<P>();
 
     const bool clock_ok = SysClock::init();
+    (void)CycleCounter::init();   // every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0)
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
     brio::enable_interrupts();

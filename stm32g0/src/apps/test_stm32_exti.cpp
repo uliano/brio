@@ -27,7 +27,12 @@
 //   PA0, PB0   line 0   (EXTI0_1) - and the same line through two
 //                       ports, which is what makes the multiplexer
 //                       measurable
-//   PB3        line 3   (EXTI2_3)
+//   PB3        line 3   (EXTI2_3) - ON THE DESK, THE SPI SCK WIRE to the
+//                       paired board (its spi_peer's PB3, this board's
+//                       SPI1): free only while that board leaves its end
+//                       high-impedance, so letter b asks first and skips
+//                       the PB3 legs - driving included - when the pad
+//                       does not follow its own pull
 //   PB7        line 7   (EXTI4_15)
 //   PA8        line 8   (EXTI4_15, a second line on the shared vector)
 //   PC13       the user button B1, READ ONLY: a press cannot be staged
@@ -84,6 +89,7 @@
 #include "stm32g0/ticker.hpp"
 #include "stm32g0/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
@@ -216,12 +222,15 @@ void clear_counts() {
 // Instruments
 // =============================================================================
 
-/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
-/// tick count and the counter's position composed right across the reload
-/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
-uint32_t cycles_now() {
-    return Ticker::cycles();
-}
+/// The ruler: a cycle count that spans ticks, the kernel ticker's own
+/// cycles() - the tick count and the counter's position composed right
+/// across the reload (util/cycle_count.hpp); it wraps at 2^32, so only
+/// differences are used. SysTick runs through a WFE's Sleep.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000UL;
 uint32_t cycles_to_us(uint32_t cycles) { return cycles / cycles_per_us; }
 
@@ -233,12 +242,10 @@ void settle() { (void)delay_us(clock, 200); }
 /// Wait for the console to be physically empty - a WFE that any pending
 /// interrupt can return is only a measurement when nothing else is
 /// asking.
+/// A wedged console (false after 200 ms) shows as a WFE ended early,
+/// which letter g judges, so the answer is dropped here.
 void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    const uint32_t t0 = cycles_now();
-    while (cycles_now() - t0 < SysClock::hz / 500u) {
-    }
+    (void)brio::console_drain<Ruler, Serial>();
 }
 
 /// THE PRECONDITION OF EVERYTHING: an input pad with nothing attached
@@ -407,10 +414,8 @@ void ta_block() {
                       "up there",
                       (boot_imr2 & exti_implemented_mask2) == direct2);
     } else {
-        print(serial, "  SKIPPED, no verdict claimed: IMR2's reset value "
-              "needs a line above 31, and this part implements none "
-              "(exti_implemented_mask2 is zero - the reserve finds no "
-              "EXTI_IMR2_IM_Msk, and the register does not exist).", crlf);
+        bench.skip("IMR2's reset value needs a line above 31, and this part implements "
+                   "none (exti_implemented_mask2 is zero: the register does not exist)");
     }
     bench.verdict("EMR1 came up at zero (no CPU event is unmasked)",
                   boot_emr1 == 0u);
@@ -495,7 +500,10 @@ void tb_stimulus() {
     bench.verdict("PA0 is electrically free (it follows its own pull)",
                   pad_follows_pull<PadA0>());
     bench.verdict("so is PB0", pad_follows_pull<PadB0>());
-    bench.verdict("so is PB3", pad_follows_pull<PadB3>());
+    // PB3 is the desk's SPI SCK wire (the file header): free only while
+    // the paired board leaves its end high-impedance. Asked, not assumed;
+    // a held pad skips every PB3 leg below, the driven one included.
+    const bool b3_free = pad_follows_pull<PadB3>();
     bench.verdict("so is PB7", pad_follows_pull<PadB7>());
     const bool pa8_free = pad_follows_pull<PadA8>();
     print(serial, "  PA8 on a part with a UCPD is UCPD1_CC1: this one ",
@@ -526,6 +534,14 @@ void tb_stimulus() {
     bench.verdict("PA0 and PB0 are two separate pins (one driven does not "
                   "move the other)",
                   b0_low_while_a0_high && b0_high_while_a0_low);
+
+    if (!b3_free) {
+        print(serial, "  PB3 does not follow its own pull: something outside holds it", crlf);
+        bench.skip("PB3 is held from outside (the desk's SPI wire): the stimulus legs need it "
+                   "free");
+        quiet_everything();
+        return;
+    }
 
     // --- technique 1: the internal pull
     PadB3::input(PinPull::down);
@@ -926,14 +942,15 @@ void tg_masks() {
     // the stopwatch only READ SysTick - so the register's state is the
     // EXTI's doing alone.
     uint32_t t = Ticker::ticks();
-    while (Ticker::ticks() == t) {
-    }
+    // A tick is 1 ms; a stopped one leaves the WFE unaligned, which the
+    // verdicts after show.
+    (void)brio::wait_until<Ruler>([&] { return Ticker::ticks() != t; }, 5'000);
     __SEV();
     __WFE();                       // consumes it: the register is now clear
     drive_to<PadB7>(true);         // the edge under test
-    uint32_t c0 = cycles_now();
+    uint32_t c0 = Ruler::now();
     __WFE();
-    const uint32_t event_us = cycles_to_us(cycles_now() - c0);
+    const uint32_t event_us = cycles_to_us(Ruler::now() - c0);
     const bool event_pending = IntB7::pending();
 
     // The control: the same edge with the CPU event masked, staged
@@ -942,14 +959,15 @@ void tg_masks() {
     (void)IntB7::clear();
     drive_to<PadB7>(false);
     t = Ticker::ticks();
-    while (Ticker::ticks() == t) {
-    }
+    // A tick is 1 ms; a stopped one leaves the WFE unaligned, which the
+    // verdicts after show.
+    (void)brio::wait_until<Ruler>([&] { return Ticker::ticks() != t; }, 5'000);
     __SEV();
     __WFE();
     drive_to<PadB7>(true);
-    c0 = cycles_now();
+    c0 = Ruler::now();
     __WFE();
-    const uint32_t control_us = cycles_to_us(cycles_now() - c0);
+    const uint32_t control_us = cycles_to_us(Ruler::now() - c0);
 
     print(serial, "  WFE after an edge: ", event_us,
           " us with the CPU event unmasked, ", control_us,
@@ -1138,12 +1156,10 @@ void tp_port_d() {
 // human can exercise by hand.
 void tu_button() {
     if constexpr (!button_bonded) {
-        print(serial, "  SKIPPED, no verdict claimed: the user button needs "
-              "PC13, and this package does not bond it (DS12992 table 12 - "
-              "the LQFP32's port C is PC6, PC14 and PC15 and nothing else); "
-              "the board it sits on has no user button either. Nothing here "
-              "names a pad the package has not got, so line 13 is left "
-              "alone: an unbonded pad's level is not a reading.", crlf);
+        // Nothing here names a pad the package has not got, so line 13 is
+        // left alone: an unbonded pad's level is not a reading.
+        bench.skip("the user button needs PC13, which this package does not bond "
+                   "(DS12992 table 12), and its board has no user button");
         return;
     }
     PadButton::input(PinPull::down);
@@ -1174,9 +1190,7 @@ void tu_button() {
                       ExtInt<PadButton>::configure(ExtiSense::falling) &&
                       ExtInt<PadButton>::arm(true));
     (void)ExtInt<PadButton>::clear();
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < 50u) {
-    }
+    brio::spin_us<Ruler>(50'000);
     const bool spontaneous = ExtInt<PadButton>::pending();
     print(serial, "  50 ms armed with nobody pressing: pending = ",
           spontaneous ? "1" : "0", crlf);

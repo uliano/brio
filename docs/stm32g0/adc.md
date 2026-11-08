@@ -52,7 +52,7 @@ ES0548 Rev 3 items 2.6.1..2.6.5, read on the bench chip's revision Z
 column. Driver: `stm32g0/adc.hpp`; the reference vocabulary is
 `stm32g0/vref.hpp`'s (see [vref.md](vref.md)), the per-part facts come
 from `stm32g0/device_tables.hpp` (the reserve: the table of what each part has, read off the device header). Bench suite:
-`test_stm32_analog` (18 letters, 139 verdicts, wireless; a letter is one command key of the suite's console and the group of verdicts it runs),
+`test_stm32_analog` (18 letters, 138 verdicts, wireless; a letter is one command key of the suite's console and the group of verdicts it runs),
 shared with the DAC, the reference buffer and the comparators. Family fixture
 `test/family_stm32g0/adc.cpp` plus four negatives under
 `brio check stm32g0`.
@@ -212,7 +212,10 @@ falls on the right side of the calibration by construction, a supply
 above 3.0 V giving fewer counts for the same bandgap. The same reading
 in volts is **1221 mV at 12 bits and 1219 mV at 10**, two counts of the
 coarse scale apart, which is the full-scale arithmetic checked at two
-resolutions; DS13560 table 27 allows 1182..1232 mV.
+resolutions. The 12-bit figure is the factory word on this scale -
+VDDA comes from the same reading, so VREFINT reads VREFINT_CAL x 3.0 V /
+4096 on every board - and what DS13560 table 27's 1182..1232 mV judges
+is that word: 1667 counts, inside the table's 1614..1682.
 
 **The junction temperature is 32.6 C**, from 15.9's two-point formula
 with the raw reading first RESCALED from the 3310 mV it was taken at to
@@ -451,14 +454,14 @@ rows instead of six and says so.
 ## On the STM32G031K8
 
 On the Nucleo-G031K8 (DEV_ID 0x466, REV_ID 0x1003) `test_stm32_analog`
-claims **67 of its 139** verdicts, and the shortfall is not the ADC's:
+claims **67 of its 138** verdicts, and the shortfall is not the ADC's:
 **this part has no DAC and no comparators at all**, so eight of the
 suite's eighteen letters (the DAC's four - `d`, `e`, `o`, `p` - the
 comparators' three - `i`, `m`, `n` - and `k`, which pairs a DAC stream
 with an ADC one) are COMPILED OUT - `Dac` and `Comp` cannot be named where
 `DAC1_BASE` and `COMP1_BASE` do not exist - and each is still registered
-in the menu, printing its own reason and claiming nothing. The converter's
-own letters run whole.
+in the menu, answering with one SKIP line that gives its reason and
+claiming nothing. The converter's own letters run whole.
 
 **THE SECOND ANALOG SOURCE IS THE JUNCTION SENSOR.** Half this suite's
 letters need a second reading that is not VREFINT, and on the bigger
@@ -470,8 +473,8 @@ DAC's code as a knob states what it lost.
 Numbers on this die: **VDDA 3308 mV** from VREFINT against VREFINT_CAL =
 1667 (3310 on the G0B1RE, 3317 on the G071RB), CALFACT 63 after the self
 calibration, the junction sensor 948 counts = 32.7 C, VBAT/3 1374 counts =
-3330 mV, VREFINT 1221 mV at 12 bits and 1218 at 10 - inside table 27's
-1.182..1.232 V. The noise floor over 64 conversions is 2 counts on VREFINT
+3330 mV, VREFINT 1221 mV at 12 bits and 1218 at 10 - the factory word
+on this scale, inside table 27's 1.182..1.232 V. The noise floor over 64 conversions is 2 counts on VREFINT
 and 3 on the sensor.
 
 **THE INPUT MAP IS THIS PACKAGE'S OWN**: IN0..IN7 on PA0..PA7, IN8..IN10

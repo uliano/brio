@@ -334,23 +334,23 @@ and a peer is a second board on the other end of a link.
 
 | Suite | G0B1RE | G071RB | What skips there, and why |
 |---|---|---|---|
-| `test_stm32_crc` | 33 | **27** | nothing - the one driver that needs no fact from the reserve |
+| `test_stm32_crc` | 32 | **27** | nothing - the one driver that needs no fact from the reserve |
 | `test_stm32_platform` | 71 (+ `i` 26, `j` 20) | **53** (+ `i` 26) | nothing; letters `w` and `k` (the idle contract) are measured on the G0B1RE alone ([platform.md](platform.md)) |
 | `test_stm32_sleep` | 50 | **50** | nothing in `z`; letter `u` measures a different Shutdown wake ([pwr.md](pwr.md)) |
-| `test_stm32_exti` | 95 | **89** | nothing; IMR1's reset value differs ([exti.md](exti.md)) |
-| `test_stm32_rtc` | 126 | **125** | nothing in `z`; two tamper inputs instead of three, and arming one does not take its pad ([rtc.md](rtc.md)) |
+| `test_stm32_exti` | 94 | **89** | nothing; IMR1's reset value differs ([exti.md](exti.md)) |
+| `test_stm32_rtc` | 123 | **125** | nothing in `z`; two tamper inputs instead of three, and arming one does not take its pad ([rtc.md](rtc.md)) |
 | `test_stm32_lptim` | 85 | **82** | nothing |
 | `test_stm32_tickless` | 47 | **45** | letter `i`'s awake-time meter needs TIM2's ETR taking MCO, which this part's ETRSEL has not got |
 | `test_stm32_clock` | 42 | **40** | letter `h` (`delay_us` at 20 us) needs that same 4 us wall; the rest runs on an LSE wall instead |
-| `test_stm32_tim` | 128 | **114** | TIM4: its counter, its four channels on PB6..PB9, and TIM3's shared vector |
-| `test_stm32_dma` | 85 (+ `p` 4, `q` 5, `u` 3) | **76**, counted on the one image it was before it split into three | DMA2's five channels, and letter `m`'s peripheral-to-peripheral destination ([dma.md](dma.md)) |
-| `test_stm32_analog` | 139 | **136** | COMP3's register block and its whole signal path |
-| `test_stm32_serial` | 120 (+ y/w/v/x; + `t` 174, the STM32F446RE as peer) | **112** (+ y/w/v) | LPUART2 (two verdicts), and four to ES0418 2.2.4 ([usart.md](usart.md)) |
-| `test_stm32_spi` | 102 (the STM32F446RE as peer) | - | the same self-link letters that skip on the G0B1RE; SPI3 and SPI2's I2S are absent; the peer letters want a board paired with this one, and none is ([spi.md](spi.md)) |
-| `test_stm32_i2c` | 200 (+ `w` 35, the STM32F446RE as peer) | **54** (peer) | the same self-link letters, and the peer set's `s` and `t`, whose third node is the self-link's I2C2; I2C3 is absent and I2C2 has no independent clock |
+| `test_stm32_tim` | 126 | **114** | TIM4: its counter, its four channels on PB6..PB9, and TIM3's shared vector |
+| `test_stm32_dma` | 84 (+ `p` 4, `q` 5, `u` 3) | **76**, counted on the one image it was before it split into three | DMA2's five channels, and letter `m`'s peripheral-to-peripheral destination ([dma.md](dma.md)) |
+| `test_stm32_analog` | 138 | **136** | COMP3's register block and its whole signal path |
+| `test_stm32_serial` | 119 (+ y/w/v/x; + `t` 179, the STM32F446RE as peer) | **112** (+ y/w/v) | LPUART2 (two verdicts), and four to ES0418 2.2.4 ([usart.md](usart.md)) |
+| `test_stm32_spi` | 106 (the STM32F446RE as peer) | - | the same self-link letters that skip on the G0B1RE; SPI3 and SPI2's I2S are absent; the peer letters want a board paired with this one, and none is ([spi.md](spi.md)) |
+| `test_stm32_i2c` | 203 (+ `w` 35, the STM32F446RE as peer) | **54** (peer) | the same self-link letters, and the peer set's `s` and `t`, whose third node is the self-link's I2C2; I2C3 is absent and I2C2 has no independent clock |
 | `test_stm32_nvm` | 85 | - | one flash bank: no storage attic ([nvm.md](nvm.md)) |
-| `test_stm32_journal` | 52 | - | the same |
-| `test_stm32_fdcan` | 96 | - | no FDCAN on this part ([fdcan.md](fdcan.md)) |
+| `test_stm32_journal` | 46 | - | the same |
+| `test_stm32_fdcan` | 95 | - | no FDCAN on this part ([fdcan.md](fdcan.md)) |
 | `test_stm32_rubato` | 39 | - | built for the G0B1RE alone (its boards line); TIM2 and TIM14, its ruler and its interrupt, exist on this part ([platform.md](platform.md)) |
 | `test_stm32_rubato_link` | 133 (`z`, the STM32F446RE's `spi_peer`) + 111 (`y`, its `usart_peer`) | - | built for the G0B1RE alone (its boards line): a two-board suite runs only where its partner is wired ([platform.md](platform.md)) |
 | `test_stm32_rubato_i2c` | 202 (`z`, the STM32F446RE's `twi_peer`) | - | built for the G0B1RE alone (its boards line): a two-board suite runs only where its partner is wired ([i2c.md](i2c.md), [platform.md](platform.md)) |
@@ -401,22 +401,22 @@ the G071RB:
 
 | Suite | G0B1RE | G071RB | G031K8 | What skips on the G031K8, and why |
 |---|---|---|---|---|
-| `test_stm32_crc` | 33 | 27 | **27** | nothing - the boards line is the whole change |
+| `test_stm32_crc` | 32 | 27 | **27** | nothing - the boards line is the whole change |
 | `test_stm32_platform` | 71 (+ `i` 26, `j` 20) | 53 (+ `i` 26) | **53** (+ `i` 26) | nothing; the LED moves to PC6 and LSI reads 31400 Hz; letters `w` and `k` are measured on the G0B1RE alone |
-| `test_stm32_sleep` | 50 (+ `s` 6, `u` 6) | 50 (+ `s` 6, `u` 6) | **50** (+ `s` 6, `u` 6) | nothing; a Shutdown wake is a literal power-on reset here as on the G071 ([pwr.md](pwr.md)) |
-| `test_stm32_exti` | 95 | 89 | **85** | IMR2's reset value (no second register group at all) and the user button (PC13 is not bonded) |
-| `test_stm32_rtc` | 126 (+ `w` 11, `v` 4) | 125 | **109** (+ `w` 11, `v` 4) | RTC_REFIN (PB15 unbonded), two tamper legs whose level is a board's, and the TAMPPUDIS contrast (a free pad that leans high) ([rtc.md](rtc.md)) |
+| `test_stm32_sleep` | 50 (+ `s` 4, `u` 4) | 50 (+ `s` 4, `u` 4) | **50** (+ `s` 4, `u` 4) | nothing; a Shutdown wake is a literal power-on reset here as on the G071 ([pwr.md](pwr.md)) |
+| `test_stm32_exti` | 94 | 89 | **85** | IMR2's reset value (no second register group at all) and the user button (PC13 is not bonded) |
+| `test_stm32_rtc` | 123 (+ `w` 10, `v` 4) | 125 | **109** (+ `w` 11, `v` 4) | RTC_REFIN (PB15 unbonded), two tamper legs whose level is a board's, and the TAMPPUDIS contrast (a free pad that leans high) ([rtc.md](rtc.md)) |
 | `test_stm32_lptim` | 85 | 82 | **78** | the two comparator routes, the comparator trigger row and the two-owner vector (no COMP, no TIM7); the LSE rows are measured |
 | `test_stm32_tickless` | 47 | 45 | **45** (+ `u` 1) | the awake-time meter, which needs TIM2's ETR taking MCO |
 | `test_stm32_clock` | 42 | 40 | **40** | letter `h`: the 4 us wall needs TIM2's ETR taking MCO, a G0B1 code; the LSE code is the wall here, as on the G071 ([clock.md](clock.md)) |
-| `test_stm32_tim` | 128 | 114 | **108** | TIM4, TIM6, TIM7 and TIM15 - four instances the part has not got - and PB13..PB15, which the package does not bond |
-| `test_stm32_dma` | 85 | 76 | **62** (+ `u` 3, `w` 0), counted on the one image it was before it split into three | DMA2, the console's DMA-fed rate (five channels, and the letters own all five) and the peripheral-to-peripheral leg; letters `o` (6) and `r` (4) are built and not run here, nor letter `h`'s rate verdict on the interrupt console, and `p` and `q` skip by name (no console engines) |
-| `test_stm32_analog` | 139 | 136 | **67** | the DAC's letters and the comparators' - this part has neither block, so eight of the eighteen letters are compiled out ([adc.md](adc.md)) |
-| `test_stm32_serial` | 118 (+ y/w/v) | 112 | **79** (+ `y` 1, `v` 2, `w` 0), counted on the one image it was before it outgrew the part and before its letters timed the wire | USART2 is a basic instance here (no kernel-clock multiplexer, no wake), LPUART1's only bonded pads are the console's, and there is no LPUART2 |
-| `test_stm32_spi` | 102 (the STM32F446RE as peer) | - | - | the eleven self-link letters, compiled out: SPI2's four pads are bonded to no pin of the LQFP32, so that instrument cannot exist here at any wiring; the peer letters want a paired board, and none is |
-| `test_stm32_i2c` | 200 (+ `w` 35) | 54 (peer) | **54** (peer), not re-counted on its group images | the self-link letters, skipped on the probe's answer like everywhere else - this package does bond I2C2's PA11/PA12, so what rules them out is the desk and not the plastic |
-| `test_stm32_nvm`, `test_stm32_journal` | 85, 52 | - | - | one flash bank: no storage attic |
-| `test_stm32_fdcan` | 96 | - | - | no FDCAN |
+| `test_stm32_tim` | 126 | 114 | **108** | TIM4, TIM6, TIM7 and TIM15 - four instances the part has not got - and PB13..PB15, which the package does not bond |
+| `test_stm32_dma` | 84 | 76 | **62** (+ `u` 3, `w` 0), counted on the one image it was before it split into three | DMA2, the console's DMA-fed rate (five channels, and the letters own all five) and the peripheral-to-peripheral leg; letters `o` (6) and `r` (4) are built and not run here, nor letter `h`'s rate verdict on the interrupt console, and `p` and `q` skip by name (no console engines) |
+| `test_stm32_analog` | 138 | 136 | **67** | the DAC's letters and the comparators' - this part has neither block, so eight of the eighteen letters are compiled out ([adc.md](adc.md)) |
+| `test_stm32_serial` | 119 (+ y/w/v) | 112 | **79** (+ `y` 1, `v` 2, `w` 0), counted on the one image it was before it outgrew the part and before its letters timed the wire | USART2 is a basic instance here (no kernel-clock multiplexer, no wake), LPUART1's only bonded pads are the console's, and there is no LPUART2 |
+| `test_stm32_spi` | 106 (the STM32F446RE as peer) | - | - | the eleven self-link letters, compiled out: SPI2's four pads are bonded to no pin of the LQFP32, so that instrument cannot exist here at any wiring; the peer letters want a paired board, and none is |
+| `test_stm32_i2c` | 203 (+ `w` 35) | 54 (peer) | **54** (peer), not re-counted on its group images | the self-link letters, skipped on the probe's answer like everywhere else - this package does bond I2C2's PA11/PA12, so what rules them out is the desk and not the plastic |
+| `test_stm32_nvm`, `test_stm32_journal` | 85, 46 | - | - | one flash bank: no storage attic |
+| `test_stm32_fdcan` | 95 | - | - | no FDCAN |
 | `test_stm32_rubato` | 39 | - | - | built for the G0B1RE alone (its boards line); TIM2 and TIM14 exist on this part too |
 
 How the images fit: `brio check stm32g0` links each, `brio fit stm32g0`

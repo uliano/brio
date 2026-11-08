@@ -141,6 +141,7 @@
 #include "stm32g0/tim.hpp"
 #include "stm32g0/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
 // register, and every architecture on this link compiles the same file.
@@ -280,6 +281,19 @@ void span_up() {
 
 [[gnu::always_inline]] inline uint32_t now_counts() { return TIM2->CNT; }
 
+/// The ruler of the time-outs (util/test_wait.hpp's CycleRuler): the same
+/// TIM2, at the NOMINAL 64 MHz - a budget is a margin, and the core's
+/// tracked offset (some 0.3 %) is nothing to it.
+struct Ruler {
+    static uint32_t now() { return now_counts(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
+
+/// The two waits that place the peer's own traffic on the wire - a gap, a
+/// guard, a turnaround - in core counts and in microseconds at the TRACKED
+/// rate (core_hz), so a gap the DUT measures is the one it asked for. Not
+/// time-outs: those are brio::wait_until() on the nominal ruler above.
 void wait_counts(uint32_t n) {
     const uint32_t t0 = now_counts();
     while (now_counts() - t0 < n) {
@@ -287,12 +301,6 @@ void wait_counts(uint32_t n) {
 }
 
 void wait_us(uint32_t us) { wait_counts(static_cast<uint32_t>((static_cast<uint64_t>(us) * core_hz) / 1'000'000u)); }
-
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
 
 // ---------------------------------------------------------------------------
 // The link's configuration: a Cfg turned into registers, refused where the
@@ -551,24 +559,29 @@ bool apply_cfg(const link::Cfg& c, uint16_t& mask) {
 // Talking
 // ---------------------------------------------------------------------------
 
-constexpr uint32_t spin_bound = 400'000u;
+/// The time-out of a wait for room in the transmit FIFO or for TC: 50 ms,
+/// a frame of twelve bits at 300 baud and some to spare.
+constexpr uint32_t frame_budget_us = 50'000;
 
-/// One frame out: wait for room in the transmit FIFO (bounded), then
-/// write it.
+/// One frame out: room in the transmit FIFO asked first, so a frame with
+/// room costs one load and one test (the blast's hot path); a full FIFO is
+/// waited for, bounded. False when the room never came.
 [[gnu::always_inline]] inline bool put_frame(uint16_t v) {
     USART_TypeDef& u = Link::regs();
-    for (uint32_t n = spin_bound; (u.ISR & UsartFlag::txfnf) == 0u; --n) {
-        if (n == 0u) return false;
+    if ((u.ISR & UsartFlag::txfnf) == 0u &&
+        !wait_until<Ruler>([&u] { return (u.ISR & UsartFlag::txfnf) != 0u; }, frame_budget_us)) {
+        return false;
     }
     u.TDR = v;
     return true;
 }
 
 /// The wire falls idle: TC up (the last stop bit gone and nothing
-/// queued), bounded.
+/// queued), bounded. Dropped on its budget: what follows - an answer, an
+/// engine run, a report - goes out regardless, and the DUT's own wait for
+/// it is what notices a wire that never fell idle.
 void wait_tx_done() {
-    for (uint32_t n = spin_bound; !Link::flag(UsartFlag::tc) && n != 0u; --n) {
-    }
+    (void)wait_until<Ruler>([] { return Link::flag(UsartFlag::tc); }, frame_budget_us);
 }
 
 /// Four bit times at the command rate before an answer: the DUT listens
@@ -970,7 +983,9 @@ link::Report run_send(const link::Params& a, uint16_t mask, bool blast) {
     link::Report r{};
     settle();
     if (!blast && a.aux16 != 0u) {
-        wait_ms(a.aux16);
+        // The lead-in on the nominal ruler; past half its wrap (33 s) the
+        // wait saturates, inside the action's own 16-bit deadline.
+        spin_us<Ruler>(static_cast<uint32_t>(a.aux16) * 1000u);
     }
     const uint32_t gap_counts = blast ? 0u : 2u * (core_hz / (a.cfg.rate ? a.cfg.rate : 1u));
     const uint16_t repeats = blast && a.aux16 > 1u ? a.aux16 : 1u;
@@ -995,14 +1010,11 @@ link::Report run_send(const link::Params& a, uint16_t mask, bool blast) {
         bool sent = true;
         for (uint16_t i = 0; i < n; ++i) {
             const uint16_t v = static_cast<uint16_t>(stream.next() & mask);
-            uint32_t spins = spin_bound;
-            while ((u.ISR & UsartFlag::txfnf) == 0u) {
-                if (--spins == 0u) {
-                    sent = false;
-                    break;
-                }
-            }
-            if (!sent) {
+            // The room asked first: a frame with room costs one load.
+            if ((u.ISR & UsartFlag::txfnf) == 0u &&
+                !wait_until<Ruler>([&u] { return (u.ISR & UsartFlag::txfnf) != 0u; },
+                                   frame_budget_us)) {
+                sent = false;
                 break;
             }
             u.TDR = v;
@@ -1585,7 +1597,7 @@ void engine_self_test() {
 void measure() {
     if (!tracking) {
         tracking = tracker_up();
-        wait_ms(300);   // the ring filled once
+        spin_us<Ruler>(300'000);   // the ring filled once
     }
     time_base = tracking && tracked_hz(Tracker::most).has_value() ? 1u : 0u;
     if (time_base == 1u) {

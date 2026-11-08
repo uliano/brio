@@ -93,6 +93,7 @@
 #include <stdint.h>
 
 #include "stm32f4/clock.hpp"
+#include "stm32f4/dwt.hpp"
 #include "stm32f4/delay.hpp"
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/pin.hpp"
@@ -102,6 +103,7 @@
 #include "stm32f4/ticker.hpp"
 #include "stm32f4/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #if defined(STM32F411xE)
@@ -153,20 +155,18 @@ TestBench<Serial, 20> bench;
 constexpr uint32_t lse_nominal_hz = 32768;
 
 // ---------------------------------------------------------------------------
-// The ruler: SysTick cycles, whole milliseconds from the kernel tick and
-// the rest from VAL.
+// The rulers: the DWT's cycle counter (started in main()) for the fixed
+// spans and time-outs, and for the seconds-long weighings a 64-bit SysTick
+// stamp, whole milliseconds from the kernel tick and the rest from VAL.
 // ---------------------------------------------------------------------------
 
-uint32_t systick_period() { return SysTick->LOAD + 1u; }
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 
-/// A wait in whole milliseconds on the kernel tick. delay_us() is capped
-/// below one SysTick period by construction (stm32f4/delay.hpp), so
-/// anything longer is the ticker's business.
-void wait_ms(uint32_t ms) {
-    const uint32_t started = Ticker::ticks();
-    while (Ticker::ticks() - started <= ms) {
-    }
-}
+uint32_t systick_period() { return SysTick->LOAD + 1u; }
 
 /// A monotonic cycle count. THE PENDING BIT IS THE RACE: SysTick can wrap
 /// between the VAL read and the tick read, and the handler that would
@@ -237,15 +237,10 @@ bool measure_seconds(uint8_t n, uint32_t& cycles) {
     return false;
 }
 
-/// Wait, on the kernel tick, for one of the RTC's event flags to stand.
+/// Wait, on the kernel tick (1 ms), for one of the RTC's event flags to
+/// stand.
 bool wait_flag(uint32_t mask, uint32_t budget_ms) {
-    const uint32_t started = Ticker::ticks();
-    while (Ticker::ticks() - started < budget_ms) {
-        if (Rtc::flag(mask)) {
-            return true;
-        }
-    }
-    return false;
+    return brio::wait_ticks<P>([mask] { return Rtc::flag(mask); }, budget_ms);
 }
 
 /// Wait for the CALENDAR's seconds field to change and stamp it. Slower
@@ -496,10 +491,14 @@ void tc_lsi() {
     print(serial, "  this letter resets the backup domain twice: the calendar, "
                   "the alarms and the twenty backup registers are spent", crlf);
 
+    // A word staged in the first backup register first, so the wipe is
+    // seen and not assumed.
+    const bool staged = Rtc::backup(0, 0x5EED'5EEDu) && Rtc::backup(0) == 0x5EED'5EEDu;
     const bool to_lsi = bring_up(RtcClockSource::lsi);
     bench.verdict("a domain reset lets RTCSEL move, and the LSI is selected",
                   to_lsi && RtcDomain::selected() == RtcClockSource::lsi);
-    bench.verdict("the domain reset wiped the backup registers", Rtc::backup(0) == 0u);
+    bench.verdict("the domain reset wiped the backup registers (a word staged before it)",
+                  staged && Rtc::backup(0) == 0u);
 
     uint32_t cycles = 0;
     if (to_lsi && measure_seconds(2, cycles)) {
@@ -867,7 +866,7 @@ int32_t weigh_calibration(const RtcCalibration& c, uint8_t seconds) {
     }
     // Let the setting take: 17.3.11 gives it three ck_apre cycles, and the
     // masked pulses are spread over the whole window.
-    wait_ms(50);
+    brio::spin_us<Ruler>(50'000);
     uint32_t cycles = 0;
     if (!measure_seconds(seconds, cycles)) {
         return INT32_MIN;
@@ -1007,7 +1006,7 @@ int32_t weigh_shift(bool add1s, uint16_t subfs, uint8_t changes) {
 void tk_shift() {
     const uint16_t sync = Rtc::prescalers().sync;
     const uint16_t s0 = Rtc::subsecond();
-    wait_ms(20);
+    brio::spin_us<Ruler>(20'000);
     const uint16_t s1 = Rtc::subsecond();
     print(serial, "  RTC_SSR read ", s0, " then ", s1, " twenty milliseconds later (PREDIV_S ",
           sync, ")", crlf);
@@ -1185,12 +1184,12 @@ void to_windows_masks_output() {
     RtcPad::input();   // the pad's input buffer, which the reads below need
     (void)Rtc::set_wakeup(RtcWakeupClock::ck_spre, 0, false);
     Rtc::alarm_output(RtcOutput::wakeup, true, true);
-    wait_ms(50);
+    brio::spin_us<Ruler>(50'000);
     Rtc::clear_flags(RtcFlag::wakeup);
-    wait_ms(20);
+    brio::spin_us<Ruler>(20'000);
     const bool inv_high_clear = RtcPad::read();
     const bool inv_came = wait_flag(RtcFlag::wakeup, 1500);
-    wait_ms(1);
+    brio::spin_us<Ruler>(1'000);
     const bool inv_low_set = inv_came && !RtcPad::read();
     // Push-pull and open drain, POL = 0, the rise timed from the flag.
     uint32_t rise[2] = {};
@@ -1198,7 +1197,7 @@ void to_windows_masks_output() {
         const bool push_pull = k == 0u;
         Rtc::alarm_output(RtcOutput::wakeup, false, push_pull);
         Rtc::clear_flags(RtcFlag::wakeup);
-        wait_ms(20);
+        brio::spin_us<Ruler>(20'000);
         rise[k] = wait_flag(RtcFlag::wakeup, 1500) ? pad_reaches(true, SysClock::hz / 100u)
                                                    : SysClock::hz / 100u;
     }
@@ -1249,8 +1248,10 @@ void tm_output() {
     print(serial, "  RTC_AF1 through the GPIO's input register reads ", RtcPad::read() ? 1u : 0u,
           crlf);
 
-    bench.verdict("the 512 Hz output is refused unless PREDIV_A is 127",
-                  Rtc::prescalers().async != 127u ||
+    // The refusal at any other PREDIV_A is the driver's own check and is
+    // not staged here: the domain runs the reset prescalers.
+    bench.verdict("the 512 Hz output is taken with PREDIV_A at 127",
+                  Rtc::prescalers().async == 127u &&
                       Rtc::calibration_output(true, RtcCalibOutput::hz512));
     uint32_t window = 0;
     const uint32_t fast = count_pad_edges(1000, window);
@@ -1263,8 +1264,23 @@ void tm_output() {
 
     bench.verdict("the 1 Hz output takes PREDIV_S ending in 0xFF",
                   Rtc::calibration_output(true, RtcCalibOutput::hz1));
-    const uint32_t slow = count_pad_edges(4200, window);
-    print(serial, "  and at COSEL = 1, ", slow, " edges in 4.2 s (4 due)", crlf);
+    // The window opens on a rising edge, so it holds the edges at 1, 2, 3
+    // and 4 s and closes 0.2 s before the fifth: four, whatever the phase
+    // the output had (the crystal and the 1 ms tick move the edges by
+    // microseconds against 200 ms). Opened anywhere, 4.2 s holds four or
+    // five.
+    bool level = RtcPad::read();
+    const bool edge_seen = brio::wait_ticks<P>(
+        [&] {
+            const bool now = RtcPad::read();
+            const bool rose = now && !level;
+            level = now;
+            return rose;
+        },
+        1500);
+    const uint32_t slow = edge_seen ? count_pad_edges(4200, window) : 0u;
+    print(serial, "  and at COSEL = 1, ", slow, " edges in the 4.2 s after a rising edge (4 due)",
+          crlf);
     bench.verdict("which is the calendar's own second on a pin", slow == 4u);
 
     bench.verdict("the output turns off", Rtc::calibration_output(false) &&
@@ -1275,12 +1291,12 @@ void tm_output() {
     bench.verdict("OSEL reads back as the wake-up output",
                   Rtc::alarm_output() == RtcOutput::wakeup);
     (void)Rtc::set_wakeup(RtcWakeupClock::ck_spre, 0, false);
-    wait_ms(50);
+    brio::spin_us<Ruler>(50'000);
     Rtc::clear_flags(RtcFlag::wakeup);
-    wait_ms(20);
+    brio::spin_us<Ruler>(20'000);
     const bool low_while_clear = !RtcPad::read();
     const bool flag_came = wait_flag(RtcFlag::wakeup, 1500);
-    wait_ms(1);
+    brio::spin_us<Ruler>(1'000);
     const bool high_while_set = flag_came && RtcPad::read();
     print(serial, "  RTC_ALARM on the pad: ", low_while_clear ? "low" : "high",
           " with WUTF clear, ", high_while_set ? "high" : "low", " with it set", crlf);
@@ -1313,7 +1329,7 @@ void tm_output() {
 void make_pad_edge() {
     Rtc::timestamp_enable(false);
     RtcPad::output(false);
-    wait_ms(5);
+    brio::spin_us<Ruler>(5'000);
     Rtc::timestamp_enable(true, false);   // rising edge
     RtcPad::set();
 }
@@ -1328,14 +1344,14 @@ void tn_timestamp() {
     // table 25 gives the RTC "TIMESTAMP input floating", and this is what
     // that costs a program that wanted to drive the pin.
     RtcPad::output(false);
-    wait_ms(2);
+    brio::spin_us<Ruler>(2'000);
     const bool core_owns_it_off = !RtcPad::read();
     RtcPad::set();
-    wait_ms(2);
+    brio::spin_us<Ruler>(2'000);
     const bool core_drives_high = RtcPad::read();
     Rtc::timestamp_enable(true, false);
     RtcPad::clear();
-    wait_ms(20);
+    brio::spin_us<Ruler>(20'000);
     const bool core_owns_it_on = !RtcPad::read();
     print(serial, "  with the timestamp off the core drives RTC_AF1 ",
           core_owns_it_off && core_drives_high ? "both ways" : "not at all",
@@ -1569,6 +1585,7 @@ extern "C" void TAMP_STAMP_IRQHandler() {
 
 int main() {
     const bool clock_ok = SysClock::init();
+    (void)brio::CycleCounter::init();   // every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0)
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
     Led::output(led_lit_low);   // dark

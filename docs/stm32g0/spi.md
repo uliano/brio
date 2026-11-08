@@ -99,13 +99,15 @@ clock selector and DMAMUX facts come from `stm32g0/device_tables.hpp`.
 Bench suite: `test_stm32_spi`, and it carries two instruments on one set
 of pads because a desk carries either (the suite probes for the wire at
 boot; its header comment is the map; a letter is one command key of the suite's console and the group of verdicts it runs):
-letters `a`..`m` (90 verdicts) run on the Nucleo's own SPI1-to-SPI2
-self-link, letter `s` (15 verdicts) on no wire at all - the host's two
+letters `a`..`m` (90 verdicts, one more where letter `g`'s staged frame-format
+error reproduces) run on the Nucleo's own SPI1-to-SPI2
+self-link (letters `a` and `m` on no wire), letter `s` (15 verdicts) on no wire at all - the host's two
 loops in every shape, judged by what the block holds after each, a request
 naming the engines refused on the engineless host, the receive shapes under
 a stretched tick handler, and the rate on the wire at every BR code - and
 letter `E` (1) on no wire but the SCK pad, when a request ends,
-letters `n`..`r` (20 verdicts) and `u`..`w` (16) on the link to a PEER
+letters `n`..`r` (20 verdicts, letter `p`'s boundary verdict a skip against a peer
+that holds every judged rung) and `u`..`w` (16) on the link to a PEER
 BOARD running `spi_peer`, commanded in band over
 `avrxt/src/apps/spi_link.hpp` - `u`..`w` through its EXTENDED EXCHANGE
 (16-bit frames, a client that only listens, both ends' CRC units), with
@@ -118,7 +120,7 @@ on the F446's SPI2 - and the peer's `ident` names which one answered
 (firmware 0x01xx, 0x02xx, 0x03xx, 0x04xx). The
 two wirings exclude each other, the suite PROBES which one is fitted
 before any letter runs, and the letters whose instrument is absent skip
-themselves with the reason printed and no verdict claimed. Family
+themselves - a skip with its reason, no verdict claimed. Family
 fixture `test/family_stm32g0/spi.cpp` plus eighteen negatives under
 `brio check stm32g0`.
 
@@ -578,9 +580,10 @@ and their inverse.
 ## Bench findings
 
 Measured by `test_stm32_spi`. The findings down to "The dynamic clock"
-are the SELF-LINK's (SPI1 host to SPI2 client, four wires): 90 verdicts.
+are the SELF-LINK's (SPI1 host to SPI2 client, four wires): 90 verdicts,
+one more where FRE reproduces.
 The ones under "The peer link" are a SECOND CHIP's, on the same four
-SPI1 pads: 36 verdicts, measured against the STM32F446RE paired with
+SPI1 pads: 36 verdicts (letter `p`'s boundary a skip where the climb holds), measured against the STM32F446RE paired with
 this board - and this board's `spi_peer` measured from that one.
 
 **The block, and the reserve against the header.** SPI1 on line 25 and
@@ -614,6 +617,15 @@ cleared (35.5.11's last sentence). Found by a probe that meant to
 measure something else. It is why the transfer engine's boot
 configuration is `SpiNss::software` and why `SpiHost::init()` never
 claims the NSS pad.
+
+**MODF'S CLEARING SEQUENCE, FROM A FRESH FAULT** (letter `a`, ten runs):
+SSI dropped under software management raises MODF with no wire; under a
+mask, the SR read followed by the CR1 write of the value kept clears it,
+the first SR read after the write already finds it down, and a write
+raising MSTR, SSI and SPE takes after it. With a CR1 read, a CR2 read or
+a second SR read between the two steps the flag comes down all the same,
+on the same first read. `clear_mode_fault()` clears a fresh fault and
+answers true.
 
 **The link.** Sixteen 8-bit frames byte-exact in both directions with
 the host polled and the client one frame ahead on its own interrupt.
@@ -689,9 +701,11 @@ staged by an 8-bit master against a 16-bit TI slave DID NOT REPRODUCE:
 the slave resynchronized on the next pulse and the flag stayed clear.
 Recorded, claimed neither way.
 
-**ES0548 2.12.1 REPRODUCES.** A raw SPE clear with three frames in the
-transmit FIFO leaves BSY standing; the same state disabled through
-35.5.9's procedure leaves BSY low and both FIFOs empty. 2.12.2's own
+**ES0548 2.12.1's workaround holds.** Three frames in the transmit FIFO
+disabled through 35.5.9's procedure leave BSY low and both FIFOs empty.
+Whether a raw SPE clear in the same state leaves BSY standing - the
+erratum itself - is printed, BSY read 1 ms after the clear, and not
+judged ("Findings left open"). 2.12.2's own
 subject did not reproduce in 32 rounds (BSY was never still high when
 RXNE rose) - which proves nothing about a sporadic clock coincidence,
 and the honest witness the erratum names, RXNE, rose on every one of the
@@ -1050,9 +1064,12 @@ at 2 MHz, three different registers for one stated SCK - and the link is
 byte-exact at every one, in both directions.
 
 **Table 205's last row, on silicon**: an SPI interrupt returns a core
-from a WFI in Sleep mode, eight rounds of eight and the FIRST wake in
-all eight (the kernel tick being the other candidate, 1 ms against the
-frame's 32 us).
+from a WFI in Sleep mode. Letter `m` counts the wake and not the
+handler: each round starts the frame (32 us at PCLK/256) and enters the
+platform's idle with interrupts masked, so the SPI handler cannot run
+before the core is asleep; a round across which the kernel tick (1 ms)
+moved could have been the tick's wake and is taken again, and the
+verdict asks that the SPI's handler ran in all eight quiet rounds.
 
 ### The peer link (letters n..r)
 
@@ -1648,6 +1665,10 @@ on every header of the pack, but no silicon has run it:
 - **ES0548 2.12.2** is a sporadic coincidence of two clocks and 32
   rounds cannot disprove it; the honest witness it names is measured
   instead.
+- **ES0548 2.12.1 itself** - BSY standing after a raw SPE clear with the
+  transmit FIFO full: letter `h` prints BSY 1 ms after such a clear (ten
+  times the three frames' 96 us) and judges nothing; runs of letter `h`
+  on the STM32G0B1RE's self-link would state what this die shows.
 - **the I2S master clock's own frequency**: MCK is 256 x Fs (about 12
   MHz here) and no free pad on this desk carries a counter for it. Its
   effect on the sampling rate is measured instead, which is the same

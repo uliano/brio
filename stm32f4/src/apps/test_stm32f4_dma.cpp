@@ -78,6 +78,7 @@
 #include "stm32f4/tim.hpp"
 #include "stm32f4/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #if defined(STM32F411xE)
@@ -92,6 +93,14 @@ constexpr SysClock clock;
 namespace {
 
 using namespace brio;
+
+/// The ruler: the DWT's cycle counter, started once in main(). It counts
+/// with interrupts masked too, so a span taken under a mask reads on it.
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 
 // ---- the console, and the cells its requests sit on --------------------------
 //
@@ -239,29 +248,18 @@ DmaTransfer mem_to_mem(uint16_t count, DmaWidth width, DmaBurst memory_burst,
 }
 
 /// Wait for a stream to raise its completion flag. Bounded: a wrong
-/// configuration must show as a failed letter, never as a dead board.
+/// configuration must show as a failed letter, never as a dead board. The
+/// default budget, 20 ms, covers the longest block a letter waits on, the
+/// console's 120 bytes at 115200 (10.4 ms); a memory-to-memory block of
+/// this suite is over in tens of microseconds.
 template <typename Stream>
-bool wait_complete(uint32_t spins = 4'000'000u) {
-    while (!Stream::flag(DmaFlag::complete)) {
-        if (spins-- == 0u) {
-            return false;
-        }
-    }
-    return true;
+bool wait_complete(uint32_t budget_us = 20'000u) {
+    return brio::wait_until<Ruler>([] { return Stream::flag(DmaFlag::complete); }, budget_us);
 }
 
-// ---- the rulers ---------------------------------------------------------------
+// ---- the ruler's spans --------------------------------------------------------
 
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
-
-uint32_t systick_period() { return SysTick->LOAD + 1u; }
-
-/// SysTick counts DOWN, so a later sample is a smaller number - unless
-/// the period wrapped between the two, which at 1000 Hz means the
-/// measurement was longer than a millisecond and is not to be trusted.
-uint32_t val_delta(uint32_t first, uint32_t second) {
-    return first >= second ? first - second : first + systick_period() - second;
-}
 
 /// Run one memory-to-memory transfer and report the core cycles it took,
 /// or 0 when it did not complete.
@@ -269,15 +267,14 @@ uint32_t timed_block(const DmaTransfer& t) {
     if (!Work::prepare(t)) {
         return 0;
     }
-    const uint32_t v0 = SysTick->VAL;
+    const uint32_t t0 = Ruler::now();
     if (!Work::trigger()) {
         return 0;
     }
     if (!wait_complete<Work>()) {
         return 0;
     }
-    const uint32_t took = val_delta(v0, SysTick->VAL);
-    return took;
+    return Ruler::now() - t0;
 }
 
 // ---- what the registers held before this program touched them ----------------
@@ -296,14 +293,14 @@ BootState boot;
 // transport for the length of the letter. The handover is safe only with
 // the ring drained and the shifter empty, and 10.3.17's warning says the
 // stream goes off before the peripheral's request bit does.
-
-void quiesce_console() {
-    uint32_t spins = 4'000'000u;
-    while (!Serial::tx_idle() && spins-- != 0u) {
-    }
-    spins = 400'000u;
-    while (!Console::tx_complete() && spins-- != 0u) {
-    }
+//
+// tx_idle() answers for the ring and for TC, the shifter's last stop bit
+// (stm32f4/usart.hpp). A console that does not drain in 200 ms is wedged;
+// the handover goes on regardless, since what a wedged console costs is
+// the host's view of the next lines, and every verdict after it reads the
+// streams' own flags and counts.
+void console_drain() {
+    (void)brio::console_drain<Ruler, Serial>();
 }
 
 void release_console_stream() {
@@ -391,7 +388,8 @@ void tb_memory_to_memory() {
     // EN right after the store, reported and not judged (the F429 takes
     // them all, the F411 wedges like the F446); then four with the store
     // left alone, which is
-    // what enable() does, and which every part completes.
+    // what enable() does, and which every part completes. The 256-byte
+    // block takes about 1.4 us, so a block not done in 1 ms is wedged.
     uint8_t wedged = 0;
     for (uint8_t k = 0; k < 4u; ++k) {
         Work::stop();
@@ -401,7 +399,7 @@ void tb_memory_to_memory() {
         (void)Work::prepare(t);
         Work::regs().CR = Work::regs().CR | DMA_SxCR_EN;
         (void)Work::enabled();   // the load right after the store
-        if (!wait_complete<Work>(200'000u)) {
+        if (!wait_complete<Work>(1'000u)) {
             ++wedged;
         }
     }
@@ -413,7 +411,7 @@ void tb_memory_to_memory() {
     uint8_t alone = 0;
     for (uint8_t k = 0; k < 4u; ++k) {
         Work::stop();
-        if (Work::prepare(t) && Work::trigger() && wait_complete<Work>(200'000u) && same(bytes)) {
+        if (Work::prepare(t) && Work::trigger() && wait_complete<Work>(1'000u) && same(bytes)) {
             ++alone;
         }
     }
@@ -516,34 +514,78 @@ void tc_refusals() {
 }
 
 // ---- d  the FIFO, table 49 ------------------------------------------------------
+//
+// RM0090 table 49 ("FIFO threshold configurations"; RM0390 table 34, the
+// same rows) as the manual prints it, written here and not taken from the
+// driver: [memory width][threshold][memory burst], the threshold a quarter
+// to full, the burst single, INCR4, INCR8, INCR16. A single beat is always
+// legal; a burst is legal where the threshold's bytes are a whole number
+// of bursts and the burst fits the four-word FIFO.
+
+constexpr DmaFifoThreshold fifo_thresholds[4] = {
+    DmaFifoThreshold::quarter, DmaFifoThreshold::half, DmaFifoThreshold::three_quarters,
+    DmaFifoThreshold::full};
+constexpr DmaBurst fifo_bursts[4] = {DmaBurst::single, DmaBurst::incr4, DmaBurst::incr8,
+                                     DmaBurst::incr16};
+constexpr DmaWidth fifo_widths[3] = {DmaWidth::byte, DmaWidth::half, DmaWidth::word};
+
+constexpr bool table49[3][4][4] = {
+    // byte:      single  INCR4  INCR8  INCR16
+    {{true, true, false, false},     // 1/4: 1 burst of 4
+     {true, true, true, false},      // 1/2: 2 of 4, 1 of 8
+     {true, true, false, false},     // 3/4: 3 of 4
+     {true, true, true, true}},      // full: 4 of 4, 2 of 8, 1 of 16
+    // half-word:
+    {{true, false, false, false},    // 1/4: forbidden
+     {true, true, false, false},     // 1/2: 1 burst of 4
+     {true, false, false, false},    // 3/4: forbidden
+     {true, true, true, false}},     // full: 2 of 4, 1 of 8
+    // word:
+    {{true, false, false, false},
+     {true, false, false, false},
+     {true, false, false, false},
+     {true, true, false, false}},    // full: 1 burst of 4
+};
+
+/// The driver's predicate against the manual's table, all 48 cells, at
+/// compile time; the letter then judges what prepare() does at run time.
+constexpr bool driver_predicate_is_table49() {
+    for (uint8_t w = 0; w < 3u; ++w) {
+        for (uint8_t th = 0; th < 4u; ++th) {
+            for (uint8_t b = 0; b < 4u; ++b) {
+                if (dma_fifo_burst_valid(fifo_thresholds[th], fifo_bursts[b], fifo_widths[w],
+                                         DmaBurst::single, fifo_widths[w]) != table49[w][th][b]) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+static_assert(driver_predicate_is_table49(),
+              "dma_fifo_burst_valid() is table 49, cell by cell, for a single-beat peripheral "
+              "port of the memory's width");
 
 void td_fifo() {
     Block::init();
     fill_source();
 
-    constexpr DmaFifoThreshold thresholds[4] = {
-        DmaFifoThreshold::quarter, DmaFifoThreshold::half, DmaFifoThreshold::three_quarters,
-        DmaFifoThreshold::full};
-    constexpr DmaBurst bursts[4] = {DmaBurst::single, DmaBurst::incr4, DmaBurst::incr8,
-                                    DmaBurst::incr16};
-    constexpr DmaWidth widths[3] = {DmaWidth::byte, DmaWidth::half, DmaWidth::word};
-
-    uint8_t accepted = 0, refused = 0, exact = 0, moved = 0;
+    uint8_t accepted = 0, refused = 0, agree = 0, exact = 0, moved = 0;
     for (uint8_t w = 0; w < 3u; ++w) {
         for (uint8_t th = 0; th < 4u; ++th) {
             for (uint8_t b = 0; b < 4u; ++b) {
-                const uint16_t items = static_cast<uint16_t>(256u / dma_width_bytes(widths[w]));
-                const DmaTransfer t = mem_to_mem(items, widths[w], bursts[b], thresholds[th]);
-                const bool legal = dma_fifo_burst_valid(thresholds[th], bursts[b], widths[w],
-                                                        DmaBurst::single, widths[w]);
+                const uint16_t items =
+                    static_cast<uint16_t>(256u / dma_width_bytes(fifo_widths[w]));
+                const DmaTransfer t =
+                    mem_to_mem(items, fifo_widths[w], fifo_bursts[b], fifo_thresholds[th]);
                 for (uint16_t i = 0; i < buffer_bytes; ++i) {
                     dst[i] = 0;
                 }
                 const bool taken = Work::prepare(t);
-                if (taken != legal) {
-                    continue;
+                if (taken == table49[w][th][b]) {
+                    ++agree;
                 }
-                if (!legal) {
+                if (!taken) {
                     ++refused;
                     continue;
                 }
@@ -560,11 +602,11 @@ void td_fifo() {
         }
     }
     print(serial, "  table 49 over 48 cells: ", accepted, " accepted, ", refused,
-          " refused, ", moved, " run, ", exact, " byte-exact with no FIFO error", crlf);
+          " refused, ", agree, " as the table says, ", moved, " run, ", exact,
+          " byte-exact with no FIFO error", crlf);
     // Twelve single-burst cells are always legal; table 49 adds seven for
     // the byte width, three for the half-word and one for the word.
-    bench.verdict("every cell of table 49 answers as the table says",
-                  accepted + refused == 48u);
+    bench.verdict("every cell of table 49 answers as the table says", agree == 48u);
     bench.verdict("twenty-three of the forty-eight are legal", accepted == 23u);
     bench.verdict("and every legal one moves its block exactly", exact == accepted);
 }
@@ -693,7 +735,7 @@ void tg_circular() {
     static const char table[lap_bytes] = {'[', 'c', 'i', 'r', 'c', 'u', 'l', 'a',
                                           'r', ' ', 'l', 'a', 'p', ']', '\r', '\n'};
 
-    quiesce_console();
+    console_drain();
     Console::dma_transmit(true);
 
     DmaTransfer t{};
@@ -709,22 +751,26 @@ void tg_circular() {
     // Five laps at the console's own bit rate: every lap is the same
     // sixteen bytes and the host sees them all. Nothing re-arms anything
     // - the controller reloads NDTR and the address itself.
+    // Five laps of sixteen bytes at 115200 are 6.9 ms; the time-out is
+    // 50 ms, and the lap count is what the verdict below judges.
     uint8_t laps = 0;
     uint16_t half_seen = 0;
-    uint32_t spins = 8'000'000u;
-    while (laps < 5u && spins-- != 0u) {
-        if (ConsoleTxStream::flag(DmaFlag::half) && half_seen == 0u) {
-            half_seen = ConsoleTxStream::count();
-        }
-        if (ConsoleTxStream::flag(DmaFlag::complete)) {
-            ConsoleTxStream::clear(DmaFlag::complete | DmaFlag::half);
-            ++laps;
-        }
-    }
+    (void)brio::wait_until<Ruler>(
+        [&] {
+            if (ConsoleTxStream::flag(DmaFlag::half) && half_seen == 0u) {
+                half_seen = ConsoleTxStream::count();
+            }
+            if (ConsoleTxStream::flag(DmaFlag::complete)) {
+                ConsoleTxStream::clear(DmaFlag::complete | DmaFlag::half);
+                ++laps;
+            }
+            return laps >= 5u;
+        },
+        50'000);
     const uint16_t reloaded = ConsoleTxStream::count();
     const bool still_running = ConsoleTxStream::enabled();
     release_console_stream();
-    quiesce_console();
+    console_drain();
 
     bench.verdict("the circular transfer is accepted", taken);
     print(serial, "  laps=", laps, " NDTR after the wrap=", reloaded,
@@ -749,7 +795,7 @@ void th_double_buffer() {
     static const char third[lap_bytes] = {'[', 'b', 'u', 'f', 'f', 'e',
                                           'r', ' ', 'C', ']', '\r', '\n'};
 
-    quiesce_console();
+    console_drain();
     Console::dma_transmit(true);
 
     DmaTransfer t{};
@@ -771,27 +817,31 @@ void th_double_buffer() {
     uint8_t laps = 0, flips = 0;
     bool target = ConsoleTxStream::current_target_is_m1();
     bool swapped_live = false;
-    uint32_t spins = 8'000'000u;
-    while (laps < 4u && spins-- != 0u) {
-        if (ConsoleTxStream::flag(DmaFlag::complete)) {
-            ConsoleTxStream::clear(DmaFlag::complete | DmaFlag::half);
-            ++laps;
-            const bool now = ConsoleTxStream::current_target_is_m1();
-            if (now != target) {
-                ++flips;
+    // Four laps of twelve bytes at 115200 are 4.2 ms; the time-out is
+    // 50 ms, and the lap count is what the verdict below judges.
+    (void)brio::wait_until<Ruler>(
+        [&] {
+            if (ConsoleTxStream::flag(DmaFlag::complete)) {
+                ConsoleTxStream::clear(DmaFlag::complete | DmaFlag::half);
+                ++laps;
+                const bool now = ConsoleTxStream::current_target_is_m1();
+                if (now != target) {
+                    ++flips;
+                }
+                target = now;
+                if (laps == 2u) {
+                    // 10.3.9's window: at the completion the target has
+                    // just changed, so the OTHER half is the one that may
+                    // be written - and the driver reads CT to know which.
+                    swapped_live = ConsoleTxStream::set_idle_buffer(const_cast<char*>(third));
+                }
             }
-            target = now;
-            if (laps == 2u) {
-                // 10.3.9's window: at the completion the target has just
-                // changed, so the OTHER half is the one that may be
-                // written - and the driver reads CT to know which.
-                swapped_live = ConsoleTxStream::set_idle_buffer(const_cast<char*>(third));
-            }
-        }
-    }
+            return laps >= 4u;
+        },
+        50'000);
     const bool no_error = !ConsoleTxStream::flag(DmaFlag::transfer_error);
     release_console_stream();
-    quiesce_console();
+    console_drain();
 
     bench.verdict("the double-buffer transfer is accepted", taken);
     bench.verdict("the double buffer forces circular mode", circular_forced);
@@ -813,16 +863,34 @@ void ti_abort() {
     // First: how long EN takes to come down on a stream that is not
     // running at all, and on one in the middle of a memory-to-memory
     // block. The chapter's claim is that the disable waits for the
-    // current transfer AND the FIFO flush.
-    const uint32_t v0 = SysTick->VAL;
-    const bool idle_down = Work::abort();
-    const uint32_t idle_cycles = val_delta(v0, SysTick->VAL);
+    // current transfer AND the FIFO flush. The two spans are tens of
+    // cycles, so a console byte's handler (or the tick's) landing in the
+    // idle one would make it the longer: the console is drained first and
+    // each span taken under the mask, on the cycle counter that counts
+    // there.
+    if (!brio::console_drain<Ruler, Serial>()) {
+        bench.skip("the console did not drain: the two abort spans would carry its handler");
+        return;
+    }
+    bool idle_down = false;
+    uint32_t idle_cycles = 0;
+    {
+        const InterruptGuard masked;
+        const uint32_t t0 = Ruler::now();
+        idle_down = Work::abort();
+        idle_cycles = Ruler::now() - t0;
+    }
 
     (void)Work::load(mem_to_mem(buffer_bytes, DmaWidth::byte, DmaBurst::single,
                                 DmaFifoThreshold::full));
-    const uint32_t v1 = SysTick->VAL;
-    const bool mid_down = Work::abort();
-    const uint32_t mid_cycles = val_delta(v1, SysTick->VAL);
+    bool mid_down = false;
+    uint32_t mid_cycles = 0;
+    {
+        const InterruptGuard masked;
+        const uint32_t t1 = Ruler::now();
+        mid_down = Work::abort();
+        mid_cycles = Ruler::now() - t1;
+    }
     const uint16_t left = Work::count();
     const bool flushed_complete = Work::flag(DmaFlag::complete);
     Work::stop();
@@ -838,9 +906,9 @@ void ti_abort() {
                   flushed_complete);
 
     // Then the resume of 10.3.14, on the console's transmitter because it
-    // is slow enough to be interrupted in the middle: send 120 bytes,
-    // stop after a millisecond, and finish the rest from where SxNDTR
-    // says the block got to.
+    // is slow enough to be interrupted in the middle: send 120 bytes
+    // (10.4 ms of line), stop after two milliseconds, and finish the rest
+    // from where SxNDTR says the block got to.
     constexpr uint16_t run = 120;
     static char line[run];
     for (uint16_t i = 0; i < run; ++i) {
@@ -849,7 +917,7 @@ void ti_abort() {
     line[run - 2] = '\r';
     line[run - 1] = '\n';
 
-    quiesce_console();
+    console_drain();
     Console::dma_transmit(true);
     DmaTransfer t{};
     t.peripheral = Console::data_address();
@@ -859,9 +927,7 @@ void ti_abort() {
     t.config.direction = DmaDirection::memory_to_peripheral;
     t.config.memory_increment = true;
     const bool started = ConsoleTxStream::load(t);
-    const uint32_t mark = Ticker::millis();
-    while (Ticker::millis() - mark < 2u) {
-    }
+    brio::spin_us<Ruler>(2'000);
     const bool stopped = ConsoleTxStream::abort();
     const uint16_t remaining = ConsoleTxStream::count();
     ConsoleTxStream::clear(DmaFlag::all);
@@ -873,7 +939,7 @@ void ti_abort() {
     const bool resumed = remaining != 0u && ConsoleTxStream::load(t);
     const bool finished = resumed && wait_complete<ConsoleTxStream>();
     release_console_stream();
-    quiesce_console();
+    console_drain();
 
     print(serial, "  suspended after ", run - remaining, " of ", run,
           " bytes, resumed and finished", crlf);
@@ -894,9 +960,9 @@ void tj_transfer_error() {
     const bool taken = Work::prepare(t);
     const bool up = Work::trigger();
 
-    uint32_t spins = 2'000'000u;
-    while (!Work::flag(DmaFlag::transfer_error) && spins-- != 0u) {
-    }
+    // The bus error comes on the first beat, cycles after the enable; the
+    // time-out is 1 ms, and the flags read next are what the verdicts judge.
+    (void)brio::wait_until<Ruler>([] { return Work::flag(DmaFlag::transfer_error); }, 1'000);
     const uint32_t flags = Work::flags();
     const bool still_enabled = Work::enabled();
     const uint16_t left = Work::count();
@@ -958,7 +1024,7 @@ void tk_priority() {
         b.config.priority = rival;
         (void)Work::prepare(a);
         (void)Rival::prepare(b);
-        const uint32_t v0 = SysTick->VAL;
+        const uint32_t t0 = Ruler::now();
         (void)Work::trigger();
         if (gap) {
             for (uint8_t k = 0; k < 8u; ++k) {
@@ -966,16 +1032,20 @@ void tk_priority() {
             }
         }
         (void)Rival::trigger();
+        // Each block takes 2300 to 4400 cycles; the time-out is 2 ms, and a
+        // stream not done by then is reported below as stalled.
         uint32_t first = 0, second = 0;
-        uint32_t spins = 400'000u;
-        while ((first == 0u || second == 0u) && spins-- != 0u) {
-            if (first == 0u && Work::flag(DmaFlag::complete)) {
-                first = val_delta(v0, SysTick->VAL);
-            }
-            if (second == 0u && Rival::flag(DmaFlag::complete)) {
-                second = val_delta(v0, SysTick->VAL);
-            }
-        }
+        (void)brio::wait_until<Ruler>(
+            [&] {
+                if (first == 0u && Work::flag(DmaFlag::complete)) {
+                    first = Ruler::now() - t0;
+                }
+                if (second == 0u && Rival::flag(DmaFlag::complete)) {
+                    second = Ruler::now() - t0;
+                }
+                return first != 0u && second != 0u;
+            },
+            2'000);
         if (second == 0u) {
             print(serial, "    the second stream STALLED: EN=", Rival::enabled() ? 1u : 0u,
                   " NDTR=", Rival::regs().NDTR, " of ", rival_bytes, " flags=",
@@ -1045,7 +1115,7 @@ struct EngineRun {
     uint32_t laps = 0;          ///< the receive engine's completions, at the end
     uint16_t rx_remaining = 0;  ///< the receive stream's SxNDTR, at the end
     bool circular = false;      ///< the receive stream still circular, at the end
-    uint32_t ruler = 0;         ///< an empty pair of SysTick reads, core cycles
+    uint32_t ruler = 0;         ///< an empty pair of ruler reads, core cycles
     uint32_t harvest_idle = 0;  ///< one harvest() with nothing new, the ruler included
     uint32_t harvest_busy = 0;  ///< one harvest() with bytes waiting, the ruler included
 };
@@ -1059,18 +1129,13 @@ volatile uint8_t engined_console = 0;
 volatile uint32_t engined_edges = 0;
 
 /// Wait for `Port`'s transmit ring to drain and its last frame to leave
-/// the shifter, then `ms` more for the line to settle.
+/// the shifter (its tx_idle() answers for both), then `ms` more for the
+/// line to settle. A port that does not drain in 200 ms shows in the
+/// counts its callers judge, so the answer is dropped here.
 template <typename Port>
 void wait_line(uint32_t ms) {
-    uint32_t spins = 4'000'000u;
-    while (!Port::tx_idle() && spins-- != 0u) {
-    }
-    spins = 400'000u;
-    while (!Console::tx_complete() && spins-- != 0u) {
-    }
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 <= ms) {
-    }
+    (void)brio::console_drain<Ruler, Port>();
+    brio::spin_us<Ruler>(ms * 1000u);
 }
 
 /// What one harvest() costs on the port `Port` holds - the least of three
@@ -1088,18 +1153,18 @@ void time_harvest(EngineRun& r) {
         while (Port::read_byte(byte)) {
         }
         (void)Port::harvest();
-        uint32_t v0 = SysTick->VAL;
-        uint32_t d = val_delta(v0, SysTick->VAL);
+        uint32_t t0 = Ruler::now();
+        uint32_t d = Ruler::now() - t0;
         r.ruler = d < r.ruler ? d : r.ruler;
-        v0 = SysTick->VAL;
+        t0 = Ruler::now();
         (void)Port::harvest();
-        d = val_delta(v0, SysTick->VAL);
+        d = Ruler::now() - t0;
         r.harvest_idle = d < r.harvest_idle ? d : r.harvest_idle;
         (void)Port::write_bulk(std::span<const uint8_t>(poke, sizeof(poke)));
         wait_line<Port>(2);
-        v0 = SysTick->VAL;
+        t0 = Ruler::now();
         (void)Port::harvest();
-        d = val_delta(v0, SysTick->VAL);
+        d = Ruler::now() - t0;
         r.harvest_busy = d < r.harvest_busy ? d : r.harvest_busy;
     }
     while (Port::read_byte(byte)) {
@@ -1121,7 +1186,7 @@ EngineRun run_engined(uint8_t which, uint16_t block, uint32_t rx_window_ms, bool
     line[sizeof(line) - 2] = '\r';
     line[sizeof(line) - 1] = '\n';
 
-    quiesce_console();
+    console_drain();
     Serial::release();
     engined_console = which;
     r.up = Port::init(clock, 115200);
@@ -1154,9 +1219,6 @@ EngineRun run_engined(uint8_t which, uint16_t block, uint32_t rx_window_ms, bool
         if (Ticker::millis() - t0 > 3000u) {
             break;
         }
-    }
-    uint32_t spins = 400'000u;
-    while (!Console::tx_complete() && spins-- != 0u) {
     }
     r.millis = Ticker::millis() - t0;
     r.drained = Port::tx_idle();
@@ -1295,7 +1357,7 @@ uint16_t loop_drain(uint16_t from, bool& in_order) {
 void tn_receive_edges() {
     Block::init();
     Dma<1>::init();
-    quiesce_console();
+    console_drain();
     Serial::release();
     engined_console = 2;
     const bool up = LoopSerial::init(clock, 115200);
@@ -1406,6 +1468,7 @@ struct SinkLeg {
     uint8_t hw_overruns = 0;
     uint8_t line_errors = 0;
     uint8_t faults = 0;
+    bool load_drained = true;   ///< the copies of letter p's load finished at the window's end
 };
 
 /// A run of received bytes against the host's stream. A byte that is not
@@ -1459,6 +1522,14 @@ using LoadC = DmaCopyEngine<2, 5>;
 using LoadD = DmaCopyEngine<2, 6>;
 uint8_t load_copies = 0;      ///< how many of the four a sink leg keeps busy
 uint32_t load_blocks = 0;     ///< blocks they started in the leg
+/// Milliseconds of the leg's window in which none of them was restarted.
+/// A 4 KB block of words takes about 21000 cycles at most with four copies
+/// sharing the controller's one memory port (2616 cycles for 2 KB alone at
+/// letter e's slowest word beat, times two for the size and four for the
+/// company): 117 us at 180 MHz, 210 us at 100 MHz - so a copy kept busy is
+/// restarted several times in every millisecond, and a millisecond with no
+/// restart is a part of the window the copies did not cover.
+uint32_t load_idle_ms = 0;
 
 // ---- s: the copy engine at every width and misalignment, and abandon() ------------
 //
@@ -1475,15 +1546,9 @@ using Copier = DmaCopyEngine<2, 1>;
 constexpr uint32_t cp_elems = 37;
 constexpr uint8_t cp_guard = 0xEE;
 
-bool cp_wait() {
-    const uint32_t t0 = Ticker::ticks();
-    while (Copier::busy()) {
-        if (Ticker::ticks() - t0 > 10u) {
-            return false;
-        }
-    }
-    return true;
-}
+/// A copy of this letter's is over in microseconds (the longest, 1024
+/// words, in about 4000 cycles); a block not done in 10 ms is a failure.
+constexpr uint32_t cp_budget_us = 10'000;
 
 /// True when dst[at, at + len) is `want(i)` and the guard stands on both
 /// sides of it, sixteen bytes each (dst has room: at + len + 16 <= 256).
@@ -1511,7 +1576,8 @@ uint32_t cp_sweep(uint32_t& cases) {
             }
             const bool ok = Copier::copy(reinterpret_cast<T*>(cp_dst + at),
                                          reinterpret_cast<const T*>(cp_src + so), cp_elems) &&
-                            cp_wait() &&
+                            brio::wait_until<Ruler>([] { return !Copier::busy(); },
+                                                    cp_budget_us) &&
                             cp_check(at, cp_elems * sizeof(T), [so](uint32_t k) {
                                 return cp_src[so + k];
                             });
@@ -1529,7 +1595,8 @@ uint32_t cp_sweep(uint32_t& cases) {
         uint8_t pattern[4] = {0x5A, 0xC3, 0x96, 0x3C};
         __builtin_memcpy(&cell, pattern, sizeof(T));
         const bool ok = Copier::fill(reinterpret_cast<T*>(cp_dst + at), &cell, cp_elems) &&
-                        cp_wait() &&
+                        brio::wait_until<Ruler>([] { return !Copier::busy(); },
+                                                cp_budget_us) &&
                         cp_check(at, cp_elems * sizeof(T), [&pattern](uint32_t k) {
                             return pattern[k % sizeof(T)];
                         });
@@ -1576,7 +1643,8 @@ void ts_copy_widths() {
         landed += w != 0u ? 1u : 0u;
     }
     const bool freed = !Copier::busy() && Copier::faults() == faults0 + 1u;
-    const bool again = Copier::copy(&load_dst[1][0], &load_src[0][0], 1024u) && cp_wait() &&
+    const bool again = Copier::copy(&load_dst[1][0], &load_src[0][0], 1024u) &&
+                       brio::wait_until<Ruler>([] { return !Copier::busy(); }, cp_budget_us) &&
                        load_dst[1][1023] == 0xA5A503FFu && load_dst[1][0] == 0xA5A50000u;
     print(serial, "  abandon() 2 us into a 1024-word block: ", stopped ? "true" : "false",
           ", ", landed, " words had landed, the engine ", freed ? "free" : "NOT free",
@@ -1603,6 +1671,8 @@ void arm_load(DmaPriority level) {
     load_blocks = 0;
 }
 
+/// Restart whichever copies are free; the blocks started so far are
+/// load_blocks.
 void run_load() {
     if (load_copies >= 1u) { keep_loaded<LoadA>(0); }
     if (load_copies >= 2u) { keep_loaded<LoadB>(1); }
@@ -1610,10 +1680,21 @@ void run_load() {
     if (load_copies >= 4u) { keep_loaded<LoadD>(3); }
 }
 
-void end_load() {
-    while (LoadA::busy() || LoadB::busy() || LoadC::busy() || LoadD::busy()) {
+/// Let the copies in flight finish (a block takes at most about 210 us,
+/// above; the time-out is 10 ms) and stop restarting them. False when one did
+/// not finish: it is abandoned, and the leg that kept it busy fails.
+bool end_load() {
+    const bool drained = brio::wait_until<Ruler>(
+        [] { return !LoadA::busy() && !LoadB::busy() && !LoadC::busy() && !LoadD::busy(); },
+        10'000);
+    if (!drained) {
+        (void)LoadA::abandon();
+        (void)LoadB::abandon();
+        (void)LoadC::abandon();
+        (void)LoadD::abandon();
     }
     load_copies = 0;
+    return drained;
 }
 
 template <typename Port>
@@ -1622,7 +1703,7 @@ SinkLeg sink_leg(uint32_t baud, uint32_t window_ms) {
     leg.baud = baud;
     print(serial, "HOST sink 3 ", baud, " 8N1 ", window_ms, " 0", crlf);
     const uint32_t t_line = Ticker::millis();
-    quiesce_console();
+    console_drain();
     Serial::release();
     engined_console = 3;
     leg.up = Port::init(clock, baud);
@@ -1639,6 +1720,8 @@ SinkLeg sink_leg(uint32_t baud, uint32_t window_ms) {
         lfsr_state = 0x12345678u;
         uint8_t chunk[64];
         uint32_t last = Ticker::millis();
+        load_idle_ms = 0;
+        uint32_t blocks_at_ms = load_blocks;
         while (Ticker::millis() - t_line < window_ms) {
             run_load();
             const uint32_t now = Ticker::millis();
@@ -1646,6 +1729,12 @@ SinkLeg sink_leg(uint32_t baud, uint32_t window_ms) {
                 continue;
             }
             last = now;
+            if (load_copies != 0u) {
+                if (load_blocks == blocks_at_ms) {
+                    ++load_idle_ms;
+                }
+                blocks_at_ms = load_blocks;
+            }
             if (engined_edges == leg.seen) {
                 continue;   // no edge since the last look: nothing to read
             }
@@ -1664,7 +1753,7 @@ SinkLeg sink_leg(uint32_t baud, uint32_t window_ms) {
         leg.line_errors = static_cast<uint8_t>(Port::noise_errors() + Port::frame_errors() +
                                                Port::parity_errors());
         leg.faults = Port::dma_faults();
-        end_load();
+        leg.load_drained = end_load();
         Port::release();
     }
     engined_console = 0;
@@ -1672,9 +1761,7 @@ SinkLeg sink_leg(uint32_t baud, uint32_t window_ms) {
     // A SILENCE BEFORE THE REPORT, the script's contract: it reads until
     // the wire has been quiet, and whatever it still had in flight lands
     // in the plain console's ring - thrown away here, it is no letter.
-    const uint32_t q0 = Ticker::millis();
-    while (Ticker::millis() - q0 < 500u) {
-    }
+    brio::spin_us<Ruler>(500'000);
     uint8_t junk = 0;
     while (Serial::read_byte(junk)) {
     }
@@ -1748,14 +1835,17 @@ void tp_ring_beside_copies() {
             const SinkLeg leg = sink_leg<StressSerial>(baud, window_ms);
             print(serial, "  sink at ", baud, " beside four copies at ",
                   level == DmaPriority::low ? "low" : "very_high", " (", load_blocks,
-                  " blocks of 4 KB): ", leg.in, " byte(s) in, ", leg.gaps, " gap(s) of ",
+                  " blocks of 4 KB, ", load_idle_ms, " ms with no restart",
+                  leg.load_drained ? "" : ", a copy that never finished", "): ", leg.in, " byte(s) in, ", leg.gaps, " gap(s) of ",
                   leg.lost, " lost, ", leg.bad, " bad; laps missed ", leg.rx_overruns,
                   ", ORE ", leg.hw_overruns, ", line errors ", leg.line_errors, ", faults ",
                   leg.faults, crlf);
             if (!leg.up || leg.in < baud / 10u / 4u) {
                 all_fed = false;
             }
-            if (load_blocks < 100u) {
+            // The whole window: a restart in every millisecond of it (the
+            // bound beside load_idle_ms), and every copy done at its end.
+            if (load_blocks == 0u || load_idle_ms != 0u || !leg.load_drained) {
                 all_loaded = false;
             }
             if (leg.gaps != 0u || leg.bad != 0u || leg.first_gap != 0u ||
@@ -1782,7 +1872,7 @@ void tp_ring_beside_copies() {
 // wire: a requester brought up with its request standing and no stream
 // listening, released one of five ways, then a stream on the requester's
 // OWN CELL - four items between memory and the requester's own register,
-// the direction its owner uses - enabled for 2000 cycles. Every item it
+// the direction its owner uses - enabled for 12 us. Every item it
 // moves before its owner runs a block is a request that outlived the
 // release. Where the requester's clock was gated it is opened again
 // afterwards, no reset, and the count read once more.
@@ -1844,15 +1934,15 @@ static_assert(adc1_cell.stream == 0u && spi1_cell.stream == 3u && tim1_up_cell.s
 
 alignas(4) volatile uint16_t handover_items[4];
 
-void spin_cycles(uint32_t n) {
-    const uint32_t t0 = CycleCounter::now();
-    while (CycleCounter::now() - t0 < n) {
-    }
-}
+/// How long the detector's stream is left enabled: 12 us, 2160 core cycles
+/// at 180 MHz and 1200 at 100 MHz. A request standing at the enable is
+/// served within a few bus cycles; what moves after that is paced by the
+/// requester (a USART frame is 87 us at the divisor below).
+constexpr uint32_t detector_us = 12;
 
 /// The detector: a stream on the requester's own `cell`, four items of
-/// `width` between memory and the requester's register `data`, given 2000
-/// cycles.
+/// `width` between memory and the requester's register `data`, given
+/// detector_us.
 template <uint8_t s>
 uint16_t incoming(uint8_t channel, volatile void* data, DmaDirection direction, DmaWidth width) {
     using In = DmaStream<2, s>;
@@ -1871,7 +1961,7 @@ uint16_t incoming(uint8_t channel, volatile void* data, DmaDirection direction, 
     t.config.peripheral_width = width;
     t.config.memory_width = width;
     (void)In::load(t);
-    spin_cycles(2000u);
+    brio::spin_us<Ruler>(detector_us);
     return static_cast<uint16_t>(4u - In::count());
 }
 template <uint8_t s>
@@ -1897,7 +1987,7 @@ Handover usart6_handover(Release how) {
     U::dma_transmit(true);
     U::transmitter(true);
     U::enable(true);
-    spin_cycles(SysClock::hz / 10000u);
+    brio::spin_us<Ruler>(100);
     switch (how) {
         case Release::contract:
             U::enable(false);   // DMAT left set, as Uart::release() leaves it
@@ -1931,7 +2021,7 @@ Handover usart6_handover(Release how) {
                                        DmaDirection::memory_to_peripheral, DmaWidth::byte);
     if (gated(how)) {
         U::bus_clock(true);
-        spin_cycles(2000u);
+        brio::spin_us<Ruler>(detector_us);
     }
     h.moved_ungated = incoming_moved<u6_cell.stream>();
     if (how == Release::contract) {
@@ -1941,7 +2031,7 @@ Handover usart6_handover(Release how) {
         U::dma_transmit(true);
         U::transmitter(true);
         U::enable(true);
-        spin_cycles(SysClock::hz / 250u);
+        brio::spin_us<Ruler>(4'000);
         h.block = incoming_moved<u6_cell.stream>();
     }
     incoming_stop<u6_cell.stream>();
@@ -1958,7 +2048,7 @@ Handover spi1_handover(Release how) {
     S1::reset();
     (void)S1::configure(SpiConfig{.dma_transmit = true});
     S1::enable();
-    spin_cycles(SysClock::hz / 10000u);
+    brio::spin_us<Ruler>(100);
     switch (how) {
         case Release::contract:
             (void)S1::disable();   // TXDMAEN left set, as SpiHost::release() leaves it
@@ -1992,7 +2082,7 @@ Handover spi1_handover(Release how) {
                                          DmaDirection::memory_to_peripheral, DmaWidth::byte);
     if (gated(how)) {
         S1::bus_clock(true);
-        spin_cycles(2000u);
+        brio::spin_us<Ruler>(detector_us);
     }
     h.moved_ungated = incoming_moved<spi1_cell.stream>();
     if (how == Release::contract) {
@@ -2000,7 +2090,7 @@ Handover spi1_handover(Release how) {
         // into nobody at the reset rate.
         (void)S1::configure(SpiConfig{.dma_transmit = true});
         S1::enable();
-        spin_cycles(SysClock::hz / 10000u);
+        brio::spin_us<Ruler>(100);
         h.block = incoming_moved<spi1_cell.stream>();
     }
     incoming_stop<spi1_cell.stream>();
@@ -2021,7 +2111,7 @@ Handover tim1_handover(Release how) {
     (void)T1::configure(TimConfig{.prescaler = 0, .period = 0xFFFFu});
     T1::interrupts(T1::update_dma, true);
     T1::update();
-    spin_cycles(64u);
+    brio::spin_us<Ruler>(1);
     switch (how) {
         case Release::contract:
             T1::bus_clock(false);   // UDE left set: the worst case, staged by hand
@@ -2048,7 +2138,7 @@ Handover tim1_handover(Release how) {
                                             DmaDirection::memory_to_peripheral, DmaWidth::half);
     if (gated(how)) {
         T1::bus_clock(true);
-        spin_cycles(2000u);
+        brio::spin_us<Ruler>(detector_us);
     }
     h.moved_ungated = incoming_moved<tim1_up_cell.stream>();
     if (how == Release::contract) {
@@ -2056,7 +2146,7 @@ Handover tim1_handover(Release how) {
         (void)T1::configure(TimConfig{.prescaler = 0, .period = 0xFFFFu});
         T1::interrupts(T1::update_dma, true);
         T1::update();
-        spin_cycles(2000u);
+        brio::spin_us<Ruler>(detector_us);
         h.block = incoming_moved<tim1_up_cell.stream>();
     }
     incoming_stop<tim1_up_cell.stream>();
@@ -2073,7 +2163,7 @@ Handover adc1_handover(Release how) {
     AdcCommon::reset();
     (void)A1::init(clock, AdcConfig{.dma = true});
     A1::start();
-    spin_cycles(SysClock::hz / 100000u);   // ten microseconds: one conversion and then some
+    brio::spin_us<Ruler>(10);   // one conversion and then some
     switch (how) {
         case Release::contract:
             A1::bus_clock(false);                // CR2.DMA left set: the worst case
@@ -2100,14 +2190,14 @@ Handover adc1_handover(Release how) {
                                          DmaDirection::peripheral_to_memory, DmaWidth::half);
     if (gated(how)) {
         A1::bus_clock(true);
-        spin_cycles(2000u);
+        brio::spin_us<Ruler>(detector_us);
     }
     h.moved_ungated = incoming_moved<adc1_cell.stream>();
     if (how == Release::contract) {
         // The owner up again, one conversion behind CR2.DMA: one item.
         (void)A1::configure(AdcConfig{.dma = true});
         A1::start();
-        spin_cycles(SysClock::hz / 100000u);
+        brio::spin_us<Ruler>(10);
         h.block = incoming_moved<adc1_cell.stream>();
     }
     incoming_stop<adc1_cell.stream>();
@@ -2118,7 +2208,6 @@ Handover adc1_handover(Release how) {
 }
 
 void tr_released_requester() {
-    (void)CycleCounter::init();
     Block::init();
     const char* names[6] = {"A contract (init resets)  ", "B enable cleared, gated   ",
                             "C enable set, no reset    ", "D enable cleared, clocked ",
@@ -2255,6 +2344,7 @@ int main() {
     boot.ndtr = Work::count();
 
     const bool clock_ok = SysClock::init();
+    (void)brio::CycleCounter::init();   // every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0)
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
     brio::enable_interrupts();

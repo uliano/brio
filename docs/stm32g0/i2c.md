@@ -396,13 +396,15 @@ the reason is in the findings.
 
 ## Bench findings
 
-Measured by `test_stm32_i2c` on the Nucleo-G0B1RE, 249 verdicts
+Measured by `test_stm32_i2c` on the Nucleo-G0B1RE, 238 verdicts
 in two sets, `z` green in three runs, `w` in three, letters `c`, `u`, `v`
 and `B` in ten each and `C` and `D` in fifteen each
 (the letters named below are the suite's console keys, each the group of
 verdicts it runs). The findings ahead of "The peer bus" are the self-link's (I2C1 host
 PB8/PB9, I2C2 client PA11/PA12, both AF6, 2.2 kOhm pull-ups): `z`,
-letters `a`..`m`, `u`, `v`, `B`, `C` and `D`, **214 verdicts**, the cost sections
+letters `a`..`m`, `u`, `v`, `B`, `C` and `D`, **203 verdicts** and five checks skipped by
+name (a glitch source, the target's PEC check, the SMBus ALERT, the Stop on the self-link and
+ES0548 2.10.1's wrong sampling: no pad or wire here gives them), the cost sections
 `bench_stm32`'s on the same link. The ones under "The peer bus" are a
 second chip's, the STM32F446RE running `twi_peer` on the same two nodes:
 the second all-key `w`, letters `n`..`t`, **35 verdicts**.
@@ -1369,8 +1371,9 @@ clock**: the header declares no `RCC_CCIPR_I2C2SEL_Pos`, so
 own question, a TIMEOUTR write that does not read back - answers **I2C1
 yes, I2C2 no** where on the G0B1RE both answer yes. The wake line follows:
 `i2c_exti_line(2)` is 0xFF here and 22 there. Letter `a`'s roster,
-selector, wake-line and SMBus verdicts are all written as the reserve's
-statement for the part rather than as constants.
+selector and wake-line checks are the reserve's statement for the part,
+asserted at compile time for each part the suite builds for, and its SMBus
+verdict asks the silicon.
 
 **And the three refusals move with it.** The verbs that must refuse on an
 instance without the independent clock - `kernel_clock()`, `timeouts()`,
@@ -1487,7 +1490,7 @@ Implemented but not bench-verified:
   in letter a's refusals, but its pads carry no wire here.
 - **The suite as it stands on the two smaller parts.** It is built for the
   STM32G071RB and the STM32G031K8 and today's verdict counts are the
-  STM32G0B1RE's alone (214 and 35). Letters `u`, `v`, `C` and `D` and the figures of "Which engine"
+  STM32G0B1RE's alone (203 and 35). Letters `u`, `v`, `C` and `D` and the figures of "Which engine"
   are measured on the STM32G0B1RE only; those letters on a self-link on those two
   boards, and `bench_stm32`'s letter `i` there, would measure them. The STOPF entry is the
   one host's on all three, and its late path has run on neither smaller part: their DMA1 is

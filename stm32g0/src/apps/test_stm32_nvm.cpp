@@ -75,6 +75,7 @@
 #include "stm32g0/usart.hpp"
 #include "util/nv_heap.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
@@ -195,9 +196,11 @@ volatile uint32_t flash_irq_flags = 0;
 // and the counter's position composed right across the reload
 // (util/cycle_count.hpp).
 // ---------------------------------------------------------------------------
-uint32_t cycles_now() {
-    return Ticker::cycles();
-}
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000UL;
 uint32_t cycles_to_us(uint32_t c) { return c / cycles_per_us; }
@@ -205,12 +208,10 @@ uint32_t cycles_to_us(uint32_t c) { return c / cycles_per_us; }
 /// Wait for the console to be physically empty. Called before anything
 /// that reboots the board: a ring that still holds bytes loses them, and
 /// a suite that loses its own last line is unreadable.
+/// A wedged console (false after 200 ms) loses only the line before the
+/// reboot, so the answer is dropped.
 void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    const uint32_t t0 = cycles_now();
-    while (cycles_now() - t0 < SysClock::hz / 500u) {
-    }
+    (void)brio::console_drain<Ruler, Serial>();
 }
 
 // ---------------------------------------------------------------------------
@@ -514,9 +515,9 @@ void tc_lock() {
 void td_cost() {
     (void)Flash::unlock();
 
-    uint32_t t0 = cycles_now();
+    uint32_t t0 = Ruler::now();
     const uint32_t err_erase = raw_erase(scratch_a);
-    const uint32_t erase_cycles = cycles_now() - t0;
+    const uint32_t erase_cycles = Ruler::now() - t0;
 
     bench.verdict("a page erase reports no error", err_erase == 0u);
     bench.verdict("and the page reads as erased, every byte",
@@ -531,13 +532,13 @@ void td_cost() {
     // One double word, then eight of them: the per-cell cost and the
     // fixed overhead separate themselves.
     fill(64, 0x11);
-    t0 = cycles_now();
+    t0 = Ruler::now();
     const uint32_t err_one = Flash::program(scratch_a, out_span(8));
-    const uint32_t one_cycles = cycles_now() - t0;
+    const uint32_t one_cycles = Ruler::now() - t0;
 
-    t0 = cycles_now();
+    t0 = Ruler::now();
     const uint32_t err_eight = Flash::program(scratch_a + 64u, out_span(64));
-    const uint32_t eight_cycles = cycles_now() - t0;
+    const uint32_t eight_cycles = Ruler::now() - t0;
 
     bench.verdict("one double word programs clean", err_one == 0u);
     bench.verdict("and eight in one call too", err_eight == 0u);
@@ -668,14 +669,23 @@ void tf_rww() {
     // what it cannot do is execute anything while it waits. flash.hpp's
     // wait loop lives in bank 1 and counts its own turns, so the number
     // below is the number of times the CPU fetched, decoded and executed
-    // that loop while bank 2 was being erased.
-    const uint32_t t0 = cycles_now();
+    // that loop while bank 2 was being erased. The instruction cache
+    // (ICEN, on since reset) is off for the measurement: a loop of a few
+    // instructions runs out of the cache without reading bank 1 at all, so
+    // with the cache on its turns would count even on a stalled bank.
+    FLASH->ACR = FLASH->ACR & ~FLASH_ACR_ICEN;
+    const uint32_t t0 = Ruler::now();
     const uint32_t err = raw_erase(scratch_a);
-    const uint32_t cycles = cycles_now() - t0;
+    const uint32_t cycles = Ruler::now() - t0;
     const uint32_t turns = Flash::last_wait_turns();
+    // The cache back on, emptied first (RM0444 3.7.1: ICRST is written
+    // only while ICEN is clear) so it holds nothing from before the erase.
+    FLASH->ACR = FLASH->ACR | FLASH_ACR_ICRST;
+    FLASH->ACR = FLASH->ACR & ~FLASH_ACR_ICRST;
+    FLASH->ACR = FLASH->ACR | FLASH_ACR_ICEN;
 
     print(serial, "  bank-2 page erase: ", cycles_to_us(cycles), " us, ",
-          turns, " turns of a bank-1 polling loop (",
+          turns, " turns of a bank-1 polling loop, instruction cache off (",
           turns == 0u ? 0u : cycles / turns, " cycles per turn)", crlf);
 
     bench.verdict("the erase succeeded", err == 0u);
@@ -727,27 +737,29 @@ void tg_fast() {
     // written with interrupts off - flash.hpp does not do it for the
     // caller, because a driver that masks behind the application's back
     // decides the system's latency.
-    // THE STOPWATCH HAS TO CHANGE FOR THIS ONE MEASUREMENT: cycles_now()
-    // is ticks x period + phase, and inside a critical section SysTick's
-    // INTERRUPT is masked, so the tick count freezes while the counter
-    // keeps wrapping - the sum then goes BACKWARDS every time the
-    // window happens to straddle a millisecond, which fails about one
-    // run in three. SysTick's own VAL, with the
-    // single wrap folded in, is valid with interrupts masked and good
-    // for one whole tick period; the row takes well under that, and the
-    // verdict below refuses to believe a figure that says otherwise.
-    const uint32_t reload = SysTick->LOAD;
+    // THE STOPWATCH INSIDE A CRITICAL SECTION. SysTick's interrupt is
+    // masked there, so the tick count freezes while the counter keeps
+    // reloading; Ticker::cycles() folds in the one reload its pending bit
+    // records and loses any after it. So the window opens just after a
+    // tick has been counted: then a row shorter than two periods (2 ms)
+    // reads exact, and a longer one reads at least one period - never
+    // inside the 0.4..1 ms band judged below, which one VAL difference
+    // could alias a 1.7 ms row into.
+    {
+        brio::TickWitness<Stm32g0Platform<>> tick;
+        // A tick is 1 ms: one comes well inside 3 ms.
+        (void)brio::wait_until<Ruler>([&] { return !tick.quiet(); }, 3'000);
+    }
     uint32_t fast_err = 0;
-    uint32_t v0 = 0;
-    uint32_t v1 = 0;
+    uint32_t c0 = 0;
+    uint32_t c1 = 0;
     {
         Stm32g0Platform<>::CriticalSection cs;
-        v0 = SysTick->VAL;
+        c0 = Ticker::cycles();
         fast_err = Flash::fast_program_row(scratch_b, out_span(Flash::row_size));
-        v1 = SysTick->VAL;
+        c1 = Ticker::cycles();
     }
-    const uint32_t fast_cycles =
-        v0 >= v1 ? v0 - v1 : v0 + reload + 1u - v1;
+    const uint32_t fast_cycles = c1 - c0;
 
     bool fast_exact = true;
     Flash::read(scratch_b, in_span(Flash::row_size));
@@ -756,10 +768,10 @@ void tg_fast() {
     }
 
     // The same 256 bytes the ordinary way, in the next row.
-    const uint32_t t1 = cycles_now();
+    const uint32_t t1 = Ruler::now();
     const uint32_t slow_err =
         Flash::program(scratch_b + Flash::row_size, out_span(Flash::row_size));
-    const uint32_t slow_cycles = cycles_now() - t1;
+    const uint32_t slow_cycles = Ruler::now() - t1;
 
     print(serial, "  row of 32 double words: FSTPG ", cycles_to_us(fast_cycles),
           " us -> ");
@@ -781,17 +793,15 @@ void tg_fast() {
                   "normal programming - 2.7 ms typ, 4.6 max",
                   cycles_to_us(slow_cycles) >= 2'000u &&
                       cycles_to_us(slow_cycles) <= 4'600u);
-    // THE FAST ROW BEATS ITS OWN DATASHEET, and by a factor: table 48
-    // gives 1.7 ms typ for a fast row and this silicon does it in a
-    // third of that. The number that explains it is in 3.3.8's own note
-    // - "maximum time between two double words write requests is the
-    // time programming (around 20 us)" - and 32 x 20 us is 640. So the
-    // datasheet's typical is conservative and the note is exact.
-    bench.verdict("and the FAST row comes in at about 20 us per double word, "
-                  "which is 3.3.8's own figure and well under table 48's "
-                  "1.7 ms typical",
-                  cycles_to_us(fast_cycles) >= 400u &&
-                      cycles_to_us(fast_cycles) <= 999u);
+    // THE FAST ROW IS WHAT TABLE 48 SAYS: 1.7 ms typical, 2.8 ms maximum
+    // (DS13560 Rev 5). It is about 52 us per double word, not 3.3.8's
+    // "around 20 us" - that note bounds the interval between two double
+    // words' requests, not the cost of each. (A single SysTick VAL
+    // difference once read this row as 0.68 ms: 1.68 ms folded into one
+    // 1 ms period, the reason the window above opens on a tick.)
+    bench.verdict("and the FAST row is within table 48's maximum, 2.8 ms "
+                  "(1.7 ms typical)",
+                  cycles_to_us(fast_cycles) <= 2'800u);
 
     // The refusals this mode has of its own: a partial row is not a row.
     bench.verdict("a fast program of anything but a whole row is refused",

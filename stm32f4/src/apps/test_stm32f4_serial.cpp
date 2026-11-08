@@ -21,7 +21,9 @@
 // (RM0390 table 29). The pad is driven PUSH-PULL while a frame goes out
 // (UartOptions::single_wire_push_pull), the pull-up holding the line the
 // transmitter releases between frames: the open drain rises on the
-// pull-up alone, and letter a measures where it gives out. The pad's own
+// pull-up alone, and letter a measures where it gives out - judging the
+// internal pull-up only where it reads PC6 free of a pull-up of its own,
+// and skipping that verdict on the bench's 2.2 kOhm. The pad's own
 // input feeds EXTI line 6 in alternate-function mode, which is how letter
 // e sees the stop bit start on the pad.
 //
@@ -79,7 +81,7 @@
 //      the far chip, the far blast on the polled receiver, the interrupt
 //      receiver and the receive engine (DMA2 stream 2 channel 4)
 //   3  the frame matrix across the wire, what this USART has no word for
-//      SKIPPED with its reason, and the half stop bits timed as lengths
+//      skipped with its reason, and the half stop bits timed as lengths
 //   4  the receiver's errors from a foreign sender: PE, the FE onset, ORE,
 //      the start bit's vote with ONEBIT clear and set, the break with and
 //      without LIN
@@ -134,6 +136,7 @@
 #include "stm32f4/tim.hpp"
 #include "stm32f4/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: the far board's usart_peer
@@ -146,6 +149,16 @@ constexpr SysClock clock;
 namespace {
 
 using namespace brio;
+
+/// The suite's ruler for util/test_wait.hpp's waits: the DWT's cycle
+/// counter at the core's rate, started once in main(). It counts with
+/// interrupts masked and through a Sleep, and stops only in a Stop, which
+/// no letter here enters (stm32f4/dwt.hpp).
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 
 constexpr UartPins console_pins{.tx = {'A', 2, PinFunction::af7}, .rx = {'A', 3, PinFunction::af7}};
 using Serial = Uart<2, console_pins>;
@@ -209,18 +222,12 @@ void down() {
     owner = 0;   // after the release: a stopped stream raises its completion
 }
 
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 <= ms) {
-    }
-}
-
 template <typename Port>
 bool up(uint8_t who, uint32_t baud, const UartFormat& f = {}) {
     down();
     owner = who;
     const bool ok = Port::init(clock, baud, f);
-    wait_ms(1);
+    brio::spin_us<Ruler>(1'000);
     uint8_t b = 0;
     while (Port::read_byte(b)) {
     }
@@ -233,7 +240,10 @@ bool up(uint8_t who, uint32_t baud, const UartFormat& f = {}) {
 
 constexpr uint8_t pattern(uint32_t i) { return static_cast<uint8_t>(i * 151u + 7u); }
 
-/// Send `n` bytes of the pattern from `from`, waiting on the wire.
+/// Send `n` bytes of the pattern from `from`, waiting on the wire. A block
+/// waits at most 100 ms for room - a 512-slot ring drains in 44 ms at the
+/// slowest rate here, 115200 - and a transmitter that takes nothing in
+/// that time ends the send short, which the caller's count then shows.
 template <typename Port>
 void send(uint32_t from, uint32_t n) {
     static uint8_t block[256];
@@ -244,8 +254,13 @@ void send(uint32_t from, uint32_t n) {
             block[i] = pattern(from + done + i);
         }
         uint32_t q = 0;
-        while (q < k) {
-            q += Port::write_bulk(std::span<const uint8_t>(block + q, k - q));
+        if (!brio::wait_until<Ruler>(
+                [&q, k] {
+                    q += Port::write_bulk(std::span<const uint8_t>(block + q, k - q));
+                    return q >= k;
+                },
+                100'000)) {
+            return;
         }
         done += k;
     }
@@ -277,47 +292,76 @@ uint32_t drain(uint32_t from, bool& in_order, uint8_t mask = 0xFFu) {
 /// counter from the first store to TC, against 1024 frames of ten bits at
 /// `baud` - enough that the run's fixed cost, some 1700 cycles, stays under
 /// a per cent at 11.25 Mbaud; the answer is in thousandths of the wire's
-/// time.
+/// time. The console is drained first, so that its transmit interrupt
+/// does not lengthen the run: nothing when it did not drain. The writes and
+/// the wait for TC are each bounded at 10 ms, twice the slowest run's wire
+/// time (5.1 ms at 2 Mbaud); a stuck transmitter reads as a figure far
+/// past the verdicts' 1030.
 template <typename Port>
-uint32_t wire_permille(uint32_t baud) {
+std::optional<uint32_t> wire_permille(uint32_t baud) {
     static uint8_t frames[1024];
     for (uint32_t i = 0; i < sizeof(frames); ++i) {
         frames[i] = pattern(i);
     }
+    if (!brio::console_drain<Ruler, Serial>()) {
+        return std::nullopt;
+    }
     Res::clear_flags(UsartFlag::tc);
-    const uint32_t t0 = CycleCounter::now();
+    const uint32_t t0 = Ruler::now();
     uint32_t q = 0;
-    while (q < sizeof(frames)) {
-        q += Port::write_bulk(std::span<const uint8_t>(frames + q, sizeof(frames) - q));
-    }
-    while (!Res::tx_complete() || !Port::tx_idle()) {
-        if (CycleCounter::now() - t0 > SysClock::hz / 100u) {
-            break;
-        }
-    }
-    const uint32_t took = CycleCounter::now() - t0;
+    (void)brio::wait_until<Ruler>(
+        [&q] {
+            q += Port::write_bulk(std::span<const uint8_t>(frames + q, sizeof(frames) - q));
+            return q >= sizeof(frames);
+        },
+        10'000);
+    (void)brio::wait_until<Ruler>([] { return Res::tx_complete() && Port::tx_idle(); }, 10'000);
+    const uint32_t took = Ruler::now() - t0;
     const uint64_t wire = 10ull * sizeof(frames) * SysClock::hz / baud;
-    wait_ms(1);
+    brio::spin_us<Ruler>(1'000);
     uint8_t b = 0;
     while (Port::read_byte(b)) {
     }
     return static_cast<uint32_t>(1000ull * took / wire);
 }
 
-/// Send n, wait for the wire and a few frames more, read it all back.
+/// Send n, wait for the wire and a few frames more, read it all back: the
+/// reads stop at n or after 200 ms (256 frames at 115200 are 22 ms), and
+/// the count is the answer.
 template <typename Port>
 bool round_trip(uint32_t n, uint32_t& got, uint8_t mask = 0xFFu) {
     send<Port>(0, n);
-    const uint32_t t0 = Ticker::millis();
     got = 0;
     bool in_order = true;
-    while (Ticker::millis() - t0 < 200u && got < n) {
-        got += drain<Port>(got, in_order, mask);
-    }
+    (void)brio::wait_until<Ruler>(
+        [&] {
+            got += drain<Port>(got, in_order, mask);
+            return got >= n;
+        },
+        200'000);
     return in_order && got == n;
 }
 
 // ---- a  the loop proven ----------------------------------------------------------
+/// Whether PC6 carries a pull-up of its own beside the pad's (the desk's
+/// I2C self-link puts 2.2 kOhm on it), read with USART6 down: the pad
+/// driven low for 10 us, then an input with no pull, read 2 us later. A
+/// pull-up of a few tens of kilohms or less has raised the line by then
+/// (2.2 kOhm on some 50 pF is a 110 ns time constant), while a pad with
+/// nothing on it holds its low charge far longer - a leakage of a
+/// microampere would move 50 pF by 40 mV in 2 us. The pad is given back
+/// (analog) after.
+bool loop_pad_pulled_up() {
+    using Pad = Pin<'C', 6>;
+    Pad::output(false);
+    brio::spin_us<Ruler>(10);
+    Pad::input(PinPull::none);
+    brio::spin_us<Ruler>(2);
+    const bool high = Pad::read();
+    Pad::release();
+    return high;
+}
+
 void ta_loop() {
     static constexpr uint32_t rates[] = {115200, 1'000'000, 5'625'000};
     for (const uint32_t baud : rates) {
@@ -339,13 +383,20 @@ void ta_loop() {
     uint32_t got = 0;
     const bool up_f = up<LoopFast>(4, 11'250'000);
     const bool ok_f = round_trip<LoopFast>(256, got);
-    const uint32_t pm = wire_permille<LoopFast>(11'250'000);
+    const std::optional<uint32_t> pm = wire_permille<LoopFast>(11'250'000);
     print(serial, "  11.25 Mbaud (OVER8, ONEBIT), receive engine: ", got, " of 256 back, BRR ",
-          hex(Res::brr()), "; 1024 frames out in ", pm, " thousandths of their wire time", crlf);
+          hex(Res::brr()), "; 1024 frames out in ", pm.value_or(0u), " thousandths of their wire time", crlf);
     bench.verdict("OVER8 reaches APB2 / 8 = 11.25 Mbaud and the loop carries it", up_f && ok_f);
-    bench.verdict("and the line runs at the rate asked: 1024 frames in their wire time within "
-                  "three per cent", pm >= 1000u && pm <= 1030u);
-    // The open drain: where the pull-up's rise gives out.
+    if (!pm) {
+        bench.skip("the console did not drain: the timed run would carry its interrupt");
+    } else {
+        bench.verdict("and the line runs at the rate asked: 1024 frames in their wire time within "
+                      "three per cent", *pm >= 1000u && *pm <= 1030u);
+    }
+    // The open drain: where the pull-up's rise gives out - the internal
+    // pull-up's, judged only where the pad has none of its own.
+    down();
+    const bool pad_pulled = loop_pad_pulled_up();
     static constexpr uint32_t od_rates[] = {1'000'000, 2'812'500};
     bool od_slow = false;
     bool od_fast = false;
@@ -360,7 +411,13 @@ void ta_loop() {
         }
     }
     down();
-    bench.verdict("the open drain on the internal pull-up carries 1 Mbaud", od_slow);
+    if (pad_pulled) {
+        print(serial, "  PC6 carries a pull-up of its own: the open drain rose on it, not on the internal "
+                      "pull-up alone", crlf);
+        bench.skip("the open drain on the internal pull-up alone: PC6 has an external pull-up here");
+    } else {
+        bench.verdict("the open drain on the internal pull-up carries 1 Mbaud", od_slow);
+    }
     print(serial, "  and ", od_fast ? "carries" : "does not carry", " 2.8125 Mbaud", crlf);
 }
 
@@ -396,12 +453,16 @@ void tc_sampling() {
     uint32_t got = 0;
     const bool ok_up = up<LoopFast>(4, 2'000'000);
     const bool ok = round_trip<LoopFast>(256, got);
-    const uint32_t pm = wire_permille<LoopFast>(2'000'000);
+    const std::optional<uint32_t> pm = wire_permille<LoopFast>(2'000'000);
     print(serial, "  OVER8 + ONEBIT at 2 Mbaud: BRR ", hex(Res::brr()), ", ", got, " of 256, NE ",
-          LoopFast::noise_errors(), "; 1024 frames out in ", pm,
+          LoopFast::noise_errors(), "; 1024 frames out in ", pm.value_or(0u),
           " thousandths of their wire time", crlf);
-    bench.verdict("USARTDIV is fCK / (8 x baud) at OVER8 (RM0390 25.4.4): 2 Mbaud on the wire, "
-                  "1024 frames in their wire time within three per cent", pm >= 1000u && pm <= 1030u);
+    if (!pm) {
+        bench.skip("the console did not drain: the timed run would carry its interrupt");
+    } else {
+        bench.verdict("USARTDIV is fCK / (8 x baud) at OVER8 (RM0390 25.4.4): 2 Mbaud on the wire, "
+                      "1024 frames in their wire time within three per cent", *pm >= 1000u && *pm <= 1030u);
+    }
     bench.verdict("OVER8 lays the divisor out in eighths, bit 3 clear", (Res::brr() & 0x8u) == 0u &&
                                                                             Res::oversampling8());
     bench.verdict("ONEBIT and OVER8 carry the loop byte-exact, no noise counted",
@@ -415,18 +476,18 @@ void tc_sampling() {
 /// and the stream's read of it would clear the flag before the vector
 /// counts it (the window letter d's last leg measures). So a frame's end
 /// is waited for on the cycle counter - two frame times at 115200, the
-/// stream's read and the vector included.
-void two_frames() {
-    const uint32_t t0 = CycleCounter::now();
-    while (CycleCounter::now() - t0 < 2u * SysClock::hz / 11'520u) {
-    }
-}
+/// stream's read and the vector included: 2 x 10 bits at 115200 are
+/// 173.6 us, rounded up.
+void two_frames() { brio::spin_us<Ruler>(174); }
 
 /// Send a break (SBK, cleared by the hardware during the break's stop
-/// bit - a CR1 read) and wait it out.
+/// bit - a CR1 read) and wait it out. The clear is waited for 1 ms, ten
+/// times a break frame and its stop bit at 115200 (95 us); an SBK still
+/// set then is said, and the counts the letter judges show the rest.
 void put_break() {
     Res::send_break();
-    while (Res::break_pending()) {
+    if (!brio::wait_until<Ruler>([] { return !Res::break_pending(); }, 1'000)) {
+        print(serial, "  SBK still set 1 ms after the request: the break did not end", crlf);
     }
     two_frames();
 }
@@ -474,7 +535,7 @@ void td_errors() {
             (void)LoopDma::consume(static_cast<uint32_t>(run.size()));
         }
     }
-    wait_ms(2);
+    brio::spin_us<Ruler>(2'000);
     {
         const auto run = LoopDma::read_span();
         for (const uint8_t b : run) {
@@ -506,7 +567,7 @@ void td_errors() {
     put_break();
     put_break();
     put_byte(0x22);
-    wait_ms(2);
+    brio::spin_us<Ruler>(2'000);
     const uint8_t two = LoopDma::frame_errors();
     (void)up<LoopDma>(2, 115200);
     put_byte(0x11);
@@ -514,7 +575,7 @@ void td_errors() {
     put_break();
     put_break();
     put_byte(0x22);
-    wait_ms(2);
+    brio::spin_us<Ruler>(2'000);
     const uint8_t three = LoopDma::frame_errors();
     print(serial, "  back to back: two breaks count ", two, ", three count ", three, crlf);
     bench.verdict("back-to-back breaks count every other one (two count 1, three count 2)",
@@ -568,7 +629,7 @@ void td_errors() {
             put_break();
         }
     }
-    wait_ms(2);
+    brio::spin_us<Ruler>(2'000);
     bool joined_ok = true;
     const uint32_t joined = drain<LoopIrq>(40, joined_ok);
     const uint32_t skips_after = (LoopIrq::rx_skips() - skips1) & 0xFFu;
@@ -585,9 +646,10 @@ uint32_t last_latency = 0, last_latency_lo = 0, last_latency_hi = 0;   ///< the 
 
 /// Four 0x55 frames (bit 7 low, so the stop bit starts with a rising
 /// edge) through `Port`; the DWT where tx_idle() first answered true,
-/// against PC6's last rising edge.
+/// against PC6's last rising edge - nothing when the console did not
+/// drain first.
 template <typename Port>
-int32_t idle_after_stop(uint8_t who, uint32_t baud, uint32_t& bit_cycles) {
+std::optional<int32_t> idle_after_stop(uint8_t who, uint32_t baud, uint32_t& bit_cycles) {
     static const uint8_t frames[4] = {0x55, 0x55, 0x55, 0x55};
     (void)up<Port>(who, baud);
     bit_cycles = SysClock::hz / Port::actual_baud(Port::template kernel_hz<SysClock>());
@@ -600,24 +662,28 @@ int32_t idle_after_stop(uint8_t who, uint32_t baud, uint32_t& bit_cycles) {
     // the stop bit rises, holds the edge's handler off and the stamp comes
     // late, which reads tx_idle() as true tens of cycles BEFORE the stop
     // bit's end (measured at 115200).
-    for (uint32_t i = 0; i < 20'000'000u && !Serial::tx_idle(); ++i) {
+    if (!brio::console_drain<Ruler, Serial>()) {
+        (void)PadLine::arm(false);
+        Nvic::disable(PadLine::irq());
+        return std::nullopt;
     }
     (void)Port::write_bulk(std::span<const uint8_t>(frames, sizeof(frames)));
     uint32_t t_idle = 0;
-    const uint32_t t0 = CycleCounter::now();
     // The stamp is taken AFTER the true answer: TC stood when SR was read,
     // so the count read after it is never early - late by a poll's few
-    // cycles at most.
-    for (;;) {
-        if (Port::tx_idle()) {
-            t_idle = CycleCounter::now();
-            break;
-        }
-        if (CycleCounter::now() - t0 > SysClock::hz / 100u) {
-            break;
-        }
-    }
-    wait_ms(1);
+    // cycles at most. Bounded at 10 ms, some 300 times four frames at
+    // 115200: a transmitter that never idles leaves the stamp at zero and
+    // the figure out of the verdict's window.
+    (void)brio::wait_until<Ruler>(
+        [&t_idle] {
+            if (Port::tx_idle()) {
+                t_idle = Ruler::now();
+                return true;
+            }
+            return false;
+        },
+        10'000);
+    brio::spin_us<Ruler>(1'000);
     const uint32_t edge = pad_edge_at;
     // The edge's stamp is its handler's: the latency from a software
     // trigger of the same line to the stamp, taken off - the MEDIAN of
@@ -629,9 +695,10 @@ int32_t idle_after_stop(uint8_t who, uint32_t baud, uint32_t& bit_cycles) {
         const uint32_t before = pad_edge_at;
         const uint32_t t_sw = CycleCounter::now();
         (void)PadLine::trigger();
-        const uint32_t t_wait = CycleCounter::now();
-        while (pad_edge_at == before && CycleCounter::now() - t_wait < SysClock::hz / 1000u) {
-        }
+        // A millisecond for the handler: one that never ran leaves the
+        // older stamp, a sample that wraps to the top of the sort, printed
+        // as the range's high end.
+        (void)brio::wait_until<Ruler>([before] { return pad_edge_at != before; }, 1'000);
         l = pad_edge_at - t_sw;
     }
     for (uint8_t i = 1; i < 7u; ++i) {   // insertion sort of seven
@@ -656,9 +723,15 @@ void te_tx_idle() {
     static constexpr uint32_t rates[] = {115200, 1'000'000};
     for (const uint32_t baud : rates) {
         uint32_t bit = 0;
-        const int32_t d_irq = idle_after_stop<LoopIrq>(1, baud, bit);
+        const std::optional<int32_t> o_irq = idle_after_stop<LoopIrq>(1, baud, bit);
         const uint32_t l_irq = last_latency, l_irq_lo = last_latency_lo, l_irq_hi = last_latency_hi;
-        const int32_t d_dma = idle_after_stop<LoopDma>(2, baud, bit);
+        const std::optional<int32_t> o_dma = idle_after_stop<LoopDma>(2, baud, bit);
+        if (!o_irq || !o_dma) {
+            bench.skip("the console did not drain: its interrupt would hold the edge's stamp off");
+            continue;
+        }
+        const int32_t d_irq = *o_irq;
+        const int32_t d_dma = *o_dma;
         print(serial, "  ", baud, " baud, a bit ", bit, " cycles: tx_idle() true ", d_irq,
               " cycles after the stop bit's rising edge (interrupt transmitter), ", d_dma,
               " (transmit engine); the stamp's latency a median of 7: ", l_irq, " (", l_irq_lo, "..",
@@ -687,7 +760,7 @@ void tf_edge() {
         (void)drain<LoopDma>(0, ok);
         const uint32_t e0 = edges;
         put_byte(0x42);
-        wait_ms(1);
+        brio::spin_us<Ruler>(1'000);
         const uint32_t e1 = edges;
         const uint32_t got = drain<LoopDma>(0, ok);
         print(serial, "  a burst of one frame: ", e1 - e0, " edge(s), ", got, " byte read", crlf);
@@ -697,7 +770,10 @@ void tf_edge() {
     // Sixteen frames: the vectors' entries, the last edge after the stop bit.
     bool ok = true;
     (void)drain<LoopDma>(0, ok);
-    wait_ms(1);
+    brio::spin_us<Ruler>(1'000);
+    // The console quiet before the timed burst: its transmit interrupt
+    // would hold the edge's stamp off.
+    const bool console_quiet = brio::console_drain<Ruler, Serial>();
     usart_entries = 0;
     dma_entries = 0;
     const uint32_t e0 = edges;
@@ -705,26 +781,33 @@ void tf_edge() {
     send<LoopDma>(0, 16);
     uint32_t got = 0;
     uint32_t seen0 = edges;
-    while (!Res::tx_complete()) {
-        if (edges != seen0) {   // a first frame's edge: the consumer drains, as it would
-            seen0 = edges;
-            got += drain<LoopDma>(got, ok);
-        }
-    }
-    const uint32_t t_tc = CycleCounter::now();
+    // TC within 10 ms, some sixty times the burst's 160 us.
+    const bool tc_seen = brio::wait_until<Ruler>(
+        [&] {
+            if (edges != seen0) {   // a first frame's edge: the consumer drains, as it would
+                seen0 = edges;
+                got += drain<LoopDma>(got, ok);
+            }
+            return Res::tx_complete();
+        },
+        10'000);
+    const uint32_t t_tc = Ruler::now();
     const uint32_t before_tc = edges;
-    const uint32_t t0 = Ticker::millis();
-    while (edges == before_tc && Ticker::millis() - t0 < 5u) {
-    }
+    // The edge within 5 ms; the verdict below asks whether it came.
+    (void)brio::wait_until<Ruler>([before_tc] { return edges != before_tc; }, 5'000);
     const uint32_t late = edge_at - t_tc;
-    wait_ms(1);
+    brio::spin_us<Ruler>(1'000);
     got += drain<LoopDma>(got, ok);
     print(serial, "  16 frames: ", edges - e0, " edge(s), the last ", late, " cycles after the last stop bit (",
           late * 10u / frame, " tenths of a frame); ", usart_entries, " USART and ", dma_entries,
           " stream interrupt(s); ", got, " read", crlf);
     bench.verdict("the burst read whole, nothing polled", got == 16u && ok);
-    bench.verdict("its edge within two frame times of the last stop bit",
-                  edges != before_tc && late <= 2u * frame);
+    if (!console_quiet) {
+        bench.skip("the console did not drain: its interrupt would hold the edge's stamp off");
+    } else {
+        bench.verdict("its edge within two frame times of the last stop bit",
+                      tc_seen && edges != before_tc && late <= 2u * frame);
+    }
     bench.verdict("at most two USART interrupts a burst, none a byte",
                   usart_entries >= 1u && usart_entries <= 2u);
 
@@ -736,14 +819,17 @@ void tf_edge() {
     send<LoopDma>(0, 4u * ring);
     uint32_t read = 0;
     ok = true;
-    const uint32_t t1 = Ticker::millis();
     uint32_t seen = edges;
-    while (read < 4u * ring && Ticker::millis() - t1 < 50u) {
-        if (edges != seen) {
-            seen = edges;
-            read += drain<LoopDma>(read, ok);
-        }
-    }
+    // 50 ms for the four laps' 2.6 ms; the count read is the answer.
+    (void)brio::wait_until<Ruler>(
+        [&] {
+            if (edges != seen) {
+                seen = edges;
+                read += drain<LoopDma>(read, ok);
+            }
+            return read >= 4u * ring;
+        },
+        50'000);
     print(serial, "  four laps without silence: ", read, " of ", 4u * ring, " read on the edges, ",
           dma_entries - d0, " stream interrupt(s), laps missed ", LoopDma::rx_overruns(), crlf);
     bench.verdict("a stream with no silence is read whole on the lap's marks",
@@ -866,6 +952,20 @@ uint32_t keep_busy(uint8_t i, bool bytes) {
     return ok ? 1u : 0u;
 }
 
+/// The four copy engines' last blocks waited for at the end of a leg. A
+/// time-out, not a bound: a 4 KB block that has not ended in 10 ms is
+/// stuck, so it is abandoned (counted in its engine's faults) and said.
+void copies_settle() {
+    if (!brio::wait_until<Ruler>(
+            [] { return !CopyA::busy() && !CopyB::busy() && !CopyC::busy() && !CopyD::busy(); }, 10'000)) {
+        (void)CopyA::abandon();
+        (void)CopyB::abandon();
+        (void)CopyC::abandon();
+        (void)CopyD::abandon();
+        print(serial, "  a copy engine still busy 10 ms after its leg: abandoned", crlf);
+    }
+}
+
 /// A store this far past its time can leave the line idle for an idle frame's detection. The
 /// period is eleven bits and a frame plus an idle frame twenty, which alone asks nine bits of
 /// lateness; the receiver counts its idle frame from the stop bit as it sampled it, half a bit
@@ -907,12 +1007,11 @@ ArbLeg arb_leg(uint8_t who, uint32_t baud, uint8_t copies, bool bytes) {
         last_store = stored;
         next = stored + period;   // never two stores closer than a frame
     }
-    while (CopyA::busy() || CopyB::busy() || CopyC::busy() || CopyD::busy()) {
-    }
-    wait_ms(1);
+    copies_settle();
+    brio::spin_us<Ruler>(1'000);
     leg.entries = usart_entries;
     leg.marks = dma_entries;
-    wait_ms(1);
+    brio::spin_us<Ruler>(1'000);
     leg.after = usart_entries - leg.entries;
     leg.parks = Port::rx_parks();
     arb_judge<Port>(leg);
@@ -944,7 +1043,7 @@ ArbLeg endless_leg(uint8_t who, uint32_t baud, bool looks) {
     endless_ticks = 0;
     endless_on = true;
     Tim<7>::enable(true);
-    wait_ms(1);
+    brio::spin_us<Ruler>(1'000);
     const uint32_t period = 11u * (SysClock::hz / baud);
     const uint32_t idle_after = arb_idle_after(period);
     uint32_t last_store = CycleCounter::now();
@@ -974,15 +1073,14 @@ ArbLeg endless_leg(uint8_t who, uint32_t baud, bool looks) {
     leg.thread_ended = endless_on;
     endless_on = false;
     Tim<7>::enable(false);
-    while (CopyA::busy() || CopyB::busy() || CopyC::busy() || CopyD::busy()) {
-    }
-    wait_ms(1);
+    copies_settle();
+    brio::spin_us<Ruler>(1'000);
     leg.entries = usart_entries;
     leg.marks = dma_entries;
     leg.parks = Port::rx_parks();
     arb_judge<Port>(leg);
     ++leg.looks;
-    wait_ms(1);
+    brio::spin_us<Ruler>(1'000);
     leg.after = usart_entries - leg.entries;
     leg.ore = Port::hw_overruns();
     leg.faults = Port::dma_faults();
@@ -1110,19 +1208,6 @@ void tg_arbitration() {
 constexpr uint32_t room_run = 48;
 constexpr uint32_t room_capacity = 511;   ///< LoopIrq's and LoopDma's 512-slot transmit ring
 
-/// Wait, bounded, for the port's wire to fall idle; false when the bound
-/// ran out. The bound is the caller's, derived from its run.
-template <typename Port>
-bool idle_within(uint32_t cycles) {
-    const uint32_t t0 = CycleCounter::now();
-    while (!Port::tx_idle()) {
-        if (CycleCounter::now() - t0 > cycles) {
-            return false;
-        }
-    }
-    return true;
-}
-
 struct RoomLeg {
     bool up = false;
     uint32_t idle_room = 0;   ///< tx_room() on the idle port
@@ -1154,11 +1239,11 @@ RoomLeg room_leg(uint8_t who) {
         l.held_room = Port::tx_room();
         l.edge_held = Port::tx_drained();
     }
-    l.idle = idle_within<Port>(SysClock::hz / 100u);
+    l.idle = brio::wait_until<Ruler>([] { return Port::tx_idle(); }, 10'000);
     l.after_room = Port::tx_room();
     l.edge_first = Port::tx_drained();
     l.edge_second = Port::tx_drained();
-    wait_ms(1);
+    brio::spin_us<Ruler>(1'000);
     l.in_order = true;
     l.back = drain<Port>(0, l.in_order);
     return l;
@@ -1206,8 +1291,8 @@ void th_room_edge() {
             Stm32f4Platform<>::CriticalSection cs;
             (void)LoopIrq::write_bulk(std::span<const uint8_t>(run, room_run));
         }
-        all_idle = idle_within<LoopIrq>(SysClock::hz / 100u) && all_idle;
-        wait_ms(1);
+        all_idle = brio::wait_until<Ruler>([] { return LoopIrq::tx_idle(); }, 10'000) && all_idle;
+        brio::spin_us<Ruler>(1'000);
         bool ok = true;
         (void)drain<LoopIrq>(0, ok);
     }
@@ -1284,8 +1369,9 @@ void stop_row(uint32_t turns, uint32_t frame_turns, StopOrder order, StopRow& ro
         Res::write_data(0xA5);
         burn(turns);
         St::regs().CR = cleared;
-        for (uint32_t i = 200'000u; i != 0u && St::enabled(); --i) {   // abort()'s bound
-        }
+        // EN reads low once the stream's current beat is done; 1 ms is a
+        // time-out, and a stream that never stopped shows in the counts.
+        (void)brio::wait_until<Ruler>([] { return !St::enabled(); }, 1'000);
         burn(2u * frame_turns);
         taken = St::count() != 4u;
         left = !taken && Res::rx_ready();
@@ -1300,13 +1386,15 @@ void stop_row(uint32_t turns, uint32_t frame_turns, StopOrder order, StopRow& ro
     (void)RxEngine::start(std::span<uint8_t>(next, 8u));
     burn(100);
     const bool stray = St::count() != 8u;
+    // Each wait 1 ms, a hundred frames at 1 Mbaud: a transmitter that
+    // stops leaves the burst short, which the count and the bytes show.
     for (const uint8_t b : burst) {
-        while (!Res::tx_empty()) {
+        if (!brio::wait_until<Ruler>([] { return Res::tx_empty(); }, 1'000)) {
+            break;
         }
         Res::write_data(b);
     }
-    while (!Res::tx_complete()) {
-    }
+    (void)brio::wait_until<Ruler>([] { return Res::tx_complete(); }, 1'000);
     burn(2u * frame_turns);
     const uint16_t count = St::count();
     bool same = true;
@@ -1355,7 +1443,6 @@ void stop_sweep(const char* name, uint32_t frame_cycles, StopOrder order, StopRo
 }
 
 void ti_stray() {
-    (void)CycleCounter::init();
     bool up_ok = up<LoopDma>(2, 5'625'000u);
     // The vector stays out of the stage: it would read SR. The ring goes, the one-shot
     // shape of the same engine comes, with no interrupt of its own.
@@ -1407,8 +1494,8 @@ void ti_stray() {
 // only once the enable has sent its idle frame; command() retries three
 // times, each after a quiet longer than the peer's partial-frame reset;
 // peer_report() raises leg_refused on report_cfg_failed, and judge()
-// prints SKIP for a refused leg and counts nothing. A leg this end's
-// silicon cannot express is skipped the same way, by name.
+// skips a refused leg (TestBench::skip) instead of judging it. A leg this
+// end's silicon cannot express is skipped the same way, by name.
 
 link::Decoder dec;
 const uint8_t no_payload[1] = {0};
@@ -1454,25 +1541,16 @@ void link_task_down() {
     link_owner = 0;
 }
 
-void wait_us(uint32_t us) {
-    const uint32_t c0 = CycleCounter::now();
-    const uint32_t n = us * (SysClock::hz / 1'000'000u);
-    while (CycleCounter::now() - c0 < n) {
-    }
-}
-
+/// One word out on the polled resource. TXE is waited for 50 ms, some
+/// fifty frames at 9600, the slowest rate here: a transmitter stuck that
+/// long loses the word, and the far end's answer or count shows it.
 void put1(uint16_t b) {
-    const uint32_t t0 = Ticker::millis();
-    while (!U1::tx_empty() && Ticker::millis() - t0 < 50u) {
-    }
+    (void)brio::wait_until<Ruler>([] { return U1::tx_empty(); }, 50'000);
     U1::write_word(b);
 }
 
-void wait_tc() {
-    const uint32_t t0 = Ticker::millis();
-    while (!U1::tx_complete() && Ticker::millis() - t0 < 50u) {
-    }
-}
+/// The last frame off the wire, 50 ms at most (as put1()).
+void wait_tc() { (void)brio::wait_until<Ruler>([] { return U1::tx_complete(); }, 50'000); }
 
 void u1_flush() {
     for (uint8_t k = 0; k < 4u; ++k) {
@@ -1546,7 +1624,7 @@ bool dut_link(const link::Cfg& c, bool lin = false, bool lin_eleven = false) {
     U1::transmitter(true);
     U1::receiver(true);
     U1::enable(true);
-    wait_us(2u * (1'000'000u / c.rate) + 20u);
+    brio::spin_us<Ruler>(2u * (1'000'000u / c.rate) + 20u);
     U1Tx::function(PinFunction::af7, {.speed = PinSpeed::very_high});
     U1Rx::function(PinFunction::af7, {.pull = PinPull::up});
     u1_flush();
@@ -1569,25 +1647,27 @@ void link_release() {
     U1Rx::release();
 }
 
+/// One frame of the protocol, polled, within `ms`.
 bool recv_frame(link::Frame& out, uint16_t ms) {
-    const uint32_t t0 = Ticker::millis();
     dec.reset();
-    while (Ticker::millis() - t0 < ms) {
-        const uint32_t st = U1::status();
-        if ((st & UsartFlag::rxne) == 0u) {
-            continue;
-        }
-        const uint8_t b = U1::read_data();
-        if ((st & (UsartFlag::fe | UsartFlag::pe | UsartFlag::ne)) != 0u) {
-            dec.reset();
-            continue;
-        }
-        if (dec.feed(b) == link::Decoder::Result::frame) {
-            out = dec.frame();
-            return true;
-        }
-    }
-    return false;
+    return brio::wait_until<Ruler>(
+        [&out] {
+            const uint32_t st = U1::status();
+            if ((st & UsartFlag::rxne) == 0u) {
+                return false;
+            }
+            const uint8_t b = U1::read_data();
+            if ((st & (UsartFlag::fe | UsartFlag::pe | UsartFlag::ne)) != 0u) {
+                dec.reset();
+                return false;
+            }
+            if (dec.feed(b) == link::Decoder::Result::frame) {
+                out = dec.frame();
+                return true;
+            }
+            return false;
+        },
+        static_cast<uint32_t>(ms) * 1000u);
 }
 
 void put_link(uint8_t b) { put1(b); }
@@ -1611,7 +1691,7 @@ bool command(link::Op op, const uint8_t* p = no_payload, uint8_t len = 0, uint16
             return true;
         }
         (void)link_command_mode();
-        wait_ms(70);
+        brio::spin_us<Ruler>(70'000);
     }
     if (!link_quiet) {
         print(serial, "    LINK FAILURE op ", hex(link::byte_of(op)),
@@ -1654,7 +1734,7 @@ bool peer_report(link::Report& r, uint16_t after_ms) {
     link_task_down();
     (void)link_command_mode();
     if (after_ms != 0u) {
-        wait_ms(after_ms);
+        brio::spin_us<Ruler>(static_cast<uint32_t>(after_ms) * 1000u);
     }
     for (uint8_t k = 0; k < 4u; ++k) {
         link::Frame f;
@@ -1673,7 +1753,7 @@ bool peer_report(link::Report& r, uint16_t after_ms) {
             }
             return true;
         }
-        wait_ms(40);
+        brio::spin_us<Ruler>(40'000);
     }
     return false;
 }
@@ -1690,21 +1770,22 @@ bool peer_act(link::Op op, const link::Params& a, const uint8_t* extra = nullptr
     if (!command(op, p, static_cast<uint8_t>(link::params_size + n))) {
         return false;
     }
-    wait_us(static_cast<uint32_t>(link::settle_ms) * 1000u);
+    brio::spin_us<Ruler>(static_cast<uint32_t>(link::settle_ms) * 1000u);
     return true;
 }
 
-/// A verdict, unless the leg was refused: then SKIP, counting nothing.
+/// A verdict, unless the leg was refused: then a skip, the refusal said
+/// on the line above it by peer_report().
 void judge(const char* name, bool ok) {
     if (leg_refused) {
-        print(serial, "  SKIP  ", name, " (the peer refused the leg)", crlf);
+        bench.skip("the peer refused the leg: ", name);
         return;
     }
     bench.verdict(name, ok);
 }
 void judge(const char* name, const char* suffix, bool ok) {
     if (leg_refused) {
-        print(serial, "  SKIP  ", name, suffix, " (the peer refused the leg)", crlf);
+        bench.skip(name, suffix);
         return;
     }
     bench.verdict(name, suffix, ok);
@@ -1719,13 +1800,15 @@ uint16_t bound_ms(uint32_t rate, uint32_t frames) {
 
 /// The peer opens its receive window settle_ms + 2 ms after its ack and
 /// flushes what this end's reconfiguration left on the line.
-void wait_for_peer_window() { wait_ms(6); }
+void wait_for_peer_window() { brio::spin_us<Ruler>(6'000); }
 
 /// `n` frames back to back: DR written on TXE, a frame ahead of the
-/// shifter, so the line never idles.
+/// shifter, so the line never idles. A TXE that does not come in 50 ms
+/// (as put1()) ends the blast short, which the far count shows.
 void dut_blast(uint16_t n, uint16_t mask) {
     for (uint16_t i = 0; i < n; ++i) {
-        while (!U1::tx_empty()) {
+        if (!brio::wait_until<Ruler>([] { return U1::tx_empty(); }, 50'000)) {
+            break;
         }
         U1::write_word(static_cast<uint16_t>((0x55u + i) & mask));
     }
@@ -1742,33 +1825,39 @@ struct Drain {
     bool lbd = false;
 };
 
+/// Reads for `ms`, or until `want` frames: the Drain's counts are the
+/// answer, so the wait's own is dropped. The poll is forced inline into
+/// the wait's loop - no call a turn - since it must keep a frame's pace at
+/// 6.4 Mbaud (281 cycles) and its stamps make the span.
 Drain collect(uint16_t ms, uint16_t want = 0xFFFFu) {
     Drain d{};
     uint32_t c_first = 0, c_last = 0;
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms && d.frames < want) {
-        const uint32_t st = U1::status();
-        if ((st & UsartFlag::lbd) != 0u) {
-            d.lbd = true;
-            U1::clear_flags(UsartFlag::lbd);
-        }
-        if ((st & UsartFlag::rxne) == 0u) {
-            continue;
-        }
-        const uint32_t now = CycleCounter::now();
-        const uint16_t w = U1::read_word();
-        if (d.frames == 0u) {
-            d.first = w;
-            c_first = now;
-        }
-        d.last = w;
-        c_last = now;
-        ++d.frames;
-        if ((st & UsartFlag::fe) != 0u && d.fe < 255u) ++d.fe;
-        if ((st & UsartFlag::pe) != 0u && d.pe < 255u) ++d.pe;
-        if ((st & UsartFlag::ne) != 0u && d.ne < 255u) ++d.ne;
-        if ((st & UsartFlag::ore) != 0u && d.ore < 255u) ++d.ore;
-    }
+    (void)brio::wait_until<Ruler>(
+        [&] [[gnu::always_inline]] () {
+            const uint32_t st = U1::status();
+            if ((st & UsartFlag::lbd) != 0u) {
+                d.lbd = true;
+                U1::clear_flags(UsartFlag::lbd);
+            }
+            if ((st & UsartFlag::rxne) == 0u) {
+                return d.frames >= want;
+            }
+            const uint32_t now = Ruler::now();
+            const uint16_t w = U1::read_word();
+            if (d.frames == 0u) {
+                d.first = w;
+                c_first = now;
+            }
+            d.last = w;
+            c_last = now;
+            ++d.frames;
+            if ((st & UsartFlag::fe) != 0u && d.fe < 255u) ++d.fe;
+            if ((st & UsartFlag::pe) != 0u && d.pe < 255u) ++d.pe;
+            if ((st & UsartFlag::ne) != 0u && d.ne < 255u) ++d.ne;
+            if ((st & UsartFlag::ore) != 0u && d.ore < 255u) ++d.ore;
+            return d.frames >= want;
+        },
+        static_cast<uint32_t>(ms) * 1000u);
     d.span = c_last - c_first;
     return d;
 }
@@ -1936,7 +2025,7 @@ void t1_link() {
     bench.verdict("a bad checksum comes back as a NAK", recv_frame(bad, 120) && bad.op == link::Op::nak);
     for (uint8_t i = 0; i < 12u; ++i) put1(static_cast<uint8_t>(0x11u * i));
     wait_tc();
-    wait_ms(120);
+    brio::spin_us<Ruler>(120'000);
     (void)link_command_mode();
     bench.verdict("the link recovers after a desync", command(link::Op::ping));
 
@@ -2025,18 +2114,24 @@ uint16_t echo_mismatches(uint16_t n, uint16_t mask) {
     wait_for_peer_window();
     for (uint16_t i = 0; i < n; ++i) {
         const uint16_t v = static_cast<uint16_t>((0x5Au + i * 37u) & mask);
-        while (!U1::tx_empty()) {
+        // TXE within 50 ms (as put1()), the echo within 20 ms - two frames
+        // at 9600 are 2.1 ms: a frame not sent or not echoed counts bad.
+        if (!brio::wait_until<Ruler>([] { return U1::tx_empty(); }, 50'000)) {
+            ++bad;
+            continue;
         }
         U1::write_word(v);
         bool ok = false;
-        const uint32_t t0 = Ticker::millis();
-        while (Ticker::millis() - t0 < 20u) {
-            const uint32_t st = U1::status();
-            if ((st & UsartFlag::rxne) != 0u) {
+        (void)brio::wait_until<Ruler>(
+            [&ok, v, mask] {
+                const uint32_t st = U1::status();
+                if ((st & UsartFlag::rxne) == 0u) {
+                    return false;
+                }
                 ok = (U1::read_word() & mask) == v && (st & UsartFlag::receive_errors) == 0u;
-                break;
-            }
-        }
+                return true;
+            },
+            20'000);
         if (!ok) ++bad;
     }
     return bad;
@@ -2077,20 +2172,23 @@ template <typename Port>
 uint32_t task_receive(uint32_t n, uint16_t ms, uint8_t& ore) {
     uint32_t got = 0;
     bool broken = false;
-    const uint32_t t0 = Ticker::millis();
-    while (got < n && !broken && Ticker::millis() - t0 < ms) {
-        const std::span<const uint8_t> run = Port::read_span();
-        uint32_t k = 0;
-        for (const uint8_t b : run) {
-            if (b != static_cast<uint8_t>(got)) {
-                broken = true;
-                break;
+    // Reads for `ms` at most: the count is the answer.
+    (void)brio::wait_until<Ruler>(
+        [&] {
+            const std::span<const uint8_t> run = Port::read_span();
+            uint32_t k = 0;
+            for (const uint8_t b : run) {
+                if (b != static_cast<uint8_t>(got)) {
+                    broken = true;
+                    break;
+                }
+                ++got;
+                ++k;
             }
-            ++got;
-            ++k;
-        }
-        (void)Port::consume(k);
-    }
+            (void)Port::consume(k);
+            return got >= n || broken;
+        },
+        static_cast<uint32_t>(ms) * 1000u);
     ore = Port::hw_overruns();
     return got;
 }
@@ -2233,7 +2331,7 @@ void t3_frames() {
         c.parity = fc.parity;
         c.stop = fc.stop;
         if (!dut_setup(c)) {
-            print(serial, "  SKIP  ", fc.name, " (this USART has no word length for it, RM0390 25.4.3)", crlf);
+            bench.skip("this USART has no word length for it (RM0390 25.4.3): ", fc.name);
             continue;
         }
         link::Params a{};
@@ -2354,7 +2452,7 @@ void t4_errors() {
         a.value = 0xB0;
         const bool acted = peer_act(link::Op::blast, a);
         const bool up = acted && dut_link(pc);
-        wait_ms(6 + 2);
+        brio::spin_us<Ruler>(8'000);   // the run sent whole before this end looks: a run read late
         const uint32_t st = U1::status();
         const uint16_t kept = U1::read_word();
         const Drain d = collect(5);
@@ -2519,7 +2617,7 @@ bool wire_up(uint32_t baud) {
     U1::transmitter(true);
     U1::receiver(true);
     U1::enable(true);
-    wait_us(2u * (1'000'000u / baud) + 20u);
+    brio::spin_us<Ruler>(2u * (1'000'000u / baud) + 20u);
     U1Tx::function(PinFunction::af7, {.pull = PinPull::up, .open_drain = true, .speed = PinSpeed::high});
     U1Rx::input(PinPull::none);
     u1_flush();
@@ -2528,16 +2626,19 @@ bool wire_up(uint32_t baud) {
 
 /// One received word within `us`, polled; its SR errors in `err`.
 std::optional<uint16_t> wire_word(uint32_t us, uint32_t& err) {
-    const uint32_t c0 = CycleCounter::now();
-    const uint32_t n = us * (SysClock::hz / 1'000'000u);
-    while (CycleCounter::now() - c0 < n) {
-        const uint32_t st = U1::status();
-        if ((st & UsartFlag::rxne) != 0u) {
+    std::optional<uint16_t> word;
+    (void)brio::wait_until<Ruler>(
+        [&] {
+            const uint32_t st = U1::status();
+            if ((st & UsartFlag::rxne) == 0u) {
+                return false;
+            }
             err = st & UsartFlag::receive_errors;
-            return U1::read_word();
-        }
-    }
-    return std::nullopt;
+            word = U1::read_word();
+            return true;
+        },
+        us);
+    return word;
 }
 
 // ---------------------------------------------------------------------------
@@ -3100,9 +3201,8 @@ RingLeg ring_leg_on(uint8_t who, uint32_t rate, uint8_t copies, bool bytes) {
         if (copies >= 3u) { l.copies += keep_busy<CopyC>(2, bytes); }
         if (copies >= 4u) { l.copies += keep_busy<CopyD>(3, bytes); }
     }
-    while (CopyA::busy() || CopyB::busy() || CopyC::busy() || CopyD::busy()) {
-    }
-    wait_ms(2);
+    copies_settle();
+    brio::spin_us<Ruler>(2'000);
     (void)ring_drain<Port>(l.c);
     l.c.close();
     l.ore = Port::hw_overruns();
@@ -3225,7 +3325,7 @@ void t9_half_duplex() {
             // end's stop bit low under it (measured: the far receiver lost
             // step and answered inside this end's next frame). Two bit
             // times, the far end's own guard's half.
-            wait_us(2'000'000u / rate + 1u);
+            brio::spin_us<Ruler>(2'000'000u / rate + 1u);
         }
         link::Report r{};
         (void)peer_report(r, 5);
@@ -3249,8 +3349,9 @@ void t9_half_duplex() {
         std::optional<uint16_t> trig, hit;
         if (up) {
             U1::write_word(0xA5u);
-            while (!U1::tx_empty()) {
-            }
+            // TXE a frame later at most (1 ms at 9600); 5 ms is a time-out,
+            // and a 0xFF written late shows in what comes back.
+            (void)brio::wait_until<Ruler>([] { return U1::tx_empty(); }, 5'000);
             U1::write_word(0xFFu);   // into the shifter behind the trigger: back to back
             trig = wire_word(5000u, e1);
             hit = wire_word(5000u, e2);
@@ -3335,9 +3436,9 @@ SentBreak sent_break(uint32_t rate, bool lin) {
     }
     wait_for_peer_window();
     U1::send_break();
-    const uint32_t t1 = Ticker::millis();
-    while (U1::break_pending() && Ticker::millis() - t1 < 20u) {
-    }
+    // SBK clears during the break's stop bit (0.7 ms at 19200 in LIN
+    // mode); 20 ms is a time-out, and the far span shows a late 0x55.
+    (void)brio::wait_until<Ruler>([] { return !U1::break_pending(); }, 20'000);
     U1::write_word(0x55);
     wait_tc();
     link::Report r{};
@@ -3434,7 +3535,7 @@ bool dut_irda(uint32_t rate, const IrdaConfig& cfg) {
     U1::transmitter(true);
     U1::receiver(true);
     U1::enable(true);
-    wait_us(2u * (1'000'000u / rate) + 20u);
+    brio::spin_us<Ruler>(2u * (1'000'000u / rate) + 20u);
     U1Tx::function(PinFunction::af7, {.speed = PinSpeed::very_high});
     U1Rx::function(PinFunction::af7, {.pull = PinPull::up});
     u1_flush();
@@ -3457,11 +3558,17 @@ PadPulse ir_first_pulse(uint8_t v) {
     const uint32_t mask = U1Tx::mask;
     const uint32_t idle = idr & mask;
     p.idle_high = idle != 0u;
-    while (!U1::tx_empty()) {
+    // On the DWT, which counts under the mask: TXE within a frame of an
+    // idle transmitter, 5 ms a time-out (a pulse never seen says the rest).
+    if (!brio::wait_until<Ruler>([] { return U1::tx_empty(); }, 5'000)) {
+        return p;
     }
     U1::write_word(v);
     // Two tight loops of one load and one compare each, the cycle counter
-    // read as each ends: the width is good to a loop's period.
+    // read as each ends: the width is good to a loop's period. Their
+    // time-out is a count of turns ON PURPOSE - a ruler read in each turn
+    // would double the period the width is good to, against a verdict of
+    // +-12 cycles; two million turns are some 50 ms, past any pulse here.
     uint32_t k = 2'000'000u;
     while ((idr & mask) == idle && --k != 0u) {
     }
@@ -3546,24 +3653,29 @@ IrRx ir_rx_leg(uint32_t rate, uint8_t txpl, const IrdaConfig& cfg = {}) {
     a.ms = static_cast<uint16_t>(bound_ms(rate, 64) + 20u);
     const bool acted = peer_act(link::Op::send, a);
     x.up = acted && dut_irda(rate, cfg);
-    const uint32_t t1 = Ticker::millis();
     // Thirty-two and no more: the far chip's return to command mode after
-    // them is one more edge on the line, a frame after the last.
-    while (x.up && x.got < 32u && Ticker::millis() - t1 < a.ms) {
-        const uint32_t st = U1::status();
-        if ((st & UsartFlag::rxne) == 0u) {
-            continue;
-        }
-        const uint8_t b = U1::read_data();
-        const uint32_t flags = st & (UsartFlag::fe | UsartFlag::pe | UsartFlag::ne | UsartFlag::ore);
-        if (flags == 0u && b == static_cast<uint8_t>(0x60u + x.good) && x.got == x.good) {
-            ++x.good;
-        }
-        if (x.got == 0u) {
-            x.first = b;
-        }
-        x.errs |= flags;
-        ++x.got;
+    // them is one more edge on the line, a frame after the last. Read for
+    // the action's own bound at most; the counts are the answer.
+    if (x.up) {
+        (void)brio::wait_until<Ruler>(
+            [&x] {
+                const uint32_t st = U1::status();
+                if ((st & UsartFlag::rxne) == 0u) {
+                    return false;
+                }
+                const uint8_t b = U1::read_data();
+                const uint32_t flags = st & (UsartFlag::fe | UsartFlag::pe | UsartFlag::ne | UsartFlag::ore);
+                if (flags == 0u && b == static_cast<uint8_t>(0x60u + x.good) && x.got == x.good) {
+                    ++x.good;
+                }
+                if (x.got == 0u) {
+                    x.first = b;
+                }
+                x.errs |= flags;
+                ++x.got;
+                return x.got >= 32u;
+            },
+            static_cast<uint32_t>(a.ms) * 1000u);
     }
     link::Report r{};
     (void)peer_report(r, 0);
@@ -3581,8 +3693,8 @@ void print_pulse(const PadPulse& p, uint32_t bit_cycles) {
 }
 
 void tr_irda() {
-    print(serial, "  RS-485: SKIPPED, no verdict claimed - this USART has no driver enable (RM0390 25.3, table 148); "
-          "the pair's RS-485 letter is the far G0's", crlf);
+    bench.skip("RS-485: this USART has no driver enable (RM0390 25.3, table 148); the pair's RS-485 letter is "
+               "the far G0's");
     if (!ensure_link()) {
         bench.verdict("the peer is reachable", false);
         link_release();
@@ -3981,14 +4093,16 @@ void tu_baud_irqs() {
             const bool moved = up && LinkIrq::set_baud(SysClock::hz, rate);
             if (moved) {
                 wait_for_peer_window();
+                // Room for each byte within 50 ms (fifty frames at 9600): a
+                // transmitter that takes none ends the run short, and the far
+                // count shows it; then the wire idle within 100 ms.
                 for (uint16_t i = 0; i < n; ++i) {
-                    const uint32_t t0 = Ticker::millis();
-                    while (!LinkIrq::write_byte(static_cast<uint8_t>(0x55u + i)) && Ticker::millis() - t0 < 50u) {
+                    if (!brio::wait_until<Ruler>(
+                            [i] { return LinkIrq::write_byte(static_cast<uint8_t>(0x55u + i)); }, 50'000)) {
+                        break;
                     }
                 }
-                const uint32_t t0 = Ticker::millis();
-                while (!LinkIrq::tx_idle() && Ticker::millis() - t0 < 100u) {
-                }
+                (void)brio::wait_until<Ruler>([] { return LinkIrq::tx_idle(); }, 100'000);
             }
             link_task_down();
             link::Report r{};
@@ -4026,17 +4140,15 @@ void tu_baud_irqs() {
             probe_tc = 0;
             link_owner = owner_probe;
             Nvic::enable(U1::irq);
+            // TXE within 5 ms (a frame is 87 us), the vector within 10 ms:
+            // what did not come is the verdict's count and time.
             for (uint16_t i = 0; i < 16u; ++i) {
-                const uint32_t t0 = Ticker::millis();
-                while (!U1::tx_empty() && Ticker::millis() - t0 < 5u) {
-                }
+                (void)brio::wait_until<Ruler>([] { return U1::tx_empty(); }, 5'000);
                 U1::write_word(static_cast<uint16_t>(0x55u + i));
             }
-            last_write = CycleCounter::now();
+            last_write = Ruler::now();
             U1::tc_interrupt(true);
-            const uint32_t t0 = Ticker::millis();
-            while (probe_tc == 0u && Ticker::millis() - t0 < 10u) {
-            }
+            (void)brio::wait_until<Ruler>([] { return probe_tc != 0u; }, 10'000);
             Nvic::disable(U1::irq);
             U1::tc_interrupt(false);
             link_owner = 0;
@@ -4069,10 +4181,10 @@ void tu_baud_irqs() {
             link_owner = owner_probe;
             U1::break_interrupt(true);
             Nvic::enable(U1::irq);
-            const uint32_t t0 = Ticker::millis();
-            while (probe_lbd == 0u && Ticker::millis() - t0 < 30u) {
-            }
-            wait_ms(5);
+            // The vector within 30 ms (the break is 0.7 ms); the verdict
+            // counts its runs after 5 ms more for a second one.
+            (void)brio::wait_until<Ruler>([] { return probe_lbd != 0u; }, 30'000);
+            brio::spin_us<Ruler>(5'000);
             Nvic::disable(U1::irq);
             U1::break_interrupt(false);
             link_owner = 0;
@@ -4218,7 +4330,7 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    (void)CycleCounter::init();
+    (void)CycleCounter::init();  // every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0)
     brio::enable_interrupts();
 
     bench.letter('a', "the loop proven: both receivers, every rate, the open drain's ceiling", ta_loop);

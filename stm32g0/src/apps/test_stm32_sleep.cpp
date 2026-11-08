@@ -91,6 +91,7 @@
 #include "stm32g0/usart.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
@@ -101,6 +102,16 @@ namespace {
 using namespace brio;
 
 using P = Stm32g0Platform<>;
+
+/// The ruler every wait of this suite is timed on (util/test_wait.hpp):
+/// the kernel's SysTick ticker composed across its reload. It needs
+/// interrupts enabled and the tick running, so no wait below sits inside
+/// a masked section or between Ticker::pause() and Ticker::resume().
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 
 constexpr UartPins console_pins{
     .tx = {'A', 2, PinFunction::af1},
@@ -231,7 +242,21 @@ uint32_t measure_lsi_hz() {
     static uint32_t samples[33];
     constexpr uint16_t want = 33;
     uint16_t got = 0;
-    for (uint32_t spin = 0; spin < 40'000'000UL && got < want; ++spin) {
+    // THE WAIT IS BOUNDED ON THE METER'S OWN COUNTER, which runs from
+    // setup() at PCLK / 16: this runs at boot, with interrupts masked and
+    // no tick started, so the SysTick ruler cannot run yet. Thirty-four
+    // edges of an LSI inside table 46's band (29.5 kHz at the slowest)
+    // take at most 1.2 ms; the budget is 20 ms. The counter is 16 bits
+    // wide and wraps every 16 ms, so it is read every turn and the 16-bit
+    // differences are summed.
+    constexpr uint32_t budget_counts =
+        20'000u * (SysClock::hz / (lsi_meter_prescaler + 1u) / 1'000'000u);
+    uint32_t elapsed = 0;
+    uint16_t last = static_cast<uint16_t>(Tim<16>::count());
+    while (got < want && elapsed < budget_counts) {
+        const uint16_t now = static_cast<uint16_t>(Tim<16>::count());
+        elapsed += static_cast<uint16_t>(now - last);
+        last = now;
         if ((Tim<16>::flags() & LsiMeter::capture_flag) == 0u) {
             continue;
         }
@@ -316,13 +341,11 @@ using TimedSite = Stm32g0TimedSleepSite<P, SysClock, timed_cfg>;
 
 bool within(uint32_t v, uint32_t lo, uint32_t hi) { return v >= lo && v <= hi; }
 
-void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    const uint32_t t0 = wall();
-    while (wall_delta(t0, wall()) < wall_hz() / 300u) {
-    }
-}
+/// A measurement window a transmit interrupt walks through is not a
+/// measurement. The answer is dropped here: a wedged console only
+/// lengthens what follows, and the one window a derived bound judges
+/// (letter d) asks brio::console_drain() itself and acts on it.
+void console_drain() { (void)brio::console_drain<Ruler, Serial>(); }
 
 /// Put the RTC back on this suite's own stopwatch split after a letter
 /// that changed it (the timed site owns different prescalers).
@@ -649,10 +672,16 @@ void td_wake_cost() {
     };
     uint32_t per_round[4] = {0, 0, 0, 0};
     uint8_t n = 0;
+    bool drained = true;
     for (const Leg& leg : legs) {
         feed();
         Pwr::flash_power_down_stop(leg.flash_down);
-        console_drain();
+        // A line leaving the console during the rounds is an interrupt
+        // inside them, and the spread below is judged to two wall ticks.
+        drained = brio::console_drain<Ruler, Serial>();
+        if (!drained) {
+            break;
+        }
         const uint32_t t0 = wall();
         for (uint16_t i = 0; i < rounds; ++i) {
             (void)one_sleep(leg.mode, counts);
@@ -661,6 +690,10 @@ void td_wake_cost() {
         per_round[n++] = wall_us(span) / rounds;
     }
     Pwr::flash_power_down_stop(false);
+    if (!drained) {
+        bench.skip("the console did not drain: the timed rounds would carry its interrupt");
+        return;
+    }
 
     for (uint8_t i = 0; i < n; ++i) {
         print(serial, "  ", legs[i].name, ": ", per_round[i],
@@ -678,10 +711,31 @@ void td_wake_cost() {
     print(serial, "  Stop 0 - Sleep = ", stop0, " us, Stop 1 - Sleep = ",
           stop1, " us, per round", crlf);
 
+    // THE SPREAD, largest leg minus smallest. Each figure is one wall span
+    // over 32 rounds, so its own reading error is a tick over 32, about
+    // 1 us. The legs differ in what a round costs beyond the armed
+    // interval: the wake itself (table 37: 11.2 us at most), the flash's
+    // own wake (about 4 us) and the PLL's re-lock in resume_clock(),
+    // which only a Stop needs - and a round is a whole number of wall
+    // ticks, because the wake-up timer counts the wall's own root, so a
+    // cost that crosses a tick edge costs the whole tick. Two ticks is the
+    // bound the two verdicts below hold the Stop legs to as well, here
+    // converted whole (wall_us(2), 61 us on the crystal, where twice the
+    // truncated tick is 60) and one more for each figure's own truncation
+    // to a whole microsecond.
+    uint32_t round_lo = 0xFFFFFFFFu;
+    uint32_t round_hi = 0;
+    for (uint8_t i = 0; i < n; ++i) {
+        if (per_round[i] < round_lo) {
+            round_lo = per_round[i];
+        }
+        if (per_round[i] > round_hi) {
+            round_hi = per_round[i];
+        }
+    }
     bench.verdict("every rung wakes: no round was lost, and the four legs "
-                  "took the same time to within one wall tick per round",
-                  per_round[0] != 0u && per_round[1] != 0u &&
-                      per_round[2] != 0u && per_round[3] != 0u);
+                  "took the same time to within two wall ticks per round",
+                  n == 4u && round_lo != 0u && round_hi - round_lo <= wall_us(2u) + 1u);
     bench.verdict("A STOP COSTS LESS THAN ONE WALL TICK MORE TO LEAVE THAN "
                   "A SLEEP - which is the whole of what this desk can say, "
                   "and it agrees with the datasheet's 5.6..11.2 us",
@@ -693,9 +747,10 @@ void td_wake_cost() {
     print(serial, "  Stop 0 against Stop 1: ",
           per_round[1] == per_round[2]
               ? "indistinguishable on this instrument"
-              : "different by less than the resolution",
-          " - the ladder's ordering rests on 4.1.3 and DS13560 table 37, "
-          "and this suite DECLINES to claim it was measured", crlf);
+              : "different by less than the resolution", crlf);
+    bench.skip("the ordering of Stop 0 and Stop 1: every counter fine enough "
+               "to resolve it stops in Stop, so the ladder's ordering rests on "
+               "4.1.3 and DS13560 table 37 and is not claimed as measured");
     bench.verdict("and powering the flash down over a Stop changes nothing "
                   "this instrument can see either (table 37 prices it at "
                   "about 4 us)",
@@ -1189,9 +1244,10 @@ void deep_leg(PwrMode mode, const char* name, uint8_t leg_id) {
         // reset". So the evidence is not a return address - it is the
         // flags, and the calendar that never stopped.
         const bool sbf = (boot_sr1 & PWR_SR1_SBF) != 0u;
-        bench.verdict("the machine came back THROUGH THE RESET VECTOR - "
-                      "which is exactly why no rung of the ladder maps here",
-                      true);
+        // A description and not a verdict: this half runs only because
+        // the boot found the token, so it cannot come out otherwise.
+        print(serial, "  the machine came back THROUGH THE RESET VECTOR - which "
+                      "is exactly why no rung of the ladder maps here", crlf);
         // WHAT THE TWO MODES LOOK LIKE FROM THE OTHER SIDE, and the
         // answer is the same for both - which is not what chapter 4
         // invites a reader to expect.
@@ -1236,9 +1292,10 @@ void deep_leg(PwrMode mode, const char* name, uint8_t leg_id) {
                       "kept counting with the VCORE domain powered off",
                       Rtc::calendar_set() && RtcDomain::enabled() &&
                           within(wall_ms(slept), 200u, 4000u));
-        bench.verdict("and the backup registers carried the resume across, "
-                      "which is what a program without SRAM has to lean on",
-                      true);
+        // Likewise a description: the token this half was entered by IS
+        // the backup register that carried the resume across.
+        print(serial, "  the backup registers carried the resume across, which "
+                      "is what a program without SRAM has to lean on", crlf);
         Pwr::clear_wakeup_flags();
         bench.end_letter();
         return;
@@ -1260,17 +1317,23 @@ void deep_leg(PwrMode mode, const char* name, uint8_t leg_id) {
     // entering it is a board that answers nothing until a hand or a
     // flasher resets it.
     if (mode == PwrMode::shutdown && !wall_on_lse) {
-        print(serial, "  SKIPPED, no verdict claimed: Shutdown powers the LSI "
-              "down (DS12992 3.7.4 - the Standby paragraph beside it does "
-              "not), so an RTC running on LSI has no clock to wake with and "
-              "this board has no crystal. The wake sources left are NRST, a "
-              "WKUP pin and a TAMP event, none of which this suite can raise "
-              "on itself. Letter s - Standby, where the LSI DOES survive - "
-              "is the rung this board can still measure.", crlf);
+        bench.skip("Shutdown powers the LSI down (DS12992 3.7.4 - the Standby "
+                   "paragraph beside it does not), so an RTC running on LSI has "
+                   "no clock to wake with and this board has no crystal. The "
+                   "wake sources left are NRST, a WKUP pin and a TAMP event, "
+                   "none of which this suite can raise on itself. Letter s - "
+                   "Standby, where the LSI DOES survive - is the rung this "
+                   "board can still measure.");
         return;
     }
-    bench.verdict("the RTC wake-up timer is set for the return trip",
-                  Rtc::set_wakeup(RtcWakeupClock::ck_spre, 1, true));
+    // NO ENTRY WITHOUT THE WAKE: a deep mode with no wake-up timer behind
+    // it comes back only through NRST, and the reboot would lose this
+    // verdict's fail from the tally the token carries.
+    const bool wake_set = Rtc::set_wakeup(RtcWakeupClock::ck_spre, 1, true);
+    bench.verdict("the RTC wake-up timer is set for the return trip", wake_set);
+    if (!wake_set) {
+        return;
+    }
     Nvic::enable(Rtc::irq());
     (void)Tamp::backup(token_reg2, wall());
     (void)Tamp::backup(token_reg,

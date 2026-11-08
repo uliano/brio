@@ -91,6 +91,7 @@
 #include "stm32g0/tim.hpp"
 #include "stm32g0/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
@@ -121,6 +122,7 @@ constexpr UartPins console_pins{
     .rx = {'A', 3, PinFunction::af1},
 };
 using Serial = Uart<2, console_pins>;
+using P = Stm32g0Platform<>;
 constexpr Serial serial;
 
 TestBench<Serial> bench;
@@ -381,12 +383,20 @@ void print_datetime(const RtcDateTime& d) {
           d.minute, ":", d.second, " (weekday ", d.weekday, ")");
 }
 
+/// The ruler of the suite's fixed spans and time-outs: the kernel ticker's
+/// own cycles(), composed across the reload (interrupts enabled while it
+/// is polled). Waits of seconds go on the tick (wait_ticks<P>).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
+
+/// A wedged console (false after 200 ms) only lengthens what follows; the
+/// timed letters print their figures after their windows, so the answer
+/// is dropped here.
 void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < 3u) {
-    }
+    (void)brio::console_drain<Ruler, Serial>();
 }
 
 /// Set the calendar and wait for the next second boundary, so a letter
@@ -415,13 +425,20 @@ void ta_domain() {
     Pwr::bus_clock(true);
     Pwr::rtc_domain_unlock(false);
     const uint32_t before = RtcDomain::bdcr();
-    (void)RtcDomain::lse_bypass(true);
+    // The verb writes only while the oscillator is off; with the LSE
+    // running it refuses before any store, and the lock is not seen.
+    const bool attempted = RtcDomain::lse_bypass(true);
     const uint32_t locked = RtcDomain::bdcr();
     Pwr::rtc_domain_unlock(true);
     const bool unlocked = Pwr::rtc_domain_unlocked();
-    bench.verdict("with DBP clear the RTC domain ignores a write to "
-                  "RCC_BDCR (4.1.2)",
-                  before == locked && (locked & 0x4u) == 0u);
+    if (attempted) {
+        bench.verdict("with DBP clear the RTC domain ignores a write to "
+                      "RCC_BDCR (4.1.2)",
+                      before == locked && (locked & 0x4u) == 0u);
+    } else {
+        bench.skip("the LSE runs, so LSEBYP takes no write either way: the DBP lock is "
+                   "not seen through it on this boot");
+    }
     bench.verdict("setting DBP opens it", unlocked);
     (void)RtcDomain::lse_bypass(false);
 
@@ -515,14 +532,9 @@ void tb_lse() {
         // an X2 footprint; whether it is populated is a board fact, and
         // a suite that cannot start the oscillator says so instead of
         // failing a verdict about a component that is not there.
-        print(serial, "  LSE did not start: X2 is not fitted on this board, "
-                      "is dead, or is cut off its pads by the board's own "
-                      "solder bridges. The data verdicts of this "
-                      "letter are DECLINED and the rest of the suite runs "
-                      "on LSI.", crlf);
-        bench.verdict("LSE reports NOT ready, and the suite says so rather "
-                      "than guessing",
-                      !RtcDomain::lse_ready());
+        bench.skip("the LSE did not start (X2 not fitted, dead, or cut off its pads by the "
+                   "board's solder bridges): this letter's data verdicts cannot run, and "
+                   "the rest of the suite runs on LSI");
         // The two register RULES are still measurable with the
         // oscillator stopped, and they are the half that does not need a
         // crystal.
@@ -741,21 +753,25 @@ void tc_lsi_and_prescalers() {
     RtcReading r{};
     bench.verdict("the calendar reads coherently", Rtc::read(r));
     const uint8_t s0 = r.time.second;
-    while (Rtc::read(r) && r.time.second == s0) {
-    }
+    // A second edge comes within a second; a stopped calendar fails the
+    // five-second band below (a span of about 2 s or 7 s, not 5).
+    (void)brio::wait_ticks<P>([&] { return !Rtc::read(r) || r.time.second != s0; }, 2000);
     const uint32_t t0 = Ticker::millis();
     const uint8_t s1 = r.time.second;
     uint8_t seen = 0;
     uint8_t last = s1;
-    while (seen < 5u) {
-        if (!Rtc::read(r)) {
-            break;
-        }
-        if (r.time.second != last) {
-            last = r.time.second;
-            ++seen;
-        }
-    }
+    (void)brio::wait_ticks<P>(
+        [&] {
+            if (!Rtc::read(r)) {
+                return true;
+            }
+            if (r.time.second != last) {
+                last = r.time.second;
+                ++seen;
+            }
+            return seen >= 5u;
+        },
+        7000);
     const uint32_t span = Ticker::millis() - t0;
     print(serial, "  five calendar seconds took ", span,
           " ms of kernel tick (nominal 5000; one RC weighed against "
@@ -934,7 +950,8 @@ void te_shadow() {
     const uint8_t sec = r.time.second;
     first = r.subsecond;
     last = first;
-    while (Rtc::read(r) && r.time.second == sec) {
+    const uint32_t guard0 = Ticker::millis();   // a second at most; 2 s bounds it
+    while (Rtc::read(r) && r.time.second == sec && Ticker::millis() - guard0 < 2000u) {
         if (r.subsecond > last) {
             descending = false;
             break;
@@ -1222,9 +1239,10 @@ void th_erratum() {
     // the count either way rather than pretending.
     print(serial, "  ES0548 2.9.1 ", raw_bad != 0u ? "REPRODUCED" : "did NOT reproduce",
           " on the unguarded path in this run", crlf);
-    bench.verdict("and the unguarded path is at least as bad as the guarded "
-                  "one - the workaround never costs correctness",
-                  raw_bad >= guarded_bad);
+    // Not judged: with the guarded path's zero judged above, "at least as
+    // bad" could not fail.
+    print(serial, "  the unguarded path corrupted ", raw_bad, ", the guarded ", guarded_bad,
+          crlf);
 
     Rtc::bypass_shadow(true);
     (void)set_time(RtcDateTime{.hour = 0, .minute = 0, .second = 0, .day = 1,
@@ -1317,7 +1335,7 @@ void ti_calibration() {
                           "prescalers, so ck_spre moves and RTCCLK/16 does not",
                           fswing < swing_ppm / 3u);
         } else {
-            print(serial, "  SKIPPED, no verdict claimed: reading this swing "
+            print(serial, "  reading this swing "
                   "as ZERO needs a root that holds its rate between two "
                   "windows thirty seconds apart, and RTCCLK here is the LSI - "
                   "an RC oscillator whose own wander is the size of the "
@@ -1325,6 +1343,8 @@ void ti_calibration() {
                   "nothing is claimed from them; the ck_spre half of the "
                   "letter, which measures a swing rather than the absence of "
                   "one, stands.", crlf);
+            bench.skip("the divided clock's swing read as zero needs a root steadier than "
+                       "the LSI");
         }
     } else {
         bench.verdict("the divided-clock control legs were measurable", false);
@@ -1488,9 +1508,7 @@ inline bool is_wrap(uint16_t prev, uint16_t ss) {
 /// for a letter that wants to sit out a tamper's sampling window: a
 /// request of 60 ms is refused outright and no time is spent.
 void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
+    brio::spin_us<Ruler>(ms * 1000u);
 }
 
 /// A pad proven free the way this stratum proves one: it follows its own
@@ -1610,13 +1628,10 @@ bool refckon(bool on) {
 
 void tk_refin() {
     if constexpr (!refin_bonded) {
-        print(serial, "  SKIPPED, no verdict claimed: RTC_REFIN is PB15 and "
-              "this package does not bond it (DS12992 table 12 - the LQFP32's "
-              "port B stops at PB9). The function has no second pad on any G0 "
-              "of this pack, so there is no reference to build and no "
-              "correction to watch: 30.3.12's whole half is out of reach on "
-              "this board, registers included, because REFCKON with nothing "
-              "on the pad is a calendar corrected by noise.", crlf);
+        // The function has no second pad on any G0 of this pack, and
+        // REFCKON with nothing on the pad is a calendar corrected by noise.
+        bench.skip("RTC_REFIN is PB15, which this package does not bond (DS12992 table "
+                   "12): 30.3.12's half is out of reach on this board");
         return;
     }
     // THE PAD, AND WHY IT NEEDS A WORD FIRST. PB15 is RTC_REFIN and it
@@ -1835,8 +1850,9 @@ void tl_shift() {
     (void)wait_mid_second(2000);
     const bool r0 = Rtc::read(before);
     const bool add = Rtc::shift(true, 0);
-    while (Rtc::shift_pending()) {
-    }
+    // A shift lands at the next second at most; one that never does shows
+    // in the calendar and RSF verdicts after it.
+    (void)brio::wait_ticks<P>([] { return !Rtc::shift_pending(); }, 2000);
     const bool r1 = Rtc::read(after);
     (void)next_wrap(b, 3000);
     const uint32_t unmoved = b - a;
@@ -1856,8 +1872,9 @@ void tl_shift() {
     (void)wait_mid_second(2000);
     (void)Rtc::read(before);
     const bool adv = Rtc::shift(true, 64);
-    while (Rtc::shift_pending()) {
-    }
+    // A shift lands at the next second at most; one that never does shows
+    // in the calendar and RSF verdicts after it.
+    (void)brio::wait_ticks<P>([] { return !Rtc::shift_pending(); }, 2000);
     (void)Rtc::read(after);
     (void)next_wrap(b, 3000);
     const uint32_t both = b - a;
@@ -1877,8 +1894,9 @@ void tl_shift() {
     (void)wait_mid_second(2000);
     const bool first = Rtc::shift(false, 32);
     const bool second = Rtc::shift(false, 32);
-    while (Rtc::shift_pending()) {
-    }
+    // A shift lands at the next second at most; one that never does shows
+    // in the calendar and RSF verdicts after it.
+    (void)brio::wait_ticks<P>([] { return !Rtc::shift_pending(); }, 2000);
     bench.verdict("a second shift while one is pending is refused, where the "
                   "register would have dropped it in silence",
                   first && !second);
@@ -1892,8 +1910,9 @@ void tl_shift() {
     const bool synced_before = Rtc::synchronized();
     (void)Rtc::shift(false, 16);
     const bool synced_after = Rtc::synchronized();
-    while (Rtc::shift_pending()) {
-    }
+    // A shift lands at the next second at most; one that never does shows
+    // in the calendar and RSF verdicts after it.
+    (void)brio::wait_ticks<P>([] { return !Rtc::shift_pending(); }, 2000);
     const bool resynced = Rtc::wait_sync();
     bench.verdict("writing SUBFS clears RSF, so a shadow reader knows its "
                   "copy is stale until the shift has landed",
@@ -2037,12 +2056,12 @@ void tm_tamper() {
     // with both numbers on the record, where it does not. TAMP_IN2 is PA0
     // on both parts (DS12232 and DS13560 alike), so this is not a pad map.
     if (driven_free && !driven_armed && still_output) {
-        bench.verdict("ARMING A TAMPER INPUT TAKES THE PAD: a port-driven high "
-                      "reads back 1 free and 0 armed with MODER untouched, so "
-                      "neither the output driver nor the input buffer reaches "
-                      "it any more - and the PULLS go with it, so no program "
-                      "on this board can put an EDGE on a tamper input at all",
-                      true);
+        // Printed, not judged: the two dies of the family differ here and
+        // nothing in the manual says which behaviour a part has.
+        print(serial, "  measured on this die: ARMING A TAMPER INPUT TAKES THE PAD - a "
+              "port-driven high reads back 1 free and 0 armed with MODER untouched, so "
+              "neither the output driver nor the input buffer reaches it any more, and the "
+              "pulls go with it", crlf);
     } else {
         print(serial, "  ON THIS DIE ARMING DOES NOT TAKE THE PAD: the "
               "port-driven high is still readable through the GPIO input "
@@ -2051,9 +2070,8 @@ void tm_tamper() {
               "restated, and what follows does not rest on it - every leg "
               "below drives the detector through the precharge and the "
               "board's own pulls, never through a port output.", crlf);
-        bench.verdict("whether arming a tamper input takes the pad - "
-                      "DECLINED on this die, see the line above",
-                      driven_free && still_output && ok);
+        bench.skip("whether arming a tamper input takes the pad: not on this die, see the "
+                   "line above");
     }
 
     // ---- THE INSTRUMENT: a pad standing at a known ACTIVE level ------------
@@ -2095,7 +2113,9 @@ void tm_tamper() {
             arm_latency(1, TamperFilter::samples2, TamperSampling::div256,
                         TamperTrigger::high_level_or_falling_edge, false, false,
                         false, true, 1000, ok);
-        print(serial, "  SKIPPED, no verdict claimed: the two legs that prove "
+        bench.skip("the two legs that prove the board holds a tamper input need PC13, "
+                   "which this package does not bond");
+        print(serial, "  the two legs that prove "
               "the BOARD holds a tamper input need PC13, and this package "
               "bonds no PC13 at all (DS12992 table 12) - its TAMP_IN1 is PA4, "
               "which nothing outside holds. Measured on it: an active-high "
@@ -2144,7 +2164,9 @@ void tm_tamper() {
         // edge detector is for, and it says nothing at all about
         // 31.3.4's caution, which is about a detector armed over a level
         // that was ALREADY standing.
-        print(serial, "  SKIPPED, no verdict claimed: 31.3.4's caution needs "
+        bench.skip("31.3.4's caution needs a level already standing when the detector is "
+                   "armed, and on this package the arming makes the level");
+        print(serial, "  31.3.4's caution needs "
               "a detector armed over a level that was ALREADY there, and on "
               "this package the level IS the arming - the precharge pulls a "
               "floating pad up as the detector starts, which is a genuine "
@@ -2246,7 +2268,9 @@ void tm_tamper() {
                      : "",
           crlf);
     if (pu_off == 0u && leans_high) {
-        print(serial, "  SKIPPED, no verdict claimed: TAMPPUDIS shows as "
+        bench.skip("TAMPPUDIS: the free pad drifts up by itself on this desk, so with the "
+                   "precharge off the detector has nothing to fire on");
+        print(serial, "  TAMPPUDIS shows as "
               "the contrast between a precharged pad that samples high "
               "and a free one that drifts LOW, and on this desk the free "
               "pad drifts UP by itself - a fact of the node, not of the "
@@ -2528,8 +2552,8 @@ void tw_erase() {
     // ---- the internal tampers, which have no NOERASE bit at all ------------
     print(serial, "  internal tampers ", Tamp::has_internal_tampers ? "" : "not ",
           "declared; TAMP_CR1=", hex(Tamp::config1()), crlf);
-    bench.verdict("this part declares the four internal sources",
-                  Tamp::has_internal_tampers);
+    static_assert(Tamp::has_internal_tampers,
+                  "every part of the stratum declares the four internal tamper sources");
     bench.verdict("an index outside the manual's ITAMP3..ITAMP6 is refused",
                   !Tamp::internal_tamper(2, true) &&
                       !Tamp::internal_tamper(7, true));
@@ -2618,11 +2642,13 @@ void tw_erase() {
                   "initialization mode starts it again",
                   restored && b.time.second != a.time.second);
 
+    bool restored_all = true;
     for (uint8_t i = 0; i < Tamp::backup_count; ++i) {
         (void)Tamp::backup(i, 0xB0000000u | i);
+        restored_all = restored_all && Tamp::backup(i) == (0xB0000000u | i);
     }
     bench.verdict("the backup registers restored to what letter j leaves",
-                  Tamp::backup(0) == 0xB0000000u && !Tamp::any_armed());
+                  restored_all && !Tamp::any_armed());
 }
 
 // =============================================================================
@@ -2675,12 +2701,15 @@ void tv_survival() {
                                     .day = 9, .month = 9, .year = 24,
                                     .weekday = 1});
     }
+    bool witnesses = true;
     for (uint8_t i = 0; i < Tamp::backup_count; ++i) {
         const uint32_t v = 0x5A000000u | (static_cast<uint32_t>(i) << 8) | i;
         (void)Tamp::backup(i, v);
         token.written[i] = v;
+        witnesses = witnesses && Tamp::backup(i) == v;
     }
-    bench.verdict("five witnesses written into the backup registers", true);
+    bench.verdict("five witnesses written into the backup registers, each read back",
+                  witnesses);
     token.magic = token_magic;
     token.leg = 1;
     token.pass = bench.passed();

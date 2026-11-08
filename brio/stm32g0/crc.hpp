@@ -407,9 +407,9 @@ public:
 
     // ---- reading ------------------------------------------------------------
 
-    /// CRC_DR, whole. For a width under 32 the bits above it are the
-    /// datapath's leftovers - use value_masked() unless you want to see
-    /// them.
+    /// CRC_DR, whole. For a width under 32 the chapter does not say what
+    /// the bits above it hold (they read zero after a 7-bit run on the
+    /// STM32G0B1RE) - use value_masked() unless you want to see them.
     static uint32_t value() { return regs().DR; }
 
     /// The result of the configured width, 14.3.3's "least significant

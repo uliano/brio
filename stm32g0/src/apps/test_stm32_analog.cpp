@@ -141,6 +141,7 @@
 #include "util/analog.hpp"
 #include "util/analog_sampler.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
@@ -379,27 +380,25 @@ void clear_counts() {
 // Instruments
 // =============================================================================
 
-/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
+/// The suite's ruler (util/test_wait.hpp's waits and spans run on it): a
+/// cycle count that spans ticks, the kernel ticker's own cycles(), the
 /// tick count and the counter's position composed right across the reload
 /// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
-uint32_t cycles_now() {
-    return Ticker::cycles();
-}
+/// It needs interrupts enabled, or a masked span shorter than one tick
+/// period (cycle_count.hpp, "The reads").
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000UL;
 
-void spin_cycles(uint32_t c) {
-    const uint32_t t0 = cycles_now();
-    while (cycles_now() - t0 < c) {
-    }
-}
-
-/// Wait for the console to be physically empty. A measurement window a
-/// transmit interrupt walks through is not a measurement.
-void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    spin_cycles(SysClock::hz / 500u);   // 2 ms of quiet on top
-}
+/// Wait for the console to be physically empty: a measurement window a
+/// transmit interrupt walks through is not a measurement. The answer is
+/// dropped here, where what follows is not timed against a derived
+/// bound (a wedged console only lengthens it); the letters whose window
+/// is, act on it themselves.
+void console_drain() { (void)brio::console_drain<Ruler, Serial>(); }
 
 /// THE PRECONDITION OF EVERY PAD LETTER: an input pad with nothing
 /// attached goes where its own pull sends it.
@@ -513,15 +512,15 @@ void dac_down() {
 void dac_up() {}
 void dac_down() {}
 
-/// What a letter that cannot be compiled without a DAC prints when it is
-/// asked for. The reason is one string for all of them; what is missing
-/// is the caller's one line.
+/// What a letter that cannot be compiled without a DAC skips with when
+/// it is asked for. The reason is one string for all of them; what is
+/// missing is the caller's one line.
 void skip_no_dac(const char* what) {
-    print(serial, "  SKIPPED, no verdict claimed: ", what,
-          " needs a DAC, and this part has none (dac_present() is false - "
-          "16.3's own table gives the G031/G041 no DAC and the reserve finds "
-          "no DAC1_BASE in the device header). Nothing is refused here: the "
-          "type does not exist, so the letter is not compiled at all.", crlf);
+    bench.skip(what,
+               " needs a DAC, and this part has none (dac_present() is false - "
+               "16.3's own table gives the G031/G041 no DAC and the reserve finds "
+               "no DAC1_BASE in the device header). Nothing is refused here: the "
+               "type does not exist, so the letter is not compiled at all.");
 }
 #endif
 
@@ -538,11 +537,11 @@ void comps_down() {}
 
 /// The comparators' twin of skip_no_dac().
 void skip_no_comp(const char* what) {
-    print(serial, "  SKIPPED, no verdict claimed: ", what,
-          " needs a comparator, and this part has none (comp_count() is 0 - "
-          "18.1 gives the block to the G05x class and up, and the reserve "
-          "finds no COMP1_BASE in the device header). The type does not "
-          "exist, so the letter is not compiled at all.", crlf);
+    bench.skip(what,
+               " needs a comparator, and this part has none (comp_count() is 0 - "
+               "18.1 gives the block to the G05x class and up, and the reserve "
+               "finds no COMP1_BASE in the device header). The type does not "
+               "exist, so the letter is not compiled at all.");
 }
 #endif
 
@@ -662,16 +661,16 @@ void ta_block() {
                       "(18.6.1, one register description at a time)",
                       comp_window_partners_ok());
     } else {
+        bench.skip("the comparators' EXTI lines and their window partners need "
+                   "a comparator, and this part has none (comp_count() is 0 - "
+                   "18.1 gives the block to the G05x class and up, and the "
+                   "reserve finds no COMP1_BASE in the device header)");
         print(serial,
-              "  SKIPPED, no verdict claimed: the comparators' EXTI lines and "
-              "their window partners need a comparator, and this part has none "
-              "(comp_count() is 0 - 18.1 gives the block to the G05x class and "
-              "up, and the reserve finds no COMP1_BASE in the device header). "
-              "The lines are not there either, which is a second witness of "
+              "  the lines are not there either, which is a second witness of "
               "the same absence: Exti::implemented() reads ",
               Exti::implemented(17), " / ", Exti::implemented(18), " / ",
               Exti::implemented(20), " for lines 17, 18 and 20, off "
-              "EXTI_IMR1's own per-part mask.", crlf);
+              "EXTI_IMR1's own per-part mask", crlf);
     }
 
     // What this boot found, before a line of this suite ran.
@@ -763,12 +762,11 @@ void ta_block() {
     // The VOCABULARY is still every part's - dac_trigger_valid() and
     // dac_channel_config_valid() are compiled here and answer - but a
     // REFUSAL is a verb of a resource, and there is no resource to refuse.
-    print(serial,
-          "  SKIPPED, no verdict claimed: the DAC's three refusals (a channel "
-          "past the count, a wave with no trigger, an empty trigger code) need "
-          "a Dac to do the refusing, and this part has none (dac_present() is "
-          "false - 16.3's table gives the G031/G041 no DAC, and the reserve "
-          "finds no DAC1_BASE in the device header).", crlf);
+    bench.skip("the DAC's three refusals (a channel past the count, a wave "
+               "with no trigger, an empty trigger code) need a Dac to do the "
+               "refusing, and this part has none (dac_present() is false - "
+               "16.3's table gives the G031/G041 no DAC, and the reserve finds "
+               "no DAC1_BASE in the device header)");
 #endif
 #if defined(COMP1_BASE)
     bench.verdict("a comparator power mode 18.6.1 marks Reserved is refused, "
@@ -776,10 +774,8 @@ void ta_block() {
                   !C1::configure({.power = static_cast<CompPower>(3)}) &&
                       !C1::configure({.blanking = 0x20}));
 #else
-    print(serial,
-          "  SKIPPED, no verdict claimed: the comparator's two refusals need a "
-          "Comp, and this part has none (comp_count() is 0 - no COMP1_BASE in "
-          "the device header).", crlf);
+    bench.skip("the comparator's two refusals need a Comp, and this part has "
+               "none (comp_count() is 0 - no COMP1_BASE in the device header)");
 #endif
 
     // The pads, before anything rests on them.
@@ -800,13 +796,12 @@ void ta_block() {
                       "an LED with a resistor to ground - which letter e then "
                       "confirms from the analog side", a5);
     } else {
-        print(serial,
-              "  SKIPPED, no verdict claimed: the lamp's drive path is a claim "
-              "about a board whose LED is on the DAC's second output, and this "
-              "board's LED (LD3) is on PC6 - a pad no analog block reaches and "
-              "one this suite never walks, its series resistor to ground being "
-              "stronger than a 40 kOhm pull. PA5 here is a free pad and is "
-              "judged as one, above.", crlf);
+        bench.skip("the lamp's drive path is a claim about a board whose LED is "
+                   "on the DAC's second output, and this board's LED (LD3) is on "
+                   "PC6 - a pad no analog block reaches and one this suite never "
+                   "walks, its series resistor to ground being stronger than a "
+                   "40 kOhm pull. PA5 here is a free pad and is judged as one, "
+                   "above");
     }
 
     PadA4::analog();
@@ -885,9 +880,19 @@ void tb_scale() {
                   "full-scale arithmetic util/analog.hpp is handed is right "
                   "at both resolutions",
                   static_cast<uint16_t>(mv12 > mv10 ? mv12 - mv10 : mv10 - mv12) <= 6u);
-    bench.verdict("and the datasheet's own number is met: VREFINT is 1.182 "
-                  "to 1.232 V over the whole temperature range (table 27)",
-                  mv12 >= 1150u && mv12 <= 1260u);
+    // On this scale VREFINT reads VREFINT_CAL x 3.0 V / 4096 whatever the
+    // supply, because VDDA is computed from the same reading: mv12 above
+    // is the factory word, not a measurement. What table 27 can judge is
+    // the word itself, in raw counts: 1.182 V and 1.232 V at ST's 3.0 V
+    // are 1613.8 and 1682.1 counts of 4096, widened by one count each
+    // side for the one conversion the word is (its quantization and a
+    // count of offset).
+    bench.verdict("and the datasheet's own number is met by the factory "
+                  "word: VREFINT_CAL is 1613..1683 counts of 4096 at 3.0 V, "
+                  "table 27's 1.182 to 1.232 V over the whole temperature "
+                  "range - the reading itself is that word on this scale",
+                  AdcFactory::vrefint_cal() >= 1613u &&
+                      AdcFactory::vrefint_cal() <= 1683u);
     quiet_everything();
 }
 
@@ -925,16 +930,20 @@ uint32_t timed_conversions(const AdcConfig& c, uint8_t channel, uint16_t count,
     if (!loaded) {
         return 0;
     }
-    const uint32_t t0 = cycles_now();
+    // The longest row is 256 x 173 ADC cycles at 32 MHz, 1.4 ms: 20 ms
+    // is a converter that stopped. The poll turn (one flag read and one
+    // ruler read, under a hundred cycles) lands on the span once, under
+    // half a CPU cycle per conversion of 256 - below the rounding the
+    // caller does.
+    const uint32_t t0 = Ruler::now();
     Adc::start();
-    uint32_t guard = 0;
-    while (!Ch::flag(DmaFlag::complete) && ++guard < 20'000'000UL) {
-    }
-    const uint32_t elapsed = cycles_now() - t0;
+    const bool complete =
+        brio::wait_until<Ruler>([] { return Ch::flag(DmaFlag::complete); }, 20'000u);
+    const uint32_t elapsed = Ruler::now() - t0;
     (void)Adc::stop();
     Ch::stop();
     (void)DmaMux::release(Ch::mux_channel);
-    return guard >= 20'000'000UL ? 0 : elapsed;
+    return complete ? elapsed : 0;
 }
 
 uint16_t timing_buffer[256];
@@ -961,14 +970,17 @@ uint32_t one_conversion_cycles() {
     Nvic::enable(Adc::irq());
     for (uint8_t i = 0; i < 32; ++i) {
         disable_interrupts();
-        const uint32_t t0 = cycles_now();
+        const uint32_t t0 = Ruler::now();
         Adc::start();
         __DSB();
         __WFI();
         const bool woken_by_eoc = Adc::ready();
-        const uint32_t d = cycles_now() - t0;
-        for (uint32_t spins = 0; spins < 100'000UL && !Adc::ready(); ++spins) {
-        }
+        const uint32_t d = Ruler::now() - t0;
+        // A tick's wake: the conversion (microseconds) ends under 100 us,
+        // and the masked span stays far under the tick period the ruler
+        // can compose across. Its answer is dropped: a run not woken by
+        // EOC is not counted below whatever the wait found.
+        (void)brio::wait_until<Ruler>([] { return Adc::ready(); }, 100u);
         (void)Adc::result();   // EOC down: reading ADC_DR clears it (15.4.3)
         Nvic::clear_pending(Adc::irq());
         enable_interrupts();
@@ -990,7 +1002,6 @@ void tc_timing() {
     Dma<1>::bus_clock(true);
     Adc::vrefint(true);
     (void)delay_us(clock, 100);
-    console_drain();
 
     struct Row {
         AdcSampleTime smp;
@@ -1013,6 +1024,14 @@ void tc_timing() {
         AdcConfig c = cfg_pad;
         c.sample1 = r.smp;
         c.resolution = r.res;
+        // Every row is judged to the CPU cycle, and the previous row's line
+        // is still leaving: its transmit interrupt would land in the span.
+        if (!brio::console_drain<Ruler, Serial>()) {
+            bench.skip("the console did not drain: the timed conversions "
+                       "would carry its interrupt");
+            quiet_everything();
+            return;
+        }
         const uint32_t cycles = timed_conversions(c, 0, n, timing_buffer);
         if (cycles == 0u) {
             continue;
@@ -1044,6 +1063,14 @@ void tc_timing() {
     // is amortized over 256 and invisible. Here one conversion is timed
     // on its own, against the same conversion at a long sampling time
     // where the erratum does not apply, so the software overhead cancels.
+    // The wakes below are judged to the CPU cycle, and a pending transmit
+    // interrupt ends every WFI before EOC can.
+    if (!brio::console_drain<Ruler, Serial>()) {
+        bench.skip("the console did not drain: its interrupt would end every "
+                   "timed wake");
+        quiet_everything();
+        return;
+    }
     AdcConfig one = cfg_pad;
     one.sample1 = AdcSampleTime::cycles1_5;
     (void)apply(one);
@@ -1337,12 +1364,14 @@ void sequencer_order(const AdcConfig& fwd) {
                           (1u << Adc::vrefint_channel);
     (void)apply(fwd);
     const bool seq_ok = Adc::sequence(mask);
+    // Each conversion here is tens of microseconds (cfg_internal's 20 us
+    // of sampling the longest): a millisecond is a converter that stopped.
+    bool converted = true;
     uint16_t f[3] = {0, 0, 0};
     Adc::start();
     for (uint8_t i = 0; i < 3; ++i) {
-        uint32_t guard = 0;
-        while (!Adc::ready() && ++guard < 1'000'000UL) {
-        }
+        converted = brio::wait_until<Ruler>([] { return Adc::ready(); }, 1000u) &&
+                    converted;
         f[i] = Adc::result();
     }
     const bool eos_fwd = Adc::sequence_done();
@@ -1355,9 +1384,8 @@ void sequencer_order(const AdcConfig& fwd) {
     uint16_t b[3] = {0, 0, 0};
     Adc::start();
     for (uint8_t i = 0; i < 3; ++i) {
-        uint32_t guard = 0;
-        while (!Adc::ready() && ++guard < 1'000'000UL) {
-        }
+        converted = brio::wait_until<Ruler>([] { return Adc::ready(); }, 1000u) &&
+                    converted;
         b[i] = Adc::result();
     }
     print(serial, "  forward ", f[0], " ", f[1], " ", f[2], " | backward ",
@@ -1366,7 +1394,7 @@ void sequencer_order(const AdcConfig& fwd) {
     bench.verdict("the bitmap sequencer scans in NUMERIC ORDER and SCANDIR "
                   "reverses it exactly - the same three values come back "
                   "front to back",
-                  seq_ok && f[0] > 800u && f[0] < 1300u && f[1] > 2700u &&
+                  seq_ok && converted && f[0] > 800u && f[0] < 1300u && f[1] > 2700u &&
                       f[1] < 3400u && f[2] < 2000u && b[0] < 2000u &&
                       b[1] > 2700u && b[1] < 3400u && b[2] > 800u && b[2] < 1300u);
     bench.verdict("and EOS rises at the end of the sequence and not before",
@@ -1380,11 +1408,11 @@ void sequencer_order(const AdcConfig& fwd) {
     const uint8_t order[3] = {Adc::vrefint_channel, In5::channel, In4::channel};
     const bool ord_ok = Adc::sequence_ordered(order, 3);
     uint16_t o[3] = {0, 0, 0};
+    bool ord_converted = true;
     Adc::start();
     for (uint8_t i = 0; i < 3; ++i) {
-        uint32_t guard = 0;
-        while (!Adc::ready() && ++guard < 1'000'000UL) {
-        }
+        ord_converted = brio::wait_until<Ruler>([] { return Adc::ready(); }, 1000u) &&
+                        ord_converted;
         o[i] = Adc::result();
     }
     print(serial, "  ordered (13, 5, 4): ", o[0], " ", o[1], " ", o[2],
@@ -1392,19 +1420,18 @@ void sequencer_order(const AdcConfig& fwd) {
     bench.verdict("the FULLY CONFIGURABLE face walks the channels in the "
                   "order written and not in their numeric order (15.3.8), "
                   "with 0xF terminating a short list",
-                  ord_ok && o[0] < 2000u && o[1] > 2700u && o[2] > 800u &&
+                  ord_ok && ord_converted && o[0] < 2000u && o[1] > 2700u && o[2] > 800u &&
                       o[2] < 1300u && (Adc::selection() & 0xFFFF000u) != 0u);
 }
 #else
 void sequencer_order(const AdcConfig& fwd) {
     (void)apply(fwd);
-    print(serial,
-          "  SKIPPED, no verdict claimed: the scan direction and the ordered "
-          "face are read off three inputs that DIFFER, and this part has no "
-          "source that can make them (dac_present() is false, and 7.3.13 "
-          "leaves a pad no pull to walk under). The sequencer's other half - "
-          "the CCRDY handshake and the refusal while a conversion runs - is "
-          "below and does run.", crlf);
+    bench.skip("the scan direction and the ordered face are read off three "
+               "inputs that DIFFER, and this part has no source that can make "
+               "them (dac_present() is false, and 7.3.13 leaves a pad no pull "
+               "to walk under). The sequencer's other half - the CCRDY "
+               "handshake and the refusal while a conversion runs - is below "
+               "and does run");
 }
 #endif
 
@@ -1539,9 +1566,9 @@ void tg_oversampler() {
                       "to reduce",
                       static_cast<uint16_t>(avg.hi - avg.lo) < base_span);
     } else {
-        print(serial, "  the base spread is ", base_span, " counts, too small "
-              "to judge a reduction - DECLINED in print rather than dressed up",
-              crlf);
+        print(serial, "  the base spread is ", base_span, " counts", crlf);
+        bench.skip("and the spread SHRINKS: the base spread is under four "
+                   "counts, too small to judge a reduction");
     }
 
     // The other half of table 79: no shift at all widens the datum.
@@ -1743,9 +1770,10 @@ void th_watchdogs() {
                   Adc::vrefint_channel);   // channel 13: the SECOND of the two
     Adc::clear_flags(AdcFlag::watchdog1);
     Adc::start();
-    uint32_t guard = 0;
-    while (!Adc::sequence_done() && ++guard < 2'000'000UL) {
-    }
+    // Two conversions of cfg_internal, about 50 us: 2 ms is a converter
+    // that stopped.
+    const bool second_ran =
+        brio::wait_until<Ruler>([] { return Adc::sequence_done(); }, 2000u);
     const bool second_flagged = Adc::flag(AdcFlag::watchdog1);
     Adc::clear_flags(AdcFlag::watchdog1 | AdcFlag::sequence_done);
     // The control: the SAME watchdog on the FIRST channel of the same
@@ -1753,9 +1781,8 @@ void th_watchdogs() {
     arm_watchdog1(0, static_cast<uint16_t>(d > 200u ? d - 200u : 0u), true,
                   second_source);
     Adc::start();
-    guard = 0;
-    while (!Adc::sequence_done() && ++guard < 2'000'000UL) {
-    }
+    const bool first_ran =
+        brio::wait_until<Ruler>([] { return Adc::sequence_done(); }, 2000u);
     const bool first_flagged = Adc::flag(AdcFlag::watchdog1);
     Adc::clear_flags(AdcFlag::watchdog1 | AdcFlag::sequence_done);
     (void)Adc::disable();
@@ -1767,7 +1794,8 @@ void th_watchdogs() {
     bench.verdict("ES0548 2.6.3 STAGED WITH A CONTROL: the erratum says an "
                   "AWD1 single-channel watchdog misses a channel that is not "
                   "the first of a sequence, and the control proves the "
-                  "instrument sensitive", first_flagged);
+                  "instrument sensitive",
+                  second_ran && first_ran && first_flagged);
     quiet_everything();
 }
 
@@ -1814,13 +1842,10 @@ void ti_comp3_registers() {
                           C3::negative() == CompNegative::vrefint);
         (void)C3::release();
     } else {
-        print(serial,
-              "  SKIPPED, no verdict claimed: the third comparator's register "
-              "block needs a COMP3, which this part has not got "
-              "(comp_present(3) is false - 18.1 gives the third to the "
-              "G0B1/G0C1 alone, and the reserve finds no COMP3 bit field in "
-              "the device header).",
-              crlf);
+        bench.skip("the third comparator's register block needs a COMP3, which "
+                   "this part has not got (comp_present(3) is false - 18.1 "
+                   "gives the third to the G0B1/G0C1 alone, and the reserve "
+                   "finds no COMP3 bit field in the device header)");
     }
 }
 
@@ -1866,12 +1891,9 @@ void ti_comparators() {
     // How long the charge lasts - the number that says whether the
     // technique is a measurement or a race.
     precharge(true);
-    const uint32_t t0 = cycles_now();
-    uint32_t held = 0;
-    const uint32_t cap = SysClock::hz / 10u;   // 100 ms
-    while (C1::value() && (held = cycles_now() - t0) < cap) {
-    }
-    const uint32_t held_us = held / cycles_per_us;
+    // Capped at 100 ms: a charge that outlasts it reads as the cap.
+    const auto fell = brio::cycles_until<Ruler>([] { return !C1::value(); }, 100'000u);
+    const uint32_t held_us = fell ? *fell / cycles_per_us : 100'000u;
     print(serial, "  the precharged node held above half VREFINT for ",
           held_us, " us", crlf);
     bench.verdict("and it holds for long enough to be read many times over - "
@@ -1999,10 +2021,11 @@ void ti_comparators() {
                   "COMP1's plus input, so one precharged node is compared "
                   "against two thresholds at once (18.3.5)",
                   win_ok && above_both && below_both);
-    print(serial, "  the INSIDE state is DECLINED: it needs the node held "
-          "between the two thresholds, which no source inside this chip can "
-          "do (tables 93/95/97 offer the plus input no internal signal). One "
-          "wire from PA4 - DAC1_OUT1 - to PA1 would settle it.", crlf);
+    bench.skip("the window's INSIDE state on a precharged node: it needs the "
+               "node held between the two thresholds, which no source inside "
+               "this chip can do (tables 93/95/97 offer the plus input no "
+               "internal signal); one wire from PA4 - DAC1_OUT1 - to PA1 would "
+               "settle it, and letter m reaches it on a settled free pad");
 
     // WINOUT: the XOR of the pair, and figure 69 puts it on the
     // comparator that OWNS the pad - the one with WINMODE CLEAR - while
@@ -2254,8 +2277,8 @@ void tj_sampler_ao() {
     // Tenuto::run() matures time events, and this loop is not run(). The
     // sampler's software pace IS a time event, so the pump has to do
     // both halves by hand.
-    const uint32_t deadline = Ticker::ticks() + 400u;
-    while (Collector::samples < 60u && Ticker::ticks() < deadline) {
+    const uint32_t start = Ticker::ticks();
+    while (Collector::samples < 60u && Ticker::ticks() - start < 400u) {
         TimeEvents<Stm32g0Platform<>>::process();
         while (AnalogKernel::step()) {
         }
@@ -2295,15 +2318,13 @@ void tj_sampler_ao() {
                       vdda >= 3000u && vdda <= 3600u && Collector::last[2] > 2700u &&
                           Collector::last[2] < 3200u);
     } else {
-        print(serial,
-              "  SKIPPED, no verdict claimed: the labelled-values check rests "
-              "on a THIRD input this program set to a known code, and without "
-              "a DAC there is nothing to set - the third input here is the "
-              "divided battery pin, whose reading is the supply's and not this "
-              "suite's to choose. VDDA from VREFINT reads ", vdda,
-              " mV and VBAT/3 reads ", Collector::last[2],
-              " counts; the walk, its evenness and its labelling are judged "
-              "above.", crlf);
+        bench.skip("the labelled-values check rests on a THIRD input this program "
+                   "set to a known code, and without a DAC there is nothing to "
+                   "set - the third input here is the divided battery pin, whose "
+                   "reading is the supply's and not this suite's to choose; the "
+                   "walk, its evenness and its labelling are judged above");
+        print(serial, "  VDDA from VREFINT reads ", vdda, " mV and VBAT/3 reads ",
+              Collector::last[2], " counts", crlf);
     }
     quiet_everything();
 }
@@ -2426,8 +2447,8 @@ void tk_chain() {
     uint8_t blocks = 0;
     uint16_t inside_bad = 0;
     bool launch_spent = false;
-    const uint32_t deadline = Ticker::ticks() + 400u;
-    while (blocks < 6u && Ticker::ticks() < deadline) {
+    const uint32_t start = Ticker::ticks();
+    while (blocks < 6u && Ticker::ticks() - start < 400u) {
         volatile uint16_t* ready = AdcPong::ready();
         if (ready == nullptr) {
             continue;
@@ -2570,7 +2591,7 @@ void tl_errata() {
     (void)Adc::select_channel(0);
     Adc::clear_flags(AdcFlag::overrun);
     Adc::start();
-    spin_cycles(SysClock::hz / 1000u);
+    brio::spin_us<Ruler>(1000);
     const bool overran = Adc::overrun();
     (void)Adc::stop();
     Adc::clear_flags(AdcFlag::overrun);
@@ -2670,7 +2691,7 @@ uint16_t sweep_up(uint16_t from, uint16_t to, uint16_t& node) {
     for (uint16_t c = from; c <= to; ++c) {
         (void)Dac::write(0, c);
         node = convert(In1{});
-        spin_cycles(64u);
+        brio::spin_us<Ruler>(1);
         if (!C1::value()) {
             return c;
         }
@@ -2683,7 +2704,7 @@ uint16_t sweep_down(uint16_t from, uint16_t to, uint16_t& node) {
     for (uint16_t c = from; c > to; --c) {
         (void)Dac::write(0, c);
         node = convert(In1{});
-        spin_cycles(64u);
+        brio::spin_us<Ruler>(1);
         if (C1::value()) {
             return c;
         }
@@ -2701,7 +2722,7 @@ uint16_t find_crossing() {
         const uint16_t mid = static_cast<uint16_t>((lo + hi) / 2u);
         (void)Dac::write(0, mid);
         (void)convert(In1{});
-        spin_cycles(128u);
+        brio::spin_us<Ruler>(2);
         if (C1::value()) {
             lo = mid;           // the node is still above the threshold
         } else {
@@ -2790,11 +2811,11 @@ void tm_comp_analog() {
     (void)settle_node(6);
     (void)Dac::write(0, 0);
     (void)convert(In1{});
-    spin_cycles(3200u);
+    brio::spin_us<Ruler>(50);
     const bool over_zero = C1::value();
     (void)Dac::write(0, 4095);
     (void)convert(In1{});
-    spin_cycles(3200u);
+    brio::spin_us<Ruler>(50);
     const bool under_full = !C1::value();
     print(serial, "  COMP1 minus = DAC channel 1 in internal_unbuffered mode "
           "(INMSEL 4, PA4 not claimed): with the DAC at 0 VALUE is ",
@@ -2894,25 +2915,30 @@ void tm_comp_analog() {
     // is everything that needs only a level BETWEEN the rails rather
     // than a still one: the DAC as a threshold, both DAC channels, the
     // window's inside state, and the two propagation delays.
-    print(serial, "  DECLINED, with the number that declines it: the band is ",
-          width_mv[0], " mV with HYST CLEAR, where it should be zero and "
-          "where table 68's LARGEST level is 30 mV. So this band is the "
-          "NODE's motion, not the comparator's hysteresis, and the four "
-          "levels are not reported as measured. The offset goes the same "
-          "way: with HYST clear the crossings sit ", offset_mv,
-          " mV from the ADC's own reading of the node, which is two "
-          "instruments reading different parts of one sawtooth and is not a "
-          "comparator offset. One wire from PA4 to PA1 settles both", crlf);
+    print(serial, "  the band is ", width_mv[0], " mV with HYST CLEAR, where "
+          "it should be zero and where table 68's LARGEST level is 30 mV; "
+          "with HYST clear the crossings sit ", offset_mv, " mV from the "
+          "ADC's own reading of the node", crlf);
     bench.verdict("the four HYST codes are each configured, enabled and swept "
                   "against a real analog node - and the sweep's own floor is "
                   "MEASURED rather than assumed, which is what makes the "
                   "decline that follows a result and not a shrug",
                   sweeps_ok && width_mv[0] != 0);
-    bench.verdict("...and the floor is too high for the question: the band "
-                  "measured with HYST CLEAR is larger than table 68's largest "
-                  "hysteresis, so the three levels are DECLINED in print "
-                  "rather than read off a ruler that cannot see them",
-                  (width_mv[0] > 30 || width_mv[0] < -30));
+    // The levels and the offset are not judged by this instrument either
+    // way: a floor above table 68's largest level is the node's motion
+    // (above), and a floor under it was never given a verdict of its own.
+    if (width_mv[0] > 30 || width_mv[0] < -30) {
+        bench.skip("the three hysteresis levels and the offset: the band with "
+                   "HYST CLEAR is larger than table 68's largest hysteresis, "
+                   "so it is the NODE's motion and not the comparator's, and "
+                   "the offset is two instruments reading different parts of "
+                   "one sawtooth; one wire from PA4 to PA1 settles both");
+    } else {
+        bench.skip("the three hysteresis levels and the offset: the band with "
+                   "HYST CLEAR is within table 68's largest hysteresis, and no "
+                   "verdict is written for the levels on this instrument; the "
+                   "bands are printed above");
+    }
 
     // ---- 5. the two propagation delays -------------------------------------
     // A FULL-SCALE DAC step across the threshold, timed on TIM2 at
@@ -2927,6 +2953,15 @@ void tm_comp_analog() {
     // does exactly the same thing twice.
     uint32_t delay_ticks[2] = {0, 0};
     const CompPower modes[2] = {CompPower::high_speed, CompPower::medium_speed};
+    // The lines above are still leaving, and a transmit interrupt inside
+    // one arm's steps would be a difference the comparator did not make.
+    if (!brio::console_drain<Ruler, Serial>()) {
+        bench.skip("the two propagation delays: the console did not drain, "
+                   "and its interrupt would land in one arm's steps");
+        T2::release();
+        quiet_everything();
+        return;
+    }
     (void)settle_node(6);
     const uint16_t step_centre = find_crossing();
     const uint16_t step_hi = static_cast<uint16_t>(step_centre + 150u);
@@ -2944,7 +2979,7 @@ void tm_comp_analog() {
         for (uint8_t r = 0; r < 32u; ++r) {
             (void)Dac::write(0, step_hi);
             (void)convert(In1{});
-            spin_cycles(6400u);                 // settled, VALUE low
+            brio::spin_us<Ruler>(100);          // settled, VALUE low
             if (C1::value()) {
                 continue;
             }
@@ -2993,18 +3028,18 @@ void tm_comp_analog() {
     (void)Dac::write(0, node0 > 400u ? static_cast<uint16_t>(node0 - 400u) : 0u);
     (void)Dac::write(1, static_cast<uint16_t>(node0 + 400u));
     (void)convert(In1{});
-    spin_cycles(3200u);
+    brio::spin_us<Ruler>(50);
     const bool above_lower = C1::value();
     const bool below_upper = !C2::value();
     (void)Dac::write(0, static_cast<uint16_t>(node0 + 500u));
     (void)Dac::write(1, static_cast<uint16_t>(node0 + 900u));
     (void)convert(In1{});
-    spin_cycles(3200u);
+    brio::spin_us<Ruler>(50);
     const bool below_both = !C1::value() && !C2::value();
     (void)Dac::write(0, node0 > 900u ? static_cast<uint16_t>(node0 - 900u) : 0u);
     (void)Dac::write(1, node0 > 500u ? static_cast<uint16_t>(node0 - 500u) : 0u);
     (void)convert(In1{});
-    spin_cycles(3200u);
+    brio::spin_us<Ruler>(50);
     const bool above_both = C1::value() && C2::value();
     print(serial, "  the window at last: a settled node, located at DAC code ",
           node0, ", read against a window made of the two DAC channels - "
@@ -3171,13 +3206,11 @@ void tn_comp3_half() {
                       "comparators - eight edges, eight interrupts",
                       c3_edges >= 8u);
     } else {
-        print(serial,
-              "  SKIPPED, no verdict claimed: a third comparator's own plus "
-              "pads (PB0, PC1) and its own EXTI line 20 need a COMP3, which "
-              "this part has not got (comp_present(3) is false - 18.1 gives "
-              "the third to the G0B1/G0C1 alone). COMP1 and COMP2 above are "
-              "every comparator this part has, and both ran.",
-              crlf);
+        bench.skip("a third comparator's own plus pads (PB0, PC1) and its own "
+                   "EXTI line 20 need a COMP3, which this part has not got "
+                   "(comp_present(3) is false - 18.1 gives the third to the "
+                   "G0B1/G0C1 alone). COMP1 and COMP2 above are every "
+                   "comparator this part has, and both ran");
     }
 }
 
@@ -3976,14 +4009,22 @@ constexpr const char* exti11_pull_verdict =
 /// The conversion time of ONE conversion of the CURRENT configuration,
 /// in TIM2 ticks: start, wait for EOC, stop the clock. The letter c
 /// technique, reused where the question is a difference and not an
-/// absolute.
+/// absolute. The wait is bounded on TIM2 itself and not on the suite's
+/// ruler, whose read (tens of cycles) would be most of the 500 ns the
+/// AUTOFF verdict resolves: the longest conversion asked for is 173 ADC
+/// cycles at 4 MHz, 43 us, so a millisecond is a converter that stopped,
+/// and that is a FAIL line of its own.
 uint32_t one_conversion_ticks() {
     (void)Adc::clear_flags(AdcFlag::converted | AdcFlag::sequence_done | AdcFlag::overrun);
     const uint32_t t0 = T2::count();
     (void)Adc::start();
-    while (!Adc::flag(AdcFlag::converted)) {
+    while (!Adc::flag(AdcFlag::converted) && T2::count() - t0 < SysClock::hz / 1000u) {
     }
     const uint32_t d = T2::count() - t0;
+    if (!Adc::flag(AdcFlag::converted)) {
+        bench.verdict("a conversion of the configuration under test ends "
+                      "within a millisecond", false);
+    }
     (void)Adc::result();
     return d;
 }
@@ -4126,10 +4167,10 @@ void tq_adc_tail() {
     for (uint8_t i = 0; i < 3u; ++i) {
         (void)Adc::clear_flags(AdcFlag::converted | AdcFlag::sequence_done);
         (void)Adc::start();
-        uint32_t spins = 0;
-        while (!Adc::flag(AdcFlag::converted) && spins < 1'000'000UL) {
-            ++spins;
-        }
+        // One conversion of cfg_internal, about 22 us.
+        disc_ok = brio::wait_until<Ruler>([] { return Adc::flag(AdcFlag::converted); },
+                                          1000u) &&
+                  disc_ok;
         got[i] = Adc::result();
         if (Adc::flag(AdcFlag::sequence_done)) {
             eos_after = static_cast<uint8_t>(i + 1u);
@@ -4253,13 +4294,11 @@ void tq_adc_tail() {
           " fired once each and not before (", timer_rows,
           " timer rows on this part)", crlf);
     if constexpr (!tim_present(4) || !tim_present(15)) {
-        print(serial,
-              "  SKIPPED, no verdict claimed: table 75's rows for the timers "
-              "this part has not got - TIM4 off the G0B1/G0C1, TIM15 off the "
-              "G031 class (tim_present() is false for each). The AdcTrigger "
-              "enumerators still exist, because a trigger's CODE is every "
-              "part's; the timer behind it is not.",
-              crlf);
+        bench.skip("table 75's rows for the timers this part has not got - TIM4 "
+                   "off the G0B1/G0C1, TIM15 off the G031 class (tim_present() "
+                   "is false for each). The AdcTrigger enumerators still exist, "
+                   "because a trigger's CODE is every part's; the timer behind "
+                   "it is not");
     }
     bench.verdict("every timer row of table 75 that this part HAS starts a "
                   "conversion on one event and not before it - TIM1's TRGO2 "

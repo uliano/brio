@@ -115,6 +115,7 @@
 #include "util/power.hpp"
 #include "util/print.hpp"
 #include "util/pwm_channel.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
@@ -249,15 +250,15 @@ const char* slow_name() {
 /// every microsecond this suite prints).
 uint32_t slow_hz = 32768;
 bool wall_on_lse = true;
-/// Whether the boot measurement really happened: false on a board that
-/// runs the crystal (nothing to weigh) and false where the LSI's edges
-/// never reached the meter, which the banner then says out loud rather
-/// than quoting a rate nobody watched.
+/// Whether the boot measurement really happened: false where the LSI's
+/// edges never reached the meter, which the banner then says out loud
+/// rather than quoting a rate nobody watched.
 bool lsi_weighed = false;
-/// What letter a's LSI row prints its reading against. The 64-pin boards
-/// have no other measurement of their LSI, so they keep this stratum's
-/// recorded one; a board that weighed its own uses that.
-uint32_t lsi_nominal = 32'586;
+/// The LSI's rate as this boot measured it, on every board: what the LSI
+/// rows of letters a, g and j are printed (and letter g's judged)
+/// against. Zero where the meter saw no edge, and letter g then judges
+/// against table 46's band instead - never against one die's constant.
+uint32_t lsi_nominal = 0;
 
 /// WHICH CLOCK RULES AN AWAKE WINDOW, and it is a board fact rather than
 /// a taste. Where the wall is a crystal it is the wall: an instrument
@@ -320,20 +321,18 @@ bool wall_up() { return wall_split(wall_prescalers); }
 // Instruments
 // ---------------------------------------------------------------------------
 
-/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
-/// tick count and the counter's position composed right across the reload
+/// The ruler every wait and every CPU-timed span of this suite reads
+/// (util/test_wait.hpp): the kernel ticker's own cycles(), the tick count
+/// and the counter's position composed right across the reload
 /// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
-uint32_t cycles_now() {
-    return Ticker::cycles();
-}
+/// It needs interrupts enabled and the tick running: nothing is timed on
+/// it between Ticker::pause() and Ticker::resume().
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000UL;
-
-void spin_cycles(uint32_t c) {
-    const uint32_t t0 = cycles_now();
-    while (cycles_now() - t0 < c) {
-    }
-}
-void spin_us(uint32_t us) { spin_cycles(us * cycles_per_us); }
 
 void feed() { Iwdg::refresh(); }
 
@@ -349,7 +348,7 @@ class Span {
   public:
     Span() {
         if constexpr (cpu_ruler) {
-            start_ = cycles_now();
+            start_ = Ruler::now();
         } else {
             start_ = wall();
         }
@@ -357,7 +356,7 @@ class Span {
 
     bool within(uint32_t ms) const {
         if constexpr (cpu_ruler) {
-            return (cycles_now() - start_) < ms * (SysClock::hz / 1000u);
+            return (Ruler::now() - start_) < ms * (SysClock::hz / 1000u);
         } else {
             return wall_ms(wall_delta(start_, wall())) < ms;
         }
@@ -365,7 +364,7 @@ class Span {
 
     uint32_t ms() const {
         if constexpr (cpu_ruler) {
-            return (cycles_now() - start_) / (SysClock::hz / 1000u);
+            return (Ruler::now() - start_) / (SysClock::hz / 1000u);
         } else {
             return wall_ms(wall_delta(start_, wall()));
         }
@@ -420,7 +419,20 @@ uint32_t measure_lsi_hz() {
     static uint32_t samples[33];
     constexpr uint16_t want = 33;
     uint16_t got = 0;
-    for (uint32_t spin = 0; spin < 40'000'000UL && got < want; ++spin) {
+    // THE WAIT IS BOUNDED ON THE METER'S OWN COUNTER, which runs from
+    // setup() at PCLK: this runs at boot, with interrupts masked and no
+    // tick started, so the ruler cannot serve yet. Thirty-four edges of
+    // an LSI inside table 46's band (29.5 kHz at the slowest) take at most
+    // 1.2 ms; the budget is 20 ms. The counter is 16 bits wide and wraps
+    // every 1 ms, so it is read every turn and the 16-bit differences are
+    // summed.
+    constexpr uint32_t budget_counts = 20'000u * (SysClock::hz / 1'000'000u);
+    uint32_t elapsed = 0;
+    uint16_t last = static_cast<uint16_t>(Tim<16>::count());
+    while (got < want && elapsed < budget_counts) {
+        const uint16_t now = static_cast<uint16_t>(Tim<16>::count());
+        elapsed += static_cast<uint16_t>(now - last);
+        last = now;
         if ((Tim<16>::flags() & LsiMeter::capture_flag) == 0u) {
             continue;
         }
@@ -451,12 +463,10 @@ uint32_t measure_lsi_hz() {
 }
 
 /// A measurement window a transmit interrupt walks through is not a
-/// measurement.
-void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    spin_cycles(SysClock::hz / 500u);
-}
+/// measurement. The answer is dropped here: a wedged console only
+/// lengthens what follows, and the window a derived bound judges (letter
+/// c's period) asks brio::console_drain() itself and acts on it.
+void console_drain() { (void)brio::console_drain<Ruler, Serial>(); }
 
 bool within(uint32_t v, uint32_t lo, uint32_t hi) { return v >= lo && v <= hi; }
 
@@ -480,21 +490,27 @@ bool pull_walks(bool in_af, PinFunction fn) {
     } else {
         Pin::input(PinPull::up);
     }
-    spin_us(300);
+    brio::spin_us<Ruler>(300);
     const bool high = Pin::read();
     Pin::pull(PinPull::down);
-    spin_us(300);
+    brio::spin_us<Ruler>(300);
     const bool low = Pin::read();
     Pin::pull(PinPull::up);
-    spin_us(300);
+    brio::spin_us<Ruler>(300);
     return high && !low;
 }
+
+/// Whether PB5 - LPTIM1_IN1, and on the desk the SPI MOSI wire to the
+/// paired board (its SPI1's PB5) - follows its own pull, so that a
+/// pull-walk on it means what it says. Free only while the paired board
+/// leaves its end high-impedance; asked by every letter that walks it.
+bool in1_free() { return pull_walks<In1Pin>(false, PinFunction::af5); }
 
 /// Move a pull-walked pad and leave it there.
 template <class Pin>
 void walk(bool high, uint32_t settle_us = 60) {
     Pin::pull(high ? PinPull::up : PinPull::down);
-    spin_us(settle_us);
+    brio::spin_us<Ruler>(settle_us);
 }
 
 /// Bring LPTIM1 up on `src` with `p`, running continuously at ARR =
@@ -723,6 +739,8 @@ Probe::Status Probe::only(const Event& e) {
 /// nominal instead of against the nominal minus a tick.
 void sync_to_tick() {
     const uint32_t t = Ticker::ticks();
+    // A wait on the tick itself, which the ruler is built on: its bound
+    // stays a loop count (two million turns, a fraction of a second).
     uint32_t guard = 2'000'000u;
     while (Ticker::ticks() == t && guard-- != 0u) {
     }
@@ -806,13 +824,23 @@ void ta_block() {
           in1_plain, " PB6 ", etr_plain, " PB7 ", in2_plain,
           "; under AF5 (the LPTIM's own function): PB5 ", in1_af, " PB6 ",
           etr_af, " PB7 ", in2_af, crlf);
-    bench.verdict("all four LPTIM1 pads are free on this board: each follows "
-                  "its own internal pull between the rails",
-                  out_plain && in1_plain && etr_plain && in2_plain);
+    // PB5 IS ALSO THE DESK'S SPI MOSI WIRE (in1_free()): a held PB5 is
+    // printed and skipped, here and in letters d and f, and the other
+    // three pads are judged alone.
+    if (!in1_plain) {
+        print(serial, "  PB5 does not follow its own pull: something outside holds it", crlf);
+        bench.skip("PB5 is held from outside (the desk's SPI wire): its pull-walk, here "
+                   "and in letters d and f, needs it free");
+    }
+    bench.verdict(in1_plain ? "all four LPTIM1 pads are free on this board: each follows "
+                              "its own internal pull between the rails"
+                            : "the three LPTIM1 pads off the desk's SPI wire are free: "
+                              "each follows its own internal pull between the rails",
+                  out_plain && etr_plain && in2_plain);
     bench.verdict("AND THE PULL SURVIVES THE HANDOVER: a pad given to an LPTIM "
                   "INPUT function still walks between the rails, which is what "
                   "makes every stimulus of this suite wireless",
-                  in1_af && etr_af && in2_af);
+                  (in1_af || !in1_plain) && etr_af && in2_af);
 
     // THE FOUR KERNEL CLOCKS, each weighed on this board's own ruler -
     // the crystal wall where there is one, the CPU's cycle counter where
@@ -850,12 +878,9 @@ void ta_block() {
         // multiplexer but an absence of a signal, and the leg says so
         // instead of counting a counter that never moves.
         if (s.code == LptimClock::lse && !wall_on_lse) {
-            print(serial,
-                  "  SKIPPED, no verdict claimed: the LSE row needs a crystal, "
-                  "and LSERDY never rose on this board (the boot line says so) "
-                  "- the other three rows below are the ones this board can "
-                  "put a signal on.",
-                  crlf);
+            bench.skip("the LSE row needs a crystal, and LSERDY never rose on this "
+                       "board (the boot line says so) - the other three rows below "
+                       "are the ones this board can put a signal on");
             continue;
         }
         if (!free_run(s.code, s.presc)) {
@@ -881,6 +906,7 @@ void ta_block() {
     // clocks between CNTSTRT and the counter really moving.
     uint32_t arr_us_at[2] = {0, 0};
     uint32_t move_us_at[2] = {0, 0};
+    bool counters_moved = true;
     for (uint8_t leg = 0; leg < 2u; ++leg) {
         feed();
         const LptimClock src = leg == 0u ? slow_clock : LptimClock::pclk;
@@ -890,16 +916,17 @@ void ta_block() {
         L1::kernel_clock(src);
         (void)L1::configure({.prescaler = LptimPrescaler::div1});
         console_drain();
-        const uint32_t t0 = cycles_now();
+        const uint32_t t0 = Ruler::now();
         L1::enable();
         (void)L1::set_arr(0xFFFFu);
         (void)L1::wait_arr_ok();
-        const uint32_t t_arr = cycles_now();
+        const uint32_t t_arr = Ruler::now();
         (void)L1::start_continuous();
-        uint32_t guard = 40'000'000u;
-        while (L1::count_raw() == 0u && guard-- != 0u) {
-        }
-        const uint32_t t_move = cycles_now();
+        // Three kernel clocks by 26.4.7, about 100 us on the 32 kHz root:
+        // 10 ms of budget, and the verdict needs the counter to move.
+        const bool moved = brio::wait_until<Ruler>([] { return L1::count_raw() != 0u; }, 10'000);
+        const uint32_t t_move = Ruler::now();
+        counters_moved = counters_moved && moved;
         arr_us_at[leg] = (t_arr - t0) / cycles_per_us;
         move_us_at[leg] = (t_move - t_arr) / cycles_per_us;
         const uint32_t kernel_ns = 1'000'000'000UL / kernel_hz;
@@ -916,7 +943,7 @@ void ta_block() {
     bench.verdict("the enable and the software start both cost REAL KERNEL "
                   "CLOCKS, not APB ones: on the 32 kHz root the same two steps "
                   "that are instant on PCLK take tens of microseconds",
-                  arr_us_at[0] >= 10u && move_us_at[0] >= 10u &&
+                  counters_moved && arr_us_at[0] >= 10u && move_us_at[0] >= 10u &&
                       arr_us_at[1] < 10u && move_us_at[1] < 10u);
 
     // THE WRITE HANDSHAKE, in CPU cycles. The chapter gives no number.
@@ -930,15 +957,15 @@ void ta_block() {
         (void)free_run(src, LptimPrescaler::div1);
         console_drain();
         (void)L1::clear_flags(LptimFlag::cmpok | LptimFlag::arrok);
-        const uint32_t c0 = cycles_now();
+        const uint32_t c0 = Ruler::now();
         (void)L1::set_cmp(1234);
         const bool ok_cmp = L1::wait_cmp_ok();
-        const uint32_t c1 = cycles_now();
+        const uint32_t c1 = Ruler::now();
         (void)L1::clear_flags(LptimFlag::cmpok);
-        const uint32_t a0 = cycles_now();
+        const uint32_t a0 = Ruler::now();
         (void)L1::set_arr(0xFFF0u);
         const bool ok_arr = L1::wait_arr_ok();
-        const uint32_t a1 = cycles_now();
+        const uint32_t a1 = Ruler::now();
         (void)L1::clear_flags(LptimFlag::arrok);
         cmp_cycles_at[leg] = c1 - c0;
         arr_cycles_at[leg] = a1 - a0;
@@ -985,7 +1012,7 @@ void ta_block() {
     L1::regs().CR = LPTIM_CR_CNTSTRT;     // by hand, past the refusal
     const uint32_t cr_after = L1::regs().CR;
     L1::enable();
-    spin_us(200);
+    brio::spin_us<Ruler>(200);
     const uint16_t after_enable = L1::count_raw();
     print(serial, "  CNTSTRT written while disabled: CR reads ", hex(cr_after),
           " and after ENABLE the counter is at ", after_enable, crlf);
@@ -1075,11 +1102,11 @@ void tb_counting() {
         // window by its own granularity, which a nominal comparison would
         // charge to the prescaler.
         const uint16_t a = L1::count_raw();
-        const uint32_t t0 = cycles_now();
-        while (cycles_now() - t0 < window) {
+        const uint32_t t0 = Ruler::now();
+        while (Ruler::now() - t0 < window) {
         }
         const uint16_t b = L1::count_raw();
-        const uint32_t spanned = cycles_now() - t0;
+        const uint32_t spanned = Ruler::now() - t0;
         const uint32_t counts = static_cast<uint32_t>((b - a) & 0xFFFFu);
         const uint32_t want = spanned / lptim_prescaler_divider(presc);
         const uint32_t off = permille_off(counts, want);
@@ -1105,9 +1132,9 @@ void tb_counting() {
     (void)L1::wait_arr_ok();
     (void)L1::clear_flags(LptimFlag::all);
     (void)L1::start_single();
-    spin_us(6000);   // 1000 counts at 500 kHz is 2 ms; three of them
+    brio::spin_us<Ruler>(6000);   // 1000 counts at 500 kHz is 2 ms; three of them
     const uint16_t single_1 = L1::count_raw();
-    spin_us(4000);
+    brio::spin_us<Ruler>(4000);
     const uint16_t single_2 = L1::count_raw();
     const bool arrm_once = (L1::status() & LptimFlag::arrm) != 0u;
     print(serial, "  one-shot at ARR = 999: the counter reads ", single_1,
@@ -1117,18 +1144,18 @@ void tb_counting() {
                   single_1 == single_2 && arrm_once);
 
     (void)L1::start_continuous();
-    spin_us(6000);
+    brio::spin_us<Ruler>(6000);
     const uint16_t cont_1 = L1::count_raw();
-    spin_us(2000);
+    brio::spin_us<Ruler>(2000);
     const uint16_t cont_2 = L1::count_raw();
     bench.verdict("...and a CNTSTRT written into that stopped one-shot "
                   "restarts it in Continuous mode, on the fly",
                   cont_1 != cont_2 || cont_2 != single_2);
 
     (void)L1::start_single();
-    spin_us(8000);
+    brio::spin_us<Ruler>(8000);
     const uint16_t back_1 = L1::count_raw();
-    spin_us(4000);
+    brio::spin_us<Ruler>(4000);
     const uint16_t back_2 = L1::count_raw();
     print(serial, "  the switch back: continuous read ", cont_1, "/", cont_2,
           ", then SNGSTRT stopped it at ", back_1, "/", back_2, crlf);
@@ -1141,24 +1168,26 @@ void tb_counting() {
     // a kernel clock is some 30 us and the reads themselves cost nothing.
     feed();
     (void)free_run(slow_clock, LptimPrescaler::div1);
-    spin_us(2000);
+    brio::spin_us<Ruler>(2000);
     console_drain();
     const uint16_t before = L1::count_raw();
     const bool reset_ok = L1::reset_count();
     uint16_t peak = before;
-    uint32_t guard = 4'000'000u;
-    for (;;) {
-        const uint16_t c = L1::count_raw();
-        if (c < before) {
-            break;
-        }
-        if (c > peak) {
-            peak = c;
-        }
-        if (guard-- == 0u) {
-            break;
-        }
-    }
+    // The reset lands three kernel clocks after the write (26.4.14), about
+    // 100 us on the 32 kHz root: 5 ms of budget, and the verdict needs it
+    // to have landed.
+    const bool reset_landed = brio::wait_until<Ruler>(
+        [&] {
+            const uint16_t c = L1::count_raw();
+            if (c < before) {
+                return true;
+            }
+            if (c > peak) {
+                peak = c;
+            }
+            return false;
+        },
+        5'000);
     const uint32_t extra = static_cast<uint32_t>(peak - before);
     const bool second_refused = !(L1::count_reset_pending() && L1::reset_count());
     print(serial, "  COUNTRST at ", before, ": the counter reached ", peak,
@@ -1167,7 +1196,7 @@ void tb_counting() {
     bench.verdict("COUNTRST really is synchronous: the counter takes a few "
                   "more pulses before the reset lands, which is 26.4.14's own "
                   "sentence with a number on it",
-                  reset_ok && extra <= 8u);
+                  reset_ok && reset_landed && extra <= 8u);
     bench.verdict("and a second COUNTRST while the first still stands is "
                   "refused (26.7.5's Caution, which no hardware enforces)",
                   second_refused);
@@ -1175,10 +1204,10 @@ void tb_counting() {
     // RSTARE: the read IS the reset.
     feed();
     (void)free_run(slow_clock, LptimPrescaler::div1);
-    spin_us(2000);
+    brio::spin_us<Ruler>(2000);
     const bool rstare_ok = L1::reset_on_read(true);
     const uint16_t r1 = L1::count_raw();
-    spin_us(200);
+    brio::spin_us<Ruler>(200);
     const uint16_t r2 = L1::count_raw();
     (void)L1::reset_on_read(false);
     print(serial, "  RSTARE on: two reads 200 us apart gave ", r1, " and ", r2,
@@ -1208,32 +1237,36 @@ void tb_counting() {
         (void)L1::wait_arr_ok();
         (void)L1::clear_flags(LptimFlag::all);
         (void)L1::start_continuous();
+        // Each wait below is for one period, 100 ms at the longest (110 on
+        // an LSI at table 46's floor): 300 ms of budget each, and the
+        // verdict needs all three flags.
+        const auto arrm_up = [] { return (L1::status() & LptimFlag::arrm) != 0u; };
         // Land on a period boundary first.
-        while ((L1::status() & LptimFlag::arrm) == 0u) {
-        }
+        const bool boundary = brio::wait_until<Ruler>(arrm_up, 300'000);
         (void)L1::clear_flags(LptimFlag::arrm | LptimFlag::arrok);
         (void)L1::set_arr(half_arr);       // half the period
         const Span s0;
-        while ((L1::status() & LptimFlag::arrm) == 0u) {
-        }
+        const bool next_seen = brio::wait_until<Ruler>(arrm_up, 300'000);
         const uint32_t first = s0.ms();
         (void)L1::clear_flags(LptimFlag::arrm);
         const Span s1;
-        while ((L1::status() & LptimFlag::arrm) == 0u) {
-        }
+        const bool after_seen = brio::wait_until<Ruler>(arrm_up, 300'000);
         const uint32_t second = s1.ms();
+        const bool flags_seen = boundary && next_seen && after_seen;
         print(serial, "  PRELOAD ", preload ? "1" : "0",
               ": after halving ARR the next period was ", first,
               " ms and the one after ", second, " ms", crlf);
         if (!preload) {
             bench.verdict("with PRELOAD clear an ARR write is taken AT ONCE - "
                           "the very next period is already the new one",
-                          within(first, 45u, 55u) && within(second, 45u, 55u));
+                          flags_seen && within(first, 45u, 55u) &&
+                              within(second, 45u, 55u));
         } else {
             bench.verdict("with PRELOAD set it is taken AT THE END OF THE "
                           "CURRENT PERIOD (26.4.11) - the next period is still "
                           "the old one and only the one after is new",
-                          within(first, 95u, 105u) && within(second, 45u, 55u));
+                          flags_seen && within(first, 95u, 105u) &&
+                              within(second, 45u, 55u));
         }
     }
 
@@ -1299,24 +1332,42 @@ void tc_waveform() {
     (void)L1::clear_flags(LptimFlag::cmpok);
     (void)L1::start_continuous();
 
-    // The PERIOD, counted off the ARRM flag over a 200 ms window.
-    console_drain();
+    // THE PERIOD, AS A RATIO TO THE COUNTER'S OWN CLOCK. The counter runs
+    // on PCLK / 128 and the ruler counts PCLK itself, so a period in
+    // cycles is exact whatever HSI16's trim: ARR + 1 ticks is 500 x 128 =
+    // 64000 cycles and ARR ticks 63872, 128 apart. Two hundred periods are
+    // timed between two ARRM edges, and each of the two stamps is late by
+    // at most one turn of the poll (a status read and a ruler read, under
+    // 100 cycles) and one tick handler landing in it (under 200 more): the
+    // per-period figure is within 3 cycles, and the band is half the
+    // distance to the other candidate, 64 cycles each way. A console line
+    // in flight could put its handler at a stamp too, so the window opens
+    // on a drained console or not at all.
+    constexpr uint32_t n_periods = 200;
+    const auto arrm_up = [] { return (L1::status() & LptimFlag::arrm) != 0u; };
+    const bool quiet = brio::console_drain<Ruler, Serial>();
     (void)L1::clear_flags(LptimFlag::arrm);
-    const Span window;
-    uint32_t periods = 0;
-    while (window.within(200u)) {
-        if ((L1::status() & LptimFlag::arrm) != 0u) {
-            (void)L1::clear_flags(LptimFlag::arrm);
-            ++periods;
-        }
+    bool seen = quiet && brio::wait_until<Ruler>(arrm_up, 5'000);   // a period is 1 ms
+    const uint32_t p0 = Ruler::now();
+    (void)L1::clear_flags(LptimFlag::arrm);
+    uint32_t p1 = p0;
+    for (uint32_t i = 0; seen && i < n_periods; ++i) {
+        seen = brio::wait_until<Ruler>(arrm_up, 5'000);
+        p1 = Ruler::now();
+        (void)L1::clear_flags(LptimFlag::arrm);
     }
-    const uint32_t hz = periods * 5u;
-    print(serial, "  ARR = 499 on a 500 kHz counter: ", periods,
-          " periods in 200 ms = ", hz, " Hz (ARR + 1 ticks would be 1000 Hz, "
-          "ARR ticks 1002)", crlf);
-    bench.verdict("A PERIOD IS ARR + 1 COUNTER TICKS - the counter runs 0..ARR "
-                  "inclusive, which 26.4.10 never prints",
-                  within(hz, 995u, 1005u));
+    const uint32_t per_period = seen ? (p1 - p0) / n_periods : 0u;
+    print(serial, "  ARR = 499 on PCLK/128: ", n_periods, " periods in ", p1 - p0,
+          " cycles = ", per_period, " cycles a period (ARR + 1 ticks would be 64000, "
+          "ARR ticks 63872)", crlf);
+    if (!quiet) {
+        bench.skip("the console did not drain: the period's two stamps could carry its "
+                   "interrupt");
+    } else {
+        bench.verdict("A PERIOD IS ARR + 1 COUNTER TICKS - the counter runs 0..ARR "
+                      "inclusive, which 26.4.10 never prints",
+                      seen && within(per_period, 64000u - 64u, 64000u + 64u));
+    }
 
     // THE HIGH TIME, from the pad, on a 64 kHz waveform the sampler can
     // really average. 26.4.10 describes the shape in words and prints no
@@ -1337,7 +1388,7 @@ void tc_waveform() {
             duty_ok = false;
             continue;
         }
-        spin_us(2000);
+        brio::spin_us<Ruler>(2000);
         const uint32_t got = pad_permille(60000);
         print(serial, "  ARR 999, CMP ", d.cmp, ": pad high ", got,
               " per mille, (ARR - CMP + 1)/(ARR + 1) = ", d.want, crlf);
@@ -1352,10 +1403,10 @@ void tc_waveform() {
     // The two values 26.4.10 forbids ("ARR must be strictly greater than
     // CMP"), which is a rule with no hardware behind it.
     (void)pwm_64k(999);          // CMP == ARR
-    spin_us(2000);
+    brio::spin_us<Ruler>(2000);
     const uint32_t at_arr = pad_permille(60000);
     (void)pwm_64k(1200);         // CMP > ARR
-    spin_us(2000);
+    brio::spin_us<Ruler>(2000);
     const uint32_t past_arr = pad_permille(60000);
     print(serial, "  the forbidden pair: CMP = ARR gives ", at_arr,
           " per mille, CMP > ARR gives ", past_arr, crlf);
@@ -1371,10 +1422,10 @@ void tc_waveform() {
     // waveform inverted is still 50 %, so a symmetric duty would let a
     // polarity bit that does nothing pass unnoticed.
     (void)pwm_64k(749);                       // 250 per mille
-    spin_us(2000);
+    brio::spin_us<Ruler>(2000);
     const uint32_t straight = pad_permille(60000);
     (void)pwm_64k(749, true);
-    spin_us(2000);
+    brio::spin_us<Ruler>(2000);
     const uint32_t inverted = pad_permille(60000);
     print(serial, "  CMP = 749: WAVPOL 0 gives ", straight,
           " per mille and WAVPOL 1 gives ", inverted, crlf);
@@ -1398,9 +1449,9 @@ void tc_waveform() {
         (void)L1::clear_flags(LptimFlag::all);
         (void)L1::start_single();
         // The pulse is 500 ticks at 500 kHz = 1 ms, inside a 2 ms period.
-        spin_us(1500);
+        brio::spin_us<Ruler>(1500);
         const bool during = OutPin::read();
-        spin_us(4000);
+        brio::spin_us<Ruler>(4000);
         const bool after = OutPin::read();
         print(serial, "  ", set_once ? "set-once" : "one-pulse",
               ": the pad reads ", during, " inside the pulse and ", after,
@@ -1430,7 +1481,7 @@ void tc_waveform() {
     for (uint16_t v : ladder) {
         feed();
         Lamp::duty(v);
-        spin_us(2000);
+        brio::spin_us<Ruler>(2000);
         const uint32_t got = pad_permille(60000);
         // The task's mapping is CMP = max - v, so the measured duty is
         // (v + 1) / (max + 1) per unit - except at v = 0, where CMP
@@ -1506,9 +1557,9 @@ void tc_waveform() {
                   "is exact, measured by a DMA channel with no peripheral, no "
                   "pad and no CPU in the loop",
                   within(edge_hz, edge_lo, edge_hi));
-    print(serial, "  the same claim at the PCLK extreme (32 MHz of output) is "
-                  "DECLINED: no counter this board can spare resolves it, and "
-                  "the DMA itself cannot serve requests that fast", crlf);
+    bench.skip("the same claim at the PCLK extreme (32 MHz of output): no counter "
+               "this board can spare resolves it, and the DMA itself cannot serve "
+               "requests that fast");
 
     Dma1::reset();
     Dma1::bus_clock(false);
@@ -1528,10 +1579,9 @@ void walk_in1(uint32_t edges, uint32_t half_us) {
     }
 }
 
-void td_counter_mode() {
-    feed();
-    quiet_everything();
-
+/// Letter d's legs on PB5, the pull-walked input: the sampled count, the
+/// input as the clock with its lost first edges, and the glitch filter.
+void td_pad_legs() {
     // COUNTMODE = 1: the INTERNAL clock samples the input, so nothing is
     // lost at the start and the prescaler must be /1 (26.4.12).
     In1Pad::claim_input(PinPull::down);
@@ -1543,7 +1593,7 @@ void td_counter_mode() {
     (void)L1::set_arr(0xFFFFu);
     (void)L1::wait_arr_ok();
     (void)L1::start_continuous();
-    spin_us(500);
+    brio::spin_us<Ruler>(500);
     const uint16_t s0 = L1::count_raw();
     walk_in1(20, 60);
     const uint16_t s1 = L1::count_raw();
@@ -1557,7 +1607,7 @@ void td_counter_mode() {
 
     // A CONTROL: with the pad left alone nothing counts.
     const uint16_t q0 = L1::count_raw();
-    spin_us(20000);
+    brio::spin_us<Ruler>(20000);
     const uint16_t q1 = L1::count_raw();
     bench.verdict("and with the pad left alone the counter does not move at "
                   "all - the input really is the only thing driving it",
@@ -1652,6 +1702,19 @@ void td_counter_mode() {
                           blips <= 2u && longs >= 8u);
         }
     }
+}
+
+void td_counter_mode() {
+    feed();
+    quiet_everything();
+
+    if (in1_free()) {
+        td_pad_legs();
+    } else {
+        print(serial, "  PB5 does not follow its own pull: something outside holds it", crlf);
+        bench.skip("PB5 is held from outside (the desk's SPI wire): the pull-walked "
+                   "counter legs need it free");
+    }
 
     // IN1SEL = COMP1_OUT: the timer's input with NO PAD ON THE TIMER'S
     // SIDE AT ALL. The comparator is flipped by precharging its own plus
@@ -1667,7 +1730,7 @@ void td_counter_mode() {
                                   .negative = CompNegative::vrefint_half};
     const bool comp_up =
         C1::claim_inputs(comp_cfg) && C1::configure(comp_cfg) && C1::enable(true);
-    spin_us(500);
+    brio::spin_us<Ruler>(500);
     L1::init();
     L1::kernel_clock(LptimClock::pclk);
     const bool internal_route = L1::configure({.count_external = true,
@@ -1677,20 +1740,20 @@ void td_counter_mode() {
     (void)L1::wait_arr_ok();
     (void)L1::start_continuous();
     PadA1::output(false);
-    spin_us(300);
+    brio::spin_us<Ruler>(300);
     PadA1::analog();
-    spin_us(300);
+    brio::spin_us<Ruler>(300);
     const uint16_t c0 = L1::count_raw();
     constexpr uint32_t flips = 12;
     for (uint32_t i = 0; i < flips; ++i) {
         PadA1::output(true);
-        spin_us(300);
+        brio::spin_us<Ruler>(300);
         PadA1::analog();
-        spin_us(300);
+        brio::spin_us<Ruler>(300);
         PadA1::output(false);
-        spin_us(300);
+        brio::spin_us<Ruler>(300);
         PadA1::analog();
-        spin_us(300);
+        brio::spin_us<Ruler>(300);
     }
     const uint16_t c1 = L1::count_raw();
     const uint32_t counted = static_cast<uint32_t>((c1 - c0) & 0xFFFFu);
@@ -1703,14 +1766,11 @@ void td_counter_mode() {
                   "side",
                   comp_up && internal_route && counted == flips);
 #else
-    print(serial,
-          "  SKIPPED, no verdict claimed: table 140's mux1 routes COMP1_OUT "
-          "into IN1, and this part has NO COMPARATOR AT ALL (18.1 - the "
-          "reserve's comp_present(1) is false and the header declares no "
-          "COMP1_BASE, so brio::Comp is not a type here). The route is a "
-          "compile-time refusal instead, which letter j's mux census checks "
-          "for both instances.",
-          crlf);
+    bench.skip("table 140's mux1 routes COMP1_OUT into IN1, and this part has NO "
+               "COMPARATOR AT ALL (18.1 - the reserve's comp_present(1) is false "
+               "and the header declares no COMP1_BASE, so brio::Comp is not a "
+               "type here). The route is a compile-time refusal instead, which "
+               "letter j's mux census checks for both instances.");
 #endif
 
     quiet_everything();
@@ -1727,9 +1787,9 @@ bool comp_trigger_row(CompPositive positive, LptimTrigger trigger, uint8_t row) 
     const CompConfig cfg{.positive = positive, .negative = CompNegative::vrefint_half};
     const bool up = C::claim_inputs(cfg) && C::configure(cfg) && C::enable(true);
     Pad::output(false);
-    spin_us(300);
+    brio::spin_us<Ruler>(300);
     Pad::analog();
-    spin_us(300);
+    brio::spin_us<Ruler>(300);
     L1::init();
     L1::kernel_clock(LptimClock::pclk);
     const bool cfg_ok = L1::configure({.prescaler = LptimPrescaler::div128,
@@ -1740,12 +1800,12 @@ bool comp_trigger_row(CompPositive positive, LptimTrigger trigger, uint8_t row) 
     (void)L1::wait_arr_ok();
     (void)L1::clear_flags(LptimFlag::all);
     (void)L1::start_continuous();
-    spin_us(1000);
+    brio::spin_us<Ruler>(1000);
     const uint16_t before = L1::count_raw();
     Pad::output(true);
-    spin_us(300);
+    brio::spin_us<Ruler>(300);
     Pad::analog();
-    spin_us(2000);
+    brio::spin_us<Ruler>(2000);
     const uint16_t after = L1::count_raw();
     const bool trig = (L1::status() & LptimFlag::exttrig) != 0u;
     print(serial, "  row ", row, ", a comparator's output as the trigger: the "
@@ -1780,16 +1840,18 @@ void te_triggers() {
     (void)L1::wait_arr_ok();
     (void)L1::clear_flags(LptimFlag::all);
     (void)L1::start_continuous();
-    spin_us(500);
+    brio::spin_us<Ruler>(500);
     const uint16_t armed_at = L1::count_raw();
     const bool no_trig_yet = (L1::status() & LptimFlag::exttrig) == 0u;
     console_drain();
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     EtrPin::pull(PinPull::up);
-    uint32_t guard = 8'000'000u;
-    while (L1::count_raw() == armed_at && guard-- != 0u) {
-    }
-    const uint32_t latency = cycles_now() - t0;
+    // The pull moves the pad in tens of microseconds and the trigger
+    // follows in two kernel clocks: 10 ms of budget, and the verdict
+    // needs the count to have moved.
+    const bool etr_moved =
+        brio::wait_until<Ruler>([armed_at] { return L1::count_raw() != armed_at; }, 10'000);
+    const uint32_t latency = Ruler::now() - t0;
     const bool trig_flag = (L1::status() & LptimFlag::exttrig) != 0u;
     print(serial, "  ETR on PB6: armed at ", armed_at,
           " and still there until the edge; edge to first count ", latency,
@@ -1798,16 +1860,16 @@ void te_triggers() {
     bench.verdict("TRIGEN != 00 really arms rather than starts: the counter "
                   "does not move until an edge arrives on the trigger the "
                   "config named, and EXTTRIG marks it",
-                  etr_cfg && armed_at == 0u && no_trig_yet && trig_flag);
+                  etr_cfg && armed_at == 0u && no_trig_yet && etr_moved && trig_flag);
 
     // A SECOND TRIGGER WHILE RUNNING IS IGNORED, and 26.7.1 says the
     // flag is not even set for it.
     (void)L1::clear_flags(LptimFlag::exttrig);
     const uint16_t running = L1::count_raw();
     EtrPin::pull(PinPull::down);
-    spin_us(200);
+    brio::spin_us<Ruler>(200);
     EtrPin::pull(PinPull::up);
-    spin_us(200);
+    brio::spin_us<Ruler>(200);
     const bool ignored = (L1::status() & LptimFlag::exttrig) == 0u;
     const uint16_t still_running = L1::count_raw();
     print(serial, "  a second ETR edge while the counter runs: EXTTRIG ",
@@ -1830,7 +1892,7 @@ void te_triggers() {
         feed();
         const bool set_once = leg == 1u;
         EtrPin::pull(PinPull::down);
-        spin_us(200);
+        brio::spin_us<Ruler>(200);
         L1::init();
         L1::kernel_clock(LptimClock::pclk);
         const bool cfg = L1::configure({.prescaler = LptimPrescaler::div128,
@@ -1845,20 +1907,20 @@ void te_triggers() {
         (void)L1::wait_cmp_ok();
         (void)L1::clear_flags(LptimFlag::all);
         (void)L1::start_single();
-        spin_us(500);
+        brio::spin_us<Ruler>(500);
         const bool idle_armed = (L1::status() & LptimFlag::arrm) == 0u &&
                                 L1::count_raw() == 0u;
         EtrPin::pull(PinPull::up);
-        spin_us(2000);
+        brio::spin_us<Ruler>(2000);
         const bool first = (L1::status() & LptimFlag::arrm) != 0u;
         const uint16_t stopped = L1::count_raw();
         (void)L1::clear_flags(LptimFlag::all);
         EtrPin::pull(PinPull::down);
-        spin_us(200);
+        brio::spin_us<Ruler>(200);
         EtrPin::pull(PinPull::up);
-        spin_us(300);
+        brio::spin_us<Ruler>(300);
         const uint16_t counting = L1::count_raw();
-        spin_us(2000);
+        brio::spin_us<Ruler>(2000);
         const uint32_t st = L1::status();
         const bool second = (st & LptimFlag::arrm) != 0u;
         const bool second_trig = (st & LptimFlag::exttrig) != 0u;
@@ -1892,20 +1954,20 @@ void te_triggers() {
                                       LptimPrescaler::div128);
     (void)L1::clear_flags(LptimFlag::all);
     EtrPin::pull(PinPull::up);
-    spin_us(200);
+    brio::spin_us<Ruler>(200);
     // FED: an edge every 3 ms, six times - the compare is never reached.
     bool fed_clean = true;
     for (uint8_t i = 0; i < 6u; ++i) {
         EtrPin::pull(PinPull::down);
-        spin_us(1500);
+        brio::spin_us<Ruler>(1500);
         EtrPin::pull(PinPull::up);
-        spin_us(1500);
+        brio::spin_us<Ruler>(1500);
         if (Timeout::expired()) {
             fed_clean = false;
         }
     }
     // STARVED: nothing for 30 ms.
-    spin_us(30000);
+    brio::spin_us<Ruler>(30000);
     const bool starved = Timeout::expired();
     print(serial, "  timeout at 10 ms: fed every 3 ms it ",
           fed_clean ? "never expired" : "EXPIRED", "; starved for 30 ms it ",
@@ -1923,14 +1985,12 @@ void te_triggers() {
     // the row says so instead of watching a counter that cannot move.
     feed();
     if (!wall_ready) {
-        print(serial,
-              "  SKIPPED, no verdict claimed: table 138's row 1 is the RTC's "
-              "alarm A, and this board's RTC domain has no clock this suite "
-              "could open it with (the boot line says which - RTCSEL is "
-              "one-way, and this suite never resets the domain because the "
-              "backup registers are other suites'). The trigger MULTIPLEXER "
-              "is exercised by the ETR row above either way.",
-              crlf);
+        bench.skip("table 138's row 1 is the RTC's alarm A, and this board's RTC "
+                   "domain has no clock this suite could open it with (the boot "
+                   "line says which - RTCSEL is one-way, and this suite never "
+                   "resets the domain because the backup registers are other "
+                   "suites'). The trigger MULTIPLEXER is exercised by the ETR row "
+                   "above either way.");
     } else {
         L1::init();
         L1::kernel_clock(LptimClock::pclk);
@@ -1950,13 +2010,10 @@ void te_triggers() {
         // second, which is all this needs.
         const bool alarm_set = Rtc::set_alarm(RtcAlarmId::a, RtcAlarm{}, false);
         const uint16_t before_alarm = L1::count_raw();
-        const Span alarm_window;
-        uint32_t aguard = 40'000'000u;
-        while (L1::count_raw() == before_alarm && aguard-- != 0u) {
-            if (!alarm_window.within(2500u)) {
-                break;
-            }
-        }
+        // The alarm fires once a second: 2.5 s of budget, and the verdict
+        // needs the count to have moved.
+        const bool alarm_moved = brio::wait_until<Ruler>(
+            [before_alarm] { return L1::count_raw() != before_alarm; }, 2'500'000);
         const uint16_t after_alarm = L1::count_raw();
         const bool alarm_trig = (L1::status() & LptimFlag::exttrig) != 0u;
         Rtc::clear_alarm(RtcAlarmId::a);
@@ -1965,8 +2022,8 @@ void te_triggers() {
               alarm_trig ? "rose" : "STAYED CLEAR", crlf);
         bench.verdict("table 138's row 1 is real: the RTC's alarm A starts an "
                       "LPTIM with no pad, no wire and no interrupt anywhere",
-                      rtc_cfg && alarm_set && after_alarm != before_alarm &&
-                          alarm_trig);
+                      rtc_cfg && alarm_set && alarm_moved &&
+                          after_alarm != before_alarm && alarm_trig);
     }
 
     // ROW 6: COMP1_OUT. The same precharge stimulus letter d uses - and
@@ -1979,9 +2036,9 @@ void te_triggers() {
     const bool comp_up =
         C1::claim_inputs(comp_cfg) && C1::configure(comp_cfg) && C1::enable(true);
     PadA1::output(false);
-    spin_us(300);
+    brio::spin_us<Ruler>(300);
     PadA1::analog();
-    spin_us(300);
+    brio::spin_us<Ruler>(300);
     L1::init();
     L1::kernel_clock(LptimClock::pclk);
     const bool comp_cfg_ok =
@@ -1993,12 +2050,12 @@ void te_triggers() {
     (void)L1::wait_arr_ok();
     (void)L1::clear_flags(LptimFlag::all);
     (void)L1::start_continuous();
-    spin_us(1000);
+    brio::spin_us<Ruler>(1000);
     const uint16_t comp_before = L1::count_raw();
     PadA1::output(true);
-    spin_us(300);
+    brio::spin_us<Ruler>(300);
     PadA1::analog();
-    spin_us(2000);
+    brio::spin_us<Ruler>(2000);
     const uint16_t comp_after = L1::count_raw();
     const bool comp_trig = (L1::status() & LptimFlag::exttrig) != 0u;
     print(serial, "  COMP1_OUT as the trigger: the counter went from ",
@@ -2009,13 +2066,11 @@ void te_triggers() {
                   comp_up && comp_cfg_ok && comp_before == 0u &&
                       comp_after != 0u && comp_trig);
 #else
-    print(serial,
-          "  SKIPPED, no verdict claimed: table 138's row 6 is COMP1_OUT, and "
-          "this part has no comparator at all (18.1). Its rows 0 and 1 above "
-          "are the two internal trigger sources this board can raise; the "
-          "reserve refuses the comparator rows at compile time, which letter "
-          "j's trigger census checks.",
-          crlf);
+    bench.skip("table 138's row 6 is COMP1_OUT, and this part has no comparator "
+               "at all (18.1). Its rows 0 and 1 above are the two internal "
+               "trigger sources this board can raise; the reserve refuses the "
+               "comparator rows at compile time, which letter j's trigger census "
+               "checks.");
 #endif
 
     // ROW 7, COMP2_OUT, on COMP2's own plus pad PB6 (INPSEL 1), and ROW 5,
@@ -2033,8 +2088,7 @@ void te_triggers() {
                   comp_trigger_row<Comp<3>, Pin<'B', 0>>(CompPositive::input0,
                                                          LptimTrigger::comp3_out, 5));
 #else
-    print(serial, "  row 5 SKIPPED, no verdict claimed: COMP3 is the "
-          "G0B1/G0C1's alone (18.1)", crlf);
+    bench.skip("table 138's row 5: COMP3 is the G0B1/G0C1's alone (18.1)");
 #endif
 
     quiet_everything();
@@ -2057,7 +2111,7 @@ void quad_apply(uint32_t hold_us = 200) {
     const bool b = (quad_pos == 2u || quad_pos == 3u);
     In1Pin::pull(a ? PinPull::up : PinPull::down);
     In2Pin::pull(b ? PinPull::up : PinPull::down);
-    spin_us(hold_us);
+    brio::spin_us<Ruler>(hold_us);
 }
 
 void quad_home() {
@@ -2072,10 +2126,9 @@ void quad_turn(bool forward, uint32_t steps) {
     }
 }
 
-void tf_encoder() {
-    feed();
-    quiet_everything();
-
+/// Letter f's encoder leg: the quadrature pair walked by the pulls of PB5
+/// and PB7, through table 144's three sub-modes.
+void tf_encoder_leg() {
     In1Pad::claim_input(PinPull::down);
     In2Pad::claim_input(PinPull::down);
     using Enc = LptimEncoder<L1>;
@@ -2104,7 +2157,7 @@ void tf_encoder() {
         const bool up = Enc::setup(0xFFFFu, m.sub, LptimInput1::pad,
                                    LptimInput2::pad, false);
         (void)L1::clear_flags(LptimFlag::all);
-        spin_us(1000);
+        brio::spin_us<Ruler>(1000);
         const uint16_t p0 = Enc::position().value_or(0xFFFFu);
         quad_turn(true, steps);
         const uint16_t p1 = Enc::position().value_or(0xFFFFu);
@@ -2131,6 +2184,19 @@ void tf_encoder() {
                   "the table says - and the flags mark each CHANGE of "
                   "direction, which is not the same thing as a direction",
                   encoder_ok);
+}
+
+void tf_encoder() {
+    feed();
+    quiet_everything();
+
+    if (in1_free()) {
+        tf_encoder_leg();
+    } else {
+        print(serial, "  PB5 does not follow its own pull: something outside holds it", crlf);
+        bench.skip("PB5 is held from outside (the desk's SPI wire): the walked "
+                   "quadrature pair needs it free");
+    }
 
     // The instance rule, both ways.
     bench.verdict("LPTIM2 has no encoder mode (table 135), so a runtime "
@@ -2166,16 +2232,13 @@ void tg_through_stop() {
     // so a board whose RTC domain has no clock has neither the wake nor
     // the witness, and both Stop legs below say so and claim nothing.
     if (!wall_ready) {
-        print(serial,
-              "  SKIPPED, no verdict claimed: a Stop is left by the RTC's "
-              "wake-up timer here and measured on the RTC's own sub-second "
-              "counter, and this board's RTC domain has no clock this suite "
-              "could open it with (the boot line says which; RTCSEL is "
-              "one-way and this suite never resets the domain). Table 145's "
-              "own claim - which kernel clocks a Stop leaves running - is the "
-              "one thing on this page that needs a clock outside the VCORE "
-              "domain to judge.",
-              crlf);
+        bench.skip("a Stop is left by the RTC's wake-up timer here and measured "
+                   "on the RTC's own sub-second counter, and this board's RTC "
+                   "domain has no clock this suite could open it with (the boot "
+                   "line says which; RTCSEL is one-way and this suite never "
+                   "resets the domain). Table 145's own claim - which kernel "
+                   "clocks a Stop leaves running - is the one thing on this page "
+                   "that needs a clock outside the VCORE domain to judge.");
     } else {
         struct Leg {
             const char* name;
@@ -2199,13 +2262,10 @@ void tg_through_stop() {
         for (const Leg& leg : legs) {
             feed();
             if (leg.code == LptimClock::lse && !wall_on_lse) {
-                print(serial,
-                      "  SKIPPED, no verdict claimed: the LSE row of table 145 "
-                      "needs a crystal, and none starts on this board. The LSI "
-                      "row below is the other clock that table names as "
-                      "unaffected by a Stop, and it is the one this board runs "
-                      "its wall on.",
-                      crlf);
+                bench.skip("the LSE row of table 145 needs a crystal, and none "
+                           "starts on this board. The LSI row below is the other "
+                           "clock that table names as unaffected by a Stop, and it "
+                           "is the one this board runs its wall on.");
                 continue;
             }
             if (!free_run(leg.code, leg.presc)) {
@@ -2237,7 +2297,10 @@ void tg_through_stop() {
             print(serial, "  ", leg.name, ": ", counts, " counts across a ",
                   span, " ms Stop 1 - ", got_hz, " counts a second against ",
                   leg.nominal, " running (expected ", expected, ")", crlf);
-            if (leg.expect_running) {
+            if (leg.expect_running && leg.nominal == 0u) {
+                // The LSI not weighed this boot: table 46's band stands in.
+                stop_ok = stop_ok && within(got_hz, 29'500u, 34'000u);
+            } else if (leg.expect_running) {
                 stop_ok = stop_ok && permille_off(counts, expected) < 60u;
             } else if (leg.code == LptimClock::pclk) {
                 stop_ok = stop_ok && counts < 16u;
@@ -2292,9 +2355,9 @@ void tg_through_stop() {
         (void)L1::set_arr(999);
         (void)L1::wait_arr_ok();
         (void)L1::set_cmp(200);
-        uint32_t guard = 4'000'000u;
-        while (!L1::cmp_ok() && guard-- != 0u) {
-        }
+        // Two to three kernel clocks land the store (about 100 us on the
+        // 32 kHz root): 5 ms of budget, and the verdict needs it landed.
+        const bool cmp_landed = brio::wait_until<Ruler>([] { return L1::cmp_ok(); }, 5'000);
         lptim_irqs = 0;
         lptim_served0 = 0;
         lptim_served1 = 0;
@@ -2303,7 +2366,7 @@ void tg_through_stop() {
         Nvic::enable(L1::irq());
         console_drain();
         (void)L1::start_continuous();
-        spin_us(leg.window_ms * 1000u);
+        brio::spin_us<Ruler>(leg.window_ms * 1000u);
         Nvic::disable(L1::irq());
         const uint32_t laps =
             leg.window_ms * leg.counter_hz / 1000u / 1000u;
@@ -2313,7 +2376,7 @@ void tg_through_stop() {
               " time(s), each serving ", hex(lptim_served0),
               "; LPTIM_ISR read ", hex(lptim_isr_after0),
               " IMMEDIATELY AFTER the ICR store", crlf);
-        per_lap_ok = per_lap_ok && lptim_irqs + 1u >= laps &&
+        per_lap_ok = per_lap_ok && cmp_landed && lptim_irqs + 1u >= laps &&
                      lptim_irqs <= laps + 1u &&
                      lptim_served0 == LptimFlag::cmpm;
         clear_lands = clear_lands && (lptim_isr_after0 & LptimFlag::cmpm) == 0u;
@@ -2358,10 +2421,11 @@ void tg_through_stop() {
         const uint16_t compare = static_cast<uint16_t>(slow_hz / 64u);
         (void)L1::set_cmp(compare);
         // With CMPMIE armed only the handler may clear a flag (ES0548
-        // 2.8.2), so the completion is waited for as a flag READ.
-        uint32_t guard = 4'000'000u;
-        while (!L1::cmp_ok() && guard-- != 0u) {
-        }
+        // 2.8.2), so the completion is waited for as a flag READ: two to
+        // three counts of the /32 counter, about 3 ms at the slowest -
+        // 20 ms of budget, and the first verdict below needs it landed.
+        const bool wake_cmp_landed =
+            brio::wait_until<Ruler>([] { return L1::cmp_ok(); }, 20'000);
         (void)L1::wake_line(true);
         lptim_irqs = 0;
         lptim_served0 = 0;
@@ -2398,7 +2462,8 @@ void tg_through_stop() {
                             "line 29 - a DIRECT line whose pending state is "
                             "the peripheral's own flag - and it lands where "
                             "the counter said it would",
-                      lptim_irqs >= 1u && lptim_served0 == LptimFlag::cmpm &&
+                      wake_cmp_landed && lptim_irqs >= 1u &&
+                          lptim_served0 == LptimFlag::cmpm &&
                           span + 8'000u >= want_us && span <= want_us + 8'000u);
         bench.verdict(name, ": and ONE match is one handler run - the "
                             "compare was placed before the counter started, "
@@ -2408,14 +2473,12 @@ void tg_through_stop() {
         L1::init();
     }
     if (!wall_ready) {
-        print(serial,
-              "  SKIPPED, no verdict claimed: the compare wake from Stop 0 and "
-              "Stop 1 is measured on the RTC's sub-second counter, which is "
-              "the only clock left running while the core is stopped, and "
-              "this board's RTC domain has none this suite could open. Both "
-              "rungs are skipped together: what they claim is WHERE the wake "
-              "lands, and there is no instrument here to say.",
-              crlf);
+        bench.skip("the compare wake from Stop 0 and Stop 1 is measured on the "
+                   "RTC's sub-second counter, which is the only clock left "
+                   "running while the core is stopped, and this board's RTC "
+                   "domain has none this suite could open. Both rungs are "
+                   "skipped together: what they claim is WHERE the wake lands, "
+                   "and there is no instrument here to say.");
     }
 
     quiet_everything();
@@ -2434,15 +2497,13 @@ void th_site() {
     // open therefore skips the letter whole rather than judging a site
     // it cannot watch.
     if (!wall_ready) {
-        print(serial,
-              "  SKIPPED, no verdict claimed: the third site places its alarm "
-              "on the LPTIM and needs nothing else, but every verdict here is "
-              "a WALL reading taken across a Stop - and this board's RTC "
-              "domain has no clock this suite could open it with (the boot "
-              "line says which; RTCSEL is one-way and this suite never resets "
-              "the domain). The site's arithmetic is the same on any part; "
-              "what is missing is the witness.",
-              crlf);
+        bench.skip("the third site places its alarm on the LPTIM and needs "
+                   "nothing else, but every verdict here is a WALL reading taken "
+                   "across a Stop - and this board's RTC domain has no clock this "
+                   "suite could open it with (the boot line says which; RTCSEL is "
+                   "one-way and this suite never resets the domain). The site's "
+                   "arithmetic is the same on any part; what is missing is the "
+                   "witness.");
         return;
     }
     (void)wall_up();
@@ -2638,7 +2699,7 @@ void ti_errata() {
     (void)L1::set_arr(99);
     (void)L1::wait_arr_ok();
     (void)L1::start_continuous();
-    spin_us(2000);
+    brio::spin_us<Ruler>(2000);
     const bool clear_allowed = L1::clear_flags(LptimFlag::arrm);
     const bool cleared = (L1::status() & LptimFlag::arrm) == 0u;
 
@@ -2650,7 +2711,7 @@ void ti_errata() {
     (void)L1::set_arr(99);
     (void)L1::wait_arr_ok();
     (void)L1::start_continuous();
-    spin_us(2000);
+    brio::spin_us<Ruler>(2000);
     const bool clear_refused = !L1::clear_flags(LptimFlag::arrm);
     const bool still_set = (L1::status() & LptimFlag::arrm) != 0u;
     print(serial, "  clear_flags() with IER = 0: ",
@@ -2711,12 +2772,11 @@ void ti_errata() {
                   cfgr_live != 0u && arr_live == 1234u && cfgr_dead == 0u &&
                       arr_dead == 1u && !still_enabled);
 
-    print(serial, "  2.8.1 itself is NOT STAGED and no verdict pretends it "
-                  "was: reproducing it needs the very ENABLE clear this driver "
-                  "has no verb for, its own description calls the occurrence "
-                  "\"very low\", and the failure mode - a wake-up signal frozen "
-                  "active - would leave the board unable to enter Stop at all",
-          crlf);
+    bench.skip("ES0548 2.8.1 itself is not staged: reproducing it needs the very "
+               "ENABLE clear this driver has no verb for, its own description "
+               "calls the occurrence \"very low\", and the failure mode - a "
+               "wake-up signal frozen active - would leave the board unable to "
+               "enter Stop at all");
 
     quiet_everything();
 }
@@ -2872,7 +2932,7 @@ void tj_shared_line() {
         Nvic::enable(L2::irq());
         (void)L2::start_continuous();
         T7::enable(true);
-        spin_us(20000);
+        brio::spin_us<Ruler>(20000);
         T7::enable(false);
         Nvic::disable(L2::irq());
         tim7_live = false;
@@ -2895,15 +2955,13 @@ void tj_shared_line() {
                           l2s == LptimFlag::arrm && t7s == T7::update_flag);
         T7::release();
     } else {
-        print(serial,
-              "  SKIPPED, no verdict claimed: two owners answering on ONE "
-              "vector needs a TIM7 to share LPTIM2's line, and this part has "
-              "neither TIM6 nor TIM7 (tim_present(7) is false - the reserve "
-              "finds no TIM7_BASE, and so names this line LPTIM2's own, "
-              "LPTIM2_IRQn, exactly as it names LPTIM1's LPTIM1_IRQn). That "
-              "the two LPTIMs are on DIFFERENT lines here is claimed by this "
-              "letter's first verdict, which reads the derivation both ways.",
-              crlf);
+        bench.skip("two owners answering on ONE vector needs a TIM7 to share "
+                   "LPTIM2's line, and this part has neither TIM6 nor TIM7 "
+                   "(tim_present(7) is false - the reserve finds no TIM7_BASE, "
+                   "and so names this line LPTIM2's own, LPTIM2_IRQn, exactly as "
+                   "it names LPTIM1's LPTIM1_IRQn). That the two LPTIMs are on "
+                   "DIFFERENT lines here is claimed by this letter's first "
+                   "verdict, which reads the derivation both ways.");
     }
 }
 
@@ -3050,11 +3108,9 @@ void tj_lptim2() {
     for (const Src& s : sources) {
         feed();
         if (s.code == LptimClock::lse && !wall_on_lse) {
-            print(serial,
-                  "  SKIPPED, no verdict claimed: LPTIM2SEL's LSE code needs a "
-                  "crystal, and none starts on this board - the other three "
-                  "codes of the same field are below.",
-                  crlf);
+            bench.skip("LPTIM2SEL's LSE code needs a crystal, and none starts on "
+                       "this board - the other three codes of the same field are "
+                       "below");
             continue;
         }
         if (!free_run2(s.code, s.presc)) {
@@ -3092,7 +3148,7 @@ void tj_lptim2() {
             duty_ok = false;
             continue;
         }
-        spin_us(2000);
+        brio::spin_us<Ruler>(2000);
         const uint32_t got = pad_out2_permille(60000);
         print(serial, "  LPTIM2 ARR 999, CMP ", d.cmp, ": P",
               static_cast<char>(out2_sel.port),
@@ -3107,10 +3163,10 @@ void tj_lptim2() {
                   duty_ok);
 
     (void)pwm2_64k(749);
-    spin_us(2000);
+    brio::spin_us<Ruler>(2000);
     const uint32_t straight = pad_out2_permille(60000);
     (void)pwm2_64k(749, true);
-    spin_us(2000);
+    brio::spin_us<Ruler>(2000);
     const uint32_t inverted = pad_out2_permille(60000);
     print(serial, "  CMP = 749 on P", static_cast<char>(out2_sel.port),
           static_cast<uint32_t>(out2_sel.pin), ": WAVPOL 0 gives ", straight,
@@ -3187,7 +3243,7 @@ void tj_lptim2() {
     (void)L2::set_arr(0xFFFFu);
     (void)L2::wait_arr_ok();
     (void)L2::start_continuous();
-    spin_us(500);
+    brio::spin_us<Ruler>(500);
     const uint16_t s0 = L2::count_raw();
     walk_in1_2(20, 60);
     const uint32_t sampled = static_cast<uint32_t>((L2::count_raw() - s0) & 0xFFFFu);
@@ -3230,7 +3286,7 @@ void tj_lptim2() {
                                   .negative = CompNegative::vrefint_half};
     const bool comp_up =
         C1::claim_inputs(comp_cfg) && C1::configure(comp_cfg) && C1::enable(true);
-    spin_us(500);
+    brio::spin_us<Ruler>(500);
     L2::init();
     L2::kernel_clock(LptimClock::pclk);
     const bool or_route = L2::configure({.count_external = true,
@@ -3240,20 +3296,20 @@ void tj_lptim2() {
     (void)L2::wait_arr_ok();
     (void)L2::start_continuous();
     PadA1::output(false);
-    spin_us(300);
+    brio::spin_us<Ruler>(300);
     PadA1::analog();
-    spin_us(300);
+    brio::spin_us<Ruler>(300);
     const uint16_t c0 = L2::count_raw();
     constexpr uint32_t flips = 12;
     for (uint32_t i = 0; i < flips; ++i) {
         PadA1::output(true);
-        spin_us(300);
+        brio::spin_us<Ruler>(300);
         PadA1::analog();
-        spin_us(300);
+        brio::spin_us<Ruler>(300);
         PadA1::output(false);
-        spin_us(300);
+        brio::spin_us<Ruler>(300);
         PadA1::analog();
-        spin_us(300);
+        brio::spin_us<Ruler>(300);
     }
     const uint32_t counted = static_cast<uint32_t>((L2::count_raw() - c0) & 0xFFFFu);
     (void)C1::enable(false);
@@ -3265,13 +3321,11 @@ void tj_lptim2() {
                   "flips into the second counter with no pad on either side",
                   comp_up && or_route && counted == flips);
 #else
-    print(serial,
-          "  SKIPPED, no verdict claimed: IN1SEL = 3 is the OR of the two "
-          "comparators, and this part has no comparator at all (18.1) - there "
-          "is no signal to route and brio::Comp is not a type here. What the "
-          "code IS on this part is a compile-time refusal, which the mux "
-          "census above claims for both instances.",
-          crlf);
+    bench.skip("IN1SEL = 3 is the OR of the two comparators, and this part has "
+               "no comparator at all (18.1) - there is no signal to route and "
+               "brio::Comp is not a type here. What the code IS on this part is "
+               "a compile-time refusal, which the mux census above claims for "
+               "both instances.");
 #endif
 
     // THE TRIGGER, on LPTIM2's own ETR pad - and with it TRGFLT, the one
@@ -3297,19 +3351,19 @@ void tj_lptim2() {
         (void)L2::wait_arr_ok();
         (void)L2::clear_flags(LptimFlag::all);
         (void)L2::start_continuous();
-        spin_us(1000);
+        brio::spin_us<Ruler>(1000);
         const uint16_t armed_at = L2::count_raw();
         // Ten 60 us blips: shorter than eight samples of the root.
         for (uint32_t i = 0; i < 10u; ++i) {
             walk<Etr2Pin>(true, 60);
             walk<Etr2Pin>(false, 2000);
         }
-        spin_us(3000);
+        brio::spin_us<Ruler>(3000);
         const uint16_t after_blips = L2::count_raw();
         const bool blip_trig = (L2::status() & LptimFlag::exttrig) != 0u;
         // And one 2 ms pulse, well past the filter's window.
         walk<Etr2Pin>(true, 3000);
-        spin_us(3000);
+        brio::spin_us<Ruler>(3000);
         const uint16_t after_long = L2::count_raw();
         const bool long_trig = (L2::status() & LptimFlag::exttrig) != 0u;
         walk<Etr2Pin>(false, 200);
@@ -3464,15 +3518,16 @@ int main() {
     }
     slow_clock = wall_on_lse ? brio::LptimClock::lse : brio::LptimClock::lsi;
     // THE SCALE, before anything is timed on it. A crystal is 32768 Hz
-    // by construction; an LSI is only bounded, so it is WEIGHED - and
-    // the weighing happens on any board that finds itself without a
-    // crystal, not only on the part that is known to lack one.
-    if (!wall_on_lse) {
-        const uint32_t measured = measure_lsi_hz();
-        if (measured != 0u) {
+    // by construction; an LSI is only bounded (table 46), so it is
+    // WEIGHED - on every board: it is the wall's scale where no crystal
+    // runs, and everywhere the rate the LSI rows of letters a, g and j
+    // are read against, a die fact rather than one die's constant.
+    const uint32_t measured = measure_lsi_hz();
+    if (measured != 0u) {
+        lsi_nominal = measured;
+        lsi_weighed = true;
+        if (!wall_on_lse) {
             slow_hz = measured;
-            lsi_nominal = measured;
-            lsi_weighed = true;
         }
     }
     if (take != brio::RtcClockSource::none &&
@@ -3520,6 +3575,7 @@ int main() {
               wall_on_lse ? " Hz (the crystal)"
                           : (lsi_weighed ? " Hz (LSI, weighed on TIM16)"
                                          : " Hz (LSI NOT WEIGHED - nominal)"),
+              " LSI=", lsi_nominal, lsi_weighed ? " Hz (weighed)" : " (NOT WEIGHED)",
               " ruler=", cpu_ruler ? "PCLK" : "the wall",
               " backstop=", wd ? "IWDG 32 s" : "FAILED", crlf);
         banner();

@@ -91,10 +91,9 @@
 //      ends aligned and the destination one past a word, cycles a copy.
 //
 //   p  print(console, s) of a static string of 1, 16, 256 and 4096 bytes,
-//      then the wait for the transport to DRAIN: the transmit ring empty
-//      (Uart::tx_idle(), which is the ring and not the wire) and then the
-//      resource's transmission-complete flag (Usart<n>::tx_complete(), SR.TC
-//      - RM0390 25.6.1: the last frame's stop bit is out). The counters
+//      then the wait for the transport to DRAIN: Uart::tx_idle(), the
+//      transmit ring empty and the transmission-complete flag set (SR.TC -
+//      RM0390 25.6.1: the last frame's stop bit is out). The counters
 //      are read before the print and after the drain. THE WIRE is 115200
 //      baud over ten bits a byte (8N1: a start bit, eight, a stop bit),
 //      11520 bytes a second. busy ~ wall: print() spins on a full ring.
@@ -300,6 +299,7 @@
 #include "stm32f4/usart.hpp"
 #include "util/bench.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #if defined(STM32F411xE)
@@ -336,10 +336,12 @@ constexpr uint32_t console_baud = 115200;
 /// 8N1: a start bit, eight data bits, a stop bit.
 constexpr uint32_t console_wire_bps = console_baud / 10u;
 
-/// The ruler: the DWT's cycle counter at the app's clock.
+/// The ruler: the DWT's cycle counter at the app's clock. Its now() is
+/// one load, so the shared waits (util/test_wait.hpp) take it inlined at
+/// no cost beyond the load.
 struct Ruler {
     [[gnu::always_inline]] static uint32_t now() { return CycleCounter::now(); }
-    static uint32_t hz() { return SysClock::hz; }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
 static_assert(CycleRuler<Ruler>);
 
@@ -413,29 +415,21 @@ BenchCounters counters() {
 /// A compiler barrier: memory is what the code says it is on both sides.
 [[gnu::always_inline]] inline void fence() { asm volatile("" ::: "memory"); }
 
-/// Wait for the console to fall silent: the ring empty, then the last
-/// frame's stop bit out (SR.TC). Bounded at a second, some forty-five
-/// times what a full 256-byte ring takes at 115200; false if it ran out.
-bool console_drain() {
-    const uint32_t t0 = Ticker::ticks();
-    while (!Serial::tx_idle()) {
-        if (Ticker::ticks() - t0 > 1000u) {
-            return false;
-        }
-    }
-    while (!Serial::Resource::tx_complete()) {
-        if (Ticker::ticks() - t0 > 1000u) {
-            return false;
-        }
-    }
-    return true;
-}
+/// Wait for the console to fall silent: the ring empty and the last
+/// frame's stop bit out (tx_idle() reads SR.TC as well as the ring).
+/// Bounded at a second, some forty-five times what a full 256-byte ring
+/// takes at 115200; false if it ran out. Letter p times the drain itself
+/// and reports a false; elsewhere a wedged console only lengthens the
+/// lines that follow, so the callers drop the answer.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(1'000'000); }
 
-/// Return right after a tick: a short run started here sees none.
+/// Return right after a tick: a short run started here sees none. A tick
+/// is a millisecond; five is the time-out, and a tick that stopped is the
+/// dead timebase every idle line after this one reads (letter r's window
+/// verdict judges it), so the answer is dropped.
 void tick_edge() {
     const uint32_t t = Ticker::ticks();
-    while (Ticker::ticks() == t) {
-    }
+    (void)brio::wait_until<Ruler>([t] { return Ticker::ticks() != t; }, 5'000);
 }
 
 /// Idle turns, as the kernel takes them with nothing posted, until `ticks`
@@ -909,7 +903,10 @@ BenchSample dma_best_of_8(uint32_t n, bool& ok) {
             started = Copier::copy(reinterpret_cast<uint32_t*>(dma_dst),
                                    reinterpret_cast<const uint32_t*>(dma_src), n / 4u);
         }
-        while (Copier::busy()) {
+        // A 4 KB block is about a thousand beats; 1 ms is the time-out, and
+        // a block that never ends is reported as one that did not land.
+        if (!brio::wait_until<Ruler>([] { return !Copier::busy(); }, 1'000)) {
+            started = false;
         }
         fence();
         const uint32_t w = sw.elapsed();
@@ -1095,8 +1092,7 @@ void td_dma() {
     }
     FastSpi::release();
 #else
-    print(serial, "  spi.dma declined on this board: the free pads are surveyed on the "
-                  "Nucleo-F446RE alone", crlf);
+    bench.skip("spi.dma: the free pads are surveyed on the Nucleo-F446RE alone");
 #endif
     bench.verdict("ran", true);
 }
@@ -1469,8 +1465,7 @@ void te_spi() {
     ReqCs::release();
     ReqDc::release();
 #else
-    print(serial, "  letter e declined on this board: the free pads are surveyed on the "
-                  "Nucleo-F446RE alone", crlf);
+    bench.skip("letter e: the free pads are surveyed on the Nucleo-F446RE alone");
 #endif
     bench.verdict("ran", true);
 }
@@ -1525,9 +1520,7 @@ bool loop_up(uint8_t owner, uint32_t baud) {
     loop_down();
     loop_owner = owner;
     const bool up = Port::init(clock, baud);
-    const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() - t0 < 2u) {
-    }
+    brio::spin_us<Ruler>(2'000);   // the line settles: two milliseconds of idle
     loop_edge = false;
     return up;
 }
@@ -1564,6 +1557,10 @@ BenchSample loop_tx(uint32_t n) {
     LoopRes::receiver(false);
     LoopRes::clear_flags(UsartFlag::tc);
     const uint8_t* src = reinterpret_cast<const uint8_t*>(print_pattern.data());
+    // The run's time-out: 4096 bytes at 115200 take 356 ms, and the kernel
+    // tick wakes every idle turn within a millisecond to look at it.
+    const uint32_t budget = brio::us_cycles<Ruler>(1'000'000);
+    bool timed_out = false;
     const BenchCounters c0 = counters();
     Stopwatch<Ruler> sw;
     sw.start();
@@ -1572,6 +1569,10 @@ BenchSample loop_tx(uint32_t n) {
         Idle::CriticalSection cs;
         queued += Port::write_bulk(std::span<const uint8_t>(src + queued, n - queued));
         if (queued >= n) {
+            break;
+        }
+        if (sw.elapsed() >= budget) {
+            timed_out = true;
             break;
         }
         Idle::idle();
@@ -1584,6 +1585,10 @@ BenchSample loop_tx(uint32_t n) {
         if (Port::tx_idle()) {
             break;
         }
+        if (sw.elapsed() >= budget) {
+            timed_out = true;
+            break;
+        }
         if (LoopRes::txe_interrupt() || LoopTxEngine::busy()) {
             Idle::idle();
         }
@@ -1591,6 +1596,9 @@ BenchSample loop_tx(uint32_t n) {
     const uint32_t w = sw.elapsed();
     const BenchCounters c1 = counters();
     LoopRes::receiver(true);
+    if (timed_out) {
+        print(serial, "  the transmitter did not go idle within a second", crlf);
+    }
     return bench_sample(w, c0, c1);
 }
 
@@ -1659,14 +1667,19 @@ BenchSample loop_edge_after(uint32_t& late) {
     const uint8_t* src = reinterpret_cast<const uint8_t*>(print_pattern.data());
     (void)Port::write_bulk(std::span<const uint8_t>(src, 16));
     uint32_t got = 0;
-    while (!LoopRes::tx_complete()) {
-        if constexpr (!poll) {
-            if (loop_edge) {
-                loop_edge = false;
-                got += loop_drain<Port>(got, scrap);
+    // Sixteen frames at 115200 take 1.4 ms; 10 ms is the time-out, and a
+    // burst that never completes is reported as the edge's time-out.
+    const bool sent = brio::wait_until<Ruler>(
+        [&] {
+            if constexpr (!poll) {
+                if (loop_edge) {
+                    loop_edge = false;
+                    got += loop_drain<Port>(got, scrap);
+                }
             }
-        }
-    }
+            return LoopRes::tx_complete();
+        },
+        10'000);
     const uint32_t t_tc = Ruler::now();
     const BenchCounters c0 = counters();
     uint32_t tick = Ticker::ticks();
@@ -1694,6 +1707,9 @@ BenchSample loop_edge_after(uint32_t& late) {
     }
     const BenchCounters c1 = counters();
     (void)loop_drain<Port>(got, scrap);
+    if (!sent) {
+        late = 1;
+    }
     return bench_sample(at - t_tc, c0, c1);
 }
 #endif
@@ -1745,8 +1761,7 @@ void tu_uart() {
     }
     bench.verdict("the loop came up at every rate", all_up);
 #else
-    print(serial, "  letter u declined on this board: the loop's pad is surveyed on the "
-                  "Nucleo-F446RE alone", crlf);
+    bench.skip("letter u: the loop's pad is surveyed on the Nucleo-F446RE alone");
 #endif
     bench.verdict("ran", true);
 }
@@ -1876,17 +1891,16 @@ typename Host::Request i2c_request(uint8_t addr, uint8_t tx, uint8_t rx, Speed s
 }
 
 /// The last tenure's STOP off the wire and BUSY down, outside every
-/// measurement; bounded at ten ticks.
+/// measurement; bounded at ten milliseconds, a hundred bit times at
+/// 100 kHz. A bus still busy then shows as the next tenure's status,
+/// which the rows print, so the answer is dropped.
 void i2c_quiet() {
-    const uint32_t t0 = Ticker::ticks();
 #if defined(STM32F446xx)
     // Either block may be the host; the wire is one.
-    while ((I2cRes::stopping() || I2cRes::busy() || FmpI2c<1>::busy()) &&
-           Ticker::ticks() - t0 < 10u) {
-    }
+    (void)brio::wait_until<Ruler>(
+        [] { return !(I2cRes::stopping() || I2cRes::busy() || FmpI2c<1>::busy()); }, 10'000);
 #else
-    while ((I2cRes::stopping() || I2cRes::busy()) && Ticker::ticks() - t0 < 10u) {
-    }
+    (void)brio::wait_until<Ruler>([] { return !(I2cRes::stopping() || I2cRes::busy()); }, 10'000);
 #endif
 }
 
@@ -2279,8 +2293,8 @@ void ti_i2c() {
                   "speeds, pump and engines",
                   i2c_bad == 0u);
 #else
-    print(serial, "  letter i declined on this board: the I2C host is measured on the "
-                  "STM32F429I-DISC1's STMPE811 and the Nucleo-F446RE's self-link alone", crlf);
+    bench.skip("letter i: the I2C host is measured on the STM32F429I-DISC1's STMPE811 and the "
+               "Nucleo-F446RE's self-link alone");
 #endif
     bench.verdict("ran", true);
 }

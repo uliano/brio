@@ -29,10 +29,10 @@
 //      TS_CAL2 at 0x1FFF7A2C and 0x1FFF7A2E give the junction
 //      temperature. All three are ADC results taken at 3.3 V, so the
 //      arithmetic is a ratio and the board's own supply comes out.
-//   3. THE CORE'S OWN CLOCK AS THE RULER. SysTick's VAL counts HCLK, and
-//      a conversion time is measured DIFFERENTIALLY - the same loop at
-//      two sampling times - so the polling overhead cancels and what is
-//      left is the chapter's own cycle count.
+//   3. THE CORE'S OWN CLOCK AS THE RULER. The DWT's cycle counter counts
+//      HCLK, and a conversion time is measured DIFFERENTIALLY - the same
+//      loop at two sampling times - so the polling overhead cancels and
+//      what is left is the chapter's own cycle count.
 //   4. THE EXTI's SOFTWARE TRIGGER AS A HARDWARE ONE. The last code of
 //      both trigger tables is a pad's EXTI line (11 for the regular
 //      group, 15 for the injected one), and EXTI_SWIER raises a line with
@@ -116,6 +116,7 @@
 #include "stm32f4/dac.hpp"
 #include "stm32f4/delay.hpp"
 #include "stm32f4/dma.hpp"
+#include "stm32f4/dwt.hpp"
 #include "stm32f4/exti.hpp"
 #include "stm32f4/flash.hpp"
 #include "stm32f4/nvic.hpp"
@@ -127,6 +128,7 @@
 #include "util/analog.hpp"
 #include "util/analog_sampler.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #if defined(STM32F411xE)
@@ -224,35 +226,35 @@ constexpr bool have_adc2 = adc_present(2);
 /// 180 MHz boards, 50 MHz on the black pill.
 constexpr uint32_t pclk2 = SysClock::pclk2_hz;
 
-/// Let the console's own transmitter fall silent before a timed
-/// measurement: its interrupt would land in the middle of one.
+// =============================================================================
+// The ruler: the DWT's cycle counter, started once in main()
+// =============================================================================
+
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
+
+/// Let the console's own transmitter fall silent before a measurement: its
+/// interrupt would land in the middle of one. A console that does not
+/// drain in 200 ms is wedged; where a derived bound judges what follows,
+/// the letter acts on console_drained() instead, and elsewhere what a
+/// wedged console costs is a longer wait, so the answer is dropped.
 void console_drain() {
-    const uint32_t t0 = Ticker::ticks();
-    while (!Serial::tx_idle() && Ticker::ticks() - t0 < 200u) {
-    }
+    (void)brio::console_drain<Ruler, Serial>();
 }
 
-// =============================================================================
-// The ruler: SysTick's VAL, accumulated across its wraps
-// =============================================================================
+/// The same drain, answering whether the console went idle.
+bool console_drained() {
+    return brio::console_drain<Ruler, Serial>();
+}
 
-struct Cycles {
-    uint32_t last = 0;
-    uint32_t total = 0;
-
-    static uint32_t period() { return SysTick->LOAD + 1u; }
-    void start() {
-        total = 0;
-        last = SysTick->VAL;
-    }
-    /// Must be called at least once per SysTick period, which every loop
-    /// below does by construction (a conversion is far shorter than 1 ms).
-    void mark() {
-        const uint32_t now = SysTick->VAL;
-        total += (last >= now) ? (last - now) : (last + period() - now);
-        last = now;
-    }
-};
+/// A conversion at 480 ADC cycles is about 22 us at 22.5 MHz (the slowest
+/// one any letter starts); a converter that has not answered in 2 ms -
+/// some ninety conversions - is not going to, which is also how long a
+/// letter waits before it calls a conversion absent.
+constexpr uint32_t conversion_budget_us = 2'000;
 
 /// How many HCLK cycles one ADCCLK cycle is worth, as a Q8 fixed-point
 /// ratio so that a 4:1 or 8:1 division is exact and anything else is
@@ -375,12 +377,9 @@ bool trigger_converts(uint8_t line, bool injected) {
     (void)Exti::clear(line);
     Adc1::clear_flags(AdcFlag::all);
     (void)Exti::trigger(line);
-    for (uint32_t i = 0; i < 20000u; ++i) {
-        if (injected ? Adc1::injected_ready() : Adc1::ready()) {
-            return true;
-        }
-    }
-    return false;
+    return brio::wait_until<Ruler>(
+        [injected] { return injected ? Adc1::injected_ready() : Adc1::ready(); },
+        conversion_budget_us);
 }
 
 // A REAL EDGE, AND STILL NO WIRE: an output pad feeds its OWN EXTI line,
@@ -429,10 +428,9 @@ bool pad_edge_converts(uint8_t line, bool injected, bool with_event, bool with_i
     Adc1::clear_flags(AdcFlag::all);
     Pad::set();
     (void)delay_us(clock, 2);
-    bool ok = false;
-    for (uint32_t i = 0; i < 20000u && !ok; ++i) {
-        ok = injected ? Adc1::injected_ready() : Adc1::ready();
-    }
+    const bool ok = brio::wait_until<Ruler>(
+        [injected] { return injected ? Adc1::injected_ready() : Adc1::ready(); },
+        conversion_budget_us);
     Pad::clear();
     (void)Exti::clear(line);
     Pad::release();
@@ -444,7 +442,7 @@ constexpr bool have_trigger_pads = false;
 
 #if !defined(DAC_BASE)
 void needs_dac(const char* what) {
-    print(serial, "  this part has no DAC: ", what, " needs one and claims nothing", crlf);
+    bench.skip("this part has no DAC: ", what);
 }
 #endif
 
@@ -492,9 +490,15 @@ void ta_block() {
           ", sensor ", adc_input_channel(AdcInput::temperature), ", VBAT ",
           adc_input_channel(AdcInput::vbat), " (/", AdcCommon::vbat_divider(), ")",
           AdcCommon::sensor_shares_vbat() ? ", sensor and battery SHARE the channel" : "", crlf);
-    bench.verdict("the internal channels are the manual's numbers for this class",
-                  adc_input_valid(AdcInput::vrefint) && adc_input_valid(AdcInput::temperature) &&
-                      adc_input_valid(AdcInput::vbat));
+    // The internal channels are the manual's numbers, a fact of the build
+    // and not of the run: VREFINT on ADC1_IN17 and the sensor on ADC1_IN18,
+    // shared with VBAT, on the four parts this suite builds for (RM0390
+    // 13.10, read; RM0090 13.10, RM0383 11.10 and RM0386 14.10 as
+    // stm32f4/device_tables.hpp cites them).
+    static_assert(adc_input_channel(AdcInput::vrefint) == 17u &&
+                      adc_input_channel(AdcInput::temperature) == 18u &&
+                      adc_input_channel(AdcInput::vbat) == 18u,
+                  "the internal channels are the manual's numbers for this class");
 
     print(serial, "  factory: VREFINT_CAL ", AdcFactory::vrefint_cal(), ", TS_CAL1 ",
           AdcFactory::ts_cal1(), " (", AdcFactory::ts_cal1_celsius, " C), TS_CAL2 ",
@@ -506,8 +510,8 @@ void ta_block() {
                   AdcFactory::ts_cal2() > AdcFactory::ts_cal1());
 
     // The pad map, and the refusals of the config.
-    bench.verdict("the pads carry the channels every datasheet of the family gives",
-                  In4::channel == 4u && In5::channel == 5u);
+    static_assert(In4::channel == 4u && In5::channel == 5u,
+                  "the pads carry the channels every datasheet of the family gives");
     AdcConfig bad = base_config();
     bad.discontinuous = true;
     bad.injected_discontinuous = true;
@@ -583,17 +587,16 @@ void tb_dac() {
 
         // The holding register reaches DOR by itself, one APB1 cycle
         // later - measured in HCLK cycles, which is what this core counts.
-        Cycles m{};
         (void)Dac::write(dac_ch_pa4, 0);
         (void)delay_us(clock, 5);
-        m.start();
+        const uint32_t t0 = Ruler::now();
         (void)Dac::write(dac_ch_pa4, 0x0ABC);
         uint32_t polls = 0;
         while (Dac::output(dac_ch_pa4) != 0x0ABCu && polls < 1000u) {
             ++polls;
         }
-        m.mark();
-        print(serial, "  DHR -> DOR with no trigger: ", m.total, " HCLK cycles, ", polls,
+        const uint32_t took = Ruler::now() - t0;
+        print(serial, "  DHR -> DOR with no trigger: ", took, " HCLK cycles, ", polls,
               " read(s) of DOR (one APB1 cycle is ", SysClock::hz / SysClock::pclk1_hz,
               " of them)", crlf);
         bench.verdict("an untriggered write reaches the output register by itself",
@@ -792,8 +795,8 @@ void td_buffer() {
                               "buffered one holds",
                               raw_stray > buf_stray + 200u);
             } else {
-                print(serial, "  no load on either DAC pad of this board: the buffer's job is "
-                              "not measurable here (declined by name)", crlf);
+                bench.skip("no load on either DAC pad of this board: the buffer's job is not "
+                           "measurable here");
             }
         }
         analog_down();
@@ -866,7 +869,15 @@ void tf_timing() {
     AdcCommon::internal_sources(true);
     Adc1::select(AdcInput::vrefint);
     (void)delay_us(clock, 20);
-    console_drain();
+    // The verdicts below are derived bounds on spans the console's handler
+    // would lengthen, and the letter prints between them: each timed loop
+    // opens on a drained console.
+    if (!console_drained()) {
+        bench.skip("the console did not drain: the timed loops would carry its interrupt");
+        AdcCommon::internal_sources(false);
+        analog_down();
+        return;
+    }
 
     const uint32_t q8 = core_cycles_per_adc_cycle_q8();
     print(serial, "  fADC ", AdcCommon::adc_hz(pclk2) / 1000u, " kHz, HCLK ", SysClock::hz / 1000u,
@@ -889,13 +900,12 @@ void tf_timing() {
         for (uint8_t s = 0; s < 3u; ++s) {
             Adc1::sample_time_all(smp[s]);
             (void)Adc1::read();   // one throwaway: the first after a change
-            Cycles m{};
-            m.start();
+            console_drain();
+            const uint32_t t0 = Ruler::now();
             for (uint16_t k = 0; k < rounds; ++k) {
                 (void)Adc1::read();
-                m.mark();
             }
-            per[s] = m.total / rounds;
+            per[s] = (Ruler::now() - t0) / rounds;
         }
         // THE DIFFERENCE is the measurement: the same loop at two
         // sampling times differs by exactly the sampling times' own
@@ -932,13 +942,12 @@ void tf_timing() {
         (void)Adc1::configure(c);
         Adc1::sample_time_all(AdcSampleTime::cycles3);
         (void)Adc1::read();
-        Cycles m{};
-        m.start();
+        console_drain();
+        const uint32_t t0 = Ruler::now();
         for (uint16_t k = 0; k < rounds; ++k) {
             (void)Adc1::read();
-            m.mark();
         }
-        (pass == 0u ? at12 : at6) = m.total / rounds;
+        (pass == 0u ? at12 : at6) = (Ruler::now() - t0) / rounds;
     }
     const uint32_t sar_measured = at12 - at6;
     const uint32_t sar_predicted =
@@ -1108,7 +1117,7 @@ void th_watchdog() {
         bench.verdict("and the guarded value is still inside it", !Adc1::flag(AdcFlag::watchdog));
     }
 #else
-    print(serial, "  no DAC: the crossing cannot be staged from here", crlf);
+    bench.skip("no DAC: the crossing cannot be staged from here");
 #endif
     Adc1::watchdog_off();
     bench.verdict("the watchdog disarms and the flag stays down through a conversion", [] {
@@ -1216,13 +1225,13 @@ void ti_injected() {
         (void)Adc1::select_channel(regular_ch);
         Adc1::clear_flags(AdcFlag::all);
         (void)Adc1::read();
-        uint32_t spins = 0;
-        while (!Adc1::injected_ready() && spins < 100000u) {
-            ++spins;
-        }
+        // Judged below on JEOC itself; the wait's length is printed.
+        const auto jeoc = brio::cycles_until<Ruler>([] { return Adc1::injected_ready(); },
+                                                    conversion_budget_us);
         const int16_t auto_value = Adc1::injected_result(1);
-        print(serial, "  JAUTO: one regular conversion, and JEOC arrived after ", spins,
-              " polls with JDR1 = ", auto_value, crlf);
+        print(serial, "  JAUTO: one regular conversion, and JEOC arrived ",
+              jeoc ? *jeoc : 0u, " HCLK cycles later", jeoc ? "" : " (NEVER)",
+              " with JDR1 = ", auto_value, crlf);
         bench.verdict("with JAUTO the injected group runs after the regular one with NO "
                       "trigger of its own (13.3.10)",
                       Adc1::injected_ready() &&
@@ -1239,8 +1248,7 @@ void ti_injected() {
 // =============================================================================
 void tj_dual() {
 #if !defined(ADC2_BASE)
-    print(serial, "  this part has ADC1 alone: the multi-ADC modes need two converters and "
-                  "this letter claims nothing", crlf);
+    bench.skip("this part has ADC1 alone: the multi-ADC modes need two converters");
 #else
 #if !defined(DAC_BASE)
     needs_dac("letter j's stimulus");
@@ -1275,16 +1283,16 @@ void tj_dual() {
         Adc1::clear_flags(AdcFlag::all);
         Adc2::clear_flags(AdcFlag::all);
         Adc1::start();
-        uint32_t spins = 0;
-        while (!Adc1::ready() && spins < 100000u) {
-            ++spins;
-        }
+        // Each wait of this letter is judged by the results read after it.
+        const auto paired = brio::cycles_until<Ruler>([] { return Adc1::ready(); },
+                                                      conversion_budget_us);
         const uint32_t pair = AdcCommon::data();
         const uint32_t csr = AdcCommon::status();
         const uint16_t master = Adc1::result();
         const uint16_t slave = Adc2::result();
         print(serial, "  two pads, one trigger: ADC1 ", master, " (single ", single4,
-              "), ADC2 ", slave, " (single ", single5, ") after ", spins, " polls; CSR ",
+              "), ADC2 ", slave, " (single ", single5, ") ", paired ? *paired : 0u,
+              " HCLK cycles after the start", paired ? "" : " (NEVER)", "; CSR ",
               hex(csr), ", CDR ", hex(pair), crlf);
         bench.verdict("ONE trigger on the MASTER converts BOTH: neither converter was started "
                       "by itself and both have a result",
@@ -1303,10 +1311,7 @@ void tj_dual() {
         Adc1::clear_flags(AdcFlag::all);
         Adc2::clear_flags(AdcFlag::all);
         Adc1::start();
-        spins = 0;
-        while (!Adc1::ready() && spins < 100000u) {
-            ++spins;
-        }
+        (void)brio::wait_until<Ruler>([] { return Adc1::ready(); }, conversion_budget_us);
         const uint32_t with_dma = AdcCommon::data();
         const uint32_t slave_sr = Adc2::flags();
         AdcCommon::multi_dma(AdcMultiDma::off, false);
@@ -1339,10 +1344,7 @@ void tj_dual() {
         Adc1::clear_flags(AdcFlag::all);
         Adc2::clear_flags(AdcFlag::all);
         Adc1::start();
-        spins = 0;
-        while (!Adc1::ready() && spins < 100000u) {
-            ++spins;
-        }
+        (void)brio::wait_until<Ruler>([] { return Adc1::ready(); }, conversion_budget_us);
         const uint16_t same_m = Adc1::result();
         const uint16_t same_s = Adc2::result();
         print(serial, "  ONE pad on both: ADC1 ", same_m, ", ADC2 ", same_s, ", difference ",
@@ -1524,11 +1526,9 @@ void tm_erratum() {
     // 180 MHz core.
     Adc1::clear_flags(AdcFlag::all);
     Adc1::start();
-    // STRT is what the driver's own "in flight" answer rests on.
-    uint32_t spins = 0;
-    while (!Adc1::started() && spins < 1000u) {
-        ++spins;
-    }
+    // STRT is what the driver's own "in flight" answer rests on; it is
+    // judged below, and how long it took is printed.
+    const auto strt = brio::cycles_until<Ruler>([] { return Adc1::started(); }, 100);
     const bool saw_started = Adc1::started();
     const bool refused = !Adc1::select_channel(other);
 
@@ -1539,36 +1539,31 @@ void tm_erratum() {
     static uint8_t one[1] = {0};
     one[0] = other;
     (void)Adc1::regular_sequence_unchecked(one, 1);
-    uint32_t waited = 0;
-    while (!Adc1::ready() && waited < 200000u) {
-        ++waited;
-    }
-    const bool never_came = !Adc1::ready();
+    const bool never_came =
+        !brio::wait_until<Ruler>([] { return Adc1::ready(); }, conversion_budget_us);
 
-    print(serial, "  STRT rose after ", spins, " polls; the driver ",
+    print(serial, "  STRT rose ", strt ? *strt : 0u, " HCLK cycles after SWSTART",
+          strt ? "" : " (NEVER)", "; the driver ",
           refused ? "REFUSED" : "accepted", " a sequence write inside the conversion", crlf);
     bench.verdict("STRT rises as soon as a conversion starts, which is what makes the "
                   "in-flight answer possible at all", saw_started);
     bench.verdict("and the driver REFUSES a sequence write there - the structural answer to "
                   "the errata item", refused);
     print(serial, "  the sequence rewritten INSIDE a software-started conversion: EOC ",
-          never_came ? "never arrived" : "arrived anyway", " after ", waited, " polls", crlf);
+          never_came ? "never arrived" : "arrived anyway", " in ", conversion_budget_us,
+          " us", crlf);
     bench.verdict("THE ERRATUM MEASURED: with a software start, a sequence written during a "
                   "conversion resets it and nothing restarts it", never_came);
 
     // The workaround: start again.
     Adc1::start();
     uint16_t v = 0;
-    uint32_t again = 0;
-    while (!Adc1::ready() && again < 200000u) {
-        ++again;
-    }
-    if (Adc1::ready()) {
+    const bool again = brio::wait_until<Ruler>([] { return Adc1::ready(); }, conversion_budget_us);
+    if (again) {
         v = Adc1::result();
     }
     print(serial, "  one more SWSTART and the new sequence converts: ", v, crlf);
-    bench.verdict("and the errata's own workaround - trigger again - brings it back",
-                  again < 200000u);
+    bench.verdict("and the errata's own workaround - trigger again - brings it back", again);
 
     // THE HARDWARE TRIGGER IS SPARED, which is the other half of the
     // item's own text - and the only way to say it on this board is a pad
@@ -1589,17 +1584,11 @@ void tm_erratum() {
         // new sequence with no software help at all.
         pad_edge<TrigPad11>(adc_regular_exti_line);
         (void)Adc1::regular_sequence_unchecked(one, 1);
-        uint32_t lost = 0;
-        while (!Adc1::ready() && lost < 20000u) {
-            ++lost;
-        }
-        const bool first_lost = !Adc1::ready();
+        const bool first_lost =
+            !brio::wait_until<Ruler>([] { return Adc1::ready(); }, conversion_budget_us);
         pad_edge<TrigPad11>(adc_regular_exti_line);
-        uint32_t hw = 0;
-        while (!Adc1::ready() && hw < 20000u) {
-            ++hw;
-        }
-        const bool recovered = Adc1::ready();
+        const bool recovered =
+            brio::wait_until<Ruler>([] { return Adc1::ready(); }, conversion_budget_us);
         const uint16_t hw_value = Adc1::result();
         TrigPad11::release();
         (void)Exti::release(adc_regular_exti_line);
@@ -1611,8 +1600,8 @@ void tm_erratum() {
                       first_lost && recovered && hw_value > 100u);
 #endif
     } else {
-        print(serial, "  no pad on line 11 this suite knows to be free on this board: the "
-                      "hardware trigger's half of the item is not staged here", crlf);
+        bench.skip("no pad on line 11 this suite knows to be free on this board: the hardware "
+                   "trigger's half of the item is not staged here");
     }
 
     AdcCommon::internal_sources(false);
@@ -1655,8 +1644,12 @@ void tn_noise() {
     bench.verdict("and the two means agree, so the errata's workaround costs the ACCURACY "
                   "nothing and buys the NOISE what this letter reports",
                   abs_diff(static_cast<uint16_t>(mean[0]), static_cast<uint16_t>(mean[1])) < 20u);
-    bench.verdict("the accelerator is back on where the clock task left it",
-                  FlashAccel::prefetch() && FlashAccel::icache() && FlashAccel::dcache());
+    // Printed, not judged: the letter wrote the prefetch back itself, and
+    // the two caches are the clock's (its own suite judges them).
+    print(serial, "  the accelerator after the letter: prefetch ",
+          FlashAccel::prefetch() ? "on" : "OFF", ", instruction cache ",
+          FlashAccel::icache() ? "on" : "OFF", ", data cache ", FlashAccel::dcache() ? "on" : "OFF",
+          crlf);
     AdcCommon::internal_sources(false);
     analog_down();
 }
@@ -1719,13 +1712,11 @@ void to_trigger() {
     // hardware trigger still converts when the software asks.
     Adc1::clear_flags(AdcFlag::all);
     Adc1::start();
-    uint32_t spins = 0;
-    while (!Adc1::ready() && spins < 20000u) {
-        ++spins;
-    }
+    const bool converted =
+        brio::wait_until<Ruler>([] { return Adc1::ready(); }, conversion_budget_us);
     const uint16_t by_software = Adc1::result();
     bench.verdict("and SWSTART is INDEPENDENT of it: a converter armed for a hardware trigger "
-                  "still converts on the software one", spins < 20000u && by_software > 100u);
+                  "still converts on the software one", converted && by_software > 100u);
 
     if constexpr (have_trigger_pads) {
 #if defined(STM32F446xx)
@@ -1757,8 +1748,8 @@ void to_trigger() {
                       inj_by_pad && Adc1::injected_result(1) > 100);
 #endif
     } else {
-        print(serial, "  no pad on lines 11 and 15 this suite knows to be free on this board: "
-                      "the edge that would start a conversion is not staged here", crlf);
+        bench.skip("no pad on lines 11 and 15 this suite knows to be free on this board: the "
+                   "edge that would start a conversion is not staged here");
     }
 
     (void)Exti::clear(adc_regular_exti_line);
@@ -1844,13 +1835,16 @@ void tp_sampler() {
     // Tenuto::step() serves ONE queued event and nothing else - only
     // Tenuto::run() matures time events, and this loop is not run(). The
     // sampler's software pace IS a time event, so the pump does both
-    // halves by hand.
-    const uint32_t deadline = Ticker::ticks() + 400u;
-    while (Collector::samples < 60u && Ticker::ticks() < deadline) {
-        TimeEvents<P>::process();
-        while (AnalogKernel::step()) {
-        }
-    }
+    // halves by hand. Sixty samples at one every 2 ms take 120 ms; the
+    // time-out is 400 ticks, and the count is what the verdicts judge.
+    (void)brio::wait_ticks<P>(
+        [] {
+            TimeEvents<P>::process();
+            while (AnalogKernel::step()) {
+            }
+            return Collector::samples >= 60u;
+        },
+        400u);
     Sampler::stop();
     for (uint8_t i = 0; i < 8u; ++i) {
         (void)AnalogKernel::step();
@@ -1935,13 +1929,14 @@ void tq_adc_dma() {
 
     Adc1::clear_flags(AdcFlag::all);
     Adc1::start();
-    uint32_t spins = 0;
-    while (!adc_dma_complete && spins < 200000u) {
-        ++spins;
-    }
+    // Four conversions at 480 cycles are about 88 us; judged below on the
+    // stream's completion, the wait's length printed.
+    const auto took = brio::cycles_until<Ruler>([] { return adc_dma_complete; },
+                                                conversion_budget_us);
     const bool moved = adc_dma_complete;
     const bool overran = Adc1::overrun();
-    print(serial, "  four ranks into memory after ", spins, " polls: ", block[0], " ", block[1],
+    print(serial, "  four ranks into memory ", took ? *took / (SysClock::hz / 1'000'000u) : 0u,
+          " us after the start", took ? "" : " (NEVER)", ": ", block[0], " ", block[1],
           " ", block[2], " ", block[3], " (errors ", adc_dma_errors, ", OVR ",
           overran ? "up" : "down", ")", crlf);
     bench.verdict("ONE trigger, FOUR conversions, four halfwords in memory - the stream's own "
@@ -2032,9 +2027,9 @@ void tr_dac_dma() {
 #if !defined(DAC_BASE)
     needs_dac("letter r");
 #elif !defined(STM32F446xx)
-    print(serial, "  no pad on EXTI line 9 this suite knows to be free on this board: the "
-                  "DAC's DMA request comes from a HARDWARE trigger only (14.3.7) and there "
-                  "is none to give it here", crlf);
+    bench.skip("no pad on EXTI line 9 this suite knows to be free on this board: the DAC's DMA "
+               "request comes from a HARDWARE trigger only (14.3.7) and there is none to give "
+               "it here");
 #else
     {
         // The trigger is EXTI line 9 - the DAC's own table 94 row - driven
@@ -2229,19 +2224,13 @@ void sources_off() {
     }
 }
 
-/// `ms` kernel ticks - delay_us() refuses a wait of a SysTick period or
-/// more, so a millisecond is waited on the tick.
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() - t0 <= ms) {
-    }
-}
-
-/// Conversions counted in a 10 ms window, regular (EOC) or injected (JEOC).
+/// Conversions counted in a window of exactly 10 ms on the cycle counter,
+/// regular (EOC) or injected (JEOC). Counted in ticks the window would last
+/// 9 to 10 ms, by where in a tick period it began.
 uint32_t count_conversions(bool injected) {
     uint32_t n = 0;
-    const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() - t0 < 10u) {
+    const uint32_t t0 = Ruler::now();
+    while (Ruler::now() - t0 < brio::us_cycles<Ruler>(10'000)) {
         if (injected) {
             if (Adc1::injected_ready()) {
                 Adc1::clear_flags(AdcFlag::injected_converted);
@@ -2271,19 +2260,20 @@ void ts_triggers_and_interrupts() {
     one[0] = adc_input_channel(AdcInput::vrefint);
     // 10 kHz of triggers for 10 ms: 100 conversions, +-1 for the window's
     // phase; a VREFINT conversion at 480 cycles of the ADC clock is some
-    // 22 us, well inside the 100 us between triggers.
+    // 22 us, well inside the 100 us between triggers. The window opens
+    // right after the source starts, whose first event comes 50 us (a
+    // compare at 50) or 100 us (the update) later, so a code counts 100,
+    // or 99 where its hundredth update falls at the window's end.
     bool reg_ok = true, inj_ok = true;
     uint8_t reg_seen = 0, inj_seen = 0;
     // NOTHING IS PRINTED WHILE A WINDOW RUNS: the counts are kept and
-    // printed after both tables, and the first window waits 20 ms past
-    // console_drain(). MEASURED, NOT EXPLAINED: right behind the letter's
-    // header line - drained or not - the first window counted 91..98 of
-    // 100 where every later one read 99..100, and 20 ms of quiet more
-    // gives it 99 too. What the console's tail costs the polling loop
-    // was not chased.
+    // printed after both tables. A window counted on the 1 ms tick lasted
+    // 9 to 10 ms by its phase: the first one, right behind the letter's
+    // header line, started anywhere in a tick period and counted 91..98,
+    // the later ones started just after a tick and read 99..100. On the
+    // cycle counter every window is 10 ms.
     uint32_t reg_n[15] = {}, inj_n[15] = {};
     console_drain();
-    wait_ms(20);
     for (uint8_t code = 0; code < 15u; ++code) {
         const Src src = regular[code];
         if (!tim_present(src.tim)) {
@@ -2338,7 +2328,6 @@ void ts_triggers_and_interrupts() {
     uint32_t by_edge[3] = {};
     const AdcEdge edges[3] = {AdcEdge::rising, AdcEdge::falling, AdcEdge::both};
     console_drain();
-    wait_ms(20);   // the same quiet the tables' first window needed
     for (uint8_t e = 0; e < 3u; ++e) {
         AdcConfig c = base_config();
         c.trigger = AdcTrigger::tim2_trgo;
@@ -2407,7 +2396,7 @@ void ts_triggers_and_interrupts() {
                        .period = 99}) &&
         T6::master(TimMasterMode::update);
     T6::enable(true);
-    wait_ms(2);   // some twenty triggers
+    brio::spin_us<Ruler>(2'500);   // some twenty-five triggers
     T6::enable(false);
     Nvic::disable(Dac::irq());
     const bool flag_left = Dac::underrun(dac_ch_pa4);
@@ -2418,8 +2407,8 @@ void ts_triggers_and_interrupts() {
     // acknowledges, and DMAENx STAYS SET through an underrun (measured -
     // it is stop_dma() that drops it), so each later trigger is an
     // underrun of its own, and the body's clearing re-arms the flag for
-    // it. wait_ms(2) is 2..3 ms of 10 kHz triggers: 20..30, so 19..29
-    // underruns, one either side for the window's phase.
+    // it. 2.5 ms of 10 kHz triggers, the first 100 us after the enable, is
+    // 24 or 25 of them, so 23 or 24 underruns.
     bench.verdict("THE DAC UNDERRUN INTERRUPT: with no stream every trigger after the "
                   "first is an underrun, each entering TIM6's shared vector, its flag "
                   "cleared by the body",
@@ -2492,6 +2481,7 @@ extern "C" void TIM6_DAC_IRQHandler() {
 
 int main() {
     const bool clock_ok = SysClock::init();
+    (void)brio::CycleCounter::init();   // every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0)
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
     brio::enable_interrupts();

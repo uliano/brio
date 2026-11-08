@@ -61,6 +61,7 @@
 
 #include "stm32f4/can.hpp"
 #include "stm32f4/clock.hpp"
+#include "stm32f4/dwt.hpp"
 #include "stm32f4/crc.hpp"
 #include "stm32f4/delay.hpp"
 #include "stm32f4/nvic.hpp"
@@ -70,6 +71,7 @@
 #include "stm32f4/ticker.hpp"
 #include "stm32f4/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #if defined(STM32F411xE)
@@ -106,28 +108,14 @@ constexpr Serial serial;
 
 TestBench<Serial> bench;
 
-/// SysTick's counter as this suite's ruler: the same VAL-delta
-/// accumulation the platform suite measures delay_us with, wrapped in a
-/// bounded wait. Nothing (0 cycles) when the predicate never came true
-/// inside `timeout_ms`.
-template <typename Pred>
-std::optional<uint32_t> timed_wait(Pred pred, uint32_t timeout_ms) {
-    const uint32_t period = SysTick->LOAD + 1u;
-    const uint32_t t0 = Ticker::ticks();
-    uint32_t last = SysTick->VAL;
-    uint32_t acc = 0;
-    for (;;) {
-        const uint32_t now = SysTick->VAL;
-        acc += (last >= now) ? (last - now) : (last + period - now);
-        last = now;
-        if (pred()) {
-            return acc;
-        }
-        if (Ticker::ticks() - t0 > timeout_ms) {
-            return std::nullopt;
-        }
-    }
-}
+/// The ruler: the DWT's cycle counter, started in main(). The letters'
+/// bounded waits are brio::cycles_until() on it (the cycles a condition
+/// took, nothing on a time-out).
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
 
@@ -231,8 +219,11 @@ void ta_crc() {
     const uint32_t per_word_tenths = (acc * 10u) / words;
     print(serial, "  ", words, " words in ", acc, " core cycles = ", per_word_tenths / 10u, ".",
           per_word_tenths % 10u, " cycles a word at ", SysClock::hz / 1'000'000u, " MHz", crlf);
-    bench.verdict("a word costs at least the chapter's four AHB cycles",
-                  per_word_tenths >= 40u);
+    // Printed, not judged: the loop's own load, store and branch already
+    // cost four cycles a word, so "at least four" would hold with no stall
+    // at all.
+    print(serial, "  (4.2's four AHB cycles a word are inside that figure with the loop's own "
+          "work; the two are not separated here)", crlf);
 }
 
 // =============================================================================
@@ -312,7 +303,7 @@ void tb_rng() {
     // DRDY goes down with the read and comes back on its own.
     (void)Rng::value();
     const bool cleared = !Rng::ready();
-    const auto back = timed_wait([] { return Rng::ready(); }, 5u);
+    const auto back = brio::cycles_until<Ruler>([] { return Rng::ready(); }, 5'000);
     print(serial, "  DRDY after a read: ", cleared ? "clear" : "still set", "; back in ",
           back ? *back / cycles_per_us : 0u, " us", crlf);
     bench.verdict("reading RNG_DR clears DRDY and the next word raises it again",
@@ -320,10 +311,13 @@ void tb_rng() {
 
     // The latched flags are rc_w0: a store of a ZERO clears them, and the
     // driver's verbs are what get that right.
+    // Printed, not judged: neither flag can be raised on purpose here, so
+    // reading them clear after the clears proves nothing of rc_w0.
     Rng::clear_seed_error();
     Rng::clear_clock_error();
-    bench.verdict("the two latched flags clear (rc_w0, not rc_w1)",
-                  !Rng::seed_error_flag() && !Rng::clock_error_flag());
+    print(serial, "  after the two clears SECS ", Rng::seed_error_flag() ? "set" : "clear",
+          ", CECS ", Rng::clock_error_flag() ? "set" : "clear",
+          " (neither was raised: the rc_w0 clear itself is not staged)", crlf);
 
     // The recovery sequence of 24.3.2 must be harmless when nothing is
     // wrong: clear, disable, enable, discard.
@@ -409,7 +403,7 @@ std::optional<CanFrame> can_round_trip(const CanFrame& out, uint32_t timeout_ms 
     if (!mb) {
         return std::nullopt;
     }
-    if (!timed_wait([&] { return Bus::result(*mb).completed; }, timeout_ms)) {
+    if (!brio::cycles_until<Ruler>([&] { return Bus::result(*mb).completed; }, timeout_ms * 1000u)) {
         return std::nullopt;
     }
     const bool ok = Bus::result(*mb).ok;
@@ -417,7 +411,7 @@ std::optional<CanFrame> can_round_trip(const CanFrame& out, uint32_t timeout_ms 
     if (!ok) {
         return std::nullopt;
     }
-    if (!timed_wait([] { return Bus::pending(0) != 0u; }, timeout_ms)) {
+    if (!brio::cycles_until<Ruler>([] { return Bus::pending(0) != 0u; }, timeout_ms * 1000u)) {
         return std::nullopt;
     }
     return Bus::receive(0);
@@ -689,14 +683,14 @@ Admitted try_id(uint32_t id, bool extended = false, bool remote = false) {
     if (!mb) {
         return a;
     }
-    if (!timed_wait([&] { return Bus::result(*mb).completed; }, 20u)) {
+    if (!brio::cycles_until<Ruler>([&] { return Bus::result(*mb).completed; }, 20'000)) {
         return a;
     }
     (void)Bus::clear_result(*mb);
     // A frame the filters reject is transmitted and simply never stored;
     // a millisecond is a hundred bit times at this rate, so the absence is
     // decided and not merely early.
-    if (!timed_wait([] { return Bus::pending(0) != 0u; }, 2u)) {
+    if (!brio::cycles_until<Ruler>([] { return Bus::pending(0) != 0u; }, 2'000)) {
         return a;
     }
     const auto in = Bus::receive(0);
@@ -805,11 +799,11 @@ void tf_can_filters() {
     f1.id = 0x77;
     f1.length = 2;
     const auto mb = Bus::transmit(f1);
-    const bool sent = mb && timed_wait([&] { return Bus::result(*mb).completed; }, 20u).has_value();
+    const bool sent = mb && brio::cycles_until<Ruler>([&] { return Bus::result(*mb).completed; }, 20'000).has_value();
     if (mb) {
         (void)Bus::clear_result(*mb);
     }
-    const bool on_one = timed_wait([] { return Bus::pending(1) != 0u; }, 5u).has_value();
+    const bool on_one = brio::cycles_until<Ruler>([] { return Bus::pending(1) != 0u; }, 5'000).has_value();
     print(serial, "  a bank assigned to FIFO 1: FIFO 0 has ", Bus::pending(0), ", FIFO 1 has ",
           Bus::pending(1), crlf);
     bench.verdict("CAN_FFA1R sends the frame to the other FIFO",
@@ -876,7 +870,7 @@ void tg_can_priority() {
     bool ok = load_three(false);
     uint32_t order[3] = {};
     for (uint8_t i = 0; i < 3u; ++i) {
-        if (!timed_wait([] { return Bus::pending(0) != 0u; }, 50u)) {
+        if (!brio::cycles_until<Ruler>([] { return Bus::pending(0) != 0u; }, 50'000)) {
             ok = false;
             break;
         }
@@ -896,7 +890,7 @@ void tg_can_priority() {
     // By request order: the mailboxes go out as they were filled.
     ok = load_three(true);
     for (uint8_t i = 0; i < 3u; ++i) {
-        if (!timed_wait([] { return Bus::pending(0) != 0u; }, 50u)) {
+        if (!brio::cycles_until<Ruler>([] { return Bus::pending(0) != 0u; }, 50'000)) {
             ok = false;
             break;
         }
@@ -943,7 +937,7 @@ bool fill_fifo(uint8_t n) {
         if (!mb) {
             return false;
         }
-        if (!timed_wait([&] { return Bus::result(*mb).completed; }, 50u)) {
+        if (!brio::cycles_until<Ruler>([&] { return Bus::result(*mb).completed; }, 50'000)) {
             return false;
         }
         (void)Bus::clear_result(*mb);
@@ -1022,7 +1016,7 @@ void ti_can_rates() {
             all_ok = false;
             break;
         }
-        const auto cycles = timed_wait([&] { return Bus::result(*mb).completed; }, 100u);
+        const auto cycles = brio::cycles_until<Ruler>([&] { return Bus::result(*mb).completed; }, 100'000);
         if (!cycles || !Bus::result(*mb).ok) {
             all_ok = false;
             break;
@@ -1088,7 +1082,7 @@ void tj_can_errors() {
     f.length = 1;
     f.data[0] = 0x5A;
     const auto mb = Bus::transmit(f);
-    const bool stuck = mb && !timed_wait([&] { return Bus::result(*mb).completed; }, 20u);
+    const bool stuck = mb && !brio::cycles_until<Ruler>([&] { return Bus::result(*mb).completed; }, 20'000);
     print(serial, "  a transmit request in silent mode after 20 ms: ",
           mb && Bus::mailbox_empty(*mb) ? "gone" : "still pending", crlf);
     bench.verdict("SILENT MODE CANNOT START A TRANSMISSION: the request stays "
@@ -1096,7 +1090,7 @@ void tj_can_errors() {
                   stuck && mb && !Bus::mailbox_empty(*mb));
     if (mb) {
         (void)Bus::abort(*mb);
-        const bool emptied = timed_wait([&] { return Bus::mailbox_empty(*mb); }, 20u).has_value();
+        const bool emptied = brio::cycles_until<Ruler>([&] { return Bus::mailbox_empty(*mb); }, 20'000).has_value();
         bench.verdict("and an abort empties it", emptied);
         (void)Bus::clear_result(*mb);
     }
@@ -1122,7 +1116,7 @@ void tj_can_errors() {
         if (!m) {
             break;
         }
-        if (!timed_wait([&] { return Bus::result(*m).completed; }, 20u)) {
+        if (!brio::cycles_until<Ruler>([&] { return Bus::result(*m).completed; }, 20'000)) {
             (void)Bus::abort(*m);
             break;
         }
@@ -1151,13 +1145,13 @@ void tj_can_errors() {
     bench.verdict("the error warning and error passive flags are passed on the "
                   "way",
                   Bus::error_warning() && Bus::error_passive());
-    bench.verdict("BUS-OFF is reached, in fewer than the 32 attempts eight at a "
+    bench.verdict("BUS-OFF is reached, in no more than the 32 attempts eight at a "
                   "time would need (an error frame nobody sees costs the counter "
                   "too)",
                   Bus::bus_off() && attempts <= 32u);
 
     // With ABOM clear the node stays off the bus until software asks.
-    (void)timed_wait([] { return false; }, 30u);
+    brio::spin_us<Ruler>(30'000);
     print(serial, "  30 ms later, with ABOM clear, BOFF is ", Bus::bus_off() ? "still set" : "gone",
           crlf);
     bench.verdict("with ABOM clear the node stays bus-off with no software",
@@ -1168,7 +1162,7 @@ void tj_can_errors() {
     (void)Bus::init_mode(true);
     (void)Bus::options(CanOptions{.auto_bus_off = true, .no_retransmit = true});
     (void)Bus::start();
-    const auto recovered = timed_wait([] { return !Bus::bus_off(); }, 200u);
+    const auto recovered = brio::cycles_until<Ruler>([] { return !Bus::bus_off(); }, 200'000);
     print(serial, "  with ABOM set the recovery took ",
           recovered ? *recovered / cycles_per_us : 0u, " us (1408 bit times is 1408 us at "
           "1 Mbit/s)", crlf);
@@ -1219,8 +1213,25 @@ void tk_can2() {
     bench.verdict("the two instances share one filter block, and CAN1 is its "
                   "master",
                   Slave::filter_master == 1u && Bus::filter_master == 1u);
-    bench.verdict("the split reads back where it is written",
-                  Slave::start_bank(14) && Slave::start_bank() == 14u);
+    // 14 is CAN2SB's reset value, so a second split is written first and
+    // read back, then the 14 the letter works with - once with the filters
+    // active (printed: the driver writes it there, and what the silicon
+    // does with it is measured) and once in filter initialization mode
+    // (judged).
+    const bool took_outside = Slave::start_bank(20);
+    const uint8_t read_outside = Slave::start_bank();
+    (void)Slave::start_bank(14);
+    (void)Slave::filter_init(true);
+    const bool took_inside = Slave::start_bank(20);
+    const uint8_t read_inside = Slave::start_bank();
+    const bool back = Slave::start_bank(14) && Slave::start_bank() == 14u;
+    (void)Slave::filter_init(false);
+    print(serial, "  CAN2SB written 20 with FINIT clear: the verb answered ",
+          took_outside ? "true" : "false", ", it reads ", read_outside,
+          "; with FINIT set it answered ", took_inside ? "true" : "false", ", it reads ",
+          read_inside, crlf);
+    bench.verdict("the split reads back where it is written in filter initialization mode",
+                  took_inside && read_inside == 20u && back);
 
     // The split is enforced by the driver, because the silicon does not:
     // each instance may only configure the banks on its own side of it.
@@ -1248,12 +1259,12 @@ void tk_can2() {
     out.data[1] = 0x55;
     out.data[2] = 0xAA;
     const auto mb = Slave::transmit(out);
-    bool ok = mb && timed_wait([&] { return Slave::result(*mb).completed; }, 20u).has_value();
+    bool ok = mb && brio::cycles_until<Ruler>([&] { return Slave::result(*mb).completed; }, 20'000).has_value();
     if (mb) {
         ok = Slave::result(*mb).ok && ok;
         (void)Slave::clear_result(*mb);
     }
-    ok = ok && timed_wait([] { return Slave::pending(0) != 0u; }, 20u).has_value();
+    ok = ok && brio::cycles_until<Ruler>([] { return Slave::pending(0) != 0u; }, 20'000).has_value();
     const auto in = Slave::receive(0);
     print(serial, "  CAN2 round trip: ", in ? "received id " : "nothing, id ",
           hex(in ? in->id : 0u), " FMI ", in ? in->filter_index : 0u, crlf);
@@ -1335,9 +1346,9 @@ void tl_can_vectors_recovery_rates() {
             f.data[i] = vec_byte(k, i);
         }
         sent_all = Bus::transmit(f).has_value() &&
-                   timed_wait([k] { return can_rx0_frames > k; }, 20u).has_value();
+                   brio::cycles_until<Ruler>([k] { return can_rx0_frames > k; }, 20'000).has_value();
     }
-    (void)timed_wait([] { return false; }, 2u);
+    brio::spin_us<Ruler>(2'000);
     can_vectors(false);
     Bus::interrupts_off();
     print(serial, "  five loopback frames under the vectors: transmit vector ",
@@ -1373,7 +1384,7 @@ void tl_can_vectors_recovery_rates() {
     uint32_t attempts = 0;
     while (attempts < 64u && !Bus::bus_off()) {
         const auto m = Bus::transmit(f);
-        if (!m || !timed_wait([&] { return Bus::result(*m).completed; }, 20u)) {
+        if (!m || !brio::cycles_until<Ruler>([&] { return Bus::result(*m).completed; }, 20'000)) {
             break;
         }
         (void)Bus::clear_result(*m);
@@ -1384,10 +1395,10 @@ void tl_can_vectors_recovery_rates() {
     const uint16_t bo_seen = can_sce_bus_off;
     can_vectors(false);
     Bus::interrupts_off();
-    (void)timed_wait([] { return false; }, 5u);
+    brio::spin_us<Ruler>(5'000);
     const bool stayed = Bus::bus_off();
     const bool asked = Bus::request_bus_off_recovery();
-    const auto took = timed_wait([] { return !Bus::bus_off(); }, 50u);
+    const auto took = brio::cycles_until<Ruler>([] { return !Bus::bus_off(); }, 50'000);
     const uint32_t took_us = took ? *took / cycles_per_us : 0u;
     print(serial, "  bus-off after ", attempts, " attempts; the status vector entered ",
           sce_at_off, " times, ", bo_seen, " of them with BOFF; with ABOM clear the "
@@ -1428,7 +1439,7 @@ void tl_can_vectors_recovery_rates() {
             g.data[k] = static_cast<uint8_t>(0x5Au ^ k);
         }
         const auto mb = Bus::transmit(g);
-        const auto cycles = mb ? timed_wait([&] { return Bus::result(*mb).completed; }, 100u)
+        const auto cycles = mb ? brio::cycles_until<Ruler>([&] { return Bus::result(*mb).completed; }, 100'000)
                                : std::optional<uint32_t>{};
         const bool ok = cycles && Bus::result(*mb).ok;
         const auto back = Bus::receive(0);
@@ -1518,6 +1529,7 @@ extern "C" void CAN1_SCE_IRQHandler() {
 
 int main() {
     const bool clock_ok = SysClock::init();
+    (void)brio::CycleCounter::init();   // every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0)
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
     brio::enable_interrupts();

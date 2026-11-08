@@ -738,7 +738,7 @@ Under one owner a stream, a request held across a release can reach only
 that owner's stream, on its own cell, and only when the owner is initialized
 again. Four requesters are brought up with their request
 standing and no stream listening, released five ways, then a stream on
-the requester's own cell is enabled for 2000 cycles, set up to move four items
+the requester's own cell is enabled for 12 us (2160 core cycles at 180 MHz), set up to move four items
 between memory and the requester's register (and read once more after the
 requester's clock reopens, no reset). A live requester moves what it asks for
 in that time: one for a timer's single update or a single conversion, two for

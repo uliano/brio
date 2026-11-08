@@ -15,9 +15,8 @@
 //   b  THE LAP CARRY on a second LptimTicker, LPTIM2 at the crystal's
 //      own rate (a lap of two seconds): monotonic across wraps in a
 //      tight loop, and with PRIMASK held across a wrap - the pending-ARRM
-//      correction ticks() carries for exactly that case; plus the one
-//      compare question the driver's rule 4 leaves to the bench (does
-//      CMPM fire at CMP == ARR?)
+//      correction ticks() carries for exactly that case; plus the compare
+//      match at CMP == ARR that the driver's rule 4 parks its compare on
 //   c  idle_until() OUTSIDE THE KERNEL: N ticks asked, N ticks slept
 //      (against TIM2), exactly one LPTIM interrupt and it served CMPM,
 //      never early in the timebase's own units; the +2 floor's one-tick
@@ -41,10 +40,11 @@
 //   g  delay_us on the interrupt-less SysTick: 5..900 us at least and
 //      never early, and the cap at one SysTick period
 //   h  AN LSI-CLOCKED LptimTicker as a witness on LPTIM2: the internal
-//      RC at the rate the program STATES (32586 Hz, this die's measured
-//      one), its ticks and millis() against the crystal, a wake placed
-//      on it and served, and the directional rule's price at the
-//      default statement (table 46's ceiling)
+//      RC at a rate the program STATES (32586 Hz), its ticks against the
+//      rate the letter MEASURES on TIM16 and its millis() against the
+//      statement's arithmetic, a wake placed on it and served, and the
+//      directional rule's price at the default statement (table 46's
+//      ceiling) on the measured die
 //   i  THE LAP WAKES OF A LONG STOP: ten seconds in Stop 1 with one
 //      deadline at the end - five ARRM wakes to carry the high word,
 //      each on HSISYS with the PLL never re-locked, their awake time
@@ -82,6 +82,7 @@
 #include "stm32g0/usart.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
@@ -118,18 +119,15 @@ static_assert(Witness::ticks_per_second == lptim_ticker_count_hz(tb_cfg));
 /// it is `witness_hz` counts whatever the root.
 constexpr uint32_t witness_hz = lptim_ticker_count_hz(witness_cfg);
 
-// Letter h's witness: LPTIM2 again, on LSI at the rate measured on the
-// die under it (a TIM16 capture), shift 5. That is a DIE fact, and the
-// three dies differ by more than the band the letter judges in, so the
-// preprocessor picks the number.
-#if defined(STM32G031xx)
-constexpr uint32_t lsi_measured_hz = 31'496;
-#else
-constexpr uint32_t lsi_measured_hz = 32'586;
-#endif
+// Letter h's witness: LPTIM2 again, on LSI at a STATED rate, shift 5. The
+// statement is a compile-time number inside table 46's band (the rate one
+// die of this desk measured), and it need not be the die's: every rate
+// the letter judges is weighed against the LSI it measures on TIM16 at
+// its start, so the dies may differ as they do.
+constexpr uint32_t lsi_stated_hz = 32'586;
 using LsiWitness = LptimTicker<LptimTickerConfig{
-    .instance = 2, .shift = 5, .source = LptimTickerSource::lsi, .lsi_hz = lsi_measured_hz}>;
-static_assert(!LsiWitness::on_crystal && LsiWitness::ticks_per_second == (lsi_measured_hz >> 5));
+    .instance = 2, .shift = 5, .source = LptimTickerSource::lsi, .lsi_hz = lsi_stated_hz}>;
+static_assert(!LsiWitness::on_crystal && LsiWitness::ticks_per_second == (lsi_stated_hz >> 5));
 using LsiDefault = LptimTicker<LptimTickerConfig{
     .instance = 2, .shift = 5, .source = LptimTickerSource::lsi}>;
 static_assert(LsiDefault::ticks_per_second == (34'000u >> 5));
@@ -170,6 +168,18 @@ bool t2_up() {
     return true;
 }
 
+/// The ruler every wait of this suite is timed on (util/test_wait.hpp):
+/// TIM2 itself, a hardware counter, so it serves inside a masked section
+/// as well. Letter i re-clocks TIM2 from MCO = HSI16/8 for its meter on
+/// the parts whose ETRSEL has that code; a wait inside that window lasts
+/// 32 times its budget, which only lengthens a time-out - nothing there
+/// is timed on the ruler.
+struct Ruler {
+    static uint32_t now() { return T2::count(); }
+    static constexpr uint32_t hz() { return t2_hz; }
+};
+static_assert(CycleRuler<Ruler>);
+
 // ---- THE LSI's OWN RATE, where the walls run on it -------------------------
 //
 // A crystal is 32768 Hz by construction; an LSI is an RC oscillator the
@@ -198,7 +208,21 @@ uint32_t measure_lsi_hz() {
     static uint32_t samples[33];
     constexpr uint16_t want = 33;
     uint16_t got = 0;
-    for (uint32_t spin = 0; spin < 40'000'000UL && got < want; ++spin) {
+    // THE WAIT IS BOUNDED ON THE METER'S OWN COUNTER, which runs from
+    // setup() at PCLK / 16: at boot interrupts are masked and TIM2 is not
+    // yet up, so the ruler cannot serve here. Thirty-four edges of an LSI
+    // inside table 46's band (29.5 kHz at the slowest) take at most
+    // 1.2 ms; the budget is 20 ms. The counter is 16 bits wide and wraps
+    // every 16 ms, so it is read every turn and the 16-bit differences
+    // are summed.
+    constexpr uint32_t budget_counts =
+        20'000u * (SysClock::hz / (lsi_meter_prescaler + 1u) / 1'000'000u);
+    uint32_t elapsed = 0;
+    uint16_t last = static_cast<uint16_t>(Tim<16>::count());
+    while (got < want && elapsed < budget_counts) {
+        const uint16_t now = static_cast<uint16_t>(Tim<16>::count());
+        elapsed += static_cast<uint16_t>(now - last);
+        last = now;
         if ((Tim<16>::flags() & LsiMeter::capture_flag) == 0u) {
             continue;
         }
@@ -286,20 +310,11 @@ bool wall_up() {
 
 void feed() { Iwdg::refresh(); }
 
-void spin_us(uint32_t us) {
-    const uint32_t t0 = t2();
-    const uint32_t c = us * (t2_hz / 1'000'000u);
-    while (t2() - t0 < c) {
-    }
-}
-
 /// A measurement window a transmit interrupt walks through is not a
-/// measurement.
-void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    spin_us(2000);
-}
+/// measurement. The answer is dropped here: a wedged console only
+/// lengthens what follows, and the windows a derived bound judges ask
+/// brio::console_drain() themselves and act on it.
+void console_drain() { (void)brio::console_drain<Ruler, Serial>(); }
 
 bool within(uint32_t v, uint32_t lo, uint32_t hi) { return v >= lo && v <= hi; }
 
@@ -310,9 +325,10 @@ bool within(uint32_t v, uint32_t lo, uint32_t hi) { return v >= lo && v <= hi; }
 /// "never early" be judged against the nominal.
 void sync_to_count() {
     const uint32_t t = Tb::ticks();
-    uint32_t guard = 4'000'000u;
-    while (Tb::ticks() == t && guard-- != 0u) {
-    }
+    // A tick is about a millisecond on either root; the budget is 10 ms.
+    // The answer is dropped: a timebase that does not tick fails every
+    // verdict after the sync, and the sync itself only sets a phase.
+    (void)brio::wait_until<Ruler>([t] { return Tb::ticks() != t; }, 10'000);
 }
 
 /// Spin into the first half of a lap, so that the next second holds no
@@ -323,9 +339,15 @@ void sync_to_count() {
 /// a lap every two seconds costs a test, and it costs a program nothing
 /// (the loop turns once more).
 void lap_room() {
-    while ((Tb::count() & 0xFFFFu) >= 0x8000u) {
-        feed();
-    }
+    // A lap is 2 s on the crystal and 2.2 s on an LSI at table 46's floor;
+    // the budget is 3 s. The answer is dropped: a counter that never
+    // reaches the first half of its lap fails the leg that follows.
+    (void)brio::wait_until<Ruler>(
+        [] {
+            feed();
+            return (Tb::count() & 0xFFFFu) < 0x8000u;
+        },
+        3'000'000);
 }
 
 // ---------------------------------------------------------------------------
@@ -692,39 +714,46 @@ void tb_lap_carry() {
     uint32_t back = 0;
     uint32_t prev = start;
     uint32_t reads = 0;
-    while (static_cast<int32_t>(Witness::ticks() - start) < static_cast<int32_t>(5u * witness_hz)) {
-        const uint32_t v = Witness::ticks();
-        if (static_cast<int32_t>(v - prev) < 0) {
-            ++back;
-        }
-        prev = v;
-        ++reads;
-        feed();
-    }
+    // Five seconds of the witness, at most 5.8 s of real time on an LSI
+    // at table 46's floor counted at a statement of 34000: the budget is
+    // 7 s of TIM2, under half its wrap.
+    const bool five_s = brio::wait_until<Ruler>(
+        [&] {
+            const uint32_t v = Witness::ticks();
+            if (static_cast<int32_t>(v - prev) < 0) {
+                ++back;
+            }
+            prev = v;
+            ++reads;
+            feed();
+            return static_cast<int32_t>(v - start) >= static_cast<int32_t>(5u * witness_hz);
+        },
+        7'000'000);
     const uint32_t laps = Witness::laps() - laps0;
     print(serial, "  5 s on the witness: ", reads, " reads, ", back, " backwards, ", laps,
           " laps carried by the handler (", lptim2_irqs, " LPTIM2 interrupts)", crlf);
     bench.verdict("five seconds of tight reads across two wraps: monotonic, the "
                   "high word carried by the lap interrupt",
-                  back == 0u && laps >= 2u && lptim2_irqs >= 2u);
+                  five_s && back == 0u && laps >= 2u && lptim2_irqs >= 2u);
 
     // PRIMASK HELD ACROSS A WRAP: the handler cannot run, ISR.ARRM stands,
     // and ticks() must add the lap itself (the pending-ARRM correction).
     // Wait until the wrap is 100 ms away, mask, spin 200 ms on TIM2
     // (feeding the watchdog), read under the mask, unmask, read again.
-    while ((Witness::count() & 0xFFFFu) < 0x10000u - 3277u) {
-        feed();
-    }
+    // A lap is 2 s (2.2 s on an LSI at table 46's floor): 3 s of budget.
+    const bool near_wrap = brio::wait_until<Ruler>(
+        [] {
+            feed();
+            return (Witness::count() & 0xFFFFu) >= 0x10000u - 3277u;
+        },
+        3'000'000);
     uint32_t masked_read = 0;
     uint32_t masked_lo = 0;
     bool arrm_stood = false;
     uint32_t laps_seen = 0;
     {
         InterruptGuard g;
-        const uint32_t t0 = t2();
-        while (t2() - t0 < (t2_hz / 5u)) {
-            feed();
-        }
+        brio::spin_us<Ruler>(200'000);   // TIM2 counts under the mask
         laps_seen = Witness::laps();
         arrm_stood = (L2::status() & LptimFlag::arrm) != 0u;
         masked_read = Witness::ticks();
@@ -738,30 +767,33 @@ void tb_lap_carry() {
           "low half ", masked_lo, "; the unmasked read is ", gap, " counts later", crlf);
     bench.verdict("THE WRAP HAPPENED UNDER THE MASK and the handler had not run: ARRM "
                   "standing, laps not yet carried",
-                  arrm_stood && laps_after == laps_seen + 1u);
+                  near_wrap && arrm_stood && laps_after == laps_seen + 1u);
     bench.verdict("and ticks() read under the mask ALREADY carried the lap - the "
                   "unmasked read follows it by microseconds, not by 65536",
                   gap >= 0 && gap < 200);
 
-    // RULE 4's OPEN QUESTION: does CMPM fire at CMP == ARR (0xFFFF)? Put
-    // the witness's compare there and watch a whole lap.
+    // RULE 4's PREMISE: the ticker parks its compare at 0xFFFF, equal to
+    // ARR, and counts on that compare matching once a lap at the wrap
+    // (stm32g0/lptim_ticker.hpp, rule 4) - so the match is required here,
+    // not described. Put the witness's compare there and watch a whole
+    // lap: 2.12 s of the witness, 2.4 s on an LSI at table 46's floor,
+    // so the budget is 4 s.
     clear_counters();
     const bool stored = L2::set_cmp(0xFFFFu) && L2::wait_cmp_ok();
     const uint32_t lap_start = Witness::ticks();
-    while (static_cast<int32_t>(Witness::ticks() - lap_start) < static_cast<int32_t>(2u * witness_hz + 4000u)) {
-        feed();
-    }
+    const bool lap_seen = brio::wait_until<Ruler>(
+        [lap_start] {
+            feed();
+            return static_cast<int32_t>(Witness::ticks() - lap_start) >=
+                   static_cast<int32_t>(2u * witness_hz + 4000u);
+        },
+        4'000'000);
     const uint32_t cmpm_at_arr = lptim_cmpm;
     print(serial, "  CMP = 0xFFFF = ARR for a lap and a bit: ", cmpm_at_arr,
           " CMPM interrupt(s) (", lptim2_irqs, " LPTIM2 interrupts in all)", crlf);
-    if (cmpm_at_arr == 0u) {
-        bench.verdict("A COMPARE EQUAL TO ARR NEVER MATCHES (0xFFFF would need refusing)",
-                      stored);
-    } else {
-        bench.verdict("A COMPARE EQUAL TO ARR MATCHES like any other value - 0xFFFF needs "
-                      "no special case (rule 4 as written)",
-                      stored);
-    }
+    bench.verdict("A COMPARE EQUAL TO ARR MATCHES like any other value - 0xFFFF needs "
+                  "no special case (rule 4 as written)",
+                  stored && lap_seen && cmpm_at_arr >= 1u);
     Nvic::disable(L2::irq());
     L2::init();
     L2::release();
@@ -785,16 +817,20 @@ void tc_idle_until() {
     // and drifts with the board's temperature: a nap is judged on the
     // wall's OWN scale - one tick weighed on TIM2 first. Judged on a
     // nominal scale instead, a nap misses by some 80 us of drift.
+    // Both waits ride the tick: its next edge (a millisecond, 10 ms of
+    // budget) and 256 more (250 ms; 280 on an LSI at table 46's floor,
+    // 400 ms of budget). A timebase that stops there leaves no scale, and
+    // the first verdict below says so.
     console_drain();
     const uint32_t cal_k0 = Tb::ticks();
-    while (Tb::ticks() == cal_k0) {
-    }
+    const bool cal_edge =
+        brio::wait_until<Ruler>([cal_k0] { return Tb::ticks() != cal_k0; }, 10'000);
     const uint32_t cal_t0 = t2();
-    while (Tb::ticks() - cal_k0 < 257u) {
-    }
+    const bool cal_span =
+        brio::wait_until<Ruler>([cal_k0] { return Tb::ticks() - cal_k0 >= 257u; }, 400'000);
     const uint32_t tick_ns = (((t2() - cal_t0) / 256u) * 1000u) / (t2_hz / 1'000'000u);   // ns per tick
     print(serial, "  one tick is ", tick_ns, " ns on TIM2's scale (976563 nominal)", crlf);
-    bool all_ok = true;
+    bool all_ok = cal_edge && cal_span;
     bool one_irq = true;
     bool never_early = true;
     uint32_t worst_over_us = 0;
@@ -885,7 +921,7 @@ void td_handshake() {
     // The handler sweeps the flag; the third arm stores the second value.
     // (The first arm must find the flag clear: a sweep is forced first.)
     Nvic::set_pending(Tb::irq());
-    spin_us(50);
+    brio::spin_us<Ruler>(50);
     clear_counters();
     const uint32_t d0 = Tb::deferrals();
     const uint32_t s0 = Tb::stores();
@@ -895,16 +931,16 @@ void td_handshake() {
     {
         InterruptGuard g;
         first = Tb::arm_wake(now0, now0 + 300u);
-        spin_us(150);                       // let the first store land
+        brio::spin_us<Ruler>(150);          // let the first store land
         second = Tb::arm_wake(now0, now0 + 400u);
     }
     // Interrupts back: the pended handler runs and sweeps CMPOK - and
-    // the clear takes its time to cross into the kernel clock domain.
-    const uint32_t x0 = t2();
-    uint32_t guard = 4'000'000u;
-    while (L1::cmp_ok() && guard-- != 0u) {
-    }
-    const uint32_t crossing_us = t2_us(t2() - x0);
+    // the clear takes its time to cross into the kernel clock domain, a
+    // few counts of the 32 kHz root (about 100 us): 2 ms of budget, and
+    // the third arm needs the clear to have crossed.
+    const std::optional<uint32_t> crossing =
+        brio::cycles_until<Ruler>([] { return !L1::cmp_ok(); }, 2'000);
+    const uint32_t crossing_us = crossing.has_value() ? t2_us(*crossing) : 0xFFFFFFFFu;
     sweeps_between = lptim_sweeps;
     {
         InterruptGuard g;
@@ -924,11 +960,17 @@ void td_handshake() {
                   first && !second && deferrals == 1u && sweeps_between >= 1u);
     bench.verdict("and the next arm stores the new value - two stores, one completion "
                   "between them, 26.4.11 kept",
-                  third && stores == 2u && reg == Tb::cmp_reg());
-    // Let that compare fire and clear the way.
-    while (static_cast<int32_t>(Tb::ticks() - (now0 + 400u)) < 0) {
-        feed();
-    }
+                  crossing.has_value() && third && stores == 2u && reg == Tb::cmp_reg());
+    // Let that compare fire and clear the way: 400 ticks from now0 are
+    // 391 ms (430 on an LSI at table 46's floor), 1 s of budget. The
+    // answer is dropped: a timebase that stops here fails the Stop leg's
+    // own verdicts below.
+    (void)brio::wait_until<Ruler>(
+        [now0] {
+            feed();
+            return static_cast<int32_t>(Tb::ticks() - (now0 + 400u)) >= 0;
+        },
+        1'000'000);
 
     // RULE 3 AS A FINDING. A compare stored IMMEDIATELY before a Stop 1:
     // with the wait (the ticker's own rule: with SLEEPDEEP set the arm
@@ -978,7 +1020,7 @@ void td_handshake() {
     (void)Rtc::set_wakeup(RtcWakeupClock::div16, 4095u);   // 2 s backstop
     // A fresh store needs CMPOK clear: force a sweep first.
     Nvic::set_pending(Tb::irq());
-    spin_us(400);
+    brio::spin_us<Ruler>(400);
     lap_room();
     sync_to_count();
     // The compare in the ticker's own arithmetic: the count where the
@@ -1022,7 +1064,7 @@ void td_handshake() {
     // Whatever happened, the ticker's mirror no longer matches the
     // register: re-park through the ticker's own path.
     Nvic::set_pending(Tb::irq());
-    spin_us(50);
+    brio::spin_us<Ruler>(50);
 }
 
 // =============================================================================
@@ -1193,17 +1235,27 @@ void tf_stop_through_manager() {
 // =============================================================================
 void tg_delay() {
     feed();
-    console_drain();
+    if (!brio::console_drain<Ruler, Serial>()) {
+        bench.skip("the console did not drain: the timed spans would carry its interrupt");
+        return;
+    }
     const uint32_t s0 = systick_irqs;
 
+    // MEASURED FIRST AND PRINTED AFTER: a console line leaving beside a
+    // span puts the USART's handler inside it.
     static const uint32_t spans[] = {5, 30, 100, 500, 900};
-    bool all_exact = true;
-    for (uint8_t i = 0; i < sizeof(spans) / sizeof(spans[0]); ++i) {
+    constexpr uint8_t n_spans = sizeof(spans) / sizeof(spans[0]);
+    uint32_t took[n_spans] = {};
+    bool ok[n_spans] = {};
+    for (uint8_t i = 0; i < n_spans; ++i) {
         const uint32_t t0 = t2();
-        const bool ok = delay_us(clock, spans[i]);
-        const uint32_t took = t2_us(t2() - t0);
-        print(serial, "  delay_us(", spans[i], ") -> ", took, " us on TIM2", crlf);
-        if (!ok || took < spans[i] || took > spans[i] + 12u) {
+        ok[i] = delay_us(clock, spans[i]);
+        took[i] = t2_us(t2() - t0);
+    }
+    bool all_exact = true;
+    for (uint8_t i = 0; i < n_spans; ++i) {
+        print(serial, "  delay_us(", spans[i], ") -> ", took[i], " us on TIM2", crlf);
+        if (!ok[i] || took[i] < spans[i] || took[i] > spans[i] + 12u) {
             all_exact = false;
         }
     }
@@ -1271,7 +1323,7 @@ void th_lsi_witness() {
     clear_counters();
     witness_mode = 1;
     const bool up = LsiWitness::init(clock);
-    print(serial, "  LptimTicker on LPTIM2 from LSI, stated ", lsi_measured_hz, " Hz, shift 5: ",
+    print(serial, "  LptimTicker on LPTIM2 from LSI, stated ", lsi_stated_hz, " Hz, shift 5: ",
           up ? "up" : "REFUSED", " - ", LsiWitness::ticks_per_second,
           " ticks a second by the statement", crlf);
     bench.verdict("AN LSI-CLOCKED LptimTicker COMES UP: RCC's own oscillator, no RTC "
@@ -1281,14 +1333,24 @@ void th_lsi_witness() {
         witness_mode = 0;
         return;
     }
-    // Two seconds of the crystal timebase: the LSI witness's ticks and
-    // millis() against the statement (LSI wanders 1..2 % between runs;
-    // the band says so).
+    // THE RATE THE WITNESS IS JUDGED AGAINST IS MEASURED HERE, on TIM16's
+    // capture (the boot's own meter), and not taken from the statement:
+    // LSI is a die fact, the dies of this family differ by more than the
+    // bands below, and it wanders between runs. TIM16 and TIM2 count the
+    // same PCLK, so HSI16's trim cancels in every ratio judged here. The
+    // meter's resolution is one count of the median period, which is
+    // `per_count` counts long: a relative error under 1 / per_count.
+    // Where the capture saw no edge, table 46's band (29.5..34 kHz)
+    // stands in.
+    const uint32_t lsi_hz = measure_lsi_hz();
+    constexpr uint32_t meter_hz = SysClock::hz / (lsi_meter_prescaler + 1u);
+    const uint32_t per_count = lsi_hz != 0u ? meter_hz / lsi_hz : 0u;
+    print(serial, "  the LSI measures ", lsi_hz, " Hz on TIM16's capture (", per_count,
+          " meter counts a period)", crlf);
     // TWO SECONDS OF TIM2 AND NOT OF THE KERNEL TICK: on a board whose
     // timebase is itself an LSI, a window measured in kernel ticks is a
     // window whose LENGTH carries the timebase's own error, and what
-    // this leg weighs is the WITNESS. TIM2 rides the PLL, i.e. HSI16's
-    // per cent, which is well inside the band below.
+    // this leg weighs is the WITNESS.
     const uint32_t t0 = t2();
     const uint32_t w0 = LsiWitness::ticks();
     const uint32_t m0 = LsiWitness::millis();
@@ -1298,13 +1360,28 @@ void th_lsi_witness() {
     const uint32_t w_ticks = LsiWitness::ticks() - w0;
     const uint32_t w_ms = LsiWitness::millis() - m0;
     const uint32_t expected = 2u * LsiWitness::ticks_per_second;
+    // THE BANDS. Ticks: two seconds of the measured rate over the shift,
+    // widened by the meter's resolution (due / per_count, plus one for
+    // the division) and by a whole tick at each end of the window.
+    // Milliseconds: millis() is floor(ticks x 1000 / ticks_per_second),
+    // so a difference of two readings is within one of the difference's
+    // own value, and each end's tick may move between the two reads (one
+    // more at each end).
+    const uint32_t due = (2u * lsi_hz) >> 5;
+    const uint32_t due_tol = lsi_hz != 0u ? due / per_count + 3u : 0u;
+    const uint32_t ticks_lo = lsi_hz != 0u ? due - due_tol : (2u * 29'500u) >> 5;
+    const uint32_t ticks_hi = lsi_hz != 0u ? due + due_tol : (2u * 34'000u) >> 5;
+    const uint32_t ms_due = (w_ticks * 1000u) / LsiWitness::ticks_per_second;
     print(serial, "  2 s of TIM2: the LSI witness counted ", w_ticks, " ticks (",
-          expected, " by the statement) and ", w_ms, " ms", crlf);
-    bench.verdict("its ticks and millis() follow the STATED rate within 3 % of a "
-                  "wall that is not its own - the arithmetic is exact, the "
-                  "number is the oscillator's",
-                  within(w_ticks, expected - expected / 33u, expected + expected / 33u) &&
-                      within(w_ms, 1940u, 2060u));
+          expected, " by the statement, ", ticks_lo, "..", ticks_hi,
+          " by the measured rate) and ", w_ms, " ms (", ms_due,
+          " by the statement's arithmetic)", crlf);
+    bench.verdict("its ticks follow the LSI's MEASURED rate within the meter's own "
+                  "resolution, and millis() is the statement's arithmetic over them "
+                  "to the millisecond - the arithmetic is exact, the number is the "
+                  "oscillator's",
+                  within(w_ticks, ticks_lo, ticks_hi) && w_ms + 3u >= ms_due &&
+                      w_ms <= ms_due + 3u);
 
     // A wake placed on it: arm_wake and a WFI by hand, judged in ITS
     // units (never early) and on the crystal (the statement's error).
@@ -1331,31 +1408,51 @@ void th_lsi_witness() {
     }
     const uint32_t took_us = t2_us(t2() - c0);
     const uint32_t landed = LsiWitness::ticks();
+    // THE WAKE'S BAND, from the measured period: armed at a phase inside
+    // the current tick, the deadline is 99 to 100 ticks away, and the
+    // verdict admits a landing one tick late - 99 to 101 periods, each end
+    // widened by the meter's resolution (plus one for the division), and
+    // 100 us more at the top for the match one count after equality
+    // (31 us, lptim.md) and the handler and the loop's turn after it.
+    // Without a measurement the periods are table 46's two ends.
+    const uint32_t t99 = static_cast<uint32_t>(
+        (99ULL * 32'000'000ULL) / (lsi_hz != 0u ? lsi_hz : 34'000u));
+    const uint32_t t101 = static_cast<uint32_t>(
+        (101ULL * 32'000'000ULL) / (lsi_hz != 0u ? lsi_hz : 29'500u));
+    const uint32_t wake_lo = lsi_hz != 0u ? t99 - t99 / per_count - 1u : t99;
+    const uint32_t wake_hi = (lsi_hz != 0u ? t101 + t101 / per_count + 1u : t101) + 100u;
     print(serial, "  a 100-tick wake on the LSI witness: slept ", took_us, " us in ", rounds,
           " round(s), ticks ", before, " -> ", landed, " (asked ", asked, "), ", lptim2_irqs,
-          " LPTIM2 interrupt(s)", crlf);
+          " LPTIM2 interrupt(s); the measured period puts it at ", wake_lo, "..", wake_hi,
+          " us", crlf);
     bench.verdict("the compare placed on the LSI counter wakes at its tick, never early in "
                   "the witness's own units, one interrupt",
                   armed && static_cast<int32_t>(landed - asked) >= 0 &&
                       static_cast<int32_t>(landed - asked) <= 1 && lptim2_irqs >= 1u &&
-                      within(took_us, 95'000u, 105'000u));
+                      within(took_us, wake_lo, wake_hi));
 
     // THE DIRECTIONAL RULE'S PRICE: the default statement is table 46's
     // ceiling, 34000 - never early on any part, and this many late on
-    // this one.
-    const uint32_t late_per_mille = (34'000u * 1000u) / lsi_measured_hz - 1000u;
-    print(serial, "  the default statement (34000 Hz) on this die's ", lsi_measured_hz,
-          " Hz: every millisecond asked lands ", late_per_mille,
-          " per mille late, never early (", LsiDefault::ticks_per_second,
-          " ticks a second would be counted at ", lsi_measured_hz >> 5, ")", crlf);
-    // THE BAND IS TABLE 46'S OWN, because the number is a DIE fact and
-    // the dies differ: the ceiling over the band's floor is 34000/29500,
-    // 153 per mille, and any part of this family lands under it. What is
-    // claimed is the DIRECTION and the bound, not one die's figure.
-    bench.verdict("the default over-states the rate, so a program that does not measure "
-                  "its LSI is late and never early - by at most what table 46's own "
-                  "ceiling over its own floor allows",
-                  late_per_mille > 0u && late_per_mille < 160u);
+    // this one, priced with the rate measured above.
+    if (lsi_hz != 0u) {
+        const uint32_t late_per_mille = (34'000u * 1000u) / lsi_hz - 1000u;
+        print(serial, "  the default statement (34000 Hz) on this die's ", lsi_hz,
+              " Hz: every millisecond asked lands ", late_per_mille,
+              " per mille late, never early (", LsiDefault::ticks_per_second,
+              " ticks a second would be counted at ", lsi_hz >> 5, ")", crlf);
+        // THE BAND IS TABLE 46'S OWN, because the number is a DIE fact and
+        // the dies differ: the ceiling over the band's floor is
+        // 34000/29500, 153 per mille, and any part of this family lands
+        // under it. A die measured above the ceiling makes the subtraction
+        // wrap and the verdict fail, which is the rule broken.
+        bench.verdict("the default over-states the rate, so a program that does not "
+                      "measure its LSI is late and never early - by at most what table "
+                      "46's own ceiling over its own floor allows",
+                      late_per_mille > 0u && late_per_mille < 160u);
+    } else {
+        bench.skip("the directional rule's price on this die needs the die's LSI rate, "
+                   "and TIM16's capture saw no edge");
+    }
 
     Nvic::disable(L2::irq());
     L2::init();
@@ -1380,9 +1477,10 @@ constexpr uint32_t awake_hz = 16'000'000u / 8u;
 /// footnotes 0100 (MCO), 0101 (MCO2) and 0110 (COMP3) "available on
 /// STM32G0B1xx and STM32G0C1xx sales types only"; on every smaller part
 /// the code selects nothing and TIM2 does not count. THE PRICE OF
-/// GETTING THAT WRONG IS THE WHOLE SUITE: `spin_us()` above rides the
-/// same TIM2, so a meter that does not count is a wait that never ends
-/// (measured - the board sat in `spin_us` until the watchdog reset it).
+/// GETTING THAT WRONG IS THE WHOLE SUITE: the Ruler above is the same
+/// TIM2, so a meter that does not count is a ruler that stands still
+/// (measured, when this suite's spin rode it - the board sat in the
+/// spin until the watchdog reset it).
 /// So the meter is built only where the reserve says the code exists,
 /// and TIM2 is left on its PLL wall everywhere else.
 constexpr bool meter_possible = tim_etrsel_has_mco(2);
@@ -1417,15 +1515,12 @@ void ti_lap_wakes() {
                       "HSI16 stops in a Stop and so does the timer's bus)",
                       meter);
     } else {
-        print(serial,
-              "  SKIPPED, no verdict claimed: the awake-time meter is TIM2's "
-              "ETR taking MCO, and RM0444 22.4.25's ETRSEL list gives code "
-              "0100 to the G0B1/G0C1 sales types alone "
-              "(tim_etrsel_has_mco(2) is false here). TIM2 stays on its PLL "
-              "wall - which this suite's own spin_us() also rides - and the "
-              "awake-time verdict below is the only one that goes with it; "
-              "the lap count and the PLL claim do not need a meter.",
-              crlf);
+        bench.skip("the awake-time meter is TIM2's ETR taking MCO, and RM0444 "
+                   "22.4.25's ETRSEL list gives code 0100 to the G0B1/G0C1 sales "
+                   "types alone (tim_etrsel_has_mco(2) is false here). TIM2 stays "
+                   "on its PLL wall - which this suite's ruler also rides - and "
+                   "the awake-time verdict below is the only one that goes with "
+                   "it; the lap count and the PLL claim do not need a meter.");
     }
     console_drain();   // a Stop under a line in flight is a garbled line (measured)
 
@@ -1486,9 +1581,9 @@ void ti_lap_wakes() {
                       "still in FLASH_ACR) - a 10^-4 duty for a rare-event program",
                       per_wake_max < 300u);
     } else {
-        print(serial, "  SKIPPED, no verdict claimed: what a lap wake COSTS "
-              "needs a clock that runs only while the part is awake, which "
-              "on this part the meter above could not build.", crlf);
+        bench.skip("what a lap wake COSTS needs a clock that runs only while the "
+                   "part is awake, which on this part the meter above could not "
+                   "build");
     }
     bench.verdict("and the round closed with the PLL back", pll_back);
     // The PLL wall back for whatever runs next.
@@ -1507,7 +1602,7 @@ void tx_latency() {
     feed();
     console_drain();
     Nvic::set_pending(Tb::irq());
-    spin_us(400);
+    brio::spin_us<Ruler>(400);
 
     // 1. CMP write to CMPOK on the undivided counter, five times.
     print(serial, "  CMPOK latency on the undivided counter (32768 Hz):", crlf);
@@ -1516,14 +1611,15 @@ void tx_latency() {
         const uint16_t far = static_cast<uint16_t>(Tb::count() + 30000u);
         const uint32_t c0 = t2();
         (void)L1::set_cmp(far);
-        uint32_t guard = 20'000'000u;
-        while (!L1::cmp_ok() && guard-- != 0u) {
-        }
+        // Two to three counts of the 32 kHz root land a store (about
+        // 100 us); the budget is 10 ms.
+        const bool landed = brio::wait_until<Ruler>([] { return L1::cmp_ok(); }, 10'000);
         const uint32_t us = t2_us(t2() - c0);
         print(serial, "    ISR before 0x", hex(before), ": store -> CMPOK in ", us, " us (",
-              (us * 32768u + 500'000u) / 1'000'000u, " counts)", crlf);
+              (us * 32768u + 500'000u) / 1'000'000u, " counts)",
+              landed ? "" : " - CMPOK NEVER ROSE", crlf);
         Nvic::set_pending(Tb::irq());
-        spin_us(400);
+        brio::spin_us<Ruler>(400);
     }
 
     // 2. The match: CMP = count + k stored right after a count edge.
@@ -1533,27 +1629,33 @@ void tx_latency() {
         feed();
         console_drain();
         Nvic::set_pending(Tb::irq());
-        spin_us(400);
+        brio::spin_us<Ruler>(400);
         clear_counters();
+        // The next count edge (31 us on the crystal; 1 ms of budget), then
+        // the match: forty counts at most (1.2 ms), a whole lap (2 s) if
+        // the store came too late - 3 s of budget. A diagnostic without
+        // verdicts: the line printed says what happened.
         const uint32_t c_sync = Tb::count();
-        while (Tb::count() == c_sync) {
-        }
+        (void)brio::wait_until<Ruler>([c_sync] { return Tb::count() != c_sync; }, 1'000);
         const uint32_t now = Tb::count();
         const uint16_t cmp = static_cast<uint16_t>(now + ks[i]);
         const uint32_t c0 = t2();
         (void)L1::set_cmp(cmp);
-        uint32_t guard = 200'000'000u;
-        while (lptim_irqs == 0u && guard-- != 0u) {
-            feed();
-        }
+        const bool fired = brio::wait_until<Ruler>(
+            [] {
+                feed();
+                return lptim_irqs != 0u;
+            },
+            3'000'000);
         const uint32_t us = t2_us(lptim_t2_at - c0);
         print(serial, "    k=", ks[i], ": CMP ", cmp, " stored at CNT ", now & 0xFFFFu,
               " -> irq at CNT ", lptim_cnt_at, " after ", us, " us (",
               (us * 32768u + 500'000u) / 1'000'000u, " counts), ISR at entry 0x",
-              hex(lptim_isr_at), " served 0x", hex(lptim_last_served), crlf);
+              hex(lptim_isr_at), " served 0x", hex(lptim_last_served),
+              fired ? "" : " - NO INTERRUPT CAME", crlf);
     }
     Nvic::set_pending(Tb::irq());
-    spin_us(400);
+    brio::spin_us<Ruler>(400);
 }
 
 // ---------------------------------------------------------------------------
@@ -1565,7 +1667,7 @@ void banner() {
           "test_stm32_tickless - the LPTIM kernel timebase and idle_until "
           "(no wires)", crlf);
     bench.menu();
-    print(serial, "  z  run them all (a..g)", crlf);
+    print(serial, "  z  run them all (a..i)", crlf);
 }
 
 }   // namespace

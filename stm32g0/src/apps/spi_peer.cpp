@@ -148,7 +148,6 @@
 #include <type_traits>
 
 #include "stm32g0/clock.hpp"
-#include "stm32g0/delay.hpp"
 #include "stm32g0/dma.hpp"
 #include "stm32g0/flash.hpp"
 #include "stm32g0/nvic.hpp"
@@ -157,6 +156,7 @@
 #include "stm32g0/ticker.hpp"
 #include "stm32g0/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
 // register, and every architecture on this link compiles the same
@@ -165,6 +165,15 @@
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
 constexpr SysClock clock{};
+
+/// The instrument's ruler (util/bench.hpp's CycleRuler): the kernel
+/// ticker's cycles() composed across SysTick's reload, so it needs
+/// interrupts enabled, which they are everywhere this app waits.
+struct Ruler {
+    static uint32_t now() { return brio::Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 
 namespace {
 
@@ -261,28 +270,10 @@ uint32_t engaged_until = 0;
 
 bool engaged() { return engaged_until != 0 && Ticker::millis() < engaged_until; }
 
-// ---- waits ----------------------------------------------------------------------
-
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
-
-/// A microsecond hold of arbitrary length: delay_us is capped below one
-/// SysTick period BY DESIGN (a tick or more is TimeEvent territory), and
-/// this instrument's holds are exactly the blocking waits that cap keeps
-/// out of KERNEL programs - this is not one, so the hold is spent in
-/// chunks the cap admits.
-void hold_us(uint32_t us) {
-    while (us >= 500u) {
-        (void)delay_us(clock, 500u);
-        us -= 500u;
-    }
-    if (us != 0u) {
-        (void)delay_us(clock, us);
-    }
-}
+// The holds of arbitrary length below are spin_us() on the ruler: delay_us
+// is capped below one SysTick period by design (a tick or more is TimeEvent
+// territory), and this instrument's holds are exactly the blocking waits
+// that cap keeps out of kernel programs - this app runs no kernel.
 
 // ---- the runs --------------------------------------------------------------------
 //
@@ -756,9 +747,9 @@ spilink::Report run_sink_slow(const spilink::Params& a) {
 spilink::Report run_ss_pulse(const spilink::Params& a) {
     spilink::Report r{};
     Client::release();
-    if (a.aux8) wait_ms(a.aux8);
+    if (a.aux8) brio::spin_us<Ruler>(uint32_t{a.aux8} * 1'000u);
     NssPin::output(false);
-    hold_us(a.aux16 ? a.aux16 : 1000u);
+    brio::spin_us<Ruler>(a.aux16 ? a.aux16 : 1000u);
     NssPin::input(PinPull::up);
     r.aux0 = 1;
     r.count = 1;
@@ -806,13 +797,13 @@ spilink::Report run_host_burst(const spilink::Params& a) {
     // open window is one extra edge and the selected client counts it
     // (SpiHost::prime()'s own comment).
     Host::prime(mode_of(a.cfg.mode), rate);
-    hold_us(200);
+    brio::spin_us<Ruler>(200);
 
     spilink::Stream out(a.pattern, a.seed_a);      // what THIS end sends
     spilink::Stream want(a.pattern, a.seed_b);     // what the client owes
 
     NssPin::clear();                               // select, for the whole burst
-    hold_us(spilink::gap_us);
+    brio::spin_us<Ruler>(spilink::gap_us);
     while (r.count < a.count && Ticker::millis() - t0 < lead + a.ms) {
         burst_tx[0] = out.next();
         burst_rx[0] = 0;
@@ -829,7 +820,7 @@ spilink::Report run_host_burst(const spilink::Params& a) {
             break;                                 // a polled request completes here
         }
         account(r, burst_rx[0], want.next());
-        hold_us(spilink::gap_us);
+        brio::spin_us<Ruler>(spilink::gap_us);
     }
     NssPin::set();
     r.aux0 = static_cast<uint8_t>(Raw::status());

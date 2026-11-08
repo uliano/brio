@@ -98,13 +98,14 @@ bus-clock, capability and EXTI facts come from
 `stm32g0/device_tables.hpp` (the reserve: the table of what each part
 has, read off the device header). The LPUARTs are
 [lpuart.md](lpuart.md) - the same task over a different resource. Bench
-suite: `test_stm32_serial` (17 letters in `z`, 120 verdicts, wireless -
-a letter is one command key of the suite's console and the group of
-verdicts it runs, `z` the key that runs them all;
-four more outside `z` through `brio stress`; thirteen under the second
-all-key `t`, 171 verdicts, against the desk's STM32F446RE running
-`usart_peer` - "Against a far board" below - and letter `W` beside
-them, outside both all-keys). The instrument for a far
+suite: `test_stm32_serial` (17 letters in `z`, 119 verdicts and two
+skips, wireless - a letter is one command key of the suite's console and
+the group of verdicts it runs, `z` the key that runs them all; the two
+skips are smartcard block mode and the synchronous data path, which one
+board cannot settle; four more outside `z` through `brio stress`;
+thirteen under the second all-key `t`, 171 verdicts, against the desk's
+STM32F446RE running `usart_peer` - "Against a far board" below - and
+letter `W` beside them, outside both all-keys). The instrument for a far
 board's suite is this stratum's `usart_peer` ("The peer" below). Family
 fixture `test/family_stm32g0/usart.cpp` plus sixteen negatives under
 `brio check stm32g0` (an instance nowhere, an instance off a part on
@@ -1176,8 +1177,8 @@ against its own LSE over the very window of each run, the stratum's
 on DMA1 channel 4 with a ring of 4096, a second of the crystal, for the
 length of the set: every rate verdict is the divisor's on the wire with
 the oscillator's walk taken out. Score: **171 of 171**, the refusals
-SKIPPED with their reason; letter `x`, outside `z` and `t`, is letter
-`7`'s control through the bridge (below).
+counted as skips with their reason; letter `x`, outside `z` and `t`, is
+letter `7`'s control through the bridge (below).
 
 - **The rendezvous and the refusal path** (`1`): ping, IDENT (kind
   0x04, another die's unique ID, a crystal time base), a bad checksum
@@ -1227,9 +1228,9 @@ SKIPPED with their reason; letter `x`, outside `z` and `t`, is letter
   through the receive engine (DMA1 channel 3) at every rung, OVER8's task
   above 4 Mbaud.
 - **The frame matrix** (`3`) at 115200: 8N1, 8E1, 8O1, 7E1, 7O1, 9N1,
-  8N2, 8N0.5 and 8N1.5 echoed by the far chip; 7N1 and 6E1 SKIPPED (the
+  8N2, 8N0.5 and 8N1.5 echoed by the far chip; 7N1 and 6E1 skipped (the
   far USART refuses them: M counts its parity bit and has no seven-bit
-  word), 9E1 SKIPPED here (no word length on this USART either); the
+  word), 9E1 skipped here (no word length on this USART either); the
   half stop bits timed as LENGTHS by the far receiver, 19 and 21 half
   bits within 100 ppm of an 8N1 run with the HSI taken out.
 - **The receiver's errors from a foreign sender** (`4`): six frames of
@@ -1726,7 +1727,7 @@ Declined with a reason (every field of chapter 33 is implemented):
   the loop, and 33.8.7 says why: the block counter is RESET while the
   USART transmits (TXE = 0), which on a wire whose transmitter is its
   own sender is always. A real card would settle it. The letter stages
-  it and prints the outcome either way.
+  it, prints the outcome and counts a skip.
 - **A LIN network.** The break is sent and detected and timed; the
   protocol layer above it (identifiers, checksums, a second node) is not
   brio's business yet.

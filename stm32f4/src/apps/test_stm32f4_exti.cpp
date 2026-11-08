@@ -52,6 +52,7 @@
 #include <stdint.h>
 
 #include "stm32f4/clock.hpp"
+#include "stm32f4/dwt.hpp"
 #include "stm32f4/delay.hpp"
 #include "stm32f4/exti.hpp"
 #include "stm32f4/nvic.hpp"
@@ -61,6 +62,7 @@
 #include "stm32f4/ticker.hpp"
 #include "stm32f4/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #if defined(STM32F411xE)
@@ -189,12 +191,20 @@ void quiet_everything() {
     reset_counters();
 }
 
+/// The ruler: the DWT's cycle counter, started in main(); it counts
+/// through a Sleep (stm32f4/dwt.hpp), so a WFE's length reads on it.
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
+
 /// Let the console's own transmitter fall silent: its interrupt would
-/// otherwise wake every WFE and WFI below.
+/// otherwise wake every WFE and WFI below. A wedged console (false after
+/// 200 ms) shows as a WFE ended early, which letter g judges, so the
+/// answer is dropped here.
 void console_drain() {
-    const uint32_t t0 = Ticker::ticks();
-    while (!Serial::tx_idle() && Ticker::ticks() - t0 < 200u) {
-    }
+    (void)brio::console_drain<Ruler, Serial>();
 }
 
 // ---- a ruler ------------------------------------------------------------------
@@ -212,13 +222,6 @@ void pulse() {
 }
 
 uint32_t systick_period() { return SysTick->LOAD + 1u; }
-
-/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
-/// tick count and the counter's position composed right across the reload
-/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
-uint32_t cycles_now() {
-    return Ticker::cycles();
-}
 
 uint32_t cycles_to_us(uint32_t c) { return c / cycles_per_us; }
 
@@ -402,14 +405,31 @@ void td_latency() {
     (void)Exti::interrupt(sw_line, true);
     Nvic::enable(Exti::irq(sw_line));
 
+    // A round a kernel tick (or a console byte) lands in carries that
+    // handler too: the console is drained first, each round keeps a tick
+    // witness, and a round the tick lengthened is counted and left out of
+    // the judgement (the lengtheners rule).
+    console_drain();
     uint32_t worst = 0, best = 0xFFFFFFFFu, total = 0;
     const uint8_t rounds = 16;
+    uint8_t quiet_rounds = 0;
+    uint8_t lost = 0;
     for (uint8_t k = 0; k < rounds; ++k) {
         reset_counters();
+        const brio::TickWitness<P> witness;
         const uint32_t v0 = SysTick->VAL;
         (void)Exti::trigger(sw_line);
-        while (vector_entries == 0u) {
+        // The handler runs within a microsecond; 1 ms is the time-out.
+        const bool entered = brio::wait_until<Ruler>([] { return vector_entries != 0u; }, 1'000);
+        if (!entered) {
+            ++lost;
+            continue;
         }
+        if (!witness.quiet()) {
+            (void)delay_us(clock, 20);
+            continue;
+        }
+        ++quiet_rounds;
         const uint32_t took = val_delta(v0, handler_val);
         total += took;
         if (took > worst) {
@@ -420,12 +440,14 @@ void td_latency() {
         }
         (void)delay_us(clock, 20);
     }
-    const uint32_t mean = total / rounds;
+    const uint32_t mean = quiet_rounds == 0u ? 0u : total / quiet_rounds;
     print(serial, "  SWIER store to handler: ", best, "..", worst, " cycles, mean ", mean,
-          " (", mean * 1000u / cycles_per_us, " ns at ", SysClock::hz / 1'000'000u, " MHz)", crlf);
+          " (", mean * 1000u / cycles_per_us, " ns at ", SysClock::hz / 1'000'000u, " MHz) over ",
+          quiet_rounds, " quiet rounds; ", static_cast<uint8_t>(rounds - quiet_rounds - lost),
+          " lengthened by the tick (not judged), ", lost, " never reached the handler", crlf);
     bench.verdict("the software trigger reaches its handler in under 200 cycles, "
-                  "every round",
-                  worst < 200u && best > 0u);
+                  "every round the tick left alone",
+                  lost == 0u && quiet_rounds != 0u && worst < 200u && best > 0u);
     quiet_everything();
 }
 
@@ -454,12 +476,17 @@ void te_pad() {
         (void)LedInt::configure(leg.sense);
         (void)LedInt::clear();
         for (uint8_t k = 0; k < 8u; ++k) {
+            // The detector samples at the APB2 clock: the pending bit is
+            // read a microsecond after the store (pulse()'s reason), not
+            // on the next instruction.
             Led::set();
+            (void)delay_us(clock, 1);
             if (LedInt::pending()) {
                 ++leg.up;
                 (void)LedInt::clear();
             }
             Led::clear();
+            (void)delay_us(clock, 1);
             if (LedInt::pending()) {
                 ++leg.down;
                 (void)LedInt::clear();
@@ -626,14 +653,15 @@ void tg_event() {
     // WFE, make the edge, sleep - and print afterwards.
     console_drain();
     uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() == t0) {
-    }
+    // A tick is 1 ms; a stopped one leaves the WFE unaligned, which the
+    // verdicts after show.
+    (void)brio::wait_until<Ruler>([&] { return Ticker::ticks() != t0; }, 5'000);
     __SEV();
     __WFE();                    // consumes the register's own set bit
     Led::set();                 // the edge
-    const uint32_t c0 = cycles_now();
+    const uint32_t c0 = Ruler::now();
     __WFE();
-    const uint32_t event_us = cycles_to_us(cycles_now() - c0);
+    const uint32_t event_us = cycles_to_us(Ruler::now() - c0);
     const bool event_flag = LedInt::pending();
 
     // The control: the same edge with the event masked, so only the tick
@@ -641,14 +669,13 @@ void tg_event() {
     (void)LedInt::event(false);
     Led::clear();
     t0 = Ticker::ticks();
-    while (Ticker::ticks() == t0) {
-    }
+    (void)brio::wait_until<Ruler>([&] { return Ticker::ticks() != t0; }, 5'000);
     __SEV();
     __WFE();
     Led::set();
-    const uint32_t c1 = cycles_now();
+    const uint32_t c1 = Ruler::now();
     __WFE();
-    const uint32_t control_us = cycles_to_us(cycles_now() - c1);
+    const uint32_t control_us = cycles_to_us(Ruler::now() - c1);
 
     print(serial, "  WFE after an edge: ", event_us, " us with the CPU event unmasked, ",
           control_us, " us with it masked (the tick)", crlf);
@@ -918,7 +945,7 @@ void settle_pad() { (void)delay_us(clock, 200); }   // a 40 k pull against the p
 
 void tq_port() {
     if constexpr (!port_pads) {
-        print(serial, "  SKIP: the two pads are chosen on the Nucleo-F446RE", crlf);
+        bench.skip("the two pads are chosen on the Nucleo-F446RE");
         return;
     } else {
         // The pulls, both ways (the down one is the item).
@@ -1005,9 +1032,7 @@ void tl_button() {
                       ButtonInt::sense() ==
                           (button_press_is_rising ? ExtiSense::rising : ExtiSense::falling));
 
-    const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() - t0 < 50u) {
-    }
+    brio::spin_us<Ruler>(50'000);
     bench.verdict("and it raises nothing in 50 ms with nobody pressing", vector_entries == 0u);
     quiet_everything();
 }
@@ -1024,9 +1049,7 @@ void tp_press() {
     reset_counters();
 
     print(serial, "  press the button (5 s) ...", crlf);
-    const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() - t0 < 5000u && vector_entries == 0u) {
-    }
+    (void)brio::wait_until<Ruler>([] { return vector_entries != 0u; }, 5'000'000);   // judged below
     const uint16_t seen = vector_entries;
     print(serial, "  ", seen, " edge(s), the pad now reads ", Button::read() ? "high" : "low",
           crlf);
@@ -1086,11 +1109,16 @@ int main() {
     boot.ftsr = brio::Exti::regs().FTSR;
     boot.swier = brio::Exti::regs().SWIER;
     boot.pr = brio::Exti::regs().PR;
+    // EXTICR reads zero through a closed gate whatever it holds, so the
+    // gate is opened for the read and put back as it was found.
+    brio::Syscfg::clock(true);
     for (uint8_t i = 0; i < 4u; ++i) {
         boot.exticr[i] = brio::Syscfg::regs().EXTICR[i];
     }
+    brio::Syscfg::clock(boot.syscfg_gate);
 
     const bool clock_ok = SysClock::init();
+    (void)brio::CycleCounter::init();   // every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0)
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
     brio::enable_interrupts();

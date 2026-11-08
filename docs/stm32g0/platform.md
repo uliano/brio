@@ -485,7 +485,9 @@ listing) - ST's
   97.6 ms on TIM2; and the default statement (34000) would make every
   millisecond asked land 43 per mille late on this die, never early -
   the directional rule's price, paid by a program that does not
-  measure.
+  measure. The letter judges the witness against the LSI it measures on
+  TIM16's capture at its start, never against the statement, which is a
+  compile-time number and need not be the die's.
 - **What a two-second lap asks of a suite over this timebase**: a leg
   that judges "one interrupt" or "the LPTIM never spoke" over a window
   under a second, or that expects CMPOK unswept between two arms, is

@@ -632,7 +632,7 @@ The board is a Nucleo-F446RE at 180 MHz with 45 MHz on APB1, and the two
 pads are PC6 and PC7, wired to I2C1's PB8 and PB9 with a 2.2 kOhm
 pull-up on each line. Letters a to l but `f` see that bus with I2C1 silent -
 what a bus with nobody answering can be made to say - letter `f` runs I2C1 as a
-second host beside it, and letters m, q, r, u and v make I2C1 the target. `test_stm32f4_fmpi2c` is 124 verdicts over sixteen
+second host beside it, and letters m, q, r, u and v make I2C1 the target. `test_stm32f4_fmpi2c` is 122 verdicts over sixteen
 letters in `z`, green in three runs of three, letters `m` and `f` in ten of ten more, `q`,
 `r` and `u` in twelve of twelve more, and letter `v`, which `z` does not run, in fifteen of
 fifteen. The figures of every section below that names a suite are of one image of it, and of

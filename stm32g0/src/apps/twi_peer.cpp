@@ -423,9 +423,9 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
 /// THE HOST ACTION, and on this silicon it is a ROLE SWITCH and not a
 /// second half (see the header). The rendezvous is the bus going BUSY -
 /// the DUT's own tenure, or a line it holds - and after the lead-in this
-/// end writes one tenure of its own. IMPLEMENTED AND NOT EXERCISED BY
-/// ANY LETTER of the G0 host suite today: it is the instrument a
-/// deterministic two-controller arbitration race would need.
+/// end writes one tenure of its own: test_stm32_i2c's letter s releases
+/// it against the DUT's own held START, and its letter t sends it to
+/// wake the DUT's client from Stop.
 twilink::Report run_arb(const twilink::Params& a) {
     twilink::Report r{};
     Client::release();

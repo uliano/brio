@@ -61,7 +61,7 @@ peripherals that publish them (`Usart<n>::dma_tx_request()`,
 channel to one owner. The first holds the instrument letters `a` to `n`
 and `r`; the second letter `o` and the serial streaming letters `p`, `q`,
 `u` and `w`; the third letter `x`, letter `o`'s ring on an LPUART. Across
-the three, 17 letters in their `z` and 85 verdicts, no wire (a letter is
+the three, 17 letters in their `z` and 84 verdicts, no wire (a letter is
 one command key of the suite's console and the group of verdicts it runs,
 `z` the key that runs them all; letters `p`, `q`, `u` and `w` stay outside
 `z` and need `brio stress`). The engines' cost is
@@ -670,11 +670,11 @@ not explained.** Table 56 makes trigger inputs 0..15 the EXTI's lines
 be reachable from software with no pad at all. Five SWIER pulses on line
 9, with the line's rising trigger selected and BOTH its interrupt and its
 event mask set, moved ZERO words on a channel that the TIM14_OC trigger
-drove perfectly in the same letter. The data verdict is DECLINED with
-the finding printed. What this bench has not separated: whether the
-DMAMUX watches a signal SWIER does not drive, or whether a pad left in
-analog mode - which blinds an EXTI line ([exti.md](exti.md)) - blinds
-this path too.
+drove perfectly in the same letter. No verdict rests on that leg: its
+count is printed, and a count other than five is a skip. What this bench
+has not separated: whether the DMAMUX watches a signal SWIER does not
+drive, or whether a pad left in analog mode - which blinds an EXTI line
+([exti.md](exti.md)) - blinds this path too.
 
 **EGE makes one channel pace another through the fabric alone.** With a
 multiplexer channel set to emit an event every four served requests and a
@@ -998,10 +998,10 @@ firing on this die too, with the copy pair then on channels 1 and 2
 **AND ONE ERRATUM RIDES ON THE REQUEST GENERATOR.** ES0418 2.2.4
 (STM32G071/G081, revision B, "no workaround") says the EXTI-related
 DMAMUX synchronization and trigger inputs are routed to `it_exti_per(y)`
-instead of to `exti[15:0]`. Letter f's SWIER leg PASSES on that die (five
-software events, five words) and the reason is instructive: the trigger
-follows the LEVEL of the line's pending interrupt, and the leg's own loop
-clears that pending bit after every pulse. A REAL PAD EDGE does not
+instead of to `exti[15:0]`. Letter f's SWIER leg moves its words on that
+die (five software events, five words) and the reason is instructive:
+the trigger follows the LEVEL of the line's pending interrupt, and the
+leg's own loop clears that pending bit after every pulse. A REAL PAD EDGE does not
 survive it - `test_stm32_serial`'s boot probe measures both and
 [usart.md](usart.md) carries the numbers - so a staging that uses SWIER
 alone would report this path healthy. Letter k's synchronization block is
@@ -1026,7 +1026,8 @@ between them", which is one claim on all three parts.
 DMAMUX-from-EXTI limitation (its 2.2.4, ES0418 2.2.4's twin) for
 revision Z alone, and this board is revision Y: `test_stm32_serial`'s
 boot probe moves 4 words for 4 pad edges with the event mask alone (the
-G071RB: 0), so letter f's SWIER leg passes here for the right reason.
+G071RB: 0), so letter f's SWIER leg moves its five words here for the
+right reason.
 
 **THE CONSOLE GIVES ITS ENGINES BACK.** Two of the seven channels are
 the console's transmit and receive on the bigger parts; on five, the

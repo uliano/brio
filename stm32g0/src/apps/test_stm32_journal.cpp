@@ -70,6 +70,7 @@
 #include "util/nv_heap.hpp"
 #include "util/nv_journal.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
@@ -176,6 +177,7 @@ constexpr uint16_t heap_record = 0x4A02;
 
 /// The id map. Six is max_ids, so this is all of them.
 constexpr uint8_t id_bytes = 0;    ///< a plain byte string
+constexpr uint8_t panic_seed = 0x6D;   ///< the pattern letter p writes before it panics
 constexpr uint8_t id_cal = 1;      ///< the typed value
 constexpr uint8_t id_short = 2;    ///< a one-byte value
 constexpr uint8_t id_full = 3;     ///< a maximum-size value
@@ -198,19 +200,20 @@ using Panic = JournalPanic<journal, id_panic>;
 // and the counter's position composed right across the reload
 // (util/cycle_count.hpp).
 // ---------------------------------------------------------------------------
-uint32_t cycles_now() {
-    return Ticker::cycles();
-}
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000UL;
 uint32_t cycles_to_us(uint32_t c) { return c / cycles_per_us; }
 
+/// The console's last byte off the wire before letter p panics. A wedged
+/// console (false after 200 ms) only loses the line before the reset, so
+/// the answer is dropped.
 void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    const uint32_t t0 = cycles_now();
-    while (cycles_now() - t0 < SysClock::hz / 500u) {
-    }
+    (void)brio::console_drain<Ruler, Serial>();
 }
 
 // ---------------------------------------------------------------------------
@@ -313,37 +316,35 @@ void ta_partition() {
     // nv-journal.md names 2048/8 as a geometry test/test_nv_journal
     // already covers "because it is the STM32G0's" - this is the line
     // that turns that sentence from a prediction into a reading.
-    bench.verdict("the erase unit is a 2048-byte PAGE and the program unit an "
-                  "8-byte DOUBLE WORD - the widest split of the three targets",
-                  Journal::erase_size == 2048u && Journal::write_cell == 8u);
-    bench.verdict("the journal owns the top two pages of the bank",
-                  MainFlashPartition::journal_bytes == 2u * Flash::page_size &&
+    // These are constants of the build, so they are asserted at compile
+    // time rather than judged at run time.
+    static_assert(Journal::erase_size == 2048u && Journal::write_cell == 8u,
+                  "the erase unit is a 2048-byte PAGE and the program unit an "
+                  "8-byte DOUBLE WORD - the widest split of the three targets");
+    static_assert(MainFlashPartition::journal_bytes == 2u * Flash::page_size &&
                       MainFlashPartition::journal_base ==
-                          MainFlashPartition::storage_end -
-                              2u * Flash::page_size);
-    bench.verdict("a half is ONE page, which is the smallest a half may be: "
-                  "erasing it must not take the other half down",
-                  Journal::half_bytes == Flash::page_size &&
-                      Journal::half_cells == 256u);
-    bench.verdict("the two regions do not overlap, the heap's map home "
-                  "included",
-                  Heap::map_home + 2u * Heap::erase_size <=
-                      MainFlashPartition::journal_base);
-    bench.verdict("the journal's halves fill the attic exactly",
-                  Journal::journal_home == MainFlashPartition::journal_base &&
+                          MainFlashPartition::storage_end - 2u * Flash::page_size,
+                  "the journal owns the top two pages of the bank");
+    static_assert(Journal::half_bytes == Flash::page_size && Journal::half_cells == 256u,
+                  "a half is ONE page, which is the smallest a half may be: "
+                  "erasing it must not take the other half down");
+    static_assert(Heap::map_home + 2u * Heap::erase_size <= MainFlashPartition::journal_base,
+                  "the two regions do not overlap, the heap's map home included");
+    static_assert(Journal::journal_home == MainFlashPartition::journal_base &&
                       Journal::half_base(1) + Journal::half_bytes ==
-                          MainFlashPartition::storage_end);
-    bench.verdict("and the reserve is one maximum-size entry",
-                  Journal::reserve_cells == Journal::max_entry_cells &&
-                      Journal::max_entry_cells == 6u);
+                          MainFlashPartition::storage_end,
+                  "the journal's halves fill the attic exactly");
+    static_assert(Journal::reserve_cells == Journal::max_entry_cells &&
+                      Journal::max_entry_cells == 6u,
+                  "the reserve is one maximum-size entry");
 
     // A mount is READ-ONLY: this is the boot path and it must cost no
     // cycle of endurance at all.
     const uint32_t erases0 = MeteredZone::erases;
     const uint32_t programs0 = MeteredZone::programs;
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     const Journal::MountReport& r = remount();
-    const uint32_t mount_us = cycles_to_us(cycles_now() - t0);
+    const uint32_t mount_us = cycles_to_us(Ruler::now() - t0);
     print_mount(r);
     print(serial, "  the mount took ", mount_us, " us and read ",
           MeteredZone::reads, " time(s) in this letter", crlf);
@@ -475,9 +476,9 @@ void td_cost() {
     // cells and nothing else.
     const uint32_t erases0 = MeteredZone::erases;
     fill(16, 0x88);
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     const bool ok = journal.save(id_churn, out_span(16));
-    const uint32_t save_us = cycles_to_us(cycles_now() - t0);
+    const uint32_t save_us = cycles_to_us(Ruler::now() - t0);
     const uint32_t save_erases = MeteredZone::erases - erases0;
 
     print(serial, "  a save of 16 bytes: ", save_us, " us, ", save_erases,
@@ -495,9 +496,9 @@ void td_cost() {
 
     // A collection, timed: two page erases and one program per live id.
     const uint32_t before = journal.free_cells();
-    const uint32_t t1 = cycles_now();
+    const uint32_t t1 = Ruler::now();
     const bool collected = journal.collect();
-    const uint32_t collect_us = cycles_to_us(cycles_now() - t1);
+    const uint32_t collect_us = cycles_to_us(Ruler::now() - t1);
     print(serial, "  a collection: ", collect_us, " us for ", journal.count(),
           " live id(s), free cells ", before, " -> ", journal.free_cells(),
           crlf);
@@ -647,9 +648,9 @@ void tf_reserve() {
     const uint32_t erases0 = MeteredZone::erases;
     const uint32_t free_before = journal.free_cells();
     fill(32, 0x9E);
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     const bool spent = journal.save_reserved(id_full, out_span(32));
-    const uint32_t us = cycles_to_us(cycles_now() - t0);
+    const uint32_t us = cycles_to_us(Ruler::now() - t0);
     print(serial, "  save_reserved: ", us, " us, ",
           MeteredZone::erases - erases0, " erase(s), free ", free_before,
           " -> ", journal.free_cells(), crlf);
@@ -699,6 +700,9 @@ void tp_panic() {
     // holds nothing: the point is that the FAILING program can still
     // write, not that it found room by luck.
     (void)journal.save<PanicRecord>(id_panic, PanicRecord{0, 0, 0});
+    // A value this letter writes itself, so the next boot judges a known
+    // pattern and not whichever an earlier letter happened to leave.
+    (void)put(id_bytes, 20, panic_seed);   // judged on the next boot
     token.free_before = journal.free_cells();
     print(serial, "  reserve ", journal.reserve_intact() ? "intact" : "SPENT",
           ", ", token.free_before, " free cells; panicking now", crlf);
@@ -765,7 +769,7 @@ void tp_resume() {
                   journal.reserve_intact());
 
     bench.verdict("the values written before the panic are all still there",
-                  holds(id_bytes, 20, 0xC9) || holds(id_bytes, 20, 0x31));
+                  holds(id_bytes, 20, panic_seed));
     bench.verdict("the token crossed the reset intact",
                   token.magic == token_magic && token.canary == token_canary);
 
@@ -784,8 +788,11 @@ void tv_verify() {
 
     bench.verdict("the journal still mounts", r.mounted());
     bench.verdict("and nothing is torn", r.torn == 0u);
-    bench.verdict("the byte string letter b or e wrote is still readable",
-                  holds(id_bytes, 20, 0x31) || holds(id_bytes, 20, 0xC9));
+    // Whichever of the three letters that write it ran last: b (0x31), e
+    // (0xC9) or p (panic_seed).
+    bench.verdict("the byte string letter b, e or p wrote is still readable",
+                  holds(id_bytes, 20, 0x31) || holds(id_bytes, 20, 0xC9) ||
+                      holds(id_bytes, 20, panic_seed));
     bench.verdict("the typed value is field for field what it was", [] {
         const std::optional<Calibration> c = journal.load<Calibration>(id_cal);
         return c && c->offset == calibration.offset &&

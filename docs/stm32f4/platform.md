@@ -289,7 +289,7 @@ int main() {
 
 ## Bench findings
 
-`test_stm32f4_rubato`, 37 verdicts on the Nucleo-F446RE, the preemptive
+`test_stm32f4_rubato`, 36 verdicts on the Nucleo-F446RE, the preemptive
 kernel on `Stm32f4RubatoPlatform` with the scheduler in thread mode;
 CYCCNT the ruler at 180 MHz, TIM9's compare the interrupt the road-1
 letters land, nothing wired and nothing lit:
@@ -349,7 +349,12 @@ letters land, nothing wired and nothing lit:
 - **The FPU across a preemption** (letter g): Low's float series
   interrupted at a mark, High's computed inside, the handler computing
   a float too: every sum bit-exact against the same code run without
-  preemption, the lazy context save proved by the values.
+  preemption, the lazy context save proved by the values. The mark arms
+  TIM9's edge with register stores alone (the timer left counting), so
+  no call stands in the loop and the series' accumulators sit in s0 to
+  s15, the registers the lazy save covers (read in the release
+  listing); the letter requires that the edge, and High's dispatch,
+  landed inside the mark's spin.
 - **The stack** (letter h): 712 bytes of high-water for the suite's
   deepest chain, the deepest sampled stack pointer at 568 bytes in a
   dispatch and 512 in the interrupt, the mark within the 350 bytes the

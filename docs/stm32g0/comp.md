@@ -45,7 +45,7 @@ RM0444 Rev 6 ch. 18, with the EXTI line table
 **no item touching the comparators**. Driver: `stm32g0/comp.hpp`; the
 per-part presence and the EXTI line numbers come from
 `stm32g0/device_tables.hpp` (the reserve: the table of what each part has, read off the device header). Bench suite:
-`test_stm32_analog` letters i (15 verdicts), m (7 - the analog
+`test_stm32_analog` letters i (15 verdicts), m (6 - the analog
 questions) and n (8 - the other two comparators, the output on a pad,
 the blanking sources), shared with the ADC, the DAC and the reference
 buffer; a letter is one command key of the suite's console and the group of verdicts it runs.
@@ -182,8 +182,8 @@ MOE for its OCREF to reach the comparator.
 input (18.3.5), so one precharged node is compared against two
 thresholds at once - COMP1 at 3/4 VREFINT and COMP2 at 1/4 - and both
 comparators say "above" together and "below" together. The **INSIDE**
-state is DECLINED in print: it needs the node held between the two
-thresholds, and no source inside this chip can do that.
+state is skipped, its reason on a SKIP line: it needs the node held
+between the two thresholds, and no source inside this chip can do that.
 
 **WINOUT DOES NOTHING THIS BENCH CAN SEE, and that is recorded rather
 than explained.** 18.6.1 says COMP1_CSR.WINOUT selects "COMP1_VALUE XOR

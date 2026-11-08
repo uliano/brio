@@ -96,6 +96,8 @@
 
 #include <stdint.h>
 
+#include <atomic>
+
 #include <optional>
 
 #include "stm32g0/clock.hpp"
@@ -112,6 +114,7 @@
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 #include "rt/selftest.hpp"
 
@@ -155,6 +158,7 @@ struct Token {
     uint8_t lsi_ready;       ///< leg 7: LSIRDY at the call
     uint32_t returned_cycles;  ///< legs 7..10: from the call to its return
     uint32_t elapsed_cycles;   ///< legs 7..11: from the call to the reset
+    uint8_t quiet;             ///< leg 2's sit-still: 1 while it runs, 2 once it survived
 };
 [[gnu::section(".noinit")]] inline Token token;
 
@@ -186,12 +190,24 @@ volatile uint32_t ewi_cycles = 0;
 volatile uint16_t ewi_count = 0;
 
 // ---------------------------------------------------------------------------
-// A cycle-resolution stopwatch: the kernel ticker's own cycles(), the tick count
-// and the counter's position composed right across the reload
-// (util/cycle_count.hpp).
+// The ruler: a cycle-resolution stopwatch, the kernel ticker's own cycles() -
+// the tick count and the counter's position composed right across the
+// reload (util/cycle_count.hpp). Interrupts must be enabled while it is
+// polled.
 // ---------------------------------------------------------------------------
-uint32_t cycles_now() {
-    return Ticker::cycles();
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
+
+/// Every plain store made to the token so far reaches memory here. A leg
+/// ends in a loop that never returns, and to the compiler a store that
+/// nothing reads before such a loop is dead - the next boot, which does
+/// read it, would find the old value. A compiler fence costs nothing at
+/// run time.
+[[gnu::always_inline]] inline void token_flush() {
+    std::atomic_signal_fence(std::memory_order_seq_cst);
 }
 
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000UL;
@@ -200,15 +216,10 @@ uint32_t cycles_to_us(uint32_t cycles) { return cycles / cycles_per_us; }
 /// Wait for the console to be physically empty. Called before anything
 /// that reboots the board: a ring that still holds bytes loses them, and
 /// a suite that loses its own last line is unreadable.
+/// A wedged console (false after 200 ms) loses only the line before the
+/// reset or the measurement, so the answer is dropped.
 void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    // The ring being empty only means the last byte reached the shifter.
-    // One character at 115200 is 87 us; two milliseconds is comfortably
-    // more, and measuring it beats a spin count nobody can check.
-    const uint32_t t0 = cycles_now();
-    while (cycles_now() - t0 < SysClock::hz / 500u) {
-    }
+    (void)brio::console_drain<Ruler, Serial>();
 }
 
 void print_flags(uint32_t f) {
@@ -364,13 +375,13 @@ void tb_critical() {
     // as a failure of the hook rather than of the test.
     console_drain();
     const uint32_t t1 = Ticker::ticks();
-    const uint32_t c1 = cycles_now();
+    const uint32_t c1 = Ruler::now();
     uint8_t calls = 0;
     while (Ticker::ticks() == t1 && calls < 20u) {
         Stm32g0Platform<>::idle();
         ++calls;
     }
-    const uint32_t idle_us = cycles_to_us(cycles_now() - c1);
+    const uint32_t idle_us = cycles_to_us(Ruler::now() - c1);
     print(serial, "  with the console silent, ", calls,
           " idle() call(s) covered the ", idle_us, " us to the next tick",
           crlf);
@@ -849,27 +860,35 @@ void tc_ticker() {
 // =============================================================================
 void td_delay() {
     // THE BRACKET'S OWN ZERO, measured first: two back-to-back
-    // cycles_now() readings are not free, and charging their cost to
+    // Ruler::now() readings are not free, and charging their cost to
     // the delay would put the whole bracket inside the measurement.
     uint32_t zero_min = 0xFFFFFFFFu;
     uint32_t zero_max = 0;
     for (uint8_t k = 0; k < 8; ++k) {
-        const uint32_t t0 = cycles_now();
-        const uint32_t b = cycles_to_us(cycles_now() - t0);
+        const uint32_t t0 = Ruler::now();
+        const uint32_t b = cycles_to_us(Ruler::now() - t0);
         if (b < zero_min) zero_min = b;
         if (b > zero_max) zero_max = b;
     }
     print(serial, "  empty measurement bracket: ", zero_min, "..", zero_max,
           " us of its own", crlf);
 
+    // Measured first and printed after, behind a drain: a console line
+    // going out during a wait puts its transmit interrupt in the figure.
     static const uint32_t spans[] = {5, 30, 100, 500, 900};
+    constexpr uint8_t span_count = sizeof(spans) / sizeof(spans[0]);
+    uint32_t took[span_count] = {};
+    bool served[span_count] = {};
+    console_drain();
+    for (uint8_t i = 0; i < span_count; ++i) {
+        const uint32_t t0 = Ruler::now();
+        served[i] = delay_us(clock, spans[i]);
+        took[i] = cycles_to_us(Ruler::now() - t0);
+    }
     bool all_exact = true;
-    for (uint8_t i = 0; i < sizeof(spans) / sizeof(spans[0]); ++i) {
-        const uint32_t t0 = cycles_now();
-        const bool ok = delay_us(clock, spans[i]);
-        const uint32_t took = cycles_to_us(cycles_now() - t0);
-        print(serial, "  delay_us(", spans[i], ") -> ", took, " us measured", crlf);
-        if (!ok || took < spans[i] || took > spans[i] + zero_max + 10u) {
+    for (uint8_t i = 0; i < span_count; ++i) {
+        print(serial, "  delay_us(", spans[i], ") -> ", took[i], " us measured", crlf);
+        if (!served[i] || took[i] < spans[i] || took[i] > spans[i] + zero_max + 10u) {
             all_exact = false;
         }
     }
@@ -883,9 +902,9 @@ void td_delay() {
     uint32_t min_took = 0xFFFFFFFFu;
     uint32_t max_took = 0;
     for (uint16_t k = 0; k < 200; ++k) {
-        const uint32_t t0 = cycles_now();
+        const uint32_t t0 = Ruler::now();
         (void)delay_us(clock, 50u);
-        const uint32_t took = cycles_to_us(cycles_now() - t0);
+        const uint32_t took = cycles_to_us(Ruler::now() - t0);
         if (took < min_took) min_took = took;
         if (took > max_took) max_took = took;
     }
@@ -916,9 +935,9 @@ void td_delay() {
     uint32_t refusal_us = 0xFFFFFFFFu;
     bool refused = true;
     for (uint8_t k = 0; k < 4; ++k) {
-        const uint32_t t0r = cycles_now();
+        const uint32_t t0r = Ruler::now();
         refused = refused && !delay_us(clock, 1000u);
-        const uint32_t r = cycles_to_us(cycles_now() - t0r);
+        const uint32_t r = cycles_to_us(Ruler::now() - t0r);
         if (r < refusal_us) refusal_us = r;
     }
     const bool served_999 = delay_us(clock, 999u);
@@ -1000,32 +1019,37 @@ void te_iwdg() {
                       (sr_locked & IWDG_SR_PVU_Msk) == 0u);
 
     // ---- one keyed write, timed from both ends ---------------------------
+    // RVU clears only when the update completes in the watchdog's own
+    // domain, which with the watchdog stopped it never does (the finding
+    // below): after one run of this letter the bit stands until a reset,
+    // and a later run cannot see the store raise it. So it is read first.
+    const bool rvu_before = (IWDG->SR & IWDG_SR_RVU_Msk) != 0u;
     Iwdg::unlock();
-    const uint32_t c0 = cycles_now();
     IWDG->RLR = 0x0ABCu;
-    uint32_t set_us = 0;
-    while ((IWDG->SR & IWDG_SR_RVU_Msk) == 0u) {
-        set_us = cycles_to_us(cycles_now() - c0);
-        if (set_us > 2000u) {
-            break;
-        }
-    }
+    const std::optional<uint32_t> set_cycles =
+        brio::cycles_until<Ruler>([] { return (IWDG->SR & IWDG_SR_RVU_Msk) != 0u; }, 2'000);
+    const uint32_t set_us = set_cycles ? cycles_to_us(*set_cycles) : 2'000u;
     const bool bit_appeared = (IWDG->SR & IWDG_SR_RVU_Msk) != 0u;
-    const uint32_t c1 = cycles_now();
+    const uint32_t c1 = Ruler::now();
     const bool completed = Iwdg::sync(IWDG_SR_RVU_Msk);
-    const uint32_t waited_ms = cycles_to_us(cycles_now() - c1) / 1000u;
+    const uint32_t waited_ms = cycles_to_us(Ruler::now() - c1) / 1000u;
 
     print(serial, "  a keyed RLR write raised RVU after ", set_us,
           " us and it ", completed ? "cleared" : "was STILL STANDING",
           " after ", waited_ms, " ms of bounded wait", crlf);
-    bench.verdict("a keyed write raises its own update bit in IWDG_SR",
-                  bit_appeared);
-    // MEASURED, and the opposite of what a domain crossing invites one
-    // to expect: the bit is raised BY THE STORE, so the read right after
-    // it already sees the bit. Only the CLEARING waits for a clock.
-    bench.verdict("and it raises it at once - the read right after the store "
-                  "already sees it, so only the CLEARING waits for a clock",
-                  set_us <= 2u);
+    if (rvu_before) {
+        bench.skip("RVU already stood before the keyed write (an earlier update this boot "
+                   "never completed): the store's own rise cannot be seen until a reset");
+    } else {
+        bench.verdict("a keyed write raises its own update bit in IWDG_SR",
+                      bit_appeared);
+        // MEASURED, and the opposite of what a domain crossing invites one
+        // to expect: the bit is raised BY THE STORE, so the read right after
+        // it already sees the bit. Only the CLEARING waits for a clock.
+        bench.verdict("and it raises it at once - the read right after the store "
+                      "already sees it, so only the CLEARING waits for a clock",
+                      set_us <= 2u);
+    }
     // THE FINDING.
     bench.verdict("the update NEVER completes while the watchdog is stopped: "
                   "LSI running is not enough, because the clock reaches the "
@@ -1113,9 +1137,7 @@ void tf_wwdg() {
     // WDGA clear throughout.
     Wwdg::refresh(0x7F);
     const uint8_t c_start = Wwdg::counter();
-    const uint32_t w0 = cycles_now();
-    while (cycles_now() - w0 < SysClock::hz / 250u) {   // 4 ms
-    }
+    brio::spin_us<Ruler>(4'000);
     const uint8_t c_later = Wwdg::counter();
     print(serial, "  T went ", hex(c_start), " -> ", hex(c_later),
           " in 4 ms with WDGA CLEAR", crlf);
@@ -1129,15 +1151,14 @@ void tf_wwdg() {
         (void)Wwdg::configure(WwdgConfig{.prescaler = p, .window = 0x7F});
         Wwdg::clear_flag();
         Wwdg::refresh(0x7F);
-        const uint32_t c0 = cycles_now();
-        while (!Wwdg::flag()) {
-            if (cycles_now() - c0 > SysClock::hz) {   // one second: give up
-                return 0;
-            }
+        // One second: give up (the flag is due within a few milliseconds).
+        const std::optional<uint32_t> took =
+            brio::cycles_until<Ruler>([] { return Wwdg::flag(); }, 1'000'000);
+        if (!took) {
+            return 0;
         }
-        const uint32_t took = cycles_now() - c0;
         Wwdg::clear_flag();
-        return cycles_to_us(took);
+        return cycles_to_us(*took);
     };
     const uint32_t ewif8 = time_ewif(WwdgPrescaler::div8);
     const uint32_t ewif64 = time_ewif(WwdgPrescaler::div64);
@@ -1165,10 +1186,8 @@ void tf_wwdg() {
     // discipline to every write-one-to-clear register in the other two
     // strata. Writing one must NOT clear it.
     Wwdg::refresh(0x41);   // one step from the warning
-    const uint32_t c1 = cycles_now();
-    while (!Wwdg::flag() && cycles_now() - c1 < SysClock::hz) {
-    }
-    const bool flag_up = Wwdg::flag();
+    // One step at most, under a millisecond; a second is the time-out.
+    const bool flag_up = brio::wait_until<Ruler>([] { return Wwdg::flag(); }, 1'000'000);
     WWDG->SR = WWDG_SR_EWIF;                 // writing ONE has no effect
     const bool survived_one = Wwdg::flag();
     Wwdg::clear_flag();                      // writing ZERO clears it
@@ -1191,9 +1210,9 @@ void tf_wwdg() {
                                      .window = 0x7F,
                                      .early_wakeup = true});
     Wwdg::refresh(0x7F);
-    const uint32_t c2 = cycles_now();
-    while (ewi_count == 0u && cycles_now() - c2 < SysClock::hz / 4u) {
-    }
+    // A window of 250 ms in which the handler must NOT run: the wait's
+    // running out is the expected outcome, so its answer is not acted on.
+    (void)brio::wait_until<Ruler>([] { return ewi_count != 0u; }, 250'000);
     const uint16_t fired = ewi_count;
     const bool flag_after = Wwdg::flag();
 
@@ -1217,9 +1236,9 @@ void tf_wwdg() {
     // sixth leg is where the hardware request itself is proven (with the
     // watchdog activated, on the reset it was going to cause anyway).
     Nvic::set_pending(Wwdg::irq());
-    const uint32_t c3 = cycles_now();
-    while (ewi_count == 0u && cycles_now() - c3 < SysClock::hz / 100u) {
-    }
+    // The pended line is taken at once; 10 ms is the time-out, and the
+    // verdict below reads ewi_count itself.
+    (void)brio::wait_until<Ruler>([] { return ewi_count != 0u; }, 10'000);
     bench.verdict("pending the line by hand runs the bound handler",
                   ewi_count != 0u);
     bench.verdict("and the ISR body acknowledged the flag (EWIF is down)",
@@ -1373,6 +1392,7 @@ void tn_priorities() {
 // =============================================================================
 
 void bank(uint8_t leg) {
+    token.quiet = 0u;
     token.magic = token_magic;
     token.canary = token_canary;
     token.leg = leg;
@@ -1385,6 +1405,7 @@ void bank(uint8_t leg) {
 [[noreturn]] void await_reset(const char* what) {
     print(serial, "  ", what, crlf);
     console_drain();
+    token_flush();
     for (;;) {
     }
 }
@@ -1431,6 +1452,7 @@ void bank(uint8_t leg) {
     // one gcc is entitled to sink out of the loop - which is to say,
     // never to perform, and the leg then banks a beautiful zero.
     volatile uint32_t* const elapsed = &token.elapsed_ms;
+    token_flush();   // armed_ok above, which the next boot judges
     const uint32_t t0 = Ticker::ticks();
     for (;;) {
         *elapsed = Ticker::ticks() - t0;
@@ -1583,15 +1605,27 @@ void ti_resume() {
         // half were the whole truth this board would now be rebooting
         // every 955 ms with nothing refreshing anything, which is what
         // the widespread STM32 lore expects. It is not.
-        const uint32_t quiet0 = Ticker::ticks();
-        while (Ticker::ticks() - quiet0 < 1500u) {
+        //
+        // The sit-still is STAGED in the token: a watchdog still running
+        // would reset the board inside it, and the boot after would come
+        // back here with the stage still at 1 - which is the failure this
+        // verdict exists to see, judged there instead of re-running.
+        bool bitten = token.quiet == 1u;
+        if (!bitten) {
+            volatile uint8_t* const stage = &token.quiet;
+            *stage = 1u;
+            brio::spin_us<Ruler>(1'500'000);
+            *stage = 2u;
+            print(serial, "  1500 ms have passed with NOTHING refreshing the "
+                  "watchdog, and this line is being printed", crlf);
+        } else {
+            print(serial, "  the board was reset INSIDE the 1500 ms sit-still", crlf);
         }
-        print(serial, "  1500 ms have passed with NOTHING refreshing the "
-              "watchdog, and this line is being printed", crlf);
+        token.quiet = 0u;
         bench.verdict("THE RESET STOPPED IT: 28.3.1's 'except upon a reset' "
                       "is literal on this family - a boot after an IWDG reset "
                       "outlives its own time-out with nobody feeding it",
-                      Ticker::ticks() - quiet0 >= 1500u);
+                      !bitten);
 
         // THE ACCUMULATION QUESTION, ANSWERED. This leg did not clear
         // the flags, so leg 1's SFTRSTF must still be standing beside
@@ -1697,8 +1731,9 @@ constexpr uint32_t fallback_cycles = 2u * SysClock::hz;
 /// boot.
 [[noreturn]] void stamp_until_reset(uint32_t t0) {
     volatile uint32_t* const elapsed = &token.elapsed_cycles;
+    token_flush();   // what the leg banked before the call, judged by the next boot
     for (;;) {
-        const uint32_t e = cycles_now() - t0;
+        const uint32_t e = Ruler::now() - t0;
         *elapsed = e;
         if (e > fallback_cycles) {
             token.fell_back = 1;
@@ -1740,12 +1775,12 @@ void bank_j(uint8_t leg) {
     Reset::clear_flags();
     token.flags_before = 0;
     token.lsi_ready = Rcc::lsi_ready() ? 1u : 0u;
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     token.armed_ok = Iwdg::arm(IwdgConfig{.prescaler = IwdgPrescaler::div4,
                                           .reload = 7,
                                           .window = 0x0FFF})
                          ? 1u : 0u;
-    token.returned_cycles = cycles_now() - t0;
+    token.returned_cycles = Ruler::now() - t0;
     token.returned = 1;
     stamp_until_reset(t0);
 }
@@ -1764,9 +1799,9 @@ void bank_j(uint8_t leg) {
                                           .reload = 0x0FFF,
                                           .window = 0x0FFF})
                          ? 1u : 0u;
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     Iwdg::force_reset();
-    token.returned_cycles = cycles_now() - t0;
+    token.returned_cycles = Ruler::now() - t0;
     token.returned = 1;
     stamp_until_reset(t0);
 }
@@ -1779,9 +1814,9 @@ void bank_j(uint8_t leg) {
     console_drain();
     Reset::clear_flags();
     token.flags_before = 0;
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     Iwdg::force_reset();
-    token.returned_cycles = cycles_now() - t0;
+    token.returned_cycles = Ruler::now() - t0;
     token.returned = 1;
     stamp_until_reset(t0);
 }
@@ -1846,7 +1881,7 @@ void until_ms(uint32_t t0, uint32_t ms) {
     t = Ticker::ticks();
     *refreshes = static_cast<uint8_t>(*refreshes + 1u);
     until_ms(t, 20u);
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     Iwdg::refresh();
     token.returned = 1;
     stamp_until_reset(t0);
@@ -1861,7 +1896,7 @@ void until_ms(uint32_t t0, uint32_t ms) {
     Reset::clear_flags();
     token.flags_before = 0;
     Wwdg::bus_clock(true);   // the write lands nowhere with the gate shut
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     Wwdg::force_reset();
     stamp_until_reset(t0);
 }
@@ -2083,7 +2118,7 @@ extern "C" void TIM14_IRQHandler() {
 extern "C" void WWDG_IRQHandler() {
     const uint8_t t = brio::Wwdg::counter();
     if (brio::Wwdg::isr()) {
-        ewi_cycles = cycles_now();
+        ewi_cycles = Ruler::now();
         ewi_count = static_cast<uint16_t>(ewi_count + 1);
         if (token.magic == token_magic && token.leg == 6) {
             token.ewi_seen = 1;

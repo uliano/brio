@@ -92,6 +92,7 @@
 #include "stm32g0/tim.hpp"
 #include "stm32g0/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
@@ -123,7 +124,7 @@ using RxPin = Pin<'C', 4>;
 using TxPin = Pin<'C', 5>;
 constexpr uint8_t tx_exti_line = 5;   // an EXTI line's NUMBER IS the pin's (PC5)
 
-using Stopwatch = Tim<2>;             // 32 bits at 64 MHz, free running
+using FreeTimer = Tim<2>;             // 32 bits at 64 MHz, free running
 using Stamper = Tim<3>;               // the FDCAN's one external timestamp source
 
 // The no-CPU edge counter: a DMAMUX request generator on the TX pad's
@@ -157,29 +158,30 @@ volatile uint32_t tim17_hits = 0;
 volatile uint32_t rtc_wakes = 0;
 
 // ---------------------------------------------------------------------------
-// The stopwatch and the backstop
+// The ruler and the backstop
 // ---------------------------------------------------------------------------
 
-uint32_t now_ticks() { return Stopwatch::count(); }
+/// The suite's ruler (util/test_wait.hpp's waits run on it): TIM2, free
+/// running at TIMPCLK = 64 MHz, started in main() before the menu. Not
+/// the kernel ticker's cycles(): a timer read is one load, it counts
+/// with interrupts masked, and it keeps counting where letter k pauses
+/// the ticker around its Stop (a Stop stops TIM2 too, and no wait here
+/// spans one).
+struct Ruler {
+    static uint32_t now() { return FreeTimer::count(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
+
+uint32_t now_ticks() { return Ruler::now(); }
 uint32_t since(uint32_t t0) { return now_ticks() - t0; }
 uint32_t us_of(uint32_t ticks) { return ticks / (SysClock::hz / 1'000'000u); }
 
-void spin_cycles(uint32_t cycles) {
-    const uint32_t t0 = now_ticks();
-    while (since(t0) < cycles) {
-    }
-}
-void spin_us(uint32_t us) { spin_cycles(us * (SysClock::hz / 1'000'000u)); }
-
-/// Wait for the console's own transmit ring to empty, plus a character
-/// time. Letter k needs it: the FDCAN's power-down window is a few
-/// hundred microseconds and the console is still emitting the previous
-/// verdict lines when it opens.
-void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    spin_us(200);
-}
+/// The console out of the shifter before letter k's power-down legs,
+/// whose window is a few hundred microseconds. The answer is dropped: a
+/// wedged console only lengthens the leg, and the verdicts there are
+/// lower bounds a longer leg still meets.
+void console_drain() { (void)brio::console_drain<Ruler, Serial>(); }
 
 void feed() { Iwdg::refresh(); }
 
@@ -248,11 +250,9 @@ bool round_trip(const FdcanFrame& in, FdcanFrame& out, uint8_t fifo = 0,
     if (!C::tx_put(in)) {
         return false;
     }
-    const uint32_t t0 = now_ticks();
-    while (C::rx_available(fifo) == 0u) {
-        if (us_of(since(t0)) > timeout_us) {
-            return false;
-        }
+    if (!brio::wait_until<Ruler>([fifo] { return C::rx_available(fifo) != 0u; },
+                                 timeout_us)) {
+        return false;
     }
     return C::rx_read(fifo, out);
 }
@@ -323,7 +323,7 @@ uint32_t edges_over(uint32_t us) {
     if (!edge_counter_arm()) {
         return 0;
     }
-    spin_us(us);
+    brio::spin_us<Ruler>(us);
     const uint32_t n = edge_counter_read();
     edge_counter_stop();
     return n;
@@ -504,13 +504,13 @@ void ta_subsystem() {
             f.length = 1;
             f.data[0] = i;
             (void)Can1::tx_put(f);
-            spin_us(2000);
+            brio::spin_us<Ruler>(2000);
         }
         FdcanFrame hp{};
         hp.id = 0x201;
         hp.length = 1;
         (void)Can1::tx_put(hp);
-        spin_us(3000);
+        brio::spin_us<Ruler>(3000);
     }
     const uint32_t before[8] = {Can1::regs().HPMS,  Can1::regs().RXF0S,
                                 Can1::regs().RXF1S, Can1::regs().TXFQS,
@@ -682,10 +682,10 @@ void ta_subsystem() {
 template <typename P>
 bool pad_is_free(const char* name) {
     P::input(PinPull::up);
-    spin_us(200);
+    brio::spin_us<Ruler>(200);
     const bool high = P::read();
     P::input(PinPull::down);
-    spin_us(200);
+    brio::spin_us<Ruler>(200);
     const bool low = !P::read();
     P::analog();
     print(serial, "  ", name, ": pull-up reads ", high ? "1" : "0",
@@ -936,7 +936,7 @@ void tc_classic() {
         in.data[2] = 0xBE;
         in.data[3] = 0xEF;
         const auto slot = Can1::tx_put(in);
-        spin_us(3000);
+        brio::spin_us<Ruler>(3000);
         const uint32_t rxf0s = Can1::regs().RXF0S;
         const uint8_t gi = Can1::rx_get_index(0);
         const uint32_t r0 = Can1::ram_word(Can1::rx_fifo0_start + gi * 18u);
@@ -977,13 +977,13 @@ void tc_classic() {
         (void)Can1::tx_buffer_interrupts(0x0);
         Can1::clear_flags(FdcanFlag::all);
         (void)Can1::tx_put(in);
-        spin_us(3000);
+        brio::spin_us<Ruler>(3000);
         const uint32_t no_tie = Can1::flags();
         drain();
         (void)Can1::tx_buffer_interrupts(0x7);
         Can1::clear_flags(FdcanFlag::all);
         (void)Can1::tx_put(in);
-        spin_us(3000);
+        brio::spin_us<Ruler>(3000);
         const uint32_t with_tie = Can1::flags();
         drain();
         print(serial, "  the same transmission with TXBTIE clear gives IR ",
@@ -1011,7 +1011,7 @@ void tc_classic() {
         in.data[0] = 1;
         in.data[1] = 2;
         (void)Can1::tx_put(in);
-        spin_us(3000);
+        brio::spin_us<Ruler>(3000);
         FdcanTxEvent ev{};
         const uint8_t avail = Can1::events_available();
         const bool got = Can1::event_read(ev);
@@ -1056,15 +1056,11 @@ void tc_classic() {
 bool frame_on_pad(uint32_t& span_cycles, uint32_t& transitions,
                   uint32_t patience_us = 5000) {
     const uint32_t deadline = patience_us * (SysClock::hz / 1'000'000u);
-    const uint32_t t0 = now_ticks();
-    bool level = TxPin::read();
     // Wait for SOF: the first dominant bit.
-    while (level) {
-        if (since(t0) > deadline) {
-            return false;
-        }
-        level = TxPin::read();
+    if (!brio::wait_until<Ruler>([] { return !TxPin::read(); }, patience_us)) {
+        return false;
     }
+    bool level = false;
     const uint32_t start = now_ticks();
     uint32_t last = start;
     uint32_t count = 1;
@@ -1155,7 +1151,7 @@ void td_external() {
             FdcanFrame f = in;
             f.id = 0x600u + i;
             (void)Can1::tx_put(f);
-            spin_us(2000);
+            brio::spin_us<Ruler>(2000);
             FdcanFrame drop{};
             (void)Can1::rx_read(0, drop);
         }
@@ -1190,16 +1186,13 @@ uint8_t where_does_it_land(uint32_t id, bool extended = false) {
     if (!Can1::tx_put(f)) {
         return 0xFE;
     }
-    const uint32_t t0 = now_ticks();
-    while (us_of(since(t0)) < 4000u) {
-        if (Can1::rx_available(0) != 0u) {
-            return 0;
-        }
-        if (Can1::rx_available(1) != 0u) {
-            return 1;
-        }
+    // A one-byte frame at 500 kbit/s lasts well under 200 us.
+    if (!brio::wait_until<Ruler>([] { return Can1::rx_available(0) != 0u ||
+                                             Can1::rx_available(1) != 0u; },
+                                 4000u)) {
+        return 0xFF;
     }
-    return 0xFF;
+    return Can1::rx_available(0) != 0u ? 0 : 1;
 }
 
 void te_filters() {
@@ -1323,7 +1316,7 @@ void te_filters() {
     rf.remote = true;
     Can1::clear_flags(FdcanFlag::all);
     (void)Can1::tx_put(rf);
-    spin_us(3000);
+    brio::spin_us<Ruler>(3000);
     const uint8_t after_reject = Can1::rx_available(0);
     const uint32_t tc = Can1::flags();
     drain();
@@ -1422,7 +1415,7 @@ void tf_fifos() {
         f.length = 1;
         f.data[0] = static_cast<uint8_t>(0xB0u + i);
         (void)Can1::tx_put(f);
-        spin_us(2000);
+        brio::spin_us<Ruler>(2000);
         feed();
     }
     const uint8_t level = Can1::rx_available(0);
@@ -1460,7 +1453,7 @@ void tf_fifos() {
         f.length = 1;
         f.data[0] = static_cast<uint8_t>(0xC0u + i);
         (void)Can1::tx_put(f);
-        spin_us(2000);
+        brio::spin_us<Ruler>(2000);
         feed();
     }
     const uint8_t o_level = Can1::rx_available(0);
@@ -1498,7 +1491,7 @@ void tf_fifos() {
         g.length = 1;
         g.data[0] = static_cast<uint8_t>(0xD0u + i);
         (void)Can1::tx_put(g);
-        spin_us(2000);
+        brio::spin_us<Ruler>(2000);
         feed();
     }
     uint8_t safe[3] = {0, 0, 0};
@@ -1544,7 +1537,7 @@ void tf_fifos() {
     }
     const uint8_t free_before = Can1::tx_free();
     (void)Can1::tx_request(0x7);   // all three in ONE write
-    spin_us(6000);
+    brio::spin_us<Ruler>(6000);
     uint8_t order[3] = {0xFF, 0xFF, 0xFF};
     for (uint8_t i = 0; i < 3; ++i) {
         FdcanTxEvent e{};
@@ -1578,7 +1571,7 @@ void tf_fifos() {
     const uint8_t q_free = Can1::tx_free();
     const uint8_t q_get = Can1::tx_get_index();
     (void)Can1::tx_request(0x7);
-    spin_us(6000);
+    brio::spin_us<Ruler>(6000);
     uint8_t q_order[3] = {0xFF, 0xFF, 0xFF};
     for (uint8_t i = 0; i < 3; ++i) {
         FdcanTxEvent e{};
@@ -1615,7 +1608,7 @@ void tf_fifos() {
         Can1::clear_flags(FdcanFlag::all);
         (void)Can1::tx_request(0x3);
         (void)Can1::tx_cancel(0x2);   // cancel the SECOND, which cannot have started
-        spin_us(4000);
+        brio::spin_us<Ruler>(4000);
         const uint8_t occurred = Can1::tx_occurred();
         const uint8_t cancelled = Can1::tx_cancelled();
         const uint8_t pending = Can1::tx_pending();
@@ -1644,9 +1637,9 @@ void tf_fifos() {
         (void)Can1::tx_put_buffer(0, f);
         Can1::clear_flags(FdcanFlag::all);
         (void)Can1::tx_request(0x1);
-        spin_us(60);   // well inside a 220 us frame
+        brio::spin_us<Ruler>(60);   // well inside a 220 us frame
         (void)Can1::tx_cancel(0x1);
-        spin_us(4000);
+        brio::spin_us<Ruler>(4000);
         const uint8_t occurred = Can1::tx_occurred();
         const uint8_t cancelled = Can1::tx_cancelled();
         FdcanTxEvent e{};
@@ -1674,7 +1667,7 @@ void tf_fifos() {
             f.length = 1;
             f.marker = i;
             (void)Can1::tx_put(f);
-            spin_us(2000);
+            brio::spin_us<Ruler>(2000);
             FdcanFrame d{};
             (void)Can1::rx_read(0, d);   // keep the Rx FIFO clear, not the event one
             feed();
@@ -1711,7 +1704,7 @@ void tf_fifos() {
             (void)Can1::tx_put_buffer(0, f);
             (void)Can1::tx_put_buffer(1, f);
             (void)Can1::tx_request(0x3);
-            spin_us(6000);
+            brio::spin_us<Ruler>(6000);
             FdcanTxEvent a{};
             FdcanTxEvent b{};
             const bool ga = Can1::event_read(a);
@@ -1979,7 +1972,7 @@ void th_time() {
         Can1::reset_timestamp();
         const uint32_t t0 = now_ticks();
         const uint16_t a = Can1::timestamp_value();
-        spin_us(20000);
+        brio::spin_us<Ruler>(20000);
         const uint16_t b = Can1::timestamp_value();
         const uint32_t elapsed = us_of(since(t0));
         const uint32_t ticks = static_cast<uint16_t>(b - a);
@@ -2002,7 +1995,7 @@ void th_time() {
         (void)Can1::start();
         Can1::reset_timestamp();
         const uint16_t a = Can1::timestamp_value();
-        spin_us(20000);
+        brio::spin_us<Ruler>(20000);
         const uint16_t b = Can1::timestamp_value();
         const uint32_t ticks = static_cast<uint16_t>(b - a);
         print(serial, "  TCP = 16: ", ticks, " counts in the same 20 ms, "
@@ -2026,7 +2019,7 @@ void th_time() {
         (void)Can1::tx_put_buffer(0, f);
         (void)Can1::tx_put_buffer(1, f);
         (void)Can1::tx_request(0x3);
-        spin_us(6000);
+        brio::spin_us<Ruler>(6000);
         FdcanFrame a{};
         FdcanFrame b{};
         const bool ga = Can1::rx_read(0, a);
@@ -2055,14 +2048,13 @@ void th_time() {
         // is impossible (a write RESETS it), so this leg is timed.
         Can1::reset_timestamp();
         const uint32_t t0 = now_ticks();
-        bool wrapped = false;
-        while (us_of(since(t0)) < 2500000u) {
-            feed();
-            if ((Can1::flags() & FdcanFlag::timestamp_wrap) != 0u) {
-                wrapped = true;
-                break;
-            }
-        }
+        // 2.5 s against the 2.1 s the arithmetic gives, the backstop fed.
+        const bool wrapped = brio::wait_until<Ruler>(
+            [] {
+                feed();
+                return (Can1::flags() & FdcanFlag::timestamp_wrap) != 0u;
+            },
+            2'500'000u);
         const uint32_t took = us_of(since(t0));
         print(serial, "  TSW after ", took, " us, against 65536 x 16 bit times "
               "= 2097 ms at 500 kbit/s", crlf);
@@ -2091,7 +2083,7 @@ void th_time() {
         Can1::clear_flags(FdcanFlag::all);
         const uint16_t at_request = static_cast<uint16_t>(Stamper::count());
         (void)Can1::tx_put(f);
-        spin_us(3000);
+        brio::spin_us<Ruler>(3000);
         FdcanFrame got{};
         const bool ok = Can1::rx_read(0, got);
         const uint16_t after = static_cast<uint16_t>(Stamper::count());
@@ -2126,13 +2118,9 @@ void th_time() {
         Can1::clear_flags(FdcanFlag::all);
         Can1::reset_timeout();
         const uint32_t t0 = now_ticks();
-        bool fired = false;
-        while (us_of(since(t0)) < 20000u) {
-            if ((Can1::flags() & FdcanFlag::timeout) != 0u) {
-                fired = true;
-                break;
-            }
-        }
+        // Ten times the 2 ms the counter is set to.
+        const bool fired = brio::wait_until<Ruler>(
+            [] { return (Can1::flags() & FdcanFlag::timeout) != 0u; }, 20000u);
         const uint32_t took = us_of(since(t0));
         print(serial, "  continuous timeout, TOP = 1000 at TCP = 1: TOO after ",
               took, " us against 1000 bit times = 2000 us", crlf);
@@ -2150,7 +2138,7 @@ void th_time() {
         (void)Can1::start();
         drain();
         Can1::clear_flags(FdcanFlag::all);
-        spin_us(5000);
+        brio::spin_us<Ruler>(5000);
         const bool quiet = (Can1::flags() & FdcanFlag::timeout) == 0u;
         const uint16_t preset = Can1::timeout_value();
         FdcanFrame f{};
@@ -2158,13 +2146,9 @@ void th_time() {
         f.length = 0;
         (void)Can1::tx_put(f);
         const uint32_t t0 = now_ticks();
-        bool fired = false;
-        while (us_of(since(t0)) < 20000u) {
-            if ((Can1::flags() & FdcanFlag::timeout) != 0u) {
-                fired = true;
-                break;
-            }
-        }
+        // Ten times the 2 ms the counter is set to.
+        const bool fired = brio::wait_until<Ruler>(
+            [] { return (Can1::flags() & FdcanFlag::timeout) != 0u; }, 20000u);
         const uint32_t took = us_of(since(t0));
         print(serial, "  FIFO-controlled timeout: an EMPTY FIFO holds the "
               "counter at ", preset, " (no TOO in 5 ms: ", quiet ? "yes" : "no",
@@ -2187,6 +2171,12 @@ void th_time() {
 // ---------------------------------------------------------------------------
 
 void ti_errors() {
+    // The block from its reset: this letter ends in restricted operation
+    // with a request still pending (TXBRP 0x1), and a second run in the
+    // same boot found it sent the moment normal mode began - the ladder
+    // below then started at TEC 136 with EW and EP already raised and
+    // cleared (nine runs of ten by name after a first one).
+    Can1::reset();
     edge_counter_setup();
     TxPad::claim_tx();
     RxPad::claim_rx(PinPull::up);   // a recessive "bus", and nothing on it
@@ -2197,7 +2187,7 @@ void ti_errors() {
     // take part in bus activities (36.3.4), which at 500 kbit/s is 22 us:
     // a status read taken straight after start() finds SYNCHRONIZING.
     const auto at_once = Can1::status();
-    spin_us(500);
+    brio::spin_us<Ruler>(500);
     const auto idle = Can1::status();
     print(serial, "  normal mode on a recessive line: PSR.ACT ",
           static_cast<uint8_t>(at_once.activity), " the instant INIT is "
@@ -2304,14 +2294,13 @@ void ti_errors() {
         Can1::clear_flags(FdcanFlag::all);
         const uint32_t r0 = now_ticks();
         (void)Can1::init_mode(false);
-        bool recovered = false;
-        while (us_of(since(r0)) < 200000u) {
-            feed();
-            if (!Can1::status().bus_off) {
-                recovered = true;
-                break;
-            }
-        }
+        // A hundred times the 2.8 ms of 1408 recessive bits.
+        const bool recovered = brio::wait_until<Ruler>(
+            [] {
+                feed();
+                return !Can1::status().bus_off;
+            },
+            200000u);
         const uint32_t took = us_of(since(r0));
         const auto st = Can1::status();
         const auto ec = Can1::error_counters();
@@ -2347,7 +2336,7 @@ void ti_errors() {
         g.id = 0x321;
         g.length = 0;
         const auto put = Can1::tx_put(g);
-        spin_us(50000);
+        brio::spin_us<Ruler>(50000);
         const auto st = Can1::status();
         const auto ec = Can1::error_counters();
         const uint8_t pending = Can1::tx_pending();
@@ -2377,7 +2366,7 @@ void ti_errors() {
         g.id = 0x123;
         g.length = 0;
         (void)Can1::tx_put(g);
-        spin_us(20000);
+        brio::spin_us<Ruler>(20000);
         const auto ec1 = Can1::error_counters();
         const uint8_t pending = Can1::tx_pending();
         const uint8_t cancelled = Can1::tx_cancelled();
@@ -2415,7 +2404,7 @@ void ti_errors() {
         g.id = 0x123;
         g.length = 8;
         (void)Can1::tx_put(g);
-        spin_us(30000);
+        brio::spin_us<Ruler>(30000);
         const uint32_t edges = edge_counter_read();
         edge_counter_stop();
         const auto ec1 = Can1::error_counters();
@@ -2435,24 +2424,19 @@ void ti_errors() {
         // active error frames, or overload frames"; 36.4.6's own
         // description of the ASM bit says it "is able to transmit and
         // receive data and remote frames". Those cannot both be true,
-        // and the pad says which one is.
-        if (edges == 0u) {
-            bench.verdict("...AND 36.3.4 BEATS 36.4.6 ON WHAT ASM DOES: the "
-                          "two descriptions of restricted operation "
-                          "contradict each other - the functional section "
-                          "says it 'does not send data frames', the register "
-                          "description says it 'is able to transmit ... data "
-                          "and remote frames' - and NOT ONE EDGE left the pad "
-                          "through a whole DLC-8 request, so nothing is sent",
-                          pending != 0u || edges == 0u);
-        } else {
-            bench.verdict("...AND 36.4.6 BEATS 36.3.4 ON WHAT ASM DOES: the "
-                          "two descriptions contradict each other and the pad "
-                          "shows a frame, so a restricted node DOES transmit "
-                          "data frames and only withholds its error and "
-                          "overload flags",
-                          true);
-        }
+        // and the pad says which one is - a measurement printed, not a
+        // verdict: the manual gives no answer to judge it against, and
+        // nothing in the driver depends on which one holds.
+        print(serial, "  36.3.4 against 36.4.6 on what ASM does: ", edges,
+              edges == 0u ? " edges left the pad through a whole DLC-8 request "
+                            "(TXBRP "
+                          : " edges on the pad, a frame sent (TXBRP ",
+              hex(pending),
+              edges == 0u ? "), so 36.3.4 holds: nothing is sent"
+                          : "), so 36.4.6 holds: a restricted node transmits "
+                            "data frames and withholds only its error and "
+                            "overload flags",
+              crlf);
         // ASM cannot be combined with a loop-back. The config checker
         // refuses the pair; these are the two LIVE roads to it.
         (void)Can1::init_mode(true);
@@ -2488,7 +2472,7 @@ void ti_errors() {
         g.id = 0x123;
         g.length = 8;
         const auto put = Can1::tx_put(g);
-        spin_us(10000);
+        brio::spin_us<Ruler>(10000);
         const uint8_t pending = Can1::tx_pending();
         const uint32_t edges = edge_counter_read();
         edge_counter_stop();
@@ -2555,7 +2539,7 @@ void tj_interrupts() {
     f.data[0] = 0xA1;
     f.data[1] = 0xB2;
     (void)Can1::tx_put(f);
-    spin_us(5000);
+    brio::spin_us<Ruler>(5000);
     print(serial, "  one frame: line 0 fired ", line0_hits, " times serving ",
           hex(line0_mask), ", line 1 fired ", line1_hits, " times serving ",
           hex(line1_mask), crlf);
@@ -2574,7 +2558,7 @@ void tj_interrupts() {
         Can1::interrupt_lines(false, true);
         Can1::clear_flags(FdcanFlag::all);
         (void)Can1::tx_put(f);
-        spin_us(5000);
+        brio::spin_us<Ruler>(5000);
         const uint32_t pending = Can1::flags();
         print(serial, "  with EINT0 cleared: line 0 fired ", line0_hits,
               " times while IR still shows ", hex(pending), crlf);
@@ -2595,14 +2579,14 @@ void tj_interrupts() {
         Can1::clear_flags(FdcanFlag::all);
         (void)Can1::tx_put_buffer(1, f);
         (void)Can1::tx_request(0x2);
-        spin_us(5000);
+        brio::spin_us<Ruler>(5000);
         const uint32_t hits_b1 = line1_hits;
         drain();
         line1_hits = 0;
         Can1::clear_flags(FdcanFlag::all);
         (void)Can1::tx_put_buffer(0, f);
         (void)Can1::tx_request(0x1);
-        spin_us(5000);
+        brio::spin_us<Ruler>(5000);
         const uint32_t hits_b0 = line1_hits;
         print(serial, "  TXBTIE = buffer 0 only: buffer 1's transmission gave ",
               hits_b1, " interrupts, buffer 0's gave ", hits_b0, crlf);
@@ -2637,7 +2621,7 @@ void tj_interrupts() {
         b.data[0] = 0x22;
         (void)Can1::tx_put(a);
         (void)Can2::tx_put(b);
-        spin_us(6000);
+        brio::spin_us<Ruler>(6000);
 
         FdcanFrame got1{};
         FdcanFrame got2{};
@@ -2679,13 +2663,9 @@ void tk_power() {
     {
         Can1::power_down(true);
         const uint32_t t0 = now_ticks();
-        bool acked = false;
-        while (us_of(since(t0)) < 20000u) {
-            if (Can1::power_down_acked()) {
-                acked = true;
-                break;
-            }
-        }
+        // A DLC-8 frame is about 220 us of wire: 20 ms is any idle.
+        const bool acked = brio::wait_until<Ruler>(
+            [] { return Can1::power_down_acked(); }, 20000u);
         const uint32_t took = us_of(since(t0));
         const bool init_set = Can1::in_init();
         print(serial, "  CSR on an idle module: CSA after ", took, " us, INIT ",
@@ -2696,14 +2676,8 @@ void tk_power() {
                       acked && init_set);
 
         Can1::power_down(false);
-        const uint32_t t1 = now_ticks();
-        bool cleared = false;
-        while (us_of(since(t1)) < 20000u) {
-            if (!Can1::power_down_acked()) {
-                cleared = true;
-                break;
-            }
-        }
+        const bool cleared = brio::wait_until<Ruler>(
+            [] { return !Can1::power_down_acked(); }, 20000u);
         bench.verdict("...and clearing CSR clears CSA, leaving INIT standing "
                       "for the application to clear when it wants the bus back",
                       cleared && Can1::in_init());
@@ -2721,13 +2695,9 @@ void tk_power() {
         (void)Can1::tx_put(f);
         Can1::power_down(true);         // requested WHILE the frame is on the wire
         const uint32_t t0 = now_ticks();
-        bool acked = false;
-        while (us_of(since(t0)) < 20000u) {
-            if (Can1::power_down_acked()) {
-                acked = true;
-                break;
-            }
-        }
+        // A DLC-8 frame is about 220 us of wire: 20 ms is any idle.
+        const bool acked = brio::wait_until<Ruler>(
+            [] { return Can1::power_down_acked(); }, 20000u);
         const uint8_t occurred = Can1::tx_occurred();
         const uint32_t took = us_of(since(t0));
         // AN UNEXPLAINED CONSOLE ARTIFACT LIVES IN THIS LEG, and it is
@@ -2775,26 +2745,29 @@ void tk_power() {
 
         if (!domain_ok) {
             print(serial, "  the RTC domain is not on the LSE crystal (BDCR ",
-                  hex(RCC->BDCR), "), and this letter will not BDRST it to get "
-                  "a wake source - the Stop leg is DECLINED and the "
-                  "configuration below is checked without one", crlf);
-            bench.verdict("the FDCAN through a Stop - DECLINED, see the line "
-                          "above",
-                          true);
+                  hex(RCC->BDCR), ")", crlf);
+            bench.skip("the FDCAN through a Stop: the RTC domain is not on the "
+                       "LSE crystal, and this letter will not BDRST it to get "
+                       "a wake source");
         } else {
             rtc_wakes = 0;
             Nvic::clear_pending(Rtc::irq());
             Nvic::enable(Rtc::irq());
             const bool armed = Rtc::set_wakeup(RtcWakeupClock::ck_spre, 0, true);
             Nvic::clear_pending(Rtc::irq());
-            Ticker::pause();
-            const uint32_t t0 = now_ticks();
-            (void)Pwr::arm(PwrMode::stop1);
-            __DSB();
-            __WFI();
-            const uint32_t slept = us_of(since(t0));
-            (void)Stm32g0SleepSite<SysClock>::resume_clock();
-            Ticker::resume();
+            uint32_t slept = 0;
+            // No Stop without the RTC's wake armed: nothing else on this
+            // board ends it, and the backstop's reset would lose the run.
+            if (armed) {
+                Ticker::pause();
+                const uint32_t t0 = now_ticks();
+                (void)Pwr::arm(PwrMode::stop1);
+                __DSB();
+                __WFI();
+                slept = us_of(since(t0));
+                (void)Stm32g0SleepSite<SysClock>::resume_clock();
+                Ticker::resume();
+            }
             Nvic::disable(Rtc::irq());
             (void)Rtc::set_wakeup(RtcWakeupClock::ck_spre, 0, false);
             (void)Pwr::arm(PwrMode::sleep);
@@ -2995,9 +2968,9 @@ int main() {
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
 
-    Stopwatch::init();
-    (void)Stopwatch::configure({.prescaler = 0, .period = 0xFFFFFFFFu});
-    Stopwatch::enable(true);
+    FreeTimer::init();
+    (void)FreeTimer::configure({.prescaler = 0, .period = 0xFFFFFFFFu});
+    FreeTimer::enable(true);
 
     const bool wd = arm_backstop();
     brio::enable_interrupts();

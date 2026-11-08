@@ -82,12 +82,14 @@
 
 #include "stm32f4/clock.hpp"
 #include "stm32f4/dma.hpp"
+#include "stm32f4/dwt.hpp"
 #include "stm32f4/fmc.hpp"
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/pin.hpp"
 #include "stm32f4/ticker.hpp"
 #include "stm32f4/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000>;
@@ -235,27 +237,21 @@ struct BootState {
 };
 BootState boot;
 
-// ---- the rulers ------------------------------------------------------------------------
+// ---- the ruler -------------------------------------------------------------------------
 
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
+constexpr uint32_t cycles_per_ms = SysClock::hz / 1000u;
 
-uint32_t systick_period() { return SysTick->LOAD + 1u; }
-
-/// SysTick counts DOWN, so a later sample is a smaller number - unless
-/// the period wrapped between the two, which at 1000 Hz means the
-/// measurement was longer than a millisecond and is not to be trusted.
-uint32_t val_delta(uint32_t first, uint32_t second) {
-    return first >= second ? first - second : first + systick_period() - second;
-}
-
-/// Wall time for the spans a march takes: the kernel timebase, 1 kHz.
-uint32_t millis() { return P::now(); }
-
-void wait_ms(uint32_t ms) {
-    const uint32_t start = millis();
-    while (millis() - start < ms) {
-    }
-}
+/// The DWT's cycle counter, started in main(): core cycles for a command
+/// and a copy, milliseconds for a march (a full march of the 16 MB device
+/// is well under the counter's 23.8 s wrap), and the shared waits'
+/// (util/test_wait.hpp). It counts with interrupts masked, which a
+/// masked march's chunks are.
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 
 // ---- the patterns ------------------------------------------------------------------
 
@@ -469,9 +465,9 @@ void tc_sequence() {
     // Run it again from where it stands. Re-initializing a live device
     // costs it nothing: the sequence is a precharge, a refresh burst and
     // a mode-register write, and the rows keep their charge throughout.
-    const uint32_t v0 = SysTick->VAL;
+    const uint32_t v0 = Ruler::now();
     const bool ok = Sdram::initialize(clock, geometry, timing, boot_sequence);
-    const uint32_t whole = val_delta(v0, SysTick->VAL);
+    const uint32_t whole = Ruler::now() - v0;
     bench.verdict("the whole of 37.7.3 runs and answers true", ok);
     print(serial, "  initialize(): ", whole, " cycles (", whole / cycles_per_us, " us), of ",
           boot_sequence.power_up_us, " us asked for the power-up delay alone", crlf);
@@ -489,21 +485,21 @@ void tc_sequence() {
                       {"auto refresh x8", 0, false},
                       {"load mode register", 0, false},
                       {"normal", 0, false}};
-    uint32_t t0 = SysTick->VAL;
+    uint32_t t0 = Ruler::now();
     steps[0].ok = Sdram::command(SdramCommand::clock_enable);
-    steps[0].cycles = val_delta(t0, SysTick->VAL);
-    t0 = SysTick->VAL;
+    steps[0].cycles = Ruler::now() - t0;
+    t0 = Ruler::now();
     steps[1].ok = Sdram::command(SdramCommand::precharge_all);
-    steps[1].cycles = val_delta(t0, SysTick->VAL);
-    t0 = SysTick->VAL;
+    steps[1].cycles = Ruler::now() - t0;
+    t0 = Ruler::now();
     steps[2].ok = Sdram::command(SdramCommand::auto_refresh, 8);
-    steps[2].cycles = val_delta(t0, SysTick->VAL);
-    t0 = SysTick->VAL;
+    steps[2].cycles = Ruler::now() - t0;
+    t0 = Ruler::now();
     steps[3].ok = Sdram::command(SdramCommand::load_mode, 1, mode_register);
-    steps[3].cycles = val_delta(t0, SysTick->VAL);
-    t0 = SysTick->VAL;
+    steps[3].cycles = Ruler::now() - t0;
+    t0 = Ruler::now();
     steps[4].ok = Sdram::command(SdramCommand::normal);
-    steps[4].cycles = val_delta(t0, SysTick->VAL);
+    steps[4].cycles = Ruler::now() - t0;
 
     bool all_ok = true;
     for (const Timed& s : steps) {
@@ -609,26 +605,26 @@ void td_lines() {
 // ---- e  the whole array, three widths ----------------------------------------------------
 
 void te_march() {
-    uint32_t t0 = millis();
+    uint32_t t0 = Ruler::now();
     fill_words(sdram_words, 1);
-    const uint32_t write_ms = millis() - t0;
-    t0 = millis();
+    const uint32_t write_ms = (Ruler::now() - t0) / cycles_per_ms;
+    t0 = Ruler::now();
     MarchResult r = check_words(sdram_words, 1);
-    const uint32_t read_ms = millis() - t0;
+    const uint32_t read_ms = (Ruler::now() - t0) / cycles_per_ms;
     report("word march", r, 4);
     print(serial, "  ", sdram_bytes / 1024u, " KB written in ", write_ms, " ms, read in ",
           read_ms, " ms", crlf);
     bench.verdict("the whole array holds 32-bit writes", r.bad == 0u);
 
     volatile uint16_t* h = halfwords();
-    t0 = millis();
+    t0 = Ruler::now();
     for (uint32_t i = 0; i < sdram_halfwords; ++i) {
         h[i] = half_of(i, 2);
     }
-    const uint32_t hw_write = millis() - t0;
+    const uint32_t hw_write = (Ruler::now() - t0) / cycles_per_ms;
     uint32_t bad = 0;
     uint32_t first = 0;
-    t0 = millis();
+    t0 = Ruler::now();
     for (uint32_t i = 0; i < sdram_halfwords; ++i) {
         if (h[i] != half_of(i, 2)) {
             if (bad == 0u) {
@@ -637,7 +633,7 @@ void te_march() {
             ++bad;
         }
     }
-    const uint32_t hw_read = millis() - t0;
+    const uint32_t hw_read = (Ruler::now() - t0) / cycles_per_ms;
     print(serial, "  halfword march: ", bad, " bad, written in ", hw_write, " ms, read in ",
           hw_read, " ms", crlf);
     if (bad != 0u) {
@@ -646,13 +642,13 @@ void te_march() {
     bench.verdict("the whole array holds 16-bit writes - the device's own width", bad == 0u);
 
     volatile uint8_t* b = bytes();
-    t0 = millis();
+    t0 = Ruler::now();
     for (uint32_t i = 0; i < sdram_bytes; ++i) {
         b[i] = byte_of(i, 3);
     }
-    const uint32_t by_write = millis() - t0;
+    const uint32_t by_write = (Ruler::now() - t0) / cycles_per_ms;
     bad = 0;
-    t0 = millis();
+    t0 = Ruler::now();
     for (uint32_t i = 0; i < sdram_bytes; ++i) {
         if (b[i] != byte_of(i, 3)) {
             if (bad == 0u) {
@@ -661,7 +657,7 @@ void te_march() {
             ++bad;
         }
     }
-    const uint32_t by_read = millis() - t0;
+    const uint32_t by_read = (Ruler::now() - t0) / cycles_per_ms;
     print(serial, "  byte march: ", bad, " bad, written in ", by_write, " ms, read in ",
           by_read, " ms", crlf);
     bench.verdict("the whole array holds 8-bit writes - the byte lanes do their work",
@@ -762,12 +758,12 @@ void tg_refresh_holds() {
     report("immediately", r, 4);
     bench.verdict("the array is exact as soon as it is written", r.bad == 0u);
 
-    wait_ms(1000);
+    brio::spin_us<Ruler>(1'000'000);
     r = check_words(sdram_words, 7);
     report("after 1 s", r, 4);
     bench.verdict("and after a second untouched", r.bad == 0u);
 
-    wait_ms(10000);
+    brio::spin_us<Ruler>(10'000'000);   // 1.8e9 cycles: inside half the counter's wrap
     r = check_words(sdram_words, 7);
     report("after 11 s", r, 4);
     bench.verdict("and after eleven", r.bad == 0u);
@@ -806,7 +802,7 @@ void th_refresh_error() {
     Sdram::clear_refresh_error();
     refresh_interrupts = 0;
     (void)Sdram::power_down();
-    wait_ms(100);
+    brio::spin_us<Ruler>(100'000);
     const bool flagged_pd = Sdram::refresh_error();
     const uint32_t taken_pd = refresh_interrupts;
     (void)Sdram::normal();
@@ -902,7 +898,10 @@ void ti_decay() {
     for (uint8_t step = 0; step < 11; ++step) {
         fill_words(decay_words, 13);
         Fmc::reset();
-        wait_ms(span);
+        // Up to 102.4 s dark, past the cycle counter's half wrap (11.9 s at
+        // 180 MHz): the span goes on the kernel tick, a condition that never
+        // holds making the wait its budget.
+        (void)brio::wait_ticks<P>([] { return false; }, span);
         if (!Sdram::initialize(clock, geometry, timing, boot_sequence)) {
             print(serial, "  ", span, " ms dark: the sequence did not come back", crlf);
             break;
@@ -944,19 +943,19 @@ alignas(4) volatile uint8_t sram_a[bench_bytes];
 alignas(4) volatile uint8_t sram_b[bench_bytes];
 
 uint32_t copy_words(volatile uint32_t* dst, const volatile uint32_t* src, uint32_t count) {
-    const uint32_t v0 = SysTick->VAL;
+    const uint32_t v0 = Ruler::now();
     for (uint32_t i = 0; i < count; ++i) {
         dst[i] = src[i];
     }
-    return val_delta(v0, SysTick->VAL);
+    return Ruler::now() - v0;
 }
 
 uint32_t copy_halfwords(volatile uint16_t* dst, const volatile uint16_t* src, uint32_t count) {
-    const uint32_t v0 = SysTick->VAL;
+    const uint32_t v0 = Ruler::now();
     for (uint32_t i = 0; i < count; ++i) {
         dst[i] = src[i];
     }
-    return val_delta(v0, SysTick->VAL);
+    return Ruler::now() - v0;
 }
 
 void line(const char* what, uint32_t cycles) {
@@ -1015,14 +1014,6 @@ using DmaWork = DmaStream<2, 0>;
 struct WorkHand {};
 static_assert(dma_claim<DmaSlotId<2, 0>, WorkHand>);
 
-bool wait_complete(uint32_t spins = 4'000'000u) {
-    while (!DmaWork::flag(DmaFlag::complete)) {
-        if (spins-- == 0u) {
-            return false;
-        }
-    }
-    return true;
-}
 
 /// One memory-to-memory block through DMA2, timed by the core's counter.
 uint32_t timed_dma(volatile void* from, volatile void* to, uint16_t count32) {
@@ -1041,11 +1032,14 @@ uint32_t timed_dma(volatile void* from, volatile void* to, uint16_t count32) {
     if (!DmaWork::prepare(t)) {
         return 0;
     }
-    const uint32_t v0 = SysTick->VAL;
-    if (!DmaWork::trigger() || !wait_complete()) {
+    const uint32_t v0 = Ruler::now();
+    // A 4 KB block takes microseconds; 10 ms is the time-out, read as the
+    // 0 the letter judges.
+    if (!DmaWork::trigger() ||
+        !brio::wait_until<Ruler>([] { return DmaWork::flag(DmaFlag::complete); }, 10'000)) {
         return 0;
     }
-    return val_delta(v0, SysTick->VAL);
+    return Ruler::now() - v0;
 }
 
 void tk_dma() {
@@ -1097,7 +1091,7 @@ void tl_low_power() {
     const SdramState in_self = Sdram::state();
     print(serial, "  after the command: MODES2=", static_cast<uint32_t>(in_self), crlf);
     bench.verdict("and the status register says so", in_self == SdramState::self_refresh);
-    wait_ms(200);
+    brio::spin_us<Ruler>(200'000);
     // 37.7.4: an access alone brings the device out. Read one word, then
     // ask where the bank is.
     const uint32_t peek = words()[0];
@@ -1115,7 +1109,7 @@ void tl_low_power() {
     const SdramState in_pd = Sdram::state();
     print(serial, "  after the command: MODES2=", static_cast<uint32_t>(in_pd), crlf);
     bench.verdict("and the status register says so", in_pd == SdramState::power_down);
-    wait_ms(200);
+    brio::spin_us<Ruler>(200'000);
     bench.verdict("normal() brings it back", Sdram::normal());
     bench.verdict("and the bank is normal again", Sdram::state() == SdramState::normal);
     r = check_words(slice_words, 21);
@@ -1337,6 +1331,7 @@ int main() {
     boot.bwtr[3] = brio::FmcNorPsram<4>::write_timing_word();
 
     const bool clock_ok = SysClock::init();
+    (void)brio::CycleCounter::init();   // every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0)
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
 

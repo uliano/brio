@@ -59,7 +59,7 @@ Rev 3: 2.13.1 and 2.13.2, both below. Driver: `stm32g0/fdcan.hpp`; the
 presence, base, mask, clock-select and vector facts come from
 `stm32g0/device_tables.hpp` (the reserve: the table of what each part has, read off the device header), and
 `Rcc::kernel_clock2()` in `stm32g0/clock.hpp` is the CCIPR2 verb this
-chapter needed. Bench suite: `test_stm32_fdcan` (12 letters, 96
+chapter needed. Bench suite: `test_stm32_fdcan` (12 letters, 95
 verdicts, wireless; a letter is one command key of the suite's console and the group of verdicts it runs). Family fixture
 `test/family_stm32g0/fdcan.cpp` plus twelve negatives under
 `brio check stm32g0`.

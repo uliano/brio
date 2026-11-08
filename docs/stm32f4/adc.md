@@ -421,9 +421,9 @@ extern "C" void ADC_IRQHandler() {
 
 `test_stm32f4_analog`, on an STM32F446 at 180 MHz with PCLK2 at 90 MHz -
 so ADCCLK at PCLK2/4 = 22.5 MHz throughout - reading a DAC output through
-the pad the two converters share; 106 verdicts green on the STM32F469 at
-the same rates, where neither DAC pad carries a load and letter d says
-so instead of judging the buffer.
+the pad the two converters share; every verdict green on the STM32F469 at
+the same rates, where neither DAC pad carries a load and letter d skips
+the buffer's verdict, saying why.
 
 **The clock.** `init()` picks PCLK2/4: half the bus is 45 MHz, past the
 36 MHz ceiling, and the next division is the first that fits. fADC
@@ -496,8 +496,8 @@ injected conversion of the other pad at code 3000: the regular register
 reads 994..1000, the injected one 3136..3139, and the regular run reads
 the same 990..994 afterwards - one converter, two channels, and the interruption costs the
 regular sequence its place and nothing else. With JAUTO instead, JEOC
-arrives 193 polls after one regular conversion with no injected trigger
-of any kind. The injected offset is subtracted (a raw 3137 reads 2637 at
+arrives after one regular conversion with no injected trigger of any
+kind. The injected offset is subtracted (a raw 3137 reads 2637 at
 JOFR1 = 500) and CAN go negative (-863 at JOFR1 = 4000), which is the only
 signed datapath this converter has.
 
@@ -527,10 +527,11 @@ sequence and no DMA, the same 200 us raises nothing at all - 13.8.3's
 "conversions without DMA and without overrun detection" is a real mode
 and not a warning.
 
-**The sequencer erratum, both halves.** STRT rises one poll after
+**The sequencer erratum, both halves.** STRT rises within one poll of
 SWSTART, and the driver refuses a sequence write there. Written anyway
 through the unchecked verb, INSIDE a 22 us conversion: EOC never arrives
-- 200000 polls of it - and one more SWSTART converts the new sequence.
+- in the 2 ms the letter waits, some ninety conversions' time - and one
+more SWSTART converts the new sequence.
 With a HARDWARE trigger (a pad edge on line 11) the conversion the
 rewrite landed in is lost in the same way and THE NEXT EDGE converts the
 new sequence with no software in between, which is exactly the sparing
@@ -584,18 +585,16 @@ fifteen timer rows of table 71 (regular) and of table 72 (injected) on
 its own timer brought up as a 10 kHz source - a 1 MHz count, ARR 99, TRGO
 on the update or the channel in PWM mode 1 at a compare of 50 - starts a
 VREFINT conversion on each event: **99 or 100 conversions in each 10 ms
-window, all thirty codes**, ten runs of ten. The channel's compare event
+window, all thirty codes**, ten runs of ten. The window is 10 ms of the
+core's cycle counter and not ten periods of the 1 ms tick: counted in
+ticks it would last 9 to 10 ms by where in a period it started, and hold
+as few as 90 events. The channel's compare event
 needs no pad and no output enable on the bench beyond CCyE, and the
 advanced-control timers' MOE is raised for them. **The edge is chosen**:
 TIM2's TRGO made its OC1REF at 50 % (MMS 100, two edges 50 us apart) gave
 100 conversions on the rising edge, 100 on the falling and 199 on both.
 **The watchdog interrupt**: VREFINT above a [0, 100] window, five
 software conversions, five entries of the ADC vector with AWD.
-MEASURED, NOT EXPLAINED: the first 10 ms window right behind the letter's
-own header line counted 91..98 of 100 - with the console drained, too -
-where every later window read 99..100; 20 ms of quiet more gives it 99.
-What the console's tail costs a polling loop was not chased; the letter
-waits.
 
 ## Not covered yet
 

@@ -545,7 +545,10 @@ wire time; every frame format of the task - 8N1, 8E1, 8O1, 7E1, 7O1, 8N2
 bit as the stream stores it (DR's MSB, 25.6.2; the interrupt receiver
 hands it on too); the open drain on the internal pull-up alone whole at
 1 Mbaud and 31 of 64 at 2.8125, and whole at 2.8125 where the pad carries
-the bench's 2.2 kOhm I2C pull-up besides.
+the bench's 2.2 kOhm I2C pull-up besides. The letter judges the internal
+pull-up only where it reads PC6 free of a pull-up of its own (the pad
+driven low, then read with no pull 2 us later); on the bench's 2.2 kOhm it
+prints the two rates and skips that verdict.
 
 **A loop cannot tell a wrong rate**: both ends share the divisor, so a
 divisor twice too large is a loop twice too slow and every byte still
@@ -689,7 +692,8 @@ core is an HSI16 it TRACKS against its LSE crystal (docs/stm32g0/
 clock.md, "The core against the LSE, tracked"), so every rate it times
 is crystal against crystal - and every rate it SENDS it states (a
 `send` or `blast` Report's aux16: its divisor on its tracked core). Score:
-**150 of 150**, what this USART has no word for SKIPPED with its reason.
+**150 of 150**, and four checks skipped with their reasons: the three
+frames this USART has no word for and RS-485 (no driver enable).
 
 - **The rendezvous and the refusal path** (`1`): ping, IDENT (kind 0x03,
   another die, a crystal-referenced time base), a bad checksum NAKed, a
@@ -721,7 +725,7 @@ is crystal against crystal - and every rate it SENDS it states (a
   above 5.625 Mbaud, the interrupt receiver keeping up at 6.4 Mbaud, 281
   cycles a frame.
 - **The frame matrix** (`3`) at 115200: 8N1, 8E1, 8O1, 7E1, 7O1, 9N1,
-  8N2, 8N0.5 and 8N1.5 echoed by the far chip; 7N1, 6E1 and 9E1 SKIPPED
+  8N2, 8N0.5 and 8N1.5 echoed by the far chip; 7N1, 6E1 and 9E1 skipped
   (M counts the parity bit: no word length for them here); the half stop
   bits timed as LENGTHS by the far receiver, 19 and 21 half bits within
   25 ppm of an 8N1 run.
@@ -925,7 +929,7 @@ transmitter's TC, so a flush at TC left it standing and the loop
 answered its own echo inside the DUT's next frame (measured: the DUT's
 frames corrupted from their fifth bit, two of every three); the peer
 now waits for that echo, two bit times at most, before it flushes. **The
-cost**: the echo's clean character is 23 instructions with no call
+cost**: the echo's clean character is 24 instructions with no call
 (release listing) - the SR load and its tests, the DWT stamp, the DR
 load, the DR store and the count - some 35 cycles against the 281 of a
 6.4 Mbaud frame. The engine's floor: an interval of 8 counts (44 ns)

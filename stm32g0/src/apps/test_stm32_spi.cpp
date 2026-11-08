@@ -48,14 +48,14 @@
 // is commanded IN BAND over the bus under test, over
 // avrxt/src/apps/spi_link.hpp included by relative path - one source of
 // truth for the wire format, whatever the peer's architecture. Letters
-// n..r and t..y are this instrument's.
+// n..r, t..y, K, S and B are this instrument's.
 //
 // THE TWO CANNOT BE ON THE DESK AT ONCE (the four jumpers go to one end
 // or the other), so main() PROBES the self-link before any letter runs -
 // each of PB3, PC2, PB5 and PA15 driven both ways against the far pad's
 // own internal pull - and EACH SET SKIPS ITSELF ON THE OTHER DESK,
-// printing the reason and claiming no verdict either way: letters b..l
-// when the probe says no, letters n..r when it says yes. The one thing
+// a skip with its reason and no verdict either way: letters b..l when
+// the probe says no, the peer's letters when it says yes. The one thing
 // that still FAILS is a peer that does not answer with the wires in
 // place - that is firmware to flash, not a desk this suite was not
 // built for.
@@ -79,8 +79,9 @@
 //
 // What is exercised, letter by letter:
 //   a  the block, WIRELESS: the reserve against the header, the reset
-//      values, the enable protection MEASURED field by field, the
-//      disable procedure, the refusals
+//      values, the enable protection MEASURED field by field, the mode
+//      fault's clearing sequence and clear_mode_fault(), the disable
+//      procedure, the refusals
 //   b  THE LINK: 8-bit mode 0 both ways, host polled then on its DMA
 //      engines, a command in the loop before its data block
 //   c  THE MATRIX: four modes x two bit orders, then every data size
@@ -207,6 +208,7 @@
 #include "util/power.hpp"
 #include "util/print.hpp"
 #include "util/spi_bus.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED. spi_link.hpp
@@ -317,8 +319,21 @@ constexpr uint8_t r_fast = 0;
 constexpr uint8_t r_mid = 1;
 constexpr uint8_t r_slow = 2;
 
+/// The suite's ruler (util/bench.hpp's CycleRuler): the kernel ticker's
+/// cycles(), the tick count and SysTick's position composed across the
+/// reload (util/cycle_count.hpp), so it needs interrupts enabled. Its rate
+/// is the boot rung's, 64 MHz: the clock is dynamic and test_wait.hpp's
+/// conversions need a constant, so a budget spent at letter l's lower
+/// rungs lasts longer in wall time - a time-out may, and no span this
+/// suite times with a fixed budget runs there.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return Fast::hz; }
+};
+static_assert(CycleRuler<Ruler>);
+
 Serial serial;
-// The table holds every letter registered in main(), 28 of them: a
+// The table holds every letter registered in main(), 29 of them: a
 // letter past its capacity is refused (letter() returns false), and the
 // suite does not check the return, so it would be missing in silence.
 TestBench<Serial, 29> bench;
@@ -334,22 +349,11 @@ using CsWatch = ExtInt<CsPin>;
 // Instruments
 // ---------------------------------------------------------------------------
 
-/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
-/// tick count and the counter's position composed right across the reload
-/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
-uint32_t cycles_now() {
-    return Ticker::cycles();
-}
-
 /// A measurement window a transmit interrupt walks through is not a
-/// measurement. Drain, then count.
-void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    const uint32_t t0 = cycles_now();
-    while (cycles_now() - t0 < SysClock::hz() / 500u) {
-    }
-}
+/// measurement: drain, then count. The answer is dropped here because a
+/// wedged console only lengthens what follows; the timed windows a derived
+/// bound judges act on brio::console_drain()'s answer themselves.
+void console_drain() { (void)brio::console_drain<Ruler, Serial>(); }
 
 // ---------------------------------------------------------------------------
 // The client's pump, one frame ahead
@@ -546,9 +550,10 @@ void software_cs_pads() {
 /// the RESOURCE rather than the task (NSS, CRC, TI, the errata, I2S).
 uint16_t raw_xfer(uint16_t out, SpiDataSize bits) {
     S1::data(bits, out);
-    uint32_t spins = 400'000u;
-    while (!S1::rxne() && spins-- != 0u) {
-    }
+    // 1 ms: a time-out only, the slowest frame here being 16 bits at
+    // PCLK/256, 64 us. On a time-out DR is read as it stands, and the
+    // caller's verdict judges what came back.
+    (void)brio::wait_until<Ruler>([] { return S1::rxne(); }, 1'000);
     return S1::data(bits);
 }
 
@@ -574,12 +579,9 @@ uint16_t pattern(uint16_t i, SpiDataSize bits) {
     return static_cast<uint16_t>(v & spi_frame_mask(bits));
 }
 
-void settle_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
-void settle() { settle_ms(spilink::settle_ms); }
+/// The protocol's settle between a command and what follows it
+/// (spi_link.hpp's settle_ms).
+void settle() { brio::spin_us<Ruler>(spilink::settle_ms * 1'000u); }
 
 // =============================================================================
 // Which desk is this? The self-link, asked of the wire
@@ -591,9 +593,9 @@ void settle() { settle_ms(spilink::settle_ms); }
 // (the two wirings are the same jumpers at different ends). So the
 // suite ASKS THE WIRE which desk it is on, once, before any letter runs,
 // and the letters
-// that need two peripherals on four wires SKIP THEMSELVES - by name,
-// with the reason printed - when the answer is no. A skipped letter
-// claims nothing and scores no verdict either way.
+// that need two peripherals on four wires SKIP THEMSELVES - a skip with
+// its reason (TestBench::skip()) - when the answer is no. A skipped
+// letter claims nothing and scores no verdict either way.
 
 bool self_link = false;
 
@@ -655,26 +657,21 @@ bool probe_self_link() {
 /// The opening line of every letter whose instrument is the self-link.
 bool need_self_link() {
     if constexpr (!self_link_possible) {
-        print(serial,
-              "  SKIPPED, no verdict claimed: this letter's instrument is a "
-              "SELF-LINK between SPI1's pads and SPI2's, and SPI2's four "
-              "(PB10/PC2/PD4/PB12) are bonded to no pin of this package "
-              "(DS12992 table 12). There is no wiring of this board that "
-              "could carry it: the letter is compiled out here, not merely "
-              "skipped.",
-              crlf);
+        bench.skip("this letter's instrument is a SELF-LINK between SPI1's pads "
+                   "and SPI2's, and SPI2's four (PB10/PC2/PD4/PB12) are bonded to "
+                   "no pin of this package (DS12992 table 12). There is no wiring "
+                   "of this board that could carry it: the letter is compiled out "
+                   "here, not merely skipped");
         return false;
     }
     if (self_link) {
         return true;
     }
-    print(serial,
-          "  SKIPPED, no verdict claimed: this letter's instrument is the board's "
-          "OWN self-link (SPI1 PB3/PB4/PB5/PA15 to SPI2 PB10/PC2/PD4/PB12) and "
-          "the probe says those four wires are not on the desk. They carry the "
-          "link to the PEER BOARD today - letters n..r are the instrument this "
-          "desk has.",
-          crlf);
+    bench.skip("this letter's instrument is the board's OWN self-link (SPI1 "
+               "PB3/PB4/PB5/PA15 to SPI2 PB10/PC2/PD4/PB12) and the probe says "
+               "those four wires are not on the desk. They carry the link to the "
+               "PEER BOARD today - the peer's letters are the instrument this "
+               "desk has");
     return false;
 }
 
@@ -830,7 +827,7 @@ bool command(Op op, const uint8_t* p = no_payload, uint8_t len = 0) {
             }
         }
         (void)link_command_mode();
-        settle_ms(400);
+        brio::spin_us<Ruler>(400'000u);
     }
     if (link_quiet) {
         return false;
@@ -877,7 +874,7 @@ bool peer_report(spilink::Report& r) {
             r = spilink::get_report(f.data);
             return true;
         }
-        settle_ms(60);
+        brio::spin_us<Ruler>(60'000u);
     }
     return false;
 }
@@ -920,13 +917,10 @@ bool ensure_link() {
 /// thing - firmware to flash - and fails loudly.
 bool need_peer() {
     if (self_link) {
-        print(serial,
-              "  SKIPPED, no verdict claimed: this letter's instrument is the PEER "
-              "BOARD running `spi_peer`, and the probe says these four pads carry "
-              "the board's OWN self-link today - the two wirings are the same "
-              "jumpers at different ends. Letters b..l are the "
-              "instrument this desk has.",
-              crlf);
+        bench.skip("this letter's instrument is the PEER BOARD running `spi_peer`, "
+                   "and the probe says these four pads carry the board's OWN "
+                   "self-link today - the two wirings are the same jumpers at "
+                   "different ends. Letters b..l are the instrument this desk has");
         return false;
     }
     if (ensure_link()) {
@@ -1112,6 +1106,118 @@ bool third_instance_has_no_i2s() {
     }
 }
 
+// ---- which sequence puts MODF down, and when -----------------------------------
+//
+// The chapter names two steps, an SR access while MODF stands and then a CR1
+// write (35.5.11, which clear_mode_fault()'s comment quotes). Each attempt
+// below starts from a fresh fault - the block's RCC reset, a software-managed
+// host at PCLK/64, SSI dropped, MODF waited for - with interrupts masked around
+// the sequence, and differs only in what happens between the two steps:
+// nothing, which is the chapter's sequence done strictly and the one judged;
+// then a CR1 read (the shape `CR1 = CR1` compiles to), a CR2 read and a second
+// SR read, each printed as a measurement - the chapter does not say what an
+// access between the steps does, and brio depends on no answer to it once the
+// driver writes the strict sequence. The flag comes down some APB cycles after
+// the CR1 write, not on the read that follows it, so each attempt counts the SR
+// reads until MODF reads clear, and the strict one is judged against the verb's
+// own bound on its re-reads (S::mode_fault_settle_reads). Then whether a write
+// raising MSTR, SSI and SPE takes, which SPE never does while the flag stands;
+// then the verb itself, on a fresh fault, unmasked as a program calls it.
+
+namespace modf_clear {
+
+/// A fresh mode fault on S. True when MODF rose: it rises some tens of core
+/// cycles after the store that drops SSI, so the 100 us budget is a time-out
+/// only. Interrupts enabled: the ruler is the ticker's.
+template <typename S, typename R>
+bool raise() {
+    S::reset();
+    (void)S::configure(SpiConfig{.clock = SpiClock::div64, .nss = SpiNss::software});
+    S::enable();
+    S::software_select(true);
+    return brio::wait_until<R>([] { return S::mode_fault(); }, 100);
+}
+
+struct Attempt {
+    bool raised = false;   ///< the fault stood before the sequence
+    bool down = false;     ///< MODF read clear within read_cap reads after the CR1 write
+    uint16_t reads = 0;    ///< SR reads after the CR1 write, the one that found it clear included
+    bool took = false;     ///< a write raising MSTR, SSI and SPE took after the sequence
+};
+
+/// The most SR reads an attempt spends waiting for the flag to come down: far
+/// past the verb's bound, so a slow clear is counted rather than cut short.
+constexpr uint16_t read_cap = 1000;
+
+/// One attempt from a fresh fault. `Between`: 0 nothing, 1 a CR1 read, 2 a CR2
+/// read, 3 a second SR read, between the SR read and the CR1 write. Inside the
+/// masked section the reads are counted, not timed: the ruler needs the tick.
+template <typename S, typename R, typename CriticalSection, uint8_t Between>
+Attempt attempt() {
+    Attempt a{};
+    a.raised = raise<S, R>();
+    {
+        CriticalSection cs;
+        auto& r = S::regs();
+        const uint32_t c = r.CR1;
+        (void)r.SR;   // step one
+        if constexpr (Between == 1u) {
+            (void)r.CR1;
+        } else if constexpr (Between == 2u) {
+            (void)r.CR2;
+        } else if constexpr (Between == 3u) {
+            (void)r.SR;
+        }
+        r.CR1 = c;    // step two
+        while (a.reads < read_cap && !a.down) {
+            ++a.reads;
+            a.down = (r.SR & SPI_SR_MODF) == 0u;
+        }
+    }
+    S::regs().CR1 = S::regs().CR1 | SPI_CR1_SSI | SPI_CR1_MSTR | SPI_CR1_SPE;
+    a.took = (S::regs().CR1 & SPI_CR1_SPE) != 0u;
+    return a;
+}
+
+template <typename Out>
+void print_attempt(const Out& out, const char* between, const Attempt& a) {
+    brio::print(out, "  ", between, ": MODF ",
+                !a.raised ? "was not raised" : a.down ? "cleared" : "LEFT STANDING", " after ",
+                a.reads, " SR read(s), and a write raising MSTR, SSI and SPE ",
+                a.took ? "took" : "did not take", brio::crlf);
+}
+
+/// The block: the strict sequence and the verb judged, the three accesses
+/// between the steps printed. Leaves the block reset; the caller reconfigures.
+template <typename S, typename R, typename CriticalSection, typename Out, typename Bench>
+void judge(const Out& out, Bench& bench) {
+    const Attempt strict = attempt<S, R, CriticalSection, 0>();
+    const Attempt cr1 = attempt<S, R, CriticalSection, 1>();
+    const Attempt cr2 = attempt<S, R, CriticalSection, 2>();
+    const Attempt sr = attempt<S, R, CriticalSection, 3>();
+    const bool verb_raised = raise<S, R>();
+    const bool verb_answer = S::clear_mode_fault();
+    const bool verb_down = !S::mode_fault();
+    S::reset();
+    print_attempt(out, "the SR read, then the CR1 write, nothing between (judged)", strict);
+    print_attempt(out, "measured: a CR1 read between the two steps", cr1);
+    print_attempt(out, "measured: a CR2 read between the two steps", cr2);
+    print_attempt(out, "measured: a second SR read between the two steps", sr);
+    brio::print(out, "  clear_mode_fault() on a fresh fault: ",
+                !verb_raised ? "found no fault" : verb_answer ? "answered true" : "answered FALSE",
+                ", MODF ", verb_down ? "clear" : "STANDING", " after it", brio::crlf);
+    bench.verdict("MODF HAS A WAY DOWN IN SOFTWARE: the SR access followed by the CR1 write, with "
+                  "no other access to the block between them, clears the flag within the verb's "
+                  "bound of SR re-reads, and a write raising SPE takes after it",
+                  strict.raised && strict.down && strict.reads <= S::mode_fault_settle_reads &&
+                      strict.took);
+    bench.verdict("clear_mode_fault(), which keeps the two steps adjacent, clears a fresh fault and "
+                  "says so",
+                  verb_raised && verb_answer && verb_down);
+}
+
+}   // namespace modf_clear
+
 void ta_block() {
     peer_stop();
     Nvic::disable(S1::irq());
@@ -1239,7 +1345,12 @@ void ta_block() {
                   "put away - which is exactly why the transfer engine's boot "
                   "configuration is SpiNss::software and never touches the pad",
                   modf_from_ssm);
-    S1::clear_mode_fault();
+    // The answer is not judged here: the verb is judged on a fresh fault just
+    // below, and disable() and configure() follow whatever it says.
+    (void)S1::clear_mode_fault();
+    // The sequences from a fresh fault each, and the verb (modf_clear above).
+    // They leave the block reset; the steps below configure it again.
+    modf_clear::judge<S1, Ruler, P::CriticalSection>(serial, bench);
     (void)S1::disable();
     (void)S1::configure(SpiConfig{});
     S1::enable();
@@ -1643,7 +1754,7 @@ void td_ladder() {
         uint16_t sent = 0;
         uint16_t got = 0;
         uint32_t guard = 200'000u;
-        const uint32_t t0 = cycles_now();
+        const uint32_t t0 = Ruler::now();
         while (got < n && guard-- != 0u) {
             if (sent < n && S1::txe()) {
                 S1::data_byte(tx_buf[sent]);
@@ -1654,7 +1765,7 @@ void td_ladder() {
                 ++got;
             }
         }
-        const uint32_t took = cycles_now() - t0;
+        const uint32_t took = Ruler::now() - t0;
         CsPin::set();
         stalled[c] = got < n;
         received[c] = got;
@@ -1861,15 +1972,14 @@ void te_nss() {
     const bool before_fault = !S1::mode_fault() && S1::enabled() &&
                               S1::role() == SpiRole::host;
     ClientNssPin::clear();   // pull the host's NSS input low
-    uint32_t spins = 100'000u;
-    while (!S1::mode_fault() && spins-- != 0u) {
-    }
+    // 1 ms: a time-out only, the flag rising some tens of core cycles after
+    // the pad (letter a's SSI staging); the flag is read and judged below.
+    (void)brio::wait_until<Ruler>([] { return S1::mode_fault(); }, 1'000);
     const bool fault = S1::mode_fault();
     const bool spe_cleared = !S1::enabled();
     const bool demoted = S1::role() == SpiRole::client;
     ClientNssPin::set();
-    S1::clear_mode_fault();
-    const bool cleared = !S1::mode_fault();
+    const bool cleared = S1::clear_mode_fault();
     print(serial, "  MODF: raised ", fault ? 1 : 0, ", SPE cleared ",
           spe_cleared ? 1 : 0, ", MSTR cleared ", demoted ? 1 : 0, ", cleared by the "
           "SR-then-CR1 sequence ", cleared ? 1 : 0, crlf);
@@ -1889,12 +1999,12 @@ void te_nss() {
     (void)S1::configure(SpiConfig{.nss = SpiNss::hardware_output});
     Pin<'A', 15>::function(PinFunction::af0, {.speed = PinSpeed::very_high});
     const bool high_before = ClientNssPin::read();
-    const uint32_t t_spe = cycles_now();
+    const uint32_t t_spe = Ruler::now();
     S1::enable();
     uint32_t fall_spins = 2000u;
     while (ClientNssPin::read() && fall_spins-- != 0u) {
     }
-    const uint32_t fall_cycles = cycles_now() - t_spe;
+    const uint32_t fall_cycles = Ruler::now() - t_spe;
     const bool low_at_spe = !ClientNssPin::read();
     bool low_throughout = true;
     for (uint16_t i = 0; i < 4u; ++i) {
@@ -1990,9 +2100,9 @@ uint16_t crc_reference(uint16_t poly, uint8_t width, const uint16_t* data, uint1
 /// the hardware's own checksum, clocked out without a store (35.5.14),
 /// and a write there would be one more DATA frame.
 uint16_t host_read(SpiDataSize bits) {
-    uint32_t spins = 400'000u;
-    while (!S1::rxne() && spins-- != 0u) {
-    }
+    // 1 ms: a time-out only (raw_xfer()'s reason); the caller judges the
+    // frame read.
+    (void)brio::wait_until<Ruler>([] { return S1::rxne(); }, 1'000);
     return S1::data(bits);
 }
 
@@ -2287,13 +2397,10 @@ void tg_ti() {
                       "the middle of the slave's frame, and the slave says so - "
                       "cleared, as the chapter has it, by a READ of SR",
                       fre && fre_cleared);
-    } else {
-        bench.verdict("35.5.11's TI frame-format error DID NOT REPRODUCE with an "
-                      "8-bit master against a 16-bit TI slave - printed, not "
-                      "claimed either way; the flag is readable and clear and "
-                      "the slave simply resynchronized on the next pulse",
-                      !S2::frame_error());
     }
+    // A staging that raised nothing is printed above and claimed neither way
+    // (the die-difference rule): the slave resynchronized on the next pulse,
+    // and there is no clear sequence to judge.
     peer_stop();
     software_cs_pads();
     (void)Host::init(clock);
@@ -2328,9 +2435,9 @@ void th_errata() {
     S1::data_byte(0x33);
     const uint8_t ftlvl_at_clear = S1::tx_level();
     S1::regs().CR1 = S1::regs().CR1 & ~SPI_CR1_SPE;   // the WRONG moment, by hand
-    uint32_t settle = 200'000u;
-    while (settle-- != 0u) {
-    }
+    // 1 ms, ten times the three frames' 96 us: BSY is read after anything
+    // still on the wire would have ended.
+    brio::spin_us<Ruler>(1'000);
     const bool bsy_stuck = S1::busy();
     print(serial, "  2.12.1: SPE cleared with FTLVL = ", ftlvl_at_clear,
           "; BSY afterwards ", bsy_stuck ? "HIGH (the erratum)" : "low", crlf);
@@ -2355,17 +2462,9 @@ void th_errata() {
                   "does not",
                   procedure_ok && bsy_clean && S1::tx_level() == 0 &&
                       S1::rx_level() == 0);
-    if (bsy_stuck) {
-        bench.verdict("...and the erratum REPRODUCES on this silicon: a raw SPE "
-                      "clear with the transmit FIFO full leaves BSY standing",
-                      bsy_stuck);
-    } else {
-        bench.verdict("...and the erratum DID NOT REPRODUCE in this staging: a "
-                      "raw SPE clear with three frames in the transmit FIFO left "
-                      "BSY LOW. Printed, not claimed: the disable procedure is "
-                      "kept as construction whatever one board says once",
-                      !bsy_stuck);
-    }
+    // Whether the erratum reproduces is printed above and not judged (the
+    // die-difference rule): the disable procedure is kept as construction
+    // whatever one board says once.
 
     // ---- ES0548 2.12.2: the slave's BSY, sampled ----
     constexpr uint16_t rounds = 32;
@@ -2383,10 +2482,9 @@ void th_errata() {
                                         .bits = SpiDataSize::bits8});
         CsPin::clear();
         (void)raw_xfer(0x77, SpiDataSize::bits8);
-        // The honest witness first, then the unreliable one.
-        uint32_t sp = 100'000u;
-        while (!S2::rxne() && sp-- != 0u) {
-        }
+        // The honest witness first, then the unreliable one. 1 ms: a time-out
+        // only, the frame already clocked; the count below judges it.
+        (void)brio::wait_until<Ruler>([] { return S2::rxne(); }, 1'000);
         if (S2::rxne()) {
             ++rxne_rose;
         }
@@ -2657,9 +2755,9 @@ void ti_dma() {
 
         // On the engines: thirty-two frames at every code.
         const bool ok_move = dma_xfer(tx_buf, rx_buf, 32, rate, false);
-        uint32_t sp = 400'000u;
-        while (PeerRx::take() == 0u && sp-- != 0u) {
-        }
+        // 10 ms: a time-out only, the host's own block already complete and
+        // the client's last frame with it; the bytes are judged below.
+        (void)brio::wait_until<Ruler>([] { return PeerRx::take() != 0u; }, 10'000);
         bool ok = ok_move;
         for (uint16_t i = 0; i < 32u && ok; ++i) {
             ok = rx_buf[i] == static_cast<uint8_t>(0x91u + i) &&
@@ -2731,16 +2829,14 @@ void ti_dma() {
         CsPin::clear();
         S1::enable();
         (void)HostTx::start(std::span<const uint16_t>(packed, 3));   // 5 or 6 frames
-        uint32_t sp = 2'000'000u;
-        while (peer_rx_n < 5u && sp-- != 0u) {
-        }
+        // 10 ms: a time-out only, six frames at PCLK/256 being 192 us; the
+        // count is judged below, after the settle.
+        (void)brio::wait_until<Ruler>([] { return peer_rx_n >= 5u; }, 10'000);
         // A SETTLE MUST WAIT ON SOMETHING REAL. An empty countdown here
         // is one gcc deletes, and the count is then read while the sixth
         // frame is still in the transmit FIFO - the two legs look
-        // identical. The wall is the wall.
-        const uint32_t t_settle = cycles_now();
-        while (cycles_now() - t_settle < 3'200'000u) {
-        }
+        // identical. The wall is the wall: 50 ms on the ruler.
+        brio::spin_us<Ruler>(50'000);
         seen[leg] = peer_rx_n;
         const uint32_t sr = S1::status();
         const uint16_t in_flight = HostTx::in_flight();
@@ -3197,15 +3293,15 @@ uint16_t i2s_play(const uint16_t* src, uint16_t n) {
     Nvic::enable(S2::irq());
     (void)S2::i2s_enable();
     (void)S1::i2s_enable();
+    // The time-outs are time-outs only: a half-word slot is at most a few
+    // hundred microseconds at the rates this letter sets (about 84 us with
+    // the master clock out at I2SDIV 21), and the count returned is what the
+    // caller judges.
     for (uint16_t i = 0; i < n; ++i) {
-        uint32_t sp = 1'000'000u;
-        while (!S1::txe() && sp-- != 0u) {
-        }
+        (void)brio::wait_until<Ruler>([] { return S1::txe(); }, 100'000);
         S1::data_halfword(src[i]);
     }
-    uint32_t sp = 4'000'000u;
-    while (i2s_rx_n < n && sp-- != 0u) {
-    }
+    (void)brio::wait_until<Ruler>([n] { return i2s_rx_n >= n; }, 400'000);
     const uint16_t got = i2s_rx_n;
     (void)S1::i2s_stop_transmit();
     S2::rxne_interrupt(false);
@@ -3252,9 +3348,9 @@ void tk_i2s() {
                   "the kernel clock on SYSCLK - 35.7.4's warning makes I2SxCLK "
                   "at or above PCLK mandatory, which rules HSI16 out at 64 MHz",
                   i2s_pair(m16, s16));
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     const uint16_t got = i2s_play(samples, 16);
-    const uint32_t took = cycles_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     bool exact = got >= 16u;
     for (uint16_t i = 0; i < 16u && exact; ++i) {
         exact = i2s_rx[i] == samples[i];
@@ -3295,9 +3391,9 @@ void tk_i2s() {
     (void)i2s_pair(m_mck, s16);
     Pin<'B', 4>::function(PinFunction::af0, {.speed = PinSpeed::very_high});   // I2S1_MCK
     Pin<'C', 2>::function(PinFunction::af1);                                   // I2S2_MCK
-    const uint32_t t1 = cycles_now();
+    const uint32_t t1 = Ruler::now();
     const uint16_t got_mck = i2s_play(samples, 16);
-    const uint32_t took_mck = cycles_now() - t1;
+    const uint32_t took_mck = Ruler::now() - t1;
     const uint32_t measured_mck = took_mck == 0u ? 0u : (8u * SysClock::hz()) / took_mck;
     bool exact_mck = got_mck >= 16u;
     for (uint16_t i = 0; i < 16u && exact_mck; ++i) {
@@ -3422,11 +3518,13 @@ void tk_i2s() {
     // the very thing that clears it, and the answer must be taken from
     // the ONE read that saw it. (The overrun's clear sequence has the
     // same shape and the same trap; letter d met it from the other end.)
+    // 100 ms: a time-out only, the master's first slot some tens of
+    // microseconds after its enable; `udr` below is the read that saw it.
     uint32_t slave_sr = 0;
-    uint32_t sp = 4'000'000u;
-    do {
+    (void)brio::wait_until<Ruler>([&slave_sr] {
         slave_sr = S2::status();
-    } while ((slave_sr & SpiFlag::underrun) == 0u && sp-- != 0u);
+        return (slave_sr & SpiFlag::underrun) != 0u;
+    }, 100'000);
     const bool udr = (slave_sr & SpiFlag::underrun) != 0u;
     const uint32_t master_sr = S1::status();
     const bool udr_cleared = (S2::status() & SpiFlag::underrun) == 0u;
@@ -3553,39 +3651,58 @@ void tm_sleep() {
     S1::enable();
     S1::flush_rx();
 
-    console_drain();
-    // The frame takes 32 us at PCLK/256; the kernel tick is 1 ms, so the
-    // SPI's own interrupt is what returns from the WFI. Repeated, so a
-    // tick landing first is visible rather than fatal.
+    // A console line going out is a wake of its own: the rounds start only
+    // with the console quiet.
+    if (!brio::console_drain<Ruler, Serial>()) {
+        bench.skip("the console did not drain: its interrupt would wake the WFI the "
+                   "letter counts");
+        (void)S1::disable();
+        (void)Host::init(clock);
+        return;
+    }
+    // WHAT IS COUNTED IS THE WAKE, NOT THE HANDLER. Each round masks
+    // interrupts, starts the frame (32 us at PCLK/256) and enters the
+    // platform's idle(), which sleeps with interrupts still masked and
+    // unmasks after the WFI - so the SPI handler cannot run before the core
+    // is asleep, and whatever is pending when it wakes runs right after. The
+    // kernel tick (1 ms) is the other thing that can return the WFI: a round
+    // across which the tick count moved could have been the tick's wake, so
+    // it is reported and taken again rather than counted either way. A quiet
+    // round - the tick count unmoved - that ran the SPI handler was the SPI's
+    // wake; one that did not was woken by something else, and fails.
     sleep_probe_live = true;
-    uint8_t first_wake_spi = 0;
     uint8_t woke_on_spi = 0;
+    uint8_t woke_other = 0;
+    uint8_t lengthened = 0;
     for (uint8_t k = 0; k < 8u; ++k) {
-        sleep_woke = false;
-        S1::rxne_interrupt(true);
-        Nvic::enable(S1::irq());
-        S1::data_byte(static_cast<uint8_t>(0x40u + k));
-        P::idle();
-        if (sleep_woke) {
-            ++first_wake_spi;
+        for (uint8_t attempt = 0; attempt < 4u; ++attempt) {
+            sleep_woke = false;
+            S1::rxne_interrupt(true);
+            Nvic::enable(S1::irq());
+            brio::disable_interrupts();
+            const uint32_t tick0 = P::now();
+            S1::data_byte(static_cast<uint8_t>(0x40u + k));
+            P::idle();   // WFI masked, interrupts enabled on the way out
+            const bool quiet = P::now() == tick0;
+            S1::rxne_interrupt(false);
+            Nvic::disable(S1::irq());
+            S1::flush_rx();
+            if (!quiet) {
+                ++lengthened;
+                continue;
+            }
+            if (sleep_woke) {
+                ++woke_on_spi;
+            } else {
+                ++woke_other;
+            }
+            break;
         }
-        // The kernel tick is the OTHER thing that can return from a WFI
-        // here (1 ms against the frame's 32 us), so a round the tick won
-        // is slept again rather than counted against the SPI.
-        for (uint8_t retry = 0; retry < 4u && !sleep_woke; ++retry) {
-            P::idle();
-        }
-        if (sleep_woke) {
-            ++woke_on_spi;
-        }
-        S1::rxne_interrupt(false);
-        Nvic::disable(S1::irq());
-        S1::flush_rx();
     }
     sleep_probe_live = false;
-    print(serial, "  WFI in Sleep mode: the SPI's own interrupt returned it in ",
-          woke_on_spi, " rounds of 8, and was the FIRST wake in ", first_wake_spi,
-          " of them (the kernel tick is the other candidate, 1 ms against the "
+    print(serial, "  WFI in Sleep mode: the SPI's own interrupt was the wake in ",
+          woke_on_spi, " rounds of 8, something else in ", woke_other, "; ", lengthened,
+          " round(s) the kernel tick landed in were taken again (1 ms against the "
           "frame's 32 us)", crlf);
     bench.verdict("TABLE 205'S LAST ROW, on silicon: an SPI interrupt wakes a "
                   "core sleeping in Sleep mode (the plain WFI the platform's "
@@ -3700,7 +3817,7 @@ bool shape_clean(const ShapeResult& r, bool inside, uint16_t blocks = 0) {
 uint32_t block_cycles(bool engines, uint16_t n, SpiClock rate, SpiDataSize bits) {
     uint32_t least = 0xFFFFFFFFu;
     for (uint8_t k = 0; k < 3u; ++k) {
-        const uint32_t t0 = cycles_now();
+        const uint32_t t0 = Ruler::now();
         if (engines) {
             // Asynchronous: both block lengths ride the engines at every
             // code, the completion waited for in the same call.
@@ -3708,7 +3825,7 @@ uint32_t block_cycles(bool engines, uint16_t n, SpiClock rate, SpiDataSize bits)
         } else {
             (void)host_xfer(nullptr, nullptr, n, rate, SpiMode::mode0, bits, true);
         }
-        const uint32_t took = cycles_now() - t0;
+        const uint32_t took = Ruler::now() - t0;
         least = took < least ? took : least;
     }
     return least;
@@ -3789,7 +3906,7 @@ void ts_shapes() {
         r.mode = SpiMode::mode3;
         const bool ended = Host::start(r);
         const uint8_t status = Host::status();
-        settle_ms(2);
+        brio::spin_us<Ruler>(2'000u);
         const uint16_t refused_falls = cs_falls;
         const uint32_t cr1_after = S1::regs().CR1;
         const bool sck_low = !Pin<'B', 3>::read();
@@ -3797,7 +3914,7 @@ void ts_shapes() {
         const uint8_t frlvl = S1::rx_level();
         r.engine = SpiEngine::polled;
         (void)Host::start(r);
-        settle_ms(2);
+        brio::spin_us<Ruler>(2'000u);
         const uint16_t polled_falls = static_cast<uint16_t>(cs_falls - refused_falls);
         (void)CsWatch::arm(false);
         (void)CsWatch::clear();
@@ -3967,7 +4084,8 @@ void tn_peer_link() {
     if (!need_peer()) {
         return;
     }
-    bench.verdict("the peer answers a ping over the four wires", true);
+    // need_peer() has pinged already; this is a fresh one, judged.
+    bench.verdict("the peer answers a ping over the four wires", command(Op::ping));
 
     spilink::Ident d{};
     const bool got = peer_ident(d);
@@ -4149,11 +4267,16 @@ void tp_peer_rates() {
     // THE SIGNATURE OF THE PEER'S BOUNDARY: at the first rung that is not
     // exact the client still RECEIVED every character (its count full,
     // its mismatches zero) while what this end read back broke - so the
-    // failure lives in the ANSWER path and not in the wire. Vacuous, and
-    // says so, on the day a peer holds the whole ladder.
-    bench.verdict("wherever the climb breaks, the peer still hears every character "
-                  "exact there - the boundary is its ANSWER RELOAD, not the wire",
-                  first_bad == 0u || (bad_r.count == 8u && bad_r.mism == 0u));
+    // failure lives in the ANSWER path and not in the wire. A peer that
+    // holds every judged rung leaves no boundary to judge: a skip.
+    if (first_bad == 0u) {
+        bench.skip("the climb never broke at a judged rung: no boundary to judge "
+                   "the answer path at");
+    } else {
+        bench.verdict("wherever the climb breaks, the peer still hears every character "
+                      "exact there - the boundary is its ANSWER RELOAD, not the wire",
+                      bad_r.count == 8u && bad_r.mism == 0u);
+    }
 
     // THE SECOND CLIMB IS INFORMATIONAL AND CLAIMS NOTHING: the same
     // ladder with `spare_polled_pump` set, which asks the peer for its
@@ -4217,11 +4340,11 @@ void tq_peer_kernel() {
     a.seed_a = 0x3B;
     a.seed_b = 0x6D;
     a.pattern = spilink::pattern_prbs;
-    if (!peer_act(Op::exchange, a)) {
-        bench.verdict("the peer accepted the exchange the kernel letter clocks", false);
+    const bool accepted = peer_act(Op::exchange, a);
+    bench.verdict("the peer accepted the exchange the kernel letter clocks", accepted);
+    if (!accepted) {
         return;
     }
-    bench.verdict("the peer accepted the exchange the kernel letter clocks", true);
 
     {
         spilink::Stream out(a.pattern, a.seed_a);
@@ -4443,13 +4566,12 @@ void tr_peer_client() {
     a.cfg.mode = 0;
     a.cfg.dord = 0;
 
-    if (!peer_act(Op::host_burst, a)) {
-        bench.verdict("the peer accepted the host_burst command (its spi_peer must "
-                      "carry op 0x14)",
-                      false);
+    const bool accepted = peer_act(Op::host_burst, a);
+    bench.verdict("the peer accepted the host_burst command", accepted);
+    if (!accepted) {
+        print(serial, "  (its spi_peer must carry op 0x14)", crlf);
         return;
     }
-    bench.verdict("the peer accepted the host_burst command", true);
 
     const bool ran = run_as_client(a);
     bench.verdict("this board came up as an SPI CLIENT on the very pads it hosts "
@@ -4688,11 +4810,11 @@ Outcome run(const Ext& e) {
         r.bits = bits;
         r.engine = SpiEngine::dma;
         const uint32_t m0 = Ticker::millis();
-        const uint32_t t0 = cycles_now();
+        const uint32_t t0 = Ruler::now();
         bool done = DmaHost::start(r);
         while (!done && !host_done && Ticker::millis() - m0 < 200u) {
         }
-        o.cycles = cycles_now() - t0;
+        o.cycles = Ruler::now() - t0;
         o.ticked = Ticker::millis() != m0;
         o.clocked = done || host_done;
         link_hold();
@@ -4713,11 +4835,11 @@ Outcome run(const Ext& e) {
         r.bits = bits;
         r.engine = SpiEngine::polled;
         const uint32_t m0 = Ticker::millis();
-        const uint32_t t0 = cycles_now();
+        const uint32_t t0 = Ruler::now();
         bool done = Host::start(r);
         while (!done && !host_done && Ticker::millis() - m0 < 200u) {
         }
-        o.cycles = cycles_now() - t0;
+        o.cycles = Ruler::now() - t0;
         o.ticked = Ticker::millis() != m0;
         o.clocked = done || host_done;
         link_hold();
@@ -4806,14 +4928,17 @@ bool climb(Ext e, uint8_t& judged) {
 /// `division` core cycles). Zero when either window was not exact. The
 /// console is drained first, and a window a tick landed in is taken again
 /// (at most six times each): the tick's handler and a transmit interrupt
-/// lengthen a window (window_ok() judges the unlengthened ones).
-uint32_t frame_permille(Ext e) {
+/// lengthen a window (window_ok() judges the unlengthened ones). Nothing
+/// when the console would not drain: its interrupt would sit in the windows.
+std::optional<uint32_t> frame_permille(Ext e) {
     Ext shorter = e;
     shorter.count = 16;
     Ext longer = e;
     longer.count = 48;
     longer.seed_a = static_cast<uint8_t>(e.seed_a + 3u);
-    console_drain();
+    if (!brio::console_drain<Ruler, Serial>()) {
+        return std::nullopt;
+    }
     Outcome a{};
     Outcome b{};
     uint8_t turns = 6;
@@ -4892,13 +5017,19 @@ void tu_wide() {
     static constexpr SpiClock timed[] = {SpiClock::div16, SpiClock::div4};
     bool engines_wire = true;
     bool polled_wire = true;
+    bool drained = true;
     for (const SpiClock c : timed) {
         for (uint8_t p = 0; p < 2u; ++p) {
             ext::Ext e{};
             e.path = static_cast<ext::Path>(p);
             e.wide = true;
             e.rate = c;
-            const uint32_t pm = ext::frame_permille(e);
+            const std::optional<uint32_t> reading = ext::frame_permille(e);
+            if (!reading) {
+                drained = false;
+                continue;
+            }
+            const uint32_t pm = *reading;
             print(serial, "  ", ext::path_name(e.path), " at PCLK/", spi_division(c),
                   ": a 16-bit frame takes ", pm, " permille of its 16 SCK periods", crlf);
             if (e.path == ext::Path::engines) {
@@ -4908,11 +5039,15 @@ void tu_wide() {
             }
         }
     }
-    bench.verdict("THE ENGINES' 16-BIT FRAMES RUN AT THE WIRE'S TIME: a frame inside the window is its "
-                  "sixteen SCK periods, within one empty turn of the wait that ends a window (window_ok()), "
-                  "at PCLK/16 and PCLK/4",
-                  engines_wire);
-    bench.verdict("...and so do the polled loop's, its two half-words in flight", polled_wire);
+    if (!drained) {
+        bench.skip("the console did not drain: the timed windows would carry its interrupt");
+    } else {
+        bench.verdict("THE ENGINES' 16-BIT FRAMES RUN AT THE WIRE'S TIME: a frame inside the window is its "
+                      "sixteen SCK periods, within one empty turn of the wait that ends a window "
+                      "(window_ok()), at PCLK/16 and PCLK/4",
+                      engines_wire);
+        bench.verdict("...and so do the polled loop's, its two half-words in flight", polled_wire);
+    }
 
     // The peer's own 16-bit RUN (spare_polled_pump): the other end's
     // SpiClient::exchange in uint16_t frames, judged at the same rungs.
@@ -5161,6 +5296,13 @@ Crc run_crc(bool wide, uint16_t poly, SpiClock rate, uint8_t spare, bool corrupt
         const uint16_t depth = wide ? 2u : 3u;
         uint16_t wr = 0;
         uint16_t rd = 0;
+        // THE LOOP'S PACE IS PART OF THE INSTRUMENT here, so its bound
+        // stays a count of turns and not a ruler read in every one: with a
+        // Ticker::cycles() read per turn (wait_until's shape) the peer's
+        // CRC check failed in 10 of 10 runs, both widths. 400000 turns of a
+        // few register reads are far past seventeen frames at PCLK/256; a
+        // run that ends on the count leaves rd short, which `frames` below
+        // judges.
         uint32_t spins = 400'000u;
         while (rd <= n && spins-- != 0u) {
             const uint32_t sr = S1::status();
@@ -5249,9 +5391,9 @@ void tt_crcnext_walk() {
     if (!need_peer()) {
         return;
     }
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     ext::spin_loops(10000u);
-    print(serial, "  a loop turn is ", (cycles_now() - t0) / 10000u, " core cycles", crlf);
+    print(serial, "  a loop turn is ", (Ruler::now() - t0) / 10000u, " core cycles", crlf);
     static constexpr SpiClock rates[] = {SpiClock::div2, SpiClock::div4, SpiClock::div8, SpiClock::div16};
     for (uint8_t w = 0; w < 2u; ++w) {
         for (const SpiClock c : rates) {
@@ -5506,18 +5648,17 @@ uint16_t host_bidi_out(const uint8_t* tx, uint16_t n, SpiClock rate, uint8_t& rx
     CsPin::clear();
     link_hold();
     uint16_t w = 0;
+    // 1 ms each: time-outs only, a frame at the slowest rung this letter
+    // clocks being 32 us. A frame that never found room ends the loop short,
+    // and the count returned is judged; the drain's answer is the disable
+    // procedure's to report (`drained`).
     for (; w < n; ++w) {
-        uint32_t spins = 100'000u;
-        while (!S1::txe() && spins-- != 0u) {
-        }
-        if (spins == UINT32_MAX) {
+        if (!brio::wait_until<Ruler>([] { return S1::txe(); }, 1'000)) {
             break;
         }
         S1::data_byte(tx[w]);
     }
-    uint32_t spins = 100'000u;
-    while (S1::tx_level() != 0u && spins-- != 0u) {
-    }
+    (void)brio::wait_until<Ruler>([] { return S1::tx_level() == 0u; }, 1'000);
     rx_left = S1::rx_level();
     drained = S1::disable();
     link_hold();
@@ -5998,14 +6139,14 @@ void host_up(SpiMode mode) {
     dma_host_live = true;
     (void)DmaHost::init(clock, {.mosi_speed = peer_mosi_speed});
     DmaHost::prime(mode, way_rate);
-    settle_ms(1);
+    brio::spin_us<Ruler>(1'000u);
 }
 
 /// Letter's pull on SCK, which the next init() takes away with the pad's
 /// function: what makes the pad's being undriven with SPE clear an edge.
 void pull_sck_down() {
     Pin<host_pins.sck.port, host_pins.sck.pin>::pull(PinPull::down);
-    settle_ms(1);
+    brio::spin_us<Ruler>(1'000u);
 }
 
 /// SCK's edges counted over one call: the pad is an input to the EXTI whatever
@@ -6047,9 +6188,9 @@ Failed run_stalled(Shape shape, PinRef cs, SpiMode mode) {
         q.engine = SpiEngine::dma;
     }
     Failed f{};
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     f.ended = DmaHost::start(q);
-    f.wall = cycles_now() - t0;
+    f.wall = Ruler::now() - t0;
     f.completed = f.ended;
     f.status = DmaHost::status();
     f.released = CsPin::read_out();
@@ -6080,9 +6221,9 @@ Failed run_faulted(bool bad_tx, PinRef cs, SpiMode mode) {
     dma_completions = 0;
     host_done = false;
     time_vector = true;
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     f.ended = DmaHost::start(q);
-    f.wall = cycles_now() - t0;
+    f.wall = Ruler::now() - t0;
     f.completed = completed_within(f.ended, 100u);
     time_vector = false;
     f.completions = dma_completions;
@@ -6283,7 +6424,7 @@ void tK_way_back() {
     way::host_up(SpiMode::mode0);
     const way::Failed e_rx = way::run_faulted(false, {}, SpiMode::mode0);
     const uint32_t rx_vector = vector_cycles;
-    settle_ms(2);
+    brio::spin_us<Ruler>(2'000u);
     const uint8_t rx_stood = static_cast<uint8_t>(S1::rx_level());
     const uint8_t tx_stood = static_cast<uint8_t>(S1::tx_level());
     const way::Window n_rx = way::next_window(a, SpiMode::mode0, false);
@@ -6301,7 +6442,7 @@ void tK_way_back() {
     (void)link_command_mode();
     way::host_up(SpiMode::mode0);
     const way::Failed e_sel = way::run_faulted(false, CsPin::ref(), SpiMode::mode0);
-    settle_ms(1);
+    brio::spin_us<Ruler>(1'000u);
     way::print_failed("a receive buffer in reserved space, the select named", e_sel);
     DmaHost::release();
     dma_host_live = false;
@@ -6410,9 +6551,9 @@ void tK_way_back() {
     S1::data_byte(0xFFu);
     S1::data_byte(0xFFu);
     const uint8_t standing = static_cast<uint8_t>(S1::tx_level());
-    const uint32_t r0 = cycles_now();
+    const uint32_t r0 = Ruler::now();
     (void)DmaHost::recover();
-    const uint32_t recover_wall = cycles_now() - r0;
+    const uint32_t recover_wall = Ruler::now() - r0;
     print(serial, "    recover() over TXFIFO level ", standing, ", the enable down: ", recover_wall, " cycles (",
           recover_wall / (SysClock::hz() / 1'000'000u), " us)", crlf);
     DmaHost::release();
@@ -6437,7 +6578,8 @@ void banner() {
                       "themselves and claim nothing", crlf);
     }
     print(serial, "  SPI1 PB3/PB4/PB5 + PA15 also reach a PEER BOARD running "
-                  "`spi_peer` (its ident says which port) - letters n..r", crlf);
+                  "`spi_peer` (its ident says which port) - letters n..r, u..w, y, K, S "
+                  "and B, and t and x outside z", crlf);
     bench.menu();
     print(serial, "  z  run them all", crlf);
 }
@@ -6646,7 +6788,7 @@ Refusal refuse(typename H::Request q) {
     way::watch_sck(true);
     f.ended = H::start(q);
     f.status = H::status();
-    settle_ms(1);
+    brio::spin_us<Ruler>(1'000u);
     way::watch_sck(false);
     (void)CsWatch::arm(false);
     (void)CsWatch::clear();
@@ -7121,7 +7263,7 @@ void one_pass(Ahead ahead, SpiClock rate, bool rxdmaen_down, uint8_t seed, Row& 
     dma_host_live = true;
     (void)DmaHost::init(clock, {.mosi_speed = peer_mosi_speed});
     DmaHost::prime(SpiMode::mode0, rate);
-    settle_ms(1);
+    brio::spin_us<Ruler>(1'000u);
     if (ahead == Ahead::fault) {
         DmaHost::Request bad{};
         bad.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out));
@@ -7133,7 +7275,7 @@ void one_pass(Ahead ahead, SpiClock rate, bool rxdmaen_down, uint8_t seed, Row& 
         if (!DmaHost::start(bad)) {
             (void)way::completed_within(false, 100u);
         }
-        settle_ms(2);
+        brio::spin_us<Ruler>(2'000u);
         DmaHost::prime(SpiMode::mode0, rate);
     }
     CsPin::clear();
@@ -7184,14 +7326,23 @@ void one_pass(Ahead ahead, SpiClock rate, bool rxdmaen_down, uint8_t seed, Row& 
     block.engine = SpiEngine::dma;
     host_done = false;
     dma_completions = 0;
-    const bool inside = DmaHost::start(block);
-    const uint32_t count_after = HostRx::remaining();
-    const uint8_t cell_after = in[done];
+    // start() and the two reads behind it under one mask: a tick handler
+    // between them would let the first frame land and read as a beat taken
+    // at the channel's start.
+    bool inside = false;
+    uint32_t count_after = 0;
+    uint8_t cell_after = 0;
+    {
+        P::CriticalSection cs;
+        inside = DmaHost::start(block);
+        count_after = HostRx::remaining();
+        cell_after = in[done];
+    }
     const bool completed = way::completed_within(inside, 400u);
     const bool busy_at_end = S1::busy();
     link_hold();
     CsPin::set();
-    settle_ms(1);
+    brio::spin_us<Ruler>(1'000u);
     const uint8_t left = static_cast<uint8_t>(S1::rx_level());
     const uint8_t status = DmaHost::status();
     DmaHost::release();
@@ -7249,7 +7400,7 @@ void by_hand(uint8_t standing, uint32_t hold_us, Hand hand, bool wide, Row& row)
     dma_host_live = true;
     (void)DmaHost::init(clock, {.mosi_speed = peer_mosi_speed});
     DmaHost::prime(SpiMode::mode0, SpiClock::div256, wide ? SpiDataSize::bits16 : SpiDataSize::bits8);
-    settle_ms(1);
+    brio::spin_us<Ruler>(1'000u);
     if (hand == Hand::down || hand == Hand::raised_on_it) {
         S1::regs().CR2 = S1::regs().CR2 & ~SPI_CR2_RXDMAEN;
     }
@@ -7288,12 +7439,19 @@ void by_hand(uint8_t standing, uint32_t hold_us, Hand hand, bool wide, Row& row)
     block.engine = SpiEngine::dma;
     host_done = false;
     dma_completions = 0;
-    const bool inside = DmaHost::start(block);
-    const uint32_t count_after = HostRx::remaining();
-    const uint16_t cell_after = wide_in[0];
+    // Under one mask, as in one_pass().
+    bool inside = false;
+    uint32_t count_after = 0;
+    uint16_t cell_after = 0;
+    {
+        P::CriticalSection cs;
+        inside = DmaHost::start(block);
+        count_after = HostRx::remaining();
+        cell_after = wide_in[0];
+    }
     const bool completed = way::completed_within(inside, 100u);
     const bool busy_at_end = S1::busy();
-    settle_ms(1);
+    brio::spin_us<Ruler>(1'000u);
     const uint8_t left = static_cast<uint8_t>(S1::rx_level());
     row.passes = static_cast<uint8_t>(row.passes + 1u);
     row.count_short = static_cast<uint8_t>(row.count_short + ((!inside && count_after < 8u) ? 1u : 0u));
@@ -7436,13 +7594,13 @@ extern "C" void EXTI4_15_IRQHandler() {
 
 /// The engined host's body, from either channel's vector; letter K times it.
 void dma_host_vector() {
-    const uint32_t t0 = time_vector ? cycles_now() : 0u;
+    const uint32_t t0 = time_vector ? Ruler::now() : 0u;
     const bool ended = DmaHost::dma_isr();
     if (ended && wire_end::watching) {
         wire_end::sampled();
     }
     if (ended && time_vector) {
-        vector_cycles = cycles_now() - t0;
+        vector_cycles = Ruler::now() - t0;
     }
     if (ended) {
         dma_host_done();

@@ -5,11 +5,22 @@
 // verdict is "ran", except letter r, whose two verdicts judge the ruler
 // every other line is read with.
 //
-// NOTHING TO WIRE. The console is the Nucleo's own ST-LINK virtual COM
+// WHAT IS WIRED. The console is the Nucleo's own ST-LINK virtual COM
 // port, USART2 on PA2 (TX) / PA3 (RX) at AF1, 115200 8N1 - the binding of
 // console.cpp and test_stm32_platform.cpp (the handler name the reserve
 // spells, BRIO_STM32G0_USART2_HANDLER), and the TestBench frame and the
-// polled prompt loop of the latter. NO KERNEL AND NO ACTIVE OBJECT: the
+// polled prompt loop of the latter. Letters r, m, p, t and f need nothing
+// more. Letters d and e clock SPI1 on PB3/PB4/PB5, letter e with a select
+// on PA15 and a D/C on PB6: what they time is the wire's whatever comes
+// back on MISO, so they run alike with the pads free or wired to a peer
+// board's SPI client, which may answer a frame its select framed (unread
+// by the times). Letter u's USART1 runs its own loop on PA9/PA10, any
+// far receive pad on PA9 high-impedance (a peer board on its dark
+// console). Letter i needs the board's I2C SELF-LINK, two jumpers - PB8
+// to PA11 and PB9 to PA12, 2.2 kOhm to 3V3 on each line - and skips
+// itself when the wire says they are absent: the same two host pads may
+// carry a bus to a peer board instead, whose pull-ups hold them high at
+// rest with no client of this board's behind them. NO KERNEL AND NO ACTIVE OBJECT: the
 // letters are plain functions and the idle path is called by hand, so
 // what is measured is the transport, the runtime and the idle path,
 // never a dispatch.
@@ -107,13 +118,12 @@
 //      The transport's copy table is letter u's.
 //   p  a print of 1, 16, 256 and 4096 bytes - print(serial, s) with s a
 //      static string in flash of that length (rows of 62 digits and a
-//      CRLF; the 1-byte one is the final LF) - then the drain. The
-//      transport has NO verb for "the ring is empty AND the shifter has
-//      finished": Uart::tx_idle() is the ring alone, so the drain is
-//      tx_idle() followed by the resource's TC flag (RM0444 33.8.10: set
-//      when the last frame written to TDR has left the shift register,
-//      cleared by the TDR write that started it), both bounded on the
-//      ruler. Counters before the print and after the drain. busy = wall
+//      CRLF; the 1-byte one is the final LF) - then the drain:
+//      util/test_wait.hpp's console_drain() over Uart::tx_idle(), which
+//      answers for the ring AND the shifter - the resource's TC flag
+//      (RM0444 33.8.10: set when the last frame written to TDR has left
+//      the shift register, cleared by the TDR write that started it) -
+//      bounded on the ruler. Counters before the print and after the drain. busy = wall
 //      (the print spins in write_blocking, the drain spins on the flags);
 //      irq and isr are the transport's shape. USART2 is a FULL instance,
 //      so the default Uart runs it in FIFO mode (stm32g0/usart.hpp's
@@ -148,12 +158,12 @@
 //                    against the 256 periods, the jitter the spread of the
 //                    eight walls;
 //        spi.dma     SpiHost<1> on its two engines (uint16_t, DMA1 channels
-//                    2 and 3), SPI1 on PB3/PB4/PB5 with nothing wired - MISO
-//                    floats: 64 and 256 frames of 8 bits (`spi.dma`) and of
+//                    2 and 3), SPI1 on PB3/PB4/PB5, MISO free or a peer
+//                    board's: 64 and 256 frames of 8 bits (`spi.dma`) and of
 //                    16 (`spi.dma.w16`) at PCLK/2 and PCLK/8, on the
 //                    engines - the wall against the wire.
 //   e  THE SPI HOST ABOVE THE WIRE (stm32g0/spi.hpp) on letter d's pads,
-//      MISO floating, each op the best of 8 runs of start() (the Request
+//      MISO free or a peer board's, each op the best of 8 runs of start() (the Request
 //      built outside the clock, as a client builds it; where the request
 //      goes to the engines, the wait for the completion on the masked idle
 //      path is inside the clock too), the frames read back into a buffer
@@ -180,8 +190,8 @@
 //        spi.req     THE FIXED COST OF A REQUEST, a DCS command's shapes: a
 //                    polled command of one byte and 0, 2 and 15 bytes of
 //                    data, write-only, the D/C scripted on PB6 and the
-//                    select on PA15 (two spare pads nothing is wired to),
-//                    at PCLK/16; "the rest" above the wire is the price of
+//                    select on PA15 (the select a peer board's client
+//                    may see: the times do not read MISO), at PCLK/16; "the rest" above the wire is the price of
 //                    a command;
 //        spi.async   THE TWO WAYS' FIXED COSTS on letter d's ENGINED host:
 //                    64 frames of 8 bits at PCLK/16, write and read, on the
@@ -224,9 +234,12 @@
 //      I2C1 the host on PB8/PB9, I2C2 a client at 0x42 on PA11/PA12
 //      answering from its own vector - the wiring test_stm32_i2c's
 //      self-link letters use, 2.2 kOhm to 3V3 on each line, both
-//      kernels on PCLK; the letter declines when the lines read low at
-//      rest. First each line's rise from a released low (the poll's turn
-//      included), then at 100 kHz, 400 kHz and 1 MHz (the Fm+ drive on
+//      kernels on PCLK. The letter asks the wire first - each host pad
+//      driven both ways against its client pad's opposite internal pull -
+//      and skips itself when a jumper is absent; with the jumpers there,
+//      lines that read low at rest (no pull-ups) or a client that does
+//      not answer a probe of 0x42 fail it. First each line's rise from a
+//      released low (the poll's turn included), then at 100 kHz, 400 kHz and 1 MHz (the Fm+ drive on
 //      both instances for the last): the SCL period MEASURED as the
 //      slope of two engined writes of 16 and 255 bytes, and every op
 //      through the engineless host (`i2c.*`) and through the engined host
@@ -252,8 +265,10 @@
 //
 //      The rise is printed beside the same steps timed on a line already
 //      high: the difference is the edge to the input's threshold, to the
-//      poll's resolution (a few cycles, some 60 ns), against the 120 ns an
-//      Fm+ edge may take.
+//      poll's resolution (a few cycles, some 60 ns; up to some 15, about
+//      230 ns, when the edge falls across the time-out's test, made once
+//      every four reads of the pad), against the 120 ns an Fm+ edge may
+//      take.
 //
 // THE WIRES (the `wire` field, bytes per second, and why it is the
 // limit):
@@ -341,6 +356,7 @@
 
 #include <array>
 #include <cstring>
+#include <optional>
 #include <span>
 
 #include "stm32g0/clock.hpp"
@@ -356,6 +372,7 @@
 #include "stm32g0/usart.hpp"
 #include "util/bench.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
@@ -484,25 +501,14 @@ constexpr OpNames pf1_ops{"ruler.pf1",  "stamp.pf1", "window.pf1", "memcpy.pf1",
 
 // ---- helpers -------------------------------------------------------------------
 
-/// Let the console fall silent: the ring empty (tx_idle()), then the last
-/// frame out of the shift register (TC, RM0444 33.8.10) - the transport
-/// has no verb for both. Bounded on the ruler at a tenth of a second, the
-/// full 256-byte ring at the wire being 22 ms; false = it gave up.
-bool drain() {
-    Stopwatch<Ruler> sw;
-    sw.start();
-    while (!Serial::tx_idle()) {
-        if (sw.elapsed() > Ruler::hz() / 10u) {
-            return false;
-        }
-    }
-    while ((Serial::Resource::status() & UsartFlag::tc) == 0u) {
-        if (sw.elapsed() > Ruler::hz() / 10u) {
-            return false;
-        }
-    }
-    return true;
-}
+/// Let the console fall silent: util/test_wait.hpp's console_drain() over
+/// tx_idle(), which answers for the ring and for the last frame's stop
+/// bit (TC, RM0444 33.8.10). Bounded on the ruler at a tenth of a second,
+/// the full 256-byte ring at the wire being 22 ms; false = it gave up.
+/// The bench lines' runs drop the answer (a wedged console only lengthens
+/// the run after it, and the line prints what it measured); letter r's
+/// verdicts and letter p's line act on it.
+bool drain() { return console_drain<Ruler, Serial>(100'000u); }
 
 /// A run's numbers divided by its units, rounded to the nearest.
 BenchSample per_unit(const BenchSample& s, uint32_t units) {
@@ -611,7 +617,7 @@ constexpr uint32_t probe_floor = SysClock::hz / 1'000'000u * probe_us;
 static_assert(SysClock::hz % 1'000'000u == 0u, "the floor is exact in whole cycles per microsecond");
 
 void tr_ruler() {
-    (void)drain();
+    const bool quiet = drain();
     (void)delay_us(clock, probe_us);   // the wait's code into the instruction cache
     const bool whole_tick_refused = !delay_us(clock, 1000u);
 
@@ -622,9 +628,14 @@ void tr_ruler() {
     print(serial, "  delay_us(clock, ", probe_us, ") served=", served, ": ", took,
           " cycles on the ruler (floor ", probe_floor, ", +5% ", probe_floor + probe_floor / 20u,
           "); delay_us(clock, 1000) refused=", whole_tick_refused, crlf);
-    bench.verdict("the ruler reads delay_us(999) at least the due cycles",
-                  served && took >= probe_floor);
-    bench.verdict("and under the due cycles + 5 per cent", took <= probe_floor + probe_floor / 20u);
+    if (quiet) {
+        bench.verdict("the ruler reads delay_us(999) at least the due cycles",
+                      served && took >= probe_floor);
+        bench.verdict("and under the due cycles + 5 per cent",
+                      took <= probe_floor + probe_floor / 20u);
+    } else {
+        bench.skip("the console did not drain: the timed wait would carry its interrupt");
+    }
 
     run_costs(plain_ops);
     bench.verdict("ran", true);
@@ -874,8 +885,8 @@ void paced_vector() {
     }
 }
 
-// -- the engined SPI host: test_stm32_spi's SPI1 pads, NOTHING WIRED to
-// them - MISO floats, and the time is the wire's whatever comes back.
+// -- the engined SPI host: test_stm32_spi's SPI1 pads, free or wired to a
+// peer board's client - the time is the wire's whatever comes back on MISO.
 /// An engine slot an image whose letters do not use it leaves empty: the
 /// three transports below share channels 2 and 3 by number, one per image.
 template <bool on, typename Engine>
@@ -1156,8 +1167,9 @@ void td_dma() {
 /// naming the engines on, and what a host with no engines runs for
 /// everything.
 using SpiSw = SpiHost<1, spi_pins, NoDmaEngine, NoDmaEngine, HotPlace>;
-/// The select and the D/C of `spi.req`, two spare pads nothing is wired
-/// to: PA15 (the SPI suite's own chip select on this board) and PB6.
+/// The select and the D/C of `spi.req`: PA15 (the SPI suite's own chip
+/// select on this board, a peer board's select where one is wired) and
+/// PB6.
 using ReqCs = Pin<'A', 15>;
 using ReqDc = Pin<'B', 6>;
 static const uint8_t req_cmd[1] = {0x2C};   // a DCS memory write's opcode
@@ -1284,7 +1296,7 @@ void print_hundredths(uint32_t v) {
 
 void te_host() {
     print(serial, "  SpiHost<1> without engines, then letter d's engined one, on SPI1 "
-                  "PB3/PB4/PB5, MISO floating; spi.req's select PA15, D/C PB6",
+                  "PB3/PB4/PB5, MISO free or a peer's; spi.req's select PA15, D/C PB6",
           crlf);
     for (uint16_t i = 0; i < 512u; ++i) {
         spi_tx[i] = static_cast<uint8_t>(0x30u + i);
@@ -1460,12 +1472,9 @@ bool loop_up(LoopMode mode, uint32_t baud) {
     loop_mode = mode;
     const bool ok = T::init(clock, baud);
     T::clear_errors();
-    // TE's idle frame (33.5.5) and anything the pad saw on the way.
-    const uint32_t frame = SysClock::hz / (baud / 10u);
-    Stopwatch<Ruler> sw;
-    sw.start();
-    while (sw.elapsed() < 4u * frame) {
-    }
+    // TE's idle frame (33.5.5) and anything the pad saw on the way: four
+    // frames of ten bits, rounded up to the next microsecond.
+    spin_us<Ruler>(40'000'000u / baud + 1u);
     uint8_t junk = 0;
     while (T::read_byte(junk)) {
     }
@@ -2071,22 +2080,74 @@ void measure_period(I2cSpeed speed) {
           I2cDma::scl_hz(speed), " Hz on the fastest wire there can be (the ceiling)", crlf);
 }
 
+/// The cycles SysTick counted down from `from` to `to`, at most one reload
+/// between the two reads of VAL.
+constexpr uint32_t val_span(uint32_t from, uint32_t to) {
+    return from >= to ? from - to : from + TickRuler::last + 1u - to;
+}
+
+/// How long a line may take to rise before rise_cycles() gives up: 100 us,
+/// some hundred times what a 2.2 kOhm pull-up into a few tens of pF takes,
+/// and under one SysTick period (val_span()'s one reload).
+constexpr uint32_t rise_budget = SysClock::hz / 10'000u;
+static_assert(rise_budget < TickRuler::last);
+
 /// The wire's rise from a released low, in cycles: a pad of the host's
 /// pulled low as an open-drain output, released, and SysTick's VAL read
 /// either side of the poll (one load each; the poll's turn, a few cycles,
-/// is the resolution).
+/// is the resolution). The poll runs masked, so it is bounded on VAL
+/// itself, not on the ticker, the budget tested once every four reads of
+/// the pad so that the turn stays the pad's load, test and branch; nothing
+/// when the line had not risen within rise_budget.
 template <typename P>
-uint32_t rise_cycles(bool from_low = true) {
+std::optional<uint32_t> rise_cycles(bool from_low = true) {
     P::output(!from_low, {.open_drain = true});
     (void)delay_us(clock, 20u);
     disable_interrupts();
     const uint32_t v0 = SysTick->VAL;
     P::set();
-    while (!P::read()) {
+    bool rose = true;
+    while (!(P::read() || P::read() || P::read() || P::read())) {
+        if (val_span(v0, SysTick->VAL) > rise_budget) {
+            rose = false;
+            break;
+        }
     }
     const uint32_t v1 = SysTick->VAL;
     enable_interrupts();
-    return v0 >= v1 ? v0 - v1 : v0 + TickRuler::last + 1u - v1;
+    if (!rose) {
+        return std::nullopt;
+    }
+    return val_span(v0, v1);
+}
+
+/// Does driving `Drv` really move `Rd`? Both levels, each against the far
+/// pad's OPPOSITE internal pull, so a far pad left alone on its own pull,
+/// or held at one rail by something else, cannot answer yes to both;
+/// 200 us for each level to settle. The self-link's question, asked as
+/// test_stm32_i2c asks it.
+template <typename Drv, typename Rd>
+bool wire_follows() {
+    Rd::input(PinPull::up);
+    Drv::output(false);
+    spin_us<Ruler>(200u);
+    const bool low = !Rd::read();
+    Rd::input(PinPull::down);
+    Drv::set();
+    spin_us<Ruler>(200u);
+    const bool high = Rd::read();
+    Drv::release();
+    Rd::release();
+    return low && high;
+}
+
+/// A rise for the line: the cycles, or a dash when it gave up.
+void print_rise(const std::optional<uint32_t>& c) {
+    if (c) {
+        print(serial, *c);
+    } else {
+        print(serial, "- (none within 100 us)");
+    }
 }
 
 template <typename Host>
@@ -2114,22 +2175,54 @@ void ti_i2c() {
                   "DmaRxEngine<1, 3>), I2C2 the client at 0x42 on PA11/PA12 from its own vector, "
                   "both kernels on PCLK, 2.2 kOhm to 3V3 on each line",
           crlf);
-    // The pads at rest first: the self-link is there or the letter says so.
+    // The self-link is two jumpers, not a property of the board, and the
+    // same host pads may carry a bus to a peer board whose pull-ups hold
+    // them high at rest with nothing of this board's behind them: the wire
+    // is asked whether the jumpers are there.
+    const bool scl_linked = wire_follows<Pin<'B', 8>, Pin<'A', 11>>();
+    const bool sda_linked = wire_follows<Pin<'B', 9>, Pin<'A', 12>>();
+    print(serial, "  self-link probe: SCL ", scl_linked, " SDA ", sda_linked, crlf);
+    if (!scl_linked || !sda_linked) {
+        bench.skip("the self-link's jumpers are absent (PB8 does not move PA11, or PB9 PA12)");
+        return;
+    }
+    // The pads at rest: with the jumpers there, a low line is a missing
+    // pull-up, a fault of the link this letter needs.
     Pin<'B', 8>::input();
     Pin<'B', 9>::input();
     (void)delay_us(clock, 20u);
     if (!Pin<'B', 8>::read() || !Pin<'B', 9>::read()) {
-        print(serial, "  SKIPPED: SCL/SDA read low at rest - no pull-ups, no self-link", crlf);
+        print(serial, "  SCL/SDA read low at rest: the self-link has no pull-ups", crlf);
         bench.verdict("ran", false);
         return;
     }
-    const uint32_t scl_rise = rise_cycles<Pin<'B', 8>>();
-    const uint32_t sda_rise = rise_cycles<Pin<'B', 9>>();
-    const uint32_t floor = rise_cycles<Pin<'B', 8>>(false);   // the same steps, the line already high
-    print(serial, "  the rise from a released low: SCL ", scl_rise, " cycles, SDA ", sda_rise,
-          ", the same steps on a line already high ", floor, " (", Ruler::hz() / 1'000'000u,
-          " a microsecond)", crlf);
+    const std::optional<uint32_t> scl_rise = rise_cycles<Pin<'B', 8>>();
+    const std::optional<uint32_t> sda_rise = rise_cycles<Pin<'B', 9>>();
+    const std::optional<uint32_t> floor = rise_cycles<Pin<'B', 8>>(false);   // the same steps, the line already high
+    print(serial, "  the rise from a released low: SCL ");
+    print_rise(scl_rise);
+    print(serial, " cycles, SDA ");
+    print_rise(sda_rise);
+    print(serial, ", the same steps on a line already high ");
+    print_rise(floor);
+    print(serial, " (", Ruler::hz() / 1'000'000u, " a microsecond)", crlf);
     (void)target_up();
+    // The client answers before anything is measured on it: a probe of
+    // 0x42 at 100 kHz through the engineless host.
+    I2c<2>::instance_fast_plus(false);
+    i2c_bring_up<I2cPump>(I2cMode::pump);
+    const bool client_there =
+        i2c_run<I2cPump>(i2c_request<I2cPump>(I2cShape::probe_ack, 0, I2cSpeed::standard_100k)) &&
+        I2cPump::status() == i2c_ok;
+    if (!client_there) {
+        print(serial, "  the client at 0x42 did not answer a probe over the self-link", crlf);
+        i2c_mode = I2cMode::none;
+        I2cPump::release();
+        target_live = false;
+        I2cTarget::release();
+        bench.verdict("ran", false);
+        return;
+    }
     static const char* const pump_names[6] = {"i2c.write",      "i2c.read",
                                               "i2c.wr",         "i2c.probe",
                                               "i2c.probe.nack", "i2c.write.nack"};

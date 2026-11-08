@@ -1144,7 +1144,7 @@ On the Nucleo-F446RE's SPI1 at 180 MHz with MISO floating, the host's costs:
 
 **`test_stm32f4_spi` on the Nucleo-F446RE**, SPI2 at PCLK1 = 45 MHz
 against the STM32G0B1RE it is paired with on the desk (the stm32g0
-`spi_peer`, firmware 0x0302, on its SPI1), runs **97 verdicts** in `z`, all
+`spi_peer`, firmware 0x0302, on its SPI1), runs **121 verdicts** in `z`, all
 green in three runs. What they judge and what they print at the top rate: every
 read of 16-bit frames and of the CRC is judged to PCLK1/4 = 11.25 MHz and printed
 at PCLK1/2 = 22.5 MHz, where this cable's read-back is not exact ("Findings left
@@ -1165,6 +1165,12 @@ ladder, are judged at PCLK1/2 too:
   half bit RXNE leaves (the last sampling edge, 26.3.9), at /2 to /16, and hidden by
   it at /32 and slower, where the frame time is eight bits. `SpiHost`'s own loop is
   the `spi.frame` table above.
+- **THE MODE FAULT'S CLEARING SEQUENCE, FROM A FRESH FAULT** (letter `d`, ten runs):
+  under a mask, the SR read followed by the CR1 write of the value kept clears MODF, the
+  first SR read after the write already finds it down, and a write raising MSTR, SSI and
+  SPE takes after it; with a CR1 read, a CR2 read or a second SR read between the two
+  steps the flag comes down all the same, on the same first read. `clear_mode_fault()`
+  clears a fresh fault and answers true.
 - **THE MODE FAULT BY A SECOND CHIP**: SSI driven low raises MODF 74 to 76 core
   cycles after the store, SPE and MSTR cleared; then with NSS a HARDWARE
   INPUT (SSM clear, PB12 handed to SPI2) the peer pulls the shared
@@ -1568,6 +1574,10 @@ Implemented, not bench-verified (each with what would measure it):
   write-then-read, the surplus rejected, the sleep vote), the engines (letter
   k's block timing and its one interrupt) or 16-bit frames through both ways. A run of
   that half on the board would measure them.
+- The mode fault's clearing sequence from a fresh fault on the STM32F429I-DISC1 (letter
+  `d`'s SPI5 half): the strict sequence, the three accesses between the steps and
+  `clear_mode_fault()`'s answer, as the Nucleo-F446RE runs them. A run of letter `d` on
+  that board would measure them.
 - A request on the engines on the STM32F411CE's breadboard panel at 12 MHz as
   this host runs it - the command byte in the loop inside `start()`, the data
   block on the streams: the pad finding above was measured with

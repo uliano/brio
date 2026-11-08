@@ -145,6 +145,7 @@
 #include "util/i2c_bus.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #if defined(STM32F446xx)
@@ -167,6 +168,17 @@ using namespace brio;
 
 using P = Stm32f4Platform<>;
 
+/// The DWT's cycle counter as a CycleRuler (util/bench.hpp), started at the
+/// top of main(): one load a read, legal with interrupts masked. It counts
+/// the core clock, whose boot rate hz() names; under letter m's DynamicClock
+/// (the core at 48 and 16 MHz) a budget on it lasts longer in wall time,
+/// which a time-out may and no span this suite times does.
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
+
 // ---- the board: the console, the bus, the peer -------------------------------------------
 
 /// What the letters know of the device beyond the bus: the address the
@@ -174,9 +186,9 @@ using P = Stm32f4Platform<>;
 /// datasheet says it reads (MSB first), a second register printed beside
 /// it, and one register that may be written and read back with nothing
 /// moving on the board. `id_len == 0` says the datasheet is NOT on the
-/// desk: the letters that need the identity or the scratch register then
-/// decline by name, and the bus is still measured on whatever the device
-/// answers at `id_reg`.
+/// desk: the checks that need the identity or the scratch register then
+/// skip (TestBench::skip()), and the bus is still measured on whatever the
+/// device answers at `id_reg`.
 struct PeerFacts {
     const char* name;
     uint8_t addr;
@@ -379,7 +391,10 @@ constexpr uint8_t parked = 0xFF;
 
 /// One tenure against `addr`, driven by hand (the arbiter skipped, as
 /// i2c-bus.md allows a device that owns a bus alone). Returns the status
-/// the engine ended with, or `parked`; the wait is bounded.
+/// the engine ended with, or `parked`; the wait is bounded at 200 ms: the
+/// longest tenure here is 3.2 ms of wire (35 bytes at 100 kHz), the longest
+/// a peer is told to stretch one is 16 ms (letter n), and 200 ms is more than
+/// ten times that.
 /// THE ENGINE: `dma` on the engined host, which is what DmaHost is in this
 /// suite for, and `interrupt` on the plain one, unless the caller names it.
 template <typename Bus>
@@ -403,10 +418,8 @@ uint8_t tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uin
     if (Bus::start(r)) {
         return Bus::status();   // the synchronous refusal
     }
-    for (uint32_t spins = 8'000'000u; spins != 0u; --spins) {
-        if (xfer_done) {
-            return Bus::status();
-        }
+    if (brio::wait_until<Ruler>([] { return xfer_done; }, 200'000u)) {
+        return Bus::status();
     }
     return parked;
 }
@@ -523,11 +536,10 @@ struct Regs {
 #endif
 
 #if defined(STM32F469xx) || defined(STM32F446xx)
-void spin_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() - t0 < ms) {
-    }
-}
+/// A fixed span of `ms` on the kernel tick, the shared wait with a condition
+/// that never holds. The tick and not the ruler: letter m's DynamicClock
+/// rebases the ticker, so the span holds at every core rate.
+void spin_ms(uint32_t ms) { (void)brio::wait_ticks<P>([] { return false; }, ms); }
 #endif
 
 /// The device put back where its reset leaves it, and the time it takes
@@ -548,8 +560,10 @@ uint8_t peer_reset() {
 #else
     const uint8_t cmd[2] = {reg_sys_ctrl1, stmpe811_soft_reset};
     const uint8_t st = tenure<Host>(peer_addr, cmd, 2, nullptr, 0);
-    for (uint32_t spins = 400'000u; spins != 0u; --spins) {
-    }
+    // The device's time to come back after its soft reset. A margin of some
+    // milliseconds, its datasheet's figure not read here; an empty loop held
+    // this place and -Os deleted it, so no wait ran before.
+    spin_us<Ruler>(10'000u);
     return st;
 #endif
 }
@@ -702,17 +716,21 @@ void tb_timing() {
     bench.verdict("CCR is rounded UP, so a bus never runs faster than the speed asked for",
                   fast < 400'000UL && fast > 390'000UL);
 
-    // The window FREQ imposes, and the refusals outside it.
-    bench.verdict("below 2 MHz of APB1 no speed is legal (27.6.2)",
-                  !i2c_timing_for(1'999'999UL, I2cSpeed::standard_100k).has_value());
-    bench.verdict("... and fast mode wants 4 MHz, where standard mode is already legal",
-                  !i2c_timing_for(2'000'000UL, I2cSpeed::fast_400k).has_value() &&
-                      i2c_timing_for(2'000'000UL, I2cSpeed::standard_100k).has_value());
-    bench.verdict("above 50 MHz the FREQ field has no encoding, and the row is refused",
-                  !i2c_timing_for(50'000'001UL, I2cSpeed::standard_100k).has_value());
-    bench.verdict("a rise time TRISE's six bits cannot hold is refused rather than truncated",
-                  !i2c_timing_for(45'000'000UL, I2cSpeed::standard_100k, I2cDuty::ratio_2, 1500)
-                       .has_value());
+    // The window FREQ imposes, and the refusals outside it: constants of the
+    // arithmetic, so the compiler checks them and the run prints them.
+    static_assert(!i2c_timing_for(1'999'999UL, I2cSpeed::standard_100k).has_value(),
+                  "below 2 MHz of APB1 no speed is legal (27.6.2)");
+    static_assert(!i2c_timing_for(2'000'000UL, I2cSpeed::fast_400k).has_value() &&
+                      i2c_timing_for(2'000'000UL, I2cSpeed::standard_100k).has_value(),
+                  "fast mode wants 4 MHz, where standard mode is already legal");
+    static_assert(!i2c_timing_for(50'000'001UL, I2cSpeed::standard_100k).has_value(),
+                  "above 50 MHz the FREQ field has no encoding, and the row is refused");
+    static_assert(!i2c_timing_for(45'000'000UL, I2cSpeed::standard_100k, I2cDuty::ratio_2, 1500)
+                       .has_value(),
+                  "a rise time TRISE's six bits cannot hold is refused rather than truncated");
+    print(serial, "  refused at compile time (static_assert): any speed below 2 MHz of APB1, fast "
+                  "mode below 4, any row above 50 MHz, a rise time TRISE's six bits cannot hold",
+          crlf);
 
     print(serial, "  table 122's ceiling on the digital filter at this clock: ",
           Host::digital_filter_max(I2cSpeed::standard_100k), " in Sm, ",
@@ -874,8 +892,7 @@ void te_identity() {
                       "so in its own identity register",
                       is_peer_id(id));
     } else {
-        print(serial, "  the device's datasheet is not on the desk: its identity is printed and "
-                      "not judged (declined by name)", crlf);
+        bench.skip("the device's datasheet is not on the desk: its identity is printed, not judged");
     }
 
     // The same read eight times running: a bus that is right is right
@@ -902,8 +919,8 @@ void te_identity() {
                       "and not from a pull-up",
                       ctrl != id[0] || ctrl != id[1]);
     } else {
-        print(serial, "  which register would answer differently is the datasheet's to say: "
-                      "not judged here (declined by name)", crlf);
+        bench.skip("which register answers differently is the datasheet's to say, and it is not on "
+                   "the desk");
     }
 }
 
@@ -989,22 +1006,31 @@ SclReading count_scl() {
     uint32_t shortest = 0xFFFFFFFFu;
     uint32_t total = 0;
     bool prev = SclPad::read();
-    for (uint32_t spins = 40'000'000u; spins != 0u && !xfer_done; --spins) {
-        const uint32_t v = SysTick->VAL;
-        const bool now = SclPad::read();
-        if (now && !prev) {
-            const uint32_t d = (last_val >= v) ? (last_val - v) : (last_val + period - v);
-            if (r.edges != 0u) {
-                total += d;
-                if (d < shortest) {
-                    shortest = d;
-                }
+    // Bounded at 50 ms, fifteen times the 3.2 ms a 32-byte read takes at
+    // 100 kHz; a tenure that never ends leaves the edges counted so far, and
+    // the status the letter prints beside them says so.
+    (void)brio::wait_until<Ruler>(
+        [&] {
+            if (xfer_done) {
+                return true;
             }
-            last_val = v;
-            ++r.edges;
-        }
-        prev = now;
-    }
+            const uint32_t v = SysTick->VAL;
+            const bool now = SclPad::read();
+            if (now && !prev) {
+                const uint32_t d = (last_val >= v) ? (last_val - v) : (last_val + period - v);
+                if (r.edges != 0u) {
+                    total += d;
+                    if (d < shortest) {
+                        shortest = d;
+                    }
+                }
+                last_val = v;
+                ++r.edges;
+            }
+            prev = now;
+            return false;
+        },
+        50'000u);
     r.shortest = shortest == 0xFFFFFFFFu ? 0u : shortest;
     r.average = r.edges > 1u ? total / (r.edges - 1u) : 0u;
     return r;
@@ -1118,8 +1144,7 @@ void th_write_back() {
         return;
     }
     if constexpr (!peer_known) {
-        print(serial, "  the device's datasheet is not on the desk, so no register of its is "
-                      "written: the letter declines by name", crlf);
+        bench.skip("the device's datasheet is not on the desk, so no register of its is written");
         return;
     } else {
         // The scratch register is one the datasheet says moves no pin: the
@@ -1489,9 +1514,8 @@ void tj_engines() {
         DmaHost::release();
         (void)host_ready();
         (void)start;
-        print(serial, "  no register of the device is written (its datasheet is not on the desk): "
-                      "the engined write phase is the index byte of the reads above (declined by "
-                      "name)", crlf);
+        bench.skip("no register of the device is written (its datasheet is not on the desk): the "
+                   "engined write phase is the index byte of the reads above");
     }
 }
 
@@ -1546,12 +1570,11 @@ void tk_recovery() {
     // while this side was the controller. RM0090 27.3.4 says a controller's
     // transfer is unaffected by one and ES0206 2.10.1 says one can be
     // raised where there was none, so the driver counts instead of aborting.
+    // Printed and not judged, one board being one specimen: the tenures above
+    // are what this letter judges, whatever BERR did meanwhile.
     print(serial, "  bus errors seen and ignored since boot: ", Host::spurious_bus_errors(),
           " (ES0206 2.10.1: in controller mode a BERR is spurious or harmless, and the tenure "
           "runs on)", crlf);
-    bench.verdict("the tenures above all completed, whatever BERR did - the count is printed and "
-                  "not judged, one board being one specimen",
-                  true);
 }
 
 // =============================================================================
@@ -2019,8 +2042,14 @@ void tn_partner() {
                   kl::Probe::n == 1u && kl::Probe::replies[0] == i2c_timeout);
     bench.verdict("... at its 20 ms limit (19..22 ms on the tick)",
                   replied_at >= 19u && replied_at <= 22u);
-    bench.verdict("and the same host carries the command channel again after recover()",
-                  need_twi_peer());
+    // One command attempt and no init(): need_twi_peer() and Link::command()
+    // both bring the host up again, which would judge init() and not the
+    // recover() the arbiter's timeout ran.
+    {
+        static const uint8_t none[1] = {0};
+        bench.verdict("and the same host carries the command channel again after recover()",
+                      Link::command_once(Op::ping, none, 0));
+    }
 
     // ---- rebase() across the core's rate ----
     // The host is a user of letter m's DynamicClock, so every switch runs
@@ -2302,9 +2331,7 @@ void watched_read(uint8_t n, I2cSpeed speed, Spin spin, ReadRow& row) {
     row.cycles = row.cycles + read_watch.ev_cycles;
     row.slow = row.slow + (slow ? 1u : 0u);
     const uint16_t c0 = RxStreamRegs::count();
-    for (uint32_t i = 100u; i != 0u; --i) {
-        __NOP();
-    }
+    spin_us<Ruler>(2u);   // a stray beat's time to move: one beat is a few bus cycles
     row.moved = row.moved + ((RxStreamRegs::enabled() || RxStreamRegs::count() != c0) ? 1u : 0u);
 }
 
@@ -2340,7 +2367,6 @@ struct LoadCell {
 };
 
 void to_load() {
-    (void)CycleCounter::init();
     Dma<1>::init();
     bus_ao_live = false;
     const bool up = DmaHost::init(clock);
@@ -2372,9 +2398,10 @@ void to_load() {
           "ahead of a read of one's completion ", total.after, ", BTF up at an event entry ", total.late,
           ", stretched past the bound ", total.slow, ", unanswered ", total.lost, ", moved after the reply ",
           total.moved, crlf);
-    bench.verdict("UNDER EVERY LOAD BELOW ALL OF APB1: every read that was answered is exact and i2c_ok, "
-                  "the stream still after the reply",
-                  up && total.reads != 0u && total.exact + total.lost == total.reads && total.moved == 0u);
+    bench.verdict("UNDER EVERY LOAD BELOW ALL OF APB1: every read answered, exact and i2c_ok, the stream "
+                  "still after the reply",
+                  up && total.reads != 0u && total.lost == 0u && total.exact == total.reads &&
+                      total.moved == 0u);
     bench.verdict("... and a load makes a read of one's stream finish behind its wire", total.after != 0u);
 
     dma_host_live = false;
@@ -2500,7 +2527,6 @@ void starved_print(const char* what, uint8_t n, const StarvedRow& row) {
 }
 
 void tr_all_of_apb1() {
-    (void)CycleCounter::init();
     Dma<1>::init();
     bus_ao_live = false;
     const bool up = DmaHost::init(clock);
@@ -2516,9 +2542,17 @@ void tr_all_of_apb1() {
     read_row("100 kHz", I2cSpeed::standard_100k, 50, copies_turn, total);
     paced_off(3);
     copies_off();
-    bench.verdict("THREE STREAMS AND THE COPIES AT THE BUS'S FIGURE: every read answered exact and "
-                  "i2c_ok, the stream still after the reply",
-                  up && total.reads != 0u && total.exact + total.lost == total.reads && total.moved == 0u);
+    // At the bus's figure (2241 to 2245 beats against its 2250) a stream can
+    // go unserved past the wait's last bound: 2 or 3 reads went unanswered
+    // in half of ten runs (a row stops at its third), each recovered with
+    // the next read whole. So the unanswered are counted and printed above,
+    // and the verdict judges the answered ones - every one exact - and that
+    // reads were answered at all.
+    const uint32_t answered = total.reads - total.lost;
+    bench.verdict("THREE STREAMS AND THE COPIES AT THE BUS'S FIGURE: every read answered was exact "
+                  "and i2c_ok, the stream still after the reply",
+                  up && answered != 0u && total.exact == answered &&
+                      total.moved == 0u);
 
     // A read of one has its STOP programmed at ADDR's clear, so the wire ends with the
     // byte in DR and the stream not served; the answer waits for the load to come off.
@@ -2755,8 +2789,10 @@ bool stray_row(bool enable_first, bool& left) {
         const uint32_t cleared = RxStreamRegs::regs().CR & ~DMA_SxCR_EN;
         S::regs().CR2 = request;
         RxStreamRegs::regs().CR = cleared;
-        for (uint32_t i = 200'000u; i != 0u && RxStreamRegs::enabled(); --i) {   // abort()'s bound
-        }
+        // EN falls once the beat under way is done (RM0390 9.3.15), a few bus
+        // cycles; 1 ms is the bound, on the ruler that runs masked. A stream
+        // still enabled after it is what the rows below then read.
+        (void)brio::wait_until<Ruler>([] { return !RxStreamRegs::enabled(); }, 1'000u);
         left = S::flag(I2cFlag::rx_not_empty);
         if (enable_first) {
             S::dma(false, false);
@@ -2766,9 +2802,7 @@ bool stray_row(bool enable_first, bool& left) {
     S::dma(false, false);
     RxEngine::stop();
     (void)RxEngine::start(std::span<uint8_t>(scratch, 2u));
-    for (uint32_t i = 100u; i != 0u; --i) {
-        __NOP();
-    }
+    spin_us<Ruler>(2u);   // a stray beat's time to move: one beat is a few bus cycles
     const bool moved = RxStreamRegs::count() != 2u;
     RxEngine::stop();
     RxEngine::service();
@@ -2779,7 +2813,6 @@ bool stray_row(bool enable_first, bool& left) {
 }
 
 void tp_held() {
-    (void)CycleCounter::init();
     Dma<1>::init();
     bus_ao_live = false;
     const bool up = DmaHost::init(clock);
@@ -2831,8 +2864,11 @@ void tp_held() {
     print(serial, "  a clear ahead of the request, staged by hand: DR read with DMAEN up, the byte left in ",
           left_up, " of 100, a stray beat at the next start in ", strays_up,
           "; DMAEN down first, left in ", left_down, ", a stray in ", strays_down, crlf);
-    bench.verdict("the stray beat's stage: DMAEN down ahead of DR's read, none at the next start",
-                  strays_down == 0u);
+    // A stray is counted only on a row whose byte was left, so the stage must
+    // have reached the case on every row for the zero to say anything.
+    bench.verdict("the stray beat's stage, reached on every row: DMAEN down ahead of DR's read, none "
+                  "at the next start",
+                  left_down == 100u && strays_down == 0u);
     const uint8_t after = tenure<DmaHost>(peer.addr, nullptr, 0, nullptr, 0, I2cSpeed::fast_400k,
                                           I2cEngine::dma);
     bench.verdict("... and the host carries the next tenure", after == i2c_ok);
@@ -2851,6 +2887,21 @@ void tp_held() {
 
 using FarScl = Pin<'C', 6>;
 using FarSda = Pin<'C', 7>;
+
+/// The console's last byte out before a stretch with nothing timed in it;
+/// the answer dropped: a wedged console only lengthens what follows.
+void console_drain() { (void)brio::console_drain<Ruler, Serial>(); }
+
+/// Before a timed window a derived bound judges: the console's last byte
+/// out, or the letter skips - a transmit interrupt inside the window would
+/// lengthen the span the bound describes.
+bool console_quiet() {
+    if (brio::console_drain<Ruler, Serial>()) {
+        return true;
+    }
+    bench.skip("the console did not drain: the timed window would carry its interrupt");
+    return false;
+}
 
 /// Letter s's client lets go: the far pad back to the target, in the state Target::init()
 /// left it, or the target's event line unmasked. From the letter or from the tick's handler.
@@ -2950,9 +3001,9 @@ void busy_bound(BoundCase c, BoundRow& row) {
 }
 
 void tq_bounds() {
-    (void)CycleCounter::init();
     const uint32_t cycles_per_us = clock_hz(clock) / 1'000'000u;
-    while (!Serial::tx_idle()) {
+    if (!console_quiet()) {
+        return;
     }
     for (const BoundCase c : {BoundCase::ticker, BoundCase::no_ticker, BoundCase::no_counter}) {
         BoundRow stop_row{};
@@ -2968,7 +3019,7 @@ void tq_bounds() {
               crlf);
         // Above the time asked: start()'s own 181 cycles at most on a quiet bus, a poll's turn
         // of 30, a tick's handler of about 100, six at most in 5 ms: under 1000 cycles. The
-        // console has drained (Serial::tx_idle() below), so no other vector lands.
+        // console has drained (console_quiet() above and below), so no other vector lands.
         constexpr uint32_t over = 1000u;
         const bool timed = c != BoundCase::no_counter;
         const uint32_t drain_low = 5000u * cycles_per_us;
@@ -2982,7 +3033,8 @@ void tq_bounds() {
                       stop_row.staged == 10u && busy_row.staged == 10u && stop_row.wall_min >= drain_low &&
                           stop_row.wall_max <= drain_high && busy_row.wall_min >= busy_low &&
                           busy_row.wall_max <= busy_high);
-        while (!Serial::tx_idle()) {
+        if (!console_quiet()) {
+            return;
         }
     }
     const uint8_t after = tenure<Host>(peer.addr, nullptr, 0, nullptr, 0);
@@ -3113,8 +3165,9 @@ struct Row {
 
 template <typename Arb, typename Kernel>
 void one_pass(const Stage& g, Row& row) {
-    while (!Serial::tx_idle()) {
-    }
+    // Nothing prints between the passes of a row: stages() drained the
+    // console, acting on it, before the row began.
+    console_drain();
     (void)Regs::up(clock);
     (void)host_ready();
     const uint8_t seed_cmd[2] = {reg_sys_ctrl2, 0x5A};
@@ -3239,6 +3292,9 @@ constexpr bool answer_in_band(const Row& row, uint8_t waits, uint32_t cycles_per
 template <typename Arb, typename Kernel>
 void stages(const char* arb) {
     const uint32_t cycles_per_us = clock_hz(clock) / 1'000'000u;
+    if (!console_quiet()) {
+        return;
+    }
     const Row held = row_of<Arb, Kernel>(arb, "SCL held behind a written byte's acknowledge", Stage{});
     bench.verdict("A CLIENT HOLDING SCL PAST THE BOUND: the request behind it answered i2c_timeout by start() itself at the "
                   "bound, every pass",
@@ -3248,17 +3304,26 @@ void stages(const char* arb) {
                   "and its read-back exact",
                   held.witness_ok == held.passes && held.next_ok == held.passes);
 
+    if (!console_quiet()) {
+        return;
+    }
     const Row three = row_of<Arb, Kernel>(arb, "SCL held behind a written byte's acknowledge", Stage{.hold_ms = 30, .behind = 3});
     bench.verdict("THREE REQUESTS BEHIND A LONGER HOLD: each answered i2c_timeout in its turn, in one dispatch of three bounds, "
                   "and the host sound when the client lets go",
                   three.first_ok == three.passes && three.behind_timeout == three.passes && three.stood == three.passes &&
                       answer_in_band(three, 3, cycles_per_us) && three.witness_ok == three.passes && three.next_ok == three.passes);
 
+    if (!console_quiet()) {
+        return;
+    }
     const Row brief = row_of<Arb, Kernel>(arb, "SCL held and let go inside the bound", Stage{.hold_ms = 2, .let_go_in_tick = true});
     bench.verdict("THE CONTROL, A HOLD THAT ENDS INSIDE THE BOUND: the request behind it runs, i2c_ok, its byte in the register",
                   brief.first_ok == brief.passes && brief.behind_ok == brief.passes && brief.witness_ok == brief.passes &&
                       brief.next_ok == brief.passes);
 
+    if (!console_quiet()) {
+        return;
+    }
     const Row own = row_of<Arb, Kernel>(arb, "FMPI2C1's own hold at its address", Stage{.target_hold = true});
     // 8000 us is when the row lets go; a bit period for the acknowledge's clock, the target's
     // vector and the host's: 7 us measured, 500 for a tick and a turn of the pump over that.
@@ -3271,7 +3336,6 @@ void stages(const char* arb) {
 }  // namespace drain
 
 void ts_drain() {
-    (void)CycleCounter::init();
     drain::stages<drain::TimedArb, Tenuto<P, drain::Probe, drain::TimedArb>>("timed 20 ms");
     drain::stages<drain::PlainArb, Tenuto<P, drain::Probe, drain::PlainArb>>("timeout_ticks 0");
     (void)Regs::up(clock);
@@ -3452,6 +3516,9 @@ int main() {
     boot.ccr = S::regs().CCR;
     boot.trise = S::regs().TRISE;
 
+    // Every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0):
+    // started once, before any letter reads the ruler.
+    (void)brio::CycleCounter::init();
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);

@@ -380,9 +380,9 @@ the DAC's half of the errata's stop sequence.
 
 **THE UNDERRUN INTERRUPT, on TIM6's line** (letter `s`): channel 1
 DMA-enabled on TIM6's TRGO at 10 kHz with NO stream serving it - every
-trigger after the first is an underrun, **21 entries of the shared
-vector in 2..3 ms of triggers**, ten runs of ten, each flag cleared by
-`isr()`. DMAENx STAYS SET through an underrun (each trigger re-raises
+trigger after the first is an underrun and **enters the shared vector
+once** (the letter's 2.5 ms hold 24 or 25 triggers, the first 100 us
+after the enable), each flag cleared by `isr()`. DMAENx STAYS SET through an underrun (each trigger re-raises
 the flag the body cleared): it is `stop_dma()` that drops it, as the
 spent-stream finding above shows from the other side.
 

@@ -68,6 +68,7 @@
 
 #include "stm32f4/clock.hpp"
 #include "stm32f4/delay.hpp"
+#include "stm32f4/dwt.hpp"
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/pin.hpp"
 #include "stm32f4/platform.hpp"
@@ -75,6 +76,7 @@
 #include "stm32f4/usart.hpp"
 #include "stm32f4/usb.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 #include "util/usb/cdc.hpp"
 #include "util/usb/device.hpp"
@@ -138,22 +140,21 @@ struct Descriptors {
 };
 using Device = UsbDevice<Usb, Descriptors, Port>;
 
-// ---- a ruler ------------------------------------------------------------------
+// ---- the ruler ----------------------------------------------------------------
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
 
-/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
-/// tick count and the counter's position composed right across the reload
-/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
-uint32_t cycles_now() {
-    return Ticker::cycles();
-}
-uint32_t us_now() { return cycles_now() / cycles_per_us; }
-
-void wait_us(uint32_t us) {
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < us) {
-    }
-}
+/// The DWT's cycle counter, started in main(). Every span here is a
+/// difference of two cycle readings, converted to microseconds after the
+/// subtraction: a microsecond count made by dividing a wrapping cycle
+/// count would itself wrap at 2^32 / 96 or / 168, every 45 or 26 s, and a
+/// span across that point would read four billion. The longest window,
+/// 11 s, is under half the counter's wrap at either rate (22 s at
+/// 96 MHz, 12.8 s at 168 MHz).
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 
 const char* state_name(UsbDeviceState s) {
     switch (s) {
@@ -168,25 +169,22 @@ const char* state_name(UsbDeviceState s) {
 /// Wait for the device to reach CONFIGURED; the microseconds it took, or
 /// 0 on a timeout.
 uint32_t wait_configured(uint32_t budget_us) {
-    const uint32_t t0 = us_now();
-    while (!Device::configured()) {
-        if (us_now() - t0 > budget_us) {
-            return 0;
-        }
-    }
-    return us_now() - t0;
+    const std::optional<uint32_t> took =
+        brio::cycles_until<Ruler>([] { return Device::configured(); }, budget_us);
+    return took ? *took / cycles_per_us : 0u;
 }
 
 /// A host letter's clean start: whatever a previous letter left in the
 /// rings is dropped, so the counts are this letter's own.
 void settle_port() {
-    uint8_t b = 0;
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < 1'000'000u) {
-        if (!Port::read_byte(b) && Port::tx_idle()) {
-            break;
-        }
-    }
+    // A second at most; a host that keeps sending past it shows in the
+    // letter's own byte counts, so the answer is dropped.
+    (void)brio::wait_until<Ruler>(
+        [] {
+            uint8_t b = 0;
+            return !Port::read_byte(b) && Port::tx_idle();
+        },
+        1'000'000);
 }
 
 /// The controller and the stack from nothing: what letter a does and what
@@ -209,9 +207,9 @@ bool usb_up = false;
 void ta_enumerate() {
     Device::stop();
     Usb::release();
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     usb_up = Usb::init(clock);
-    const uint32_t init_us = us_now() - t0;
+    const uint32_t init_us = (Ruler::now() - t0) / cycles_per_us;
     print(serial, "  init: ", usb_up ? "ok" : "FAILED", " in ", init_us, " us; core id ",
           hex(Usb::core_id()), ", device mode=", Usb::in_device_mode(), ", session valid=",
           Usb::session_valid(), ", pulled up=", Usb::pulled_up(), crlf);
@@ -373,9 +371,9 @@ void te_frames() {
         return;
     }
     const uint16_t f0 = Usb::frame();
-    const uint32_t t0 = us_now();
-    wait_us(100'000u);
-    const uint32_t span = us_now() - t0;
+    const uint32_t t0 = Ruler::now();
+    brio::spin_us<Ruler>(100'000);
+    const uint32_t span = (Ruler::now() - t0) / cycles_per_us;
     const uint16_t frames = static_cast<uint16_t>((Usb::frame() - f0) & 0x3FFFu);
     print(serial, "  ", frames, " frames in ", span, " us (", f0, " -> ", Usb::frame(), ")", crlf);
     bench.verdict("the host's start-of-frame counter advances a frame a millisecond",
@@ -393,7 +391,7 @@ void tf_reconnect() {
     const uint32_t resets = Device::resets();
     const uint8_t address = Device::address();
     Device::stop();
-    wait_us(500'000u);
+    brio::spin_us<Ruler>(500'000);
     print(serial, "  the pull-up down for 500 ms: state=", state_name(Device::state()),
           " suspended=", Usb::suspended(), "; start() again...", crlf);
     Device::start();
@@ -422,11 +420,12 @@ void tg_suspend() {
     // the bus and its suspend detector with it; the suspend condition
     // 22.16.4 names is an idle bus the device is still ATTACHED to.
     Device::stop();
-    const uint32_t t0 = us_now();
+    Stopwatch<Ruler> sw;
+    sw.start();
     uint32_t detached_us = 0;
-    while (us_now() - t0 < 200'000u) {
+    while (sw.elapsed() < brio::us_cycles<Ruler>(200'000)) {
         if (Usb::suspended() && detached_us == 0u) {
-            detached_us = us_now() - t0;
+            detached_us = sw.elapsed() / cycles_per_us;
         }
     }
     print(serial, "  the pull-up down for 200 ms: SUSPSTS after ", detached_us,
@@ -440,21 +439,21 @@ void tg_suspend() {
     // notice the pull-up and reset the bus, and until it does the lines
     // are idle with the device on them. Three milliseconds of that is
     // the early suspend, three more the suspend itself.
-    const uint32_t t1 = us_now();
+    sw.start();
     Device::start();
     uint32_t suspended_us = 0;
     uint32_t left_us = 0;
-    while (us_now() - t1 < 3'000'000u) {
+    while (sw.elapsed() < brio::us_cycles<Ruler>(3'000'000)) {
         if (suspended_us == 0u && Usb::suspended()) {
-            suspended_us = us_now() - t1;
+            suspended_us = sw.elapsed() / cycles_per_us;
         } else if (suspended_us != 0u && left_us == 0u && !Usb::suspended()) {
-            left_us = us_now() - t1;
+            left_us = sw.elapsed() / cycles_per_us;
         }
         if (Device::configured()) {
             break;
         }
     }
-    const uint32_t took = us_now() - t1;
+    const uint32_t took = sw.elapsed() / cycles_per_us;
     print(serial, "  the pull-up up: SUSPSTS at ", suspended_us, " us, gone at ", left_us,
           " us, configured at ", took, " us; early suspends ", early, " -> ",
           Usb::early_suspends(), ", stack suspends ", suspends, " -> ", Device::suspends(), crlf);
@@ -481,29 +480,25 @@ void th_gating() {
     // the device is on an idle bus and the core suspends after six
     // milliseconds. The gate goes on there.
     Device::stop();
-    wait_us(100'000u);
+    brio::spin_us<Ruler>(100'000);
     Device::start();
-    const uint32_t t0 = us_now();
-    while (!Usb::suspended() && us_now() - t0 < 100'000u) {
-    }
+    // Six milliseconds of idle bus suspend the core; 100 ms is the
+    // time-out, and the verdict below judges the state read after it.
+    (void)brio::wait_until<Ruler>([] { return Usb::suspended(); }, 100'000);
     const bool suspended = Usb::suspended();
     const bool phy_awake_before = !Usb::phy_suspended();
     Usb::gate_clocks(true);
-    const uint32_t t1 = us_now();
-    uint32_t asleep_us = 0;
-    while (us_now() - t1 < 10'000u) {
-        if (Usb::phy_suspended()) {
-            asleep_us = us_now() - t1;
-            break;
-        }
-    }
+    const std::optional<uint32_t> asleep =
+        brio::cycles_until<Ruler>([] { return Usb::phy_suspended(); }, 10'000);
+    // 0 = never; a PHY that reports at once still reads a microsecond.
+    const uint32_t asleep_us = asleep ? *asleep / cycles_per_us + 1u : 0u;
     Usb::gate_clocks(false);
     print(serial, "  suspended=", suspended, ", PHY awake before the gate=", phy_awake_before,
           ", PHY suspended ", asleep_us, " us after it (0 = never)", crlf);
     bench.verdict("the PHY clock stopped while the bus is suspended, and the core reports the PHY "
                   "suspended",
                   suspended && phy_awake_before && asleep_us != 0u);
-    wait_us(1'000u);
+    brio::spin_us<Ruler>(1'000);
     const bool awake = !Usb::phy_suspended();
     const uint32_t took = wait_configured(3'000'000u);
     print(serial, "  ungated: PHY awake=", awake, ", configured in ", took, " us", crlf);
@@ -561,22 +556,27 @@ void ty_echo() {
     print(serial, "  echoing every byte for 10 s: send a stream on the port now", crlf);
     const uint32_t rx0 = Port::rx_bytes();
     const uint32_t tx0 = Port::tx_bytes();
-    const uint32_t t0 = us_now();
+    Stopwatch<Ruler> sw;
+    sw.start();
     uint32_t echoed = 0;
     uint8_t buf[64];
-    while (us_now() - t0 < 10'000'000u) {
+    // The write loop ends with the window too: a host that stops reading
+    // leaves write_bulk() with no room, and the bytes it did not take are
+    // the shortfall the verdict counts.
+    const uint32_t window = brio::us_cycles<Ruler>(10'000'000);
+    while (sw.elapsed() < window) {
         uint32_t n = 0;
         while (n < sizeof buf && Port::read_byte(buf[n])) {
             ++n;
         }
         uint32_t written = 0;
-        while (written < n) {
+        while (written < n && sw.elapsed() < window) {
             written += Port::write_bulk(std::span<const uint8_t>(buf + written, n - written));
         }
         echoed += n;
     }
-    while (!Port::tx_idle() && us_now() - t0 < 11'000'000u) {
-    }
+    // The last packets out, a second more at most; the counts judge it.
+    (void)brio::wait_until<Ruler>([] { return Port::tx_idle(); }, 1'000'000);
     print(serial, "  echoed ", echoed, " bytes (received ", Port::rx_bytes() - rx0, ", sent ",
           Port::tx_bytes() - tx0, "), overruns ", Port::rx_overruns(), ", FIFO waits ",
           Usb::fifo_waits(), crlf);
@@ -599,7 +599,7 @@ void tw_line() {
     print(serial, "  now: ", before.baud, "/", before.data_bits, "/", before.parity, "/",
           before.stop_bits, " dtr=", Port::dtr(),
           "; 10 s for the host to open the port at another rate and raise DTR", crlf);
-    wait_us(10'000'000u);
+    brio::spin_us<Ruler>(10'000'000);
     const UsbLineCoding after = Port::line_coding();
     print(serial, "  then: ", after.baud, "/", after.data_bits, "/", after.parity, "/",
           after.stop_bits, " dtr=", Port::dtr(), " rts=", Port::rts(), " coding changes ", changes,
@@ -624,18 +624,20 @@ void tv_throughput() {
     uint8_t pattern[64];
     uint8_t next = 0;
     const uint32_t tx0 = Port::tx_bytes();
-    uint32_t t0 = us_now();
-    while (us_now() - t0 < 3'000'000u) {
+    Stopwatch<Ruler> sw;
+    sw.start();
+    const uint32_t pour = brio::us_cycles<Ruler>(3'000'000);
+    while (sw.elapsed() < pour) {
         for (uint8_t i = 0; i < 64u; ++i) {
             pattern[i] = next++;
         }
         uint32_t written = 0;
-        while (written < 64u && us_now() - t0 < 3'000'000u) {
+        while (written < 64u && sw.elapsed() < pour) {
             written += Port::write_bulk(std::span<const uint8_t>(pattern + written, 64u - written));
         }
     }
-    while (!Port::tx_idle() && us_now() - t0 < 4'000'000u) {
-    }
+    // The last packets out, a second more at most; the count judges it.
+    (void)brio::wait_until<Ruler>([] { return Port::tx_idle(); }, 1'000'000);
     const uint32_t sent = Port::tx_bytes() - tx0;
     print(serial, "  sent ", sent, " bytes in 3 s: ", sent / 3000u, " KB/s", crlf);
     bench.verdict("the device pours more than 100 KB/s into the port", sent > 300'000u);
@@ -643,13 +645,13 @@ void tv_throughput() {
     print(serial, "  host -> device: write the port now, the two seconds count from the first byte",
           crlf);
     uint8_t b = 0;
-    t0 = us_now();
-    while (!Port::read_byte(b) && us_now() - t0 < 5'000'000u) {
-    }
+    // Five seconds for the host's first byte; a host that never writes
+    // leaves the count the verdict judges at zero.
+    (void)brio::wait_until<Ruler>([&b] { return Port::read_byte(b); }, 5'000'000);
     const uint32_t rx0 = Port::rx_bytes();
     uint32_t drained = 0;
-    t0 = us_now();
-    while (us_now() - t0 < 2'000'000u) {
+    sw.start();
+    while (sw.elapsed() < brio::us_cycles<Ruler>(2'000'000)) {
         if (Port::read_byte(b)) {
             ++drained;
         }
@@ -677,9 +679,7 @@ void tx_nak() {
     // stops re-arming the endpoint, and the host is NAKed - USB's own
     // flow control, which costs no byte.
     const uint32_t rx0 = Port::rx_bytes();
-    uint32_t t0 = us_now();
-    while (us_now() - t0 < 2'000'000u) {
-    }
+    brio::spin_us<Ruler>(2'000'000);
     const bool armed_none = Usb::out_armed(2) == 0u;
     const uint32_t held = Port::rx_bytes() - rx0;
     print(serial, "  after the 2 s pause: ", held, " bytes taken in of a ", Port::rx_capacity(),
@@ -691,16 +691,16 @@ void tx_nak() {
     uint8_t expected = 0;
     uint32_t got = 0;
     uint32_t breaks = 0;
-    t0 = us_now();
-    uint32_t last_byte_us = t0;
-    while (us_now() - t0 < 8'000'000u) {
+    const uint32_t t0 = Ruler::now();
+    uint32_t last_byte = t0;
+    while (Ruler::now() - t0 < brio::us_cycles<Ruler>(8'000'000)) {
         if (!Port::read_byte(b)) {
-            if (us_now() - last_byte_us > 1'000'000u && got != 0u) {
+            if (Ruler::now() - last_byte > brio::us_cycles<Ruler>(1'000'000) && got != 0u) {
                 break;   // the host has stopped and the ring is empty
             }
             continue;
         }
-        last_byte_us = us_now();
+        last_byte = Ruler::now();
         if (first) {
             first = false;
         } else if (b != expected) {
@@ -734,22 +734,25 @@ void tt_zlp() {
     const uint32_t tx0 = Port::tx_bytes();
     uint8_t buf[64];
     uint8_t next = 0;
-    const uint32_t t0 = us_now();
+    Stopwatch<Ruler> sw;
+    sw.start();
+    const uint32_t pour = brio::us_cycles<Ruler>(3'000'000);
     uint32_t sent = 0;
-    while (sent < run && us_now() - t0 < 3'000'000u) {
+    while (sent < run && sw.elapsed() < pour) {
         const uint32_t want = run - sent < sizeof buf ? run - sent : sizeof buf;
         for (uint32_t i = 0; i < want; ++i) {
             buf[i] = next++;
         }
         uint32_t written = 0;
-        while (written < want && us_now() - t0 < 3'000'000u) {
+        while (written < want && sw.elapsed() < pour) {
             written += Port::write_bulk(std::span<const uint8_t>(buf + written, want - written));
         }
         sent += written;
     }
-    while (!Port::tx_idle() && us_now() - t0 < 4'000'000u) {
-    }
-    const uint32_t took = us_now() - t0;
+    // The last packet out, the zero-length one included, a second more at
+    // most; the verdict reads tx_idle() itself.
+    (void)brio::wait_until<Ruler>([] { return Port::tx_idle(); }, 1'000'000);
+    const uint32_t took = sw.elapsed() / cycles_per_us;
     print(serial, "  sent ", Port::tx_bytes() - tx0, " bytes in ", took,
           " us, transmitter idle=", Port::tx_idle(), crlf);
     bench.verdict("the whole run went out and the transmitter went idle - the zero-length packet "
@@ -779,6 +782,7 @@ extern "C" void OTG_FS_IRQHandler() { Device::isr(); }
 
 int main() {
     const bool clock_ok = SysClock::init();
+    (void)brio::CycleCounter::init();   // every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0)
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
     brio::enable_interrupts();

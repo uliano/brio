@@ -92,7 +92,7 @@
 //      that have channels AND pads on this package
 //
 // WHAT SKIPS WHERE. An instance the part has not got is not a failure and
-// not a silence: the leg that needs it prints one SKIPPED line naming
+// not a silence: the leg that needs it SKIPS (TestBench::skip()), naming
 // what it wanted and the reserve fact that refused it, and claims no
 // verdict at all. On the G0B1 every letter runs whole; on the G071 the
 // TIM4 legs skip; on the G031 the TIM4, TIM6, TIM7 and TIM15 legs skip
@@ -122,6 +122,7 @@
 #include "util/meter_sampler.hpp"
 #include "util/print.hpp"
 #include "util/pwm_channel.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
@@ -331,20 +332,17 @@ void clear_counts() {
 // Instruments
 // =============================================================================
 
-/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
-/// tick count and the counter's position composed right across the reload
-/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
-uint32_t cycles_now() {
-    return Ticker::cycles();
-}
+/// The ruler: a cycle count that spans ticks, the kernel ticker's own
+/// cycles() - the tick count and the counter's position composed right
+/// across the reload (util/cycle_count.hpp); it wraps at 2^32, so only
+/// differences are used. Interrupts must be enabled while it is polled.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000UL;
 uint32_t cycles_to_us(uint32_t c) { return c / cycles_per_us; }
-
-void spin_cycles(uint32_t c) {
-    const uint32_t t0 = cycles_now();
-    while (cycles_now() - t0 < c) {
-    }
-}
 
 /// Long enough for a floating pad's own RC under a ~40 kohm internal
 /// pull of about 40 kohm.
@@ -356,10 +354,12 @@ void settle() { (void)delay_us(clock, 200); }
 /// a polling capture loop that the USART's ISR interrupts MISSES edges,
 /// and a missed capture reads as an interval that is a multiple of the
 /// true one.
+///
+/// A wedged console (false after 200 ms) shows as a capture interval that
+/// is a multiple of the true one, which the letters judge; so the answer
+/// is dropped here.
 void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    spin_cycles(SysClock::hz / 500u);   // 2 ms of quiet on top
+    (void)brio::console_drain<Ruler, Serial>();
 }
 
 /// THE PRECONDITION OF THE PULL-WALKED LETTERS: an input pad with
@@ -795,11 +795,11 @@ void tb_time_base() {
     bench.verdict("a free-running 32-bit counter configures and starts",
                   T2::configure({.prescaler = 0, .period = 0xFFFFFFFFUL}));
     T2::enable(true);
-    const uint32_t c0 = cycles_now();
+    const uint32_t c0 = Ruler::now();
     const uint32_t n0 = T2::count();
-    spin_cycles(SysClock::hz / 100u);   // 10 ms
+    brio::spin_us<Ruler>(10'000);   // 10 ms
     const uint32_t n1 = T2::count();
-    const uint32_t c1 = cycles_now();
+    const uint32_t c1 = Ruler::now();
     const uint32_t counted = n1 - n0;
     const uint32_t elapsed = c1 - c0;
     print(serial, "  PSC=0: ", counted, " counts in ", elapsed,
@@ -814,11 +814,11 @@ void tb_time_base() {
     T2::init();
     (void)T2::configure({.prescaler = 63, .period = 0xFFFFFFFFUL});
     T2::enable(true);
-    const uint32_t p0 = cycles_now();
+    const uint32_t p0 = Ruler::now();
     const uint32_t m0 = T2::count();
-    spin_cycles(SysClock::hz / 100u);
+    brio::spin_us<Ruler>(10'000);
     const uint32_t m1 = T2::count();
-    const uint32_t p1 = cycles_now();
+    const uint32_t p1 = Ruler::now();
     const uint32_t pre_counted = m1 - m0;
     const uint32_t pre_expect = (p1 - p0) / 64u;
     print(serial, "  PSC=63: ", pre_counted, " counts where ", pre_expect,
@@ -829,12 +829,12 @@ void tb_time_base() {
     // PSC is copied into the working register only at an update (21.4.11).
     T2::set_prescaler(0xFFFF);
     const uint32_t s0 = T2::count();
-    spin_cycles(SysClock::hz / 1000u);   // 1 ms
+    brio::spin_us<Ruler>(1'000);   // 1 ms
     const uint32_t s1 = T2::count();
     T2::update();                        // now load the shadow
-    spin_cycles(SysClock::hz / 10000u);  // let the reinitialization land
+    brio::spin_us<Ruler>(100);  // let the reinitialization land
     const uint32_t s2 = T2::count();
-    spin_cycles(SysClock::hz / 1000u);
+    brio::spin_us<Ruler>(1'000);
     const uint32_t s3 = T2::count();
     print(serial, "  a new PSC before its update: ", s1 - s0,
           " counts in 1 ms; after it: ", s3 - s2, crlf);
@@ -853,7 +853,7 @@ void tb_time_base() {
         if (v > high_water) { high_water = v; }
     }
     T2::update();
-    spin_cycles(SysClock::hz / 500u);   // 2 ms: twenty of the new periods
+    brio::spin_us<Ruler>(2'000);   // 2 ms: twenty of the new periods
     uint32_t after = 0;
     for (uint32_t i = 0; i < 3000u; ++i) {
         const uint32_t v = T2::count();
@@ -872,7 +872,7 @@ void tb_time_base() {
     T2::enable(true);
     T2::set_count(900);
     const uint32_t d0 = T2::count();
-    spin_cycles(SysClock::hz / 10000u);   // 100 us
+    brio::spin_us<Ruler>(100);   // 100 us
     const uint32_t d1 = T2::count();
     print(serial, "  down-counting: ", d0, " then ", d1, crlf);
     bench.verdict("CR1.DIR really counts down", d1 < d0);
@@ -882,12 +882,12 @@ void tb_time_base() {
     (void)T2::configure({.prescaler = 0, .period = 0xFFFF, .update_on_overflow_only = true});
     T2::clear_flags(T2::update_flag);
     T2::update();
-    spin_cycles(1000u);
+    brio::spin_us<Ruler>(16);
     const bool urs_flag = T2::flag(T2::update_flag);
     (void)T2::configure({.prescaler = 0, .period = 0xFFFF});
     T2::clear_flags(T2::update_flag);
     T2::update();
-    spin_cycles(1000u);
+    brio::spin_us<Ruler>(16);
     const bool plain_flag = T2::flag(T2::update_flag);
     print(serial, "  EGR.UG with URS set raised UIF: ", urs_flag ? "yes" : "no",
           "; with URS clear: ", plain_flag ? "yes" : "no", crlf);
@@ -900,7 +900,7 @@ void tb_time_base() {
     (void)T2::configure({.prescaler = 63, .period = 500, .one_pulse = true});
     T2::enable(true);
     const bool running_now = T2::enabled();
-    spin_cycles(SysClock::hz / 500u);   // 2 ms, four periods' worth
+    brio::spin_us<Ruler>(2'000);   // 2 ms, four periods' worth
     const bool stopped = !T2::enabled();
     bench.verdict("one-pulse mode clears CEN at the update that ends the "
                   "first period (21.4.1)", running_now && stopped);
@@ -945,7 +945,7 @@ void tc_pwm_pad() {
     const uint16_t asks[5] = {0, 250, 500, 750, 1000};
     for (uint8_t i = 0; i < 5; ++i) {
         LedPwm::duty(asks[i]);
-        spin_cycles(SysClock::hz / 1000u);      // let the preload be taken
+        brio::spin_us<Ruler>(1'000);      // let the preload be taken
         pts[i] = {asks[i],
                   sample_permille_port<led_pad.port>(PadLed::pin_number, 60000u)};
     }
@@ -983,9 +983,9 @@ void tc_pwm_pad() {
     exti_edges = 0;
     Nvic::clear_pending(EXTI4_15_IRQn);
     Nvic::enable(EXTI4_15_IRQn);
-    const uint32_t e0 = cycles_now();
-    spin_cycles(SysClock::hz / 5u);   // 200 ms
-    const uint32_t e1 = cycles_now();
+    const uint32_t e0 = Ruler::now();
+    brio::spin_us<Ruler>(200'000);   // 200 ms
+    const uint32_t e1 = Ruler::now();
     Nvic::disable(EXTI4_15_IRQn);
     const uint32_t edges = exti_edges;
     const uint32_t window_us = cycles_to_us(e1 - e0);
@@ -1023,11 +1023,11 @@ void td_timer_on_timer() {
                   Counter::setup(trg_t2));
     T2::enable(true);
     Counter::restart();
-    const uint32_t f0 = cycles_now();
+    const uint32_t f0 = Ruler::now();
     const uint32_t k0 = Counter::count();
-    spin_cycles(SysClock::hz / 10u);   // 100 ms
+    brio::spin_us<Ruler>(100'000);   // 100 ms
     const uint32_t k1 = Counter::count();
-    const uint32_t f1 = cycles_now();
+    const uint32_t f1 = Ruler::now();
     const uint32_t updates = k1 - k0;
     const uint32_t cycles_per_update = updates == 0u ? 0u : (f1 - f0) / updates;
     print(serial, "  TIM3 counted ", updates, " of TIM2's updates in ", f1 - f0,
@@ -1061,11 +1061,11 @@ void td_timer_on_timer() {
         (void)T2::set_compare(0, gate_asks[i]);
         T2::update();
         Gate::restart();
-        const uint32_t g0 = cycles_now();
+        const uint32_t g0 = Ruler::now();
         const uint32_t q0 = Gate::count();
-        spin_cycles(SysClock::hz / 400u);   // 2.5 ms, 160 periods at 64 kHz
+        brio::spin_us<Ruler>(2'500);   // 2.5 ms, 160 periods at 64 kHz
         const uint32_t q1 = Gate::count();
-        const uint32_t g1 = cycles_now();
+        const uint32_t g1 = Ruler::now();
         const uint32_t high = (q1 - q0) * 4u;    // TIM3's PSC is 3
         gp[i] = {gate_asks[i],
                  static_cast<uint16_t>(g1 == g0 ? 0u : (high * 1000ULL) / (g1 - g0))};
@@ -1130,14 +1130,15 @@ struct Run {
 /// and a missed edge reads as an interval that is a multiple of the true
 /// one. CCyOF is carried out with the readings, so a run that DID miss
 /// says so instead of averaging the damage in.
-Run collect_intervals(uint32_t n, uint32_t spins) {
+Run collect_intervals(uint32_t n, uint32_t budget_us) {
     console_drain();
     LsiMeter::restart();
     T16::clear_flags(LsiMeter::capture_flag | LsiMeter::overrun_flag);
     Run r;
     uint32_t sum = 0;
     r.lo = 0xFFFFFFFFUL;
-    for (uint32_t i = 0; i < spins && r.got < n; ++i) {
+    const uint32_t t0 = Ruler::now();
+    while (r.got < n && Ruler::now() - t0 < brio::us_cycles<Ruler>(budget_us)) {
         if (T16::flag(LsiMeter::capture_flag)) {
             const auto d = LsiMeter::interval();
             if (d.has_value()) {
@@ -1167,7 +1168,7 @@ void te_capture_lsi() {
                   T16::input_select(0, 1) && T16::input_select(0) == 1u);
     bench.verdict("and the capture channel comes up on it", LsiMeter::setup(0));
 
-    const Run base = collect_intervals(16, 4'000'000u);
+    const Run base = collect_intervals(16, 100'000);   // 16 x ~31 us, every capture
     const uint32_t mean = base.mean;
     const uint32_t lsi_hz = mean == 0u ? 0u : SysClock::hz / mean;
     print(serial, "  ", base.got, " intervals: mean ", mean, " ticks (", base.lo,
@@ -1177,27 +1178,10 @@ void te_capture_lsi() {
     bench.verdict("A CAPTURE THAT NEEDS NO PAD ANYWHERE - the interval lands in "
                   "DS13560 table 46's 29.5..34 kHz window for LSI",
                   lsi_hz >= 29'500u && lsi_hz <= 34'000u);
-    // THE CROSS-CHECK IS AGAINST THE OTHER INSTRUMENT ON THIS DIE, and
-    // that number is a DIE fact: a real IWDG time-out timed on the same
-    // oscillator reads 32536 Hz on the
-    // G0B1RE, 32295 on the G071RB and 31400 on the G031K8 - all three
-    // inside table 46's band and none of them each other. So what is
-    // compared is this die's own pair, and the number is stated per part
-    // rather than baked in from one board.
-#if defined(STM32G031xx)
-    constexpr uint32_t watchdog_lsi_hz = 31'400;
-#elif defined(STM32G071xx)
-    constexpr uint32_t watchdog_lsi_hz = 32'295;
-#else
-    constexpr uint32_t watchdog_lsi_hz = 32'536;
-#endif
-    print(serial, "  the watchdog's own reading of this die's LSI is ",
-          watchdog_lsi_hz, " Hz (the platform suite's reading)", crlf);
-    bench.verdict("and it agrees with the watchdog-timed reading of the SAME "
-                  "oscillator on the SAME die to within 3 per cent - two "
-                  "instruments sharing no mechanism",
-                  lsi_hz > watchdog_lsi_hz - watchdog_lsi_hz / 33u &&
-                      lsi_hz < watchdog_lsi_hz + watchdog_lsi_hz / 33u);
+    // No cross-check against another instrument's reading of this LSI:
+    // the one the platform suite has (an IWDG time-out) ends in a reset,
+    // and a number carried over from one die is not a reading of another.
+    // The band above is the datasheet's, and holds on every die.
     bench.verdict("the spread of sixteen readings is a handful of ticks out "
                   "of two thousand - a capture is not an estimate",
                   base.got == 16u && (base.hi - base.lo) * 100u < mean);
@@ -1210,7 +1194,7 @@ void te_capture_lsi() {
     Run runs[3];
     for (uint8_t i = 0; i < 3; ++i) {
         (void)LsiMeter::setup(0, 0, TimCapturePolarity::rising, divs[i]);
-        runs[i] = collect_intervals(8, 8'000'000u);
+        runs[i] = collect_intervals(8, 100'000);   // 8 x up to 8 x ~31 us
     }
     bool psc_ok = true;
     for (uint8_t i = 0; i < 3; ++i) {
@@ -1229,10 +1213,10 @@ void te_capture_lsi() {
     (void)LsiMeter::setup(0);
     console_drain();
     T16::clear_flags(LsiMeter::capture_flag | LsiMeter::overrun_flag);
-    while (!T16::flag(LsiMeter::capture_flag)) {
-    }
+    // An LSI edge comes every ~31 us; a missing one fails the verdict below.
+    (void)brio::wait_until<Ruler>([] { return T16::flag(LsiMeter::capture_flag); }, 1'000);
     const bool over_clean = !T16::flag(LsiMeter::overrun_flag);
-    spin_cycles(SysClock::hz / 1000u);   // 1 ms: two more LSI edges at least
+    brio::spin_us<Ruler>(1'000);   // 1 ms: two more LSI edges at least
     const bool over_set = T16::flag(LsiMeter::overrun_flag);
     (void)T16::compare(0);               // reading CCR1 is the acknowledgement
     T16::clear_flags(LsiMeter::overrun_flag);
@@ -1285,13 +1269,13 @@ void tf_pwm_input() {
     // from) is not what the verdict rests on.
     uint32_t cap_period = 0, cap_width = 0, real_period = 0, real_width = 0;
     for (uint8_t round = 0; round < 3; ++round) {
-        const uint32_t up_at = cycles_now();
+        const uint32_t up_at = Ruler::now();
         PadCap::pull(PinPull::up);
         (void)delay_us(clock, 300);
-        const uint32_t down_at = cycles_now();
+        const uint32_t down_at = Ruler::now();
         PadCap::pull(PinPull::down);
         (void)delay_us(clock, 700);
-        const uint32_t next_at = cycles_now();
+        const uint32_t next_at = Ruler::now();
         real_width = cycles_to_us(down_at - up_at);
         real_period = cycles_to_us(next_at - up_at);
         (void)round;
@@ -1357,7 +1341,7 @@ void tg_pair_and_break() {
                       PadPairN::has_function());
     Pair::duty(500);
     T1::update();
-    spin_cycles(SysClock::hz / 1000u);
+    brio::spin_us<Ruler>(1'000);
 
     PairCensus c = census_pair(PadPair::pin_number, PadPairN::pin_number, 60000u);
     const uint16_t a_pm = static_cast<uint16_t>((c.a_high * 1000u + 30000u) / 60000u);
@@ -1388,7 +1372,7 @@ void tg_pair_and_break() {
     // MOE, the master switch.
     bench.verdict("MOE stands while the pair runs", T1::main_output());
     (void)T1::main_output(false);
-    spin_cycles(SysClock::hz / 1000u);
+    brio::spin_us<Ruler>(1'000);
     PairCensus off = census_pair(PadPair::pin_number, PadPairN::pin_number, 20000u);
     print(serial, "  with MOE clear: CH1 high ", off.a_high, " times, CH1N ",
           off.b_high, " of 20000", crlf);
@@ -1396,14 +1380,14 @@ void tg_pair_and_break() {
                   "clear the pads go back to the GPIO and rest on their pulls",
                   off.a_high == 0u && off.b_high == 0u);
     (void)T1::main_output(true);
-    spin_cycles(SysClock::hz / 1000u);
+    brio::spin_us<Ruler>(1'000);
     PairCensus on = census_pair(PadPair::pin_number, PadPairN::pin_number, 20000u);
     bench.verdict("and raising it hands them back", on.a_high > 0u && on.b_high > 0u);
 
     // The break, by software: EGR.BG needs no pad and no BKE (21.4.6).
     T1::clear_flags(T1::break_flag);
     bench.verdict("a software break is generated", T1::break_event());
-    spin_cycles(SysClock::hz / 10000u);
+    brio::spin_us<Ruler>(100);
     const bool bif = T1::flag(T1::break_flag);
     const bool moe_gone = !T1::main_output();
     PairCensus broken = census_pair(PadPair::pin_number, PadPairN::pin_number, 20000u);
@@ -1419,9 +1403,9 @@ void tg_pair_and_break() {
     (void)T1::break_dead_time({.dead_time = dtg,
                                .main_output_enable = true,
                                .automatic_output_enable = true});
-    spin_cycles(SysClock::hz / 1000u);
+    brio::spin_us<Ruler>(1'000);
     (void)T1::break_event();
-    spin_cycles(SysClock::hz / 1000u);   // many periods, so an update has passed
+    brio::spin_us<Ruler>(1'000);   // many periods, so an update has passed
     const bool moe_back = T1::main_output();
     bench.verdict("with AOE set the silicon raises MOE again at the next "
                   "update, the break condition being gone (21.4.18)",
@@ -1438,7 +1422,7 @@ void tg_pair_and_break() {
     (void)T1::break_dead_time({.dead_time = dtg,
                                .main_output_enable = true,
                                .break_enable = true});
-    spin_cycles(SysClock::hz / 1000u);
+    brio::spin_us<Ruler>(1'000);
     const bool armed_ok = T1::main_output();
     T1::clear_flags(T1::break_flag);
     PadCap::pull(PinPull::down);
@@ -1466,7 +1450,7 @@ void tg_pair_and_break() {
         (void)T1::set_repetition(i == 0 ? 0 : 3);
         T1::update();
         T2::set_count(0);
-        spin_cycles(SysClock::hz / 20u);   // 50 ms
+        brio::spin_us<Ruler>(50'000);   // 50 ms
         rcr_counts[i] = T2::count();
     }
     print(serial, "  updates in 50 ms: RCR 0 gives ", rcr_counts[0], ", RCR 3 gives ",
@@ -1494,12 +1478,12 @@ template <class T>
 void masked_flag_leg(volatile uint32_t& calls) {
     T::interrupts(T::update_interrupt, false);
     T::clear_flags(T::update_flag);
-    spin_cycles(SysClock::hz / 100u);
+    brio::spin_us<Ruler>(10'000);
     const bool standing = T::flag(T::update_flag);
     Nvic::clear_pending(T::irq());
     Nvic::enable(T::irq());
     const uint32_t before = calls;
-    spin_cycles(SysClock::hz / 100u);
+    brio::spin_us<Ruler>(10'000);
     Nvic::disable(T::irq());
     const uint32_t after = calls;
     bench.verdict("A TIMER FLAG STANDS WITH ITS INTERRUPT MASKED and is "
@@ -1522,7 +1506,7 @@ void th_shared_line() {
         T4::enable(true);
         Nvic::clear_pending(tim_irq(3));
         Nvic::enable(tim_irq(3));
-        spin_cycles(SysClock::hz / 10u);   // 100 ms
+        brio::spin_us<Ruler>(100'000);   // 100 ms
         Nvic::disable(tim_irq(3));
         const uint32_t n3 = t3_update_calls;
         const uint32_t n4 = t4_update_calls;
@@ -1535,8 +1519,9 @@ void th_shared_line() {
                       t3_saw_t4_flag == 0u);
         masked_flag_leg<T4>(t4_update_calls);
     } else {
+        bench.skip("two timers on one vector need a TIM4, which this part has not got (tim_present(4))");
         print(serial,
-              "  SKIPPED, no verdict claimed: two timers answering on ONE "
+              "  two timers answering on ONE "
               "vector needs a TIM4 to share TIM3's line, and this part has "
               "not got one (tim_present(4) is false - the reserve finds no "
               "TIM4_BASE, and so names this line TIM3's alone). The masked "
@@ -1545,7 +1530,7 @@ void th_shared_line() {
               crlf);
         Nvic::clear_pending(tim_irq(3));
         Nvic::enable(tim_irq(3));
-        spin_cycles(SysClock::hz / 10u);
+        brio::spin_us<Ruler>(100'000);
         Nvic::disable(tim_irq(3));
         print(serial, "  100 ms on TIM3's own vector: ", t3_update_calls,
               " updates at 1 kHz", crlf);
@@ -1576,7 +1561,7 @@ void th_vectors() {
     Nvic::clear_pending(T1::cc_irq());
     Nvic::enable(T1::irq());
     Nvic::enable(T1::cc_irq());
-    spin_cycles(SysClock::hz / 20u);   // 50 ms
+    brio::spin_us<Ruler>(50'000);   // 50 ms
     Nvic::disable(T1::irq());
     Nvic::disable(T1::cc_irq());
     print(serial, "  50 ms of TIM1 at 1 kHz: ", t1_up_calls,
@@ -1592,12 +1577,12 @@ void th_vectors() {
     T2::clear_flags(0xFFFFu);
     T2::update();
     (void)T2::capture_compare_event(0);
-    spin_cycles(1000u);
+    brio::spin_us<Ruler>(16);
     const uint32_t sr_both = T2::flags();
     const bool both_set = (sr_both & T2::update_flag) != 0u &&
                           (sr_both & T2::compare_flag(0)) != 0u;
     T2::clear_flags(T2::update_flag);
-    spin_cycles(1000u);
+    brio::spin_us<Ruler>(16);
     const uint32_t sr_one = T2::flags();
     const bool only_one = (sr_one & T2::update_flag) == 0u &&
                           (sr_one & T2::compare_flag(0)) != 0u;
@@ -1627,11 +1612,11 @@ struct WaveformRate {
 };
 WaveformRate measure_waveform(uint32_t window_cycles) {
     Counter::restart();
-    const uint32_t c0 = cycles_now();
+    const uint32_t c0 = Ruler::now();
     const uint32_t k0 = Counter::count();
-    spin_cycles(window_cycles);
+    brio::spin_us<Ruler>(window_cycles / cycles_per_us);
     const uint32_t k1 = Counter::count();
-    const uint32_t c1 = cycles_now();
+    const uint32_t c1 = Ruler::now();
     const uint32_t counts = k1 - k0;
     const uint32_t cycles = c1 - c0;
     return {counts, cycles, counts == 0u ? 0u : (cycles * 10u) / counts};
@@ -1698,7 +1683,7 @@ void ti_center_aligned() {
         T2::enable(true);
         Nvic::clear_pending(T2::irq());
         Nvic::enable(T2::irq());
-        spin_cycles(SysClock::hz / 10u);   // 100 ms
+        brio::spin_us<Ruler>(100'000);   // 100 ms
         Nvic::disable(T2::irq());
         cc_counts[i] = t2_compare_calls;
     }
@@ -1842,11 +1827,9 @@ void tj_meter_ao() {
 // errata sheet - ES0548 for the G0B1/G0C1, ES0418 for the G071, ES0487
 // for the G031 - and an item's NUMBER does not travel between them, so
 // what this letter names is the G0B1's 2.7.2 and what it stages is that
-// item's own mechanism. ES0487 was not in hand when this letter was
-// opened for the G031, and a number nobody has read is not a citation:
-// the outcome below is therefore recorded as MEASURED ON THIS DIE, with
-// the G0B1's item named as the description being staged and its twin in
-// ES0487 left pending.
+// item's own mechanism; on the G031 its twin is ES0487 2.6.2 (with 2.6.1
+// and 2.6.3 for the G0B1's 2.7.1 and 2.7.3), which the prints name there.
+// The outcome below is recorded as MEASURED ON THIS DIE.
 //
 // 2.7.2 is the one this bench can stage, and it is staged WITH A CONTROL:
 // the same compare value at the same counter value, once reached the slow
@@ -1854,6 +1837,19 @@ void tj_meter_ao() {
 // describes. The prescaler is at its maximum so that one counter tick is
 // about a millisecond, which is what makes "write CCR between two
 // consecutive counter cycles" something software can do at all.
+/// The G031's own errata sheet numbers the same items differently (the
+/// letter's header comment); on the other parts the G0B1's numbers are
+/// the description staged and nothing is added.
+#if defined(STM32G031xx)
+constexpr const char* errata_twin_1 = ", ES0487 2.6.1 on this part";
+constexpr const char* errata_twin_2 = "; ES0487 2.6.2 on this part";
+constexpr const char* errata_twin_3 = ", ES0487 2.6.3 on this part";
+#else
+constexpr const char* errata_twin_1 = "";
+constexpr const char* errata_twin_2 = "";
+constexpr const char* errata_twin_3 = "";
+#endif
+
 void tk_errata() {
     T3::init();
     // 65536 CPU cycles per counter tick: 1.024 ms, which is what makes
@@ -1875,10 +1871,9 @@ void tk_errata() {
     T3::set_count(1);
     const bool level_before = PadCap::read();
     T3::clear_flags(T3::compare_flag(0));
-    uint32_t spins = 0;
-    while (!T3::flag(T3::compare_flag(0)) && spins < 4'000'000u) {
-        ++spins;
-    }
+    // A counter tick is about a millisecond: the compare comes within a
+    // few, and 50 ms is the time-out (the verdict reads the flag).
+    (void)brio::wait_until<Ruler>([] { return T3::flag(T3::compare_flag(0)); }, 50'000);
     const bool control_fired = T3::flag(T3::compare_flag(0));
     const bool control_moved = PadCap::read() != level_before;
     bench.verdict("the control: a compare at CNT = CCR = 0, set well in "
@@ -1893,20 +1888,14 @@ void tk_errata() {
     for (uint8_t round = 0; round < 8u; ++round) {
         (void)T3::set_compare(0, 4);
         T3::clear_flags(T3::compare_flag(0) | T3::update_flag);
-        spins = 0;
-        while (!T3::flag(T3::compare_flag(0)) && spins < 8'000'000u) {
-            ++spins;
-        }
+        (void)brio::wait_until<Ruler>([] { return T3::flag(T3::compare_flag(0)); }, 50'000);
         if (T3::flag(T3::compare_flag(0))) {
             first_fired = first_fired + 1u;
         }
         const bool mid = PadCap::read();
         T3::clear_flags(T3::compare_flag(0) | T3::update_flag);
         (void)T3::set_compare(0, 0);          // inside the one-tick window
-        spins = 0;
-        while (!T3::flag(T3::update_flag) && spins < 8'000'000u) {
-            ++spins;
-        }
+        (void)brio::wait_until<Ruler>([] { return T3::flag(T3::update_flag); }, 50'000);
         if (T3::flag(T3::update_flag)) {
             wrapped = wrapped + 1u;
         }
@@ -1917,7 +1906,7 @@ void tk_errata() {
             second_toggled = second_toggled + 1u;
         }
     }
-    print(serial, "  the G0B1's 2.7.2 (ES0487 2.6.2 on this part) staged 8 times: "
+    print(serial, "  the G0B1's 2.7.2 (ES0548", errata_twin_2, ") staged 8 times: "
                   "the first match (CNT = CCR = ARR) fired ", first_fired,
           " times, the counter wrapped ", wrapped,
           " times, and the SECOND match (CNT = CCR = 0, one counter "
@@ -1935,25 +1924,23 @@ void tk_errata() {
     // DMA), where this letter drives it once per period from software.
     bench.verdict("THE STAGED BEHAVIOUR DID NOT REPRODUCE ON THIS DIE - the "
                   "second compare raised its flag and toggled its output "
-                  "every round - the item being the G0B1's 2.7.2, ES0487's 2.6.2",
+                  "every round - the item being the G0B1's 2.7.2 (ES0548)",
                   second_fired == 8u && second_toggled == 8u);
 
     print(serial, "  the G0B1's 2.7.1 (one-pulse trigger lost in master-slave "
-                  "reset + trigger with MSM), ES0487's 2.6.1, NOT "
+                  "reset + trigger with MSM)", errata_twin_1, ", NOT "
                   "staged: it needs the trigger to "
                   "arrive exactly at CNT = ARR of a cascaded master, which "
                   "nothing here can place. Its own workaround is the "
                   "driver's default - TimSlaveConfig::master_slave is false.",
           crlf);
     print(serial, "  the G0B1's 2.7.3 (output compare clear with an external "
-                  "reset), ES0487's 2.6.3, NOT "
+                  "reset)", errata_twin_3, ", NOT "
                   "staged: ocref_clr comes from ETR or a comparator, and "
                   "this stratum has neither an ETR wire nor a COMP driver "
                   "(and this part has no comparator at all where the reserve "
                   "says so).",
           crlf);
-    bench.verdict("the two unreachable TIM errata are named with the reason, "
-                  "not described away", true);
 
     quiet_everything();
 }
@@ -1966,13 +1953,13 @@ void tk_errata() {
 /// resolution every pad stamp below has. Measured, not assumed.
 uint32_t poll_turn_cycles() {
     uint32_t n = 0;
-    const uint32_t c0 = cycles_now();
+    const uint32_t c0 = Ruler::now();
     while (n < 100u) {
         (void)PadCap::read();
-        (void)cycles_now();
+        (void)Ruler::now();
         ++n;
     }
-    return (cycles_now() - c0) / 100u;
+    return (Ruler::now() - c0) / 100u;
 }
 
 struct PulseStamp {
@@ -1985,9 +1972,9 @@ struct PulseStamp {
 /// first low one, each wait bounded by `limit` cycles.
 PulseStamp stamp_pulse(uint32_t t0, uint32_t limit) {
     PulseStamp p;
-    uint32_t now = cycles_now();
+    uint32_t now = Ruler::now();
     while (!PadCap::read() && now - t0 < limit) {
-        now = cycles_now();
+        now = Ruler::now();
     }
     if (!PadCap::read()) {
         return p;
@@ -1995,7 +1982,7 @@ PulseStamp stamp_pulse(uint32_t t0, uint32_t limit) {
     p.rise = now - t0;
     const uint32_t r = now;
     while (PadCap::read() && now - r < limit) {
-        now = cycles_now();
+        now = Ruler::now();
     }
     p.fall = now - r;
     p.seen = !PadCap::read();
@@ -2016,17 +2003,17 @@ void tm_tasks_and_modes() {
     Nvic::clear_pending(T14::irq());
     Nvic::enable(T14::irq());
     const bool tick_up = Tick::setup(63, 999);
+    console_drain();   // the console's interrupt would sit among the handlers counted
     uint32_t tk = Ticker::ticks();
-    while (Ticker::ticks() == tk) {
-    }
+    // A tick is 1 ms; a stopped tick shows in the update count judged.
+    (void)brio::wait_until<Ruler>([&] { return Ticker::ticks() != tk; }, 5'000);
     tk = Ticker::ticks();
     const uint32_t u0 = t14_update_calls;
-    while (Ticker::ticks() - tk < 100u) {
-    }
+    (void)brio::wait_until<Ruler>([&] { return Ticker::ticks() - tk >= 100u; }, 200'000);
     const uint32_t updates = t14_update_calls - u0;
     Tick::stop();
     const uint32_t u1 = t14_update_calls;
-    spin_cycles(SysClock::hz / 200u);
+    brio::spin_us<Ruler>(5'000);
     const bool stopped = t14_update_calls == u1;
     Nvic::disable(T14::irq());
     print(serial, "  TimPeriodicTick<TIM14> at 1 kHz: ", updates,
@@ -2048,12 +2035,12 @@ void tm_tasks_and_modes() {
     T3::init();
     CapIn::claim();
     const bool pulse_up = Pulse::setup(639, 50, 100);
-    spin_cycles(SysClock::hz / 1000u);
+    brio::spin_us<Ruler>(1'000);
     const bool low_before = !PadCap::read();
-    const uint32_t f0 = cycles_now();
+    const uint32_t f0 = Ruler::now();
     Pulse::fire();
     const PulseStamp p = stamp_pulse(f0, SysClock::hz / 100u);
-    spin_cycles(SysClock::hz / 1000u);
+    brio::spin_us<Ruler>(1'000);
     const bool idle_after = !Pulse::busy() && !PadCap::read();
     const uint32_t rise_us = p.rise / cyc_us;
     const uint32_t width_us = p.fall / cyc_us;
@@ -2082,12 +2069,12 @@ void tm_tasks_and_modes() {
                        T2::master(TimMasterMode::update);
     (void)Pulse::setup(639, 50, 100);
     const bool armed = Pulse::arm(trg_t2);
-    spin_cycles(SysClock::hz / 1000u);
+    brio::spin_us<Ruler>(1'000);
     const bool waiting = !Pulse::busy() && !PadCap::read();
-    const uint32_t g0 = cycles_now();
+    const uint32_t g0 = Ruler::now();
     T2::enable(true);
     const PulseStamp q = stamp_pulse(g0, SysClock::hz / 100u);
-    spin_cycles(SysClock::hz / 1000u);
+    brio::spin_us<Ruler>(1'000);
     const bool once = !Pulse::busy() && !T2::enabled();
     const uint32_t q_rise = q.rise / cyc_us;
     const uint32_t q_width = q.fall / cyc_us;
@@ -2108,7 +2095,7 @@ void tm_tasks_and_modes() {
     auto walks = [](TimCapturePolarity pol) {
         T3::init();
         CapIn::claim_input(PinPull::down);
-        spin_cycles(SysClock::hz / 5000u);
+        brio::spin_us<Ruler>(200);
         (void)T3::configure({.prescaler = 0, .period = 0xFFFFu});
         (void)T3::capture_channel(0, {.polarity = pol});
         T3::enable(true);
@@ -2117,7 +2104,7 @@ void tm_tasks_and_modes() {
         for (uint8_t k = 0; k < 5u; ++k) {
             for (const bool up : {true, false}) {
                 PadCap::pull(up ? PinPull::up : PinPull::down);
-                spin_cycles(SysClock::hz / 5000u);   // 200 us: the pad's RC under 40 k
+                brio::spin_us<Ruler>(200);   // 200 us: the pad's RC under 40 k
                 if (T3::flag(T3::compare_flag(0))) {
                     ++caught;
                     (void)T3::compare(0);   // the read is the acknowledgement
@@ -2145,7 +2132,7 @@ void tm_tasks_and_modes() {
     T3::clear_flags(T3::update_flag);
     const bool before = T3::count_update_flag();
     T3::enable(true);
-    spin_cycles(SysClock::hz / 2000u);   // 500 us against a 100 us period
+    brio::spin_us<Ruler>(500);   // 500 us against a 100 us period
     const bool raised = T3::count_update_flag() && T3::flag(T3::update_flag);
     T3::clear_flags(T3::update_flag);
     const bool cleared = !T3::count_update_flag();
@@ -2168,9 +2155,9 @@ void tm_tasks_and_modes() {
     (void)Pair::setup(3, 128);
     Pair::duty(500);
     T1::update();
-    spin_cycles(SysClock::hz / 1000u);
+    brio::spin_us<Ruler>(1'000);
     auto both_levels = [] {
-        spin_cycles(SysClock::hz / 5000u);
+        brio::spin_us<Ruler>(200);
         PairCensus c = census_pair(PadPair::pin_number, PadPairN::pin_number, 2000u);
         return c;
     };
@@ -2288,12 +2275,12 @@ bool instance_counts_and_interrupts(const char* name, volatile uint32_t& calls) 
     const bool cfg = T::configure({.prescaler = 63, .period = T::max_period});
     T::enable(true);
     console_drain();
-    const uint32_t c0 = cycles_now();
+    const uint32_t c0 = Ruler::now();
     const uint32_t n0 = T::count();
-    while (cycles_now() - c0 < 10'000u * cycles_per_us) {
+    while (Ruler::now() - c0 < 10'000u * cycles_per_us) {
     }
     const uint32_t n1 = T::count();
-    const uint32_t c1 = cycles_now();
+    const uint32_t c1 = Ruler::now();
     T::enable(false);
     const uint32_t counted = (n1 - n0) & T::max_period;
     const uint32_t want = (c1 - c0) / 64u;
@@ -2309,8 +2296,8 @@ bool instance_counts_and_interrupts(const char* name, volatile uint32_t& calls) 
     Nvic::clear_pending(T::irq());
     Nvic::enable(T::irq());
     T::enable(true);
-    const uint32_t s0 = cycles_now();
-    while (cycles_now() - s0 < 20'000u * cycles_per_us) {
+    const uint32_t s0 = Ruler::now();
+    while (Ruler::now() - s0 < 20'000u * cycles_per_us) {
     }
     T::enable(false);
     Nvic::disable(T::irq());
@@ -2339,8 +2326,9 @@ void tl_tim4_counts() {
                       "the vector it SHARES with TIM3",
                       t4_ok);
     } else {
+        bench.skip("TIM4's counter and update interrupt need a TIM4, which this part has not got");
         print(serial,
-              "  SKIPPED, no verdict claimed: TIM4's counter and its update "
+              "  TIM4's counter and its update "
               "interrupt need a TIM4, which this part has not got "
               "(tim_present(4) is false). The census below is of the "
               "instances this part DOES have, and no shorter a question for "
@@ -2364,8 +2352,9 @@ void tl_tim6_counts() {
                       "reports on the line the reserve names for it",
                       ok);
     } else {
+        bench.skip("TIM6's counter and update interrupt need a TIM6, which this part has not got");
         print(serial,
-              "  SKIPPED, no verdict claimed: TIM6's counter and its update "
+              "  TIM6's counter and its update "
               "interrupt need a TIM6, which this part has not got "
               "(tim_present(6) is false - the reserve finds no TIM6_BASE, and "
               "the line this timer would have shared is LPTIM1's alone here).",
@@ -2380,8 +2369,9 @@ void tl_tim7_counts() {
             instance_counts_and_interrupts<Tim7<present>>("TIM7", t7_update_calls);
         bench.verdict("TIM7 likewise, on the line it shares with LPTIM2", ok);
     } else {
+        bench.skip("TIM7's counter and update interrupt need a TIM7, which this part has not got");
         print(serial,
-              "  SKIPPED, no verdict claimed: TIM7's counter and its update "
+              "  TIM7's counter and its update "
               "interrupt need a TIM7, which this part has not got "
               "(tim_present(7) is false - the reserve finds no TIM7_BASE, and "
               "LPTIM2 has that line to itself here).",
@@ -2396,8 +2386,9 @@ void tl_tim15_counts() {
             instance_counts_and_interrupts<Tim15<present>>("TIM15", t15_update_calls);
         bench.verdict("TIM15 does, on its own vector", ok);
     } else {
+        bench.skip("TIM15's counter and update interrupt need a TIM15, which this part has not got");
         print(serial,
-              "  SKIPPED, no verdict claimed: TIM15's counter and its update "
+              "  TIM15's counter and its update "
               "interrupt need a TIM15, which this part has not got "
               "(tim_present(15) is false - the reserve finds no TIM15_BASE, "
               "and its vector position is empty in this part's own table).",
@@ -2438,8 +2429,9 @@ void tl_basic_timers() {
         T6::release();
         T7::release();
     } else {
+        bench.skip("the basic timers' master mode needs TIM6 and TIM7, which this part has not got");
         print(serial,
-              "  SKIPPED, no verdict claimed: what a BASIC timer is - a master "
+              "  what a BASIC timer is - a master "
               "mode and nothing else - is a claim about TIM6 and TIM7 together, "
               "and this part has neither (tim_present(6) and tim_present(7) are "
               "both false), so chapter 23 has no instance at all on this die. "
@@ -2457,6 +2449,19 @@ void tl_basic_timers() {
 template <bool present = tim_present(4)>
 void tl_tim4_pwm() {
     if constexpr (present) {
+        // PB8 and PB9 are also the desk's I2C wires to the paired board
+        // (its bus pull-ups on them). They are driven push-pull below, so
+        // the leg asks first that nothing outside holds either one low.
+        PadB8::input(PinPull::up);
+        PadB9::input(PinPull::up);
+        settle();
+        if (!PadB8::read() || !PadB9::read()) {
+            bench.skip("PB8/PB9 (the desk's I2C wires) are held low from outside: TIM4's "
+                       "four pads are not driven");
+            PadB8::input(PinPull::none);
+            PadB9::input(PinPull::none);
+            return;
+        }
         using T4 = Tim4<present>;
         T4::init();
         const bool t4_cfg = T4::configure({.prescaler = 0, .period = pwm_top,
@@ -2473,7 +2478,7 @@ void tl_tim4_pwm() {
                                                   .compare = t4_asks[ch]});
         }
         T4::enable(true);
-        spin_cycles(SysClock::hz / 1000u);
+        brio::spin_us<Ruler>(1'000);
         uint16_t t4_got[4];
         t4_got[0] = sample_permille_b(6, 40000u);
         t4_got[1] = sample_permille_b(7, 40000u);
@@ -2500,8 +2505,9 @@ void tl_tim4_pwm() {
         PadB8::input(PinPull::none);
         PadB9::input(PinPull::none);
     } else {
+        bench.skip("four channels on PB6..PB9 need a TIM4, which this part has not got");
         print(serial,
-              "  SKIPPED, no verdict claimed: four channels at four duties on "
+              "  four channels at four duties on "
               "PB6/PB7/PB8/PB9 at AF9 need a TIM4, which this part has not got "
               "(tim_present(4) is false). No other timer of this package "
               "reaches those four pads at once.",
@@ -2532,7 +2538,7 @@ void tl_tim15_pwm() {
         T15Pair::duty(300);
         const bool t15_ch2 = T15::output_channel(1, {.mode = TimOutputMode::pwm1,
                                                      .compare = 700});
-        spin_cycles(SysClock::hz / 1000u);
+        brio::spin_us<Ruler>(1'000);
         const PairCensus t15c = census_pair_b(14, 13, 40000u);
         const uint16_t t15_ch2_got = sample_permille_b(15, 40000u);
         const uint32_t t15_a = (t15c.a_high * 1000u + 20000u) / 40000u;
@@ -2568,8 +2574,9 @@ void tl_tim15_pwm() {
         PadB14::input(PinPull::none);
         PadB15::input(PinPull::none);
     } else if constexpr (!tim_present(15)) {
+        bench.skip("a complementary pair on PB13..PB15 needs a TIM15, which this part has not got");
         print(serial,
-              "  SKIPPED, no verdict claimed: a complementary pair and a second "
+              "  a complementary pair and a second "
               "channel on PB13/PB14/PB15 at AF5 need a TIM15, which this part "
               "has not got (tim_present(15) is false).");
         if constexpr (!pb_high_bonded) {
@@ -2579,8 +2586,9 @@ void tl_tim15_pwm() {
         }
         print(serial, crlf);
     } else {
+        bench.skip("TIM15's three outputs are on PB13..PB15, which this package does not bond");
         print(serial,
-              "  SKIPPED, no verdict claimed: TIM15's three outputs land on "
+              "  TIM15's three outputs land on "
               "PB13, PB14 and PB15 and nowhere else on this family, and this "
               "package bonds none of them (DS12992 table 12). The instance is "
               "here and its counter was measured above; only its PADS are out "
@@ -2683,7 +2691,7 @@ void tl_six_instances() {
     static_assert(PwmChannel<T14Pwm>);
     const bool t14_up = T14Pwm::setup(0);
     T14Pwm::duty(350);
-    spin_cycles(SysClock::hz / 1000u);
+    brio::spin_us<Ruler>(1'000);
     const uint16_t t14_got = sample_permille(PadPairN::pin_number, 40000u);
     print(serial, "  TIM14_CH1 on PA7 at AF4 (letter g's TIM1_CH1N pad at "
           "AF2): duty 350 asked, ", t14_got, " per mille read", crlf);
@@ -2706,7 +2714,7 @@ void tl_six_instances() {
     using T17Pair = TimPairPwm<T17, 0, pwm_top>;
     const bool t17_up = T17Pair::setup(0, tim_dead_time_code(64));
     T17Pair::duty(450);
-    spin_cycles(SysClock::hz / 1000u);
+    brio::spin_us<Ruler>(1'000);
     const PairCensus t17c = census_pair_b(9, 7, 40000u);
     const uint32_t t17_a = (t17c.a_high * 1000u + 20000u) / 40000u;
     const uint32_t t17_b = (t17c.b_high * 1000u + 20000u) / 40000u;

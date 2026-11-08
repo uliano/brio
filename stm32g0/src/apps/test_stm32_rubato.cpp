@@ -121,6 +121,7 @@
 #include "stm32g0/tim.hpp"
 #include "stm32g0/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
@@ -134,10 +135,14 @@ using P = Stm32g0RubatoPlatform<>;
 using Edge = Tim<14>;
 using Clock32 = Tim<2>;
 
-/// TIM2 free-running at HCLK: one load of CNT, a count a cycle.
+/// TIM2 free-running at HCLK: one load of CNT, a count a cycle. It runs
+/// with interrupts masked too, so the shared waits (util/test_wait.hpp)
+/// over it may run inside a critical section.
 struct Ruler {
     [[gnu::always_inline]] static uint32_t now() { return Clock32::count(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
+static_assert(CycleRuler<Ruler>);
 
 constexpr UartPins console_pins{.tx = {'A', 2, PinFunction::af1}, .rx = {'A', 3, PinFunction::af1}};
 using Serial = Uart<2, console_pins>;
@@ -217,6 +222,10 @@ volatile uint32_t sp_low_isr = 0xFFFF'FFFFu;
     }
 }
 
+/// A span of `cycles` on the ruler, written inline where a dispatch spins
+/// at a mark for the edge to land in: the span is in TIM14's own counts,
+/// and letter h's arithmetic counts every frame an action calls, which
+/// util/test_wait.hpp's spin_us() - a call - would add.
 [[gnu::always_inline]] inline void spin(uint32_t cycles) {
     const uint32_t t0 = Ruler::now();
     while (Ruler::now() - t0 < cycles) {
@@ -343,32 +352,17 @@ void reset_scenario() {
     tracing = true;
 }
 
-/// Wait until `runs` moves past `before`, at most `cycles`: true when it
-/// did.
-bool wait_runs(const volatile uint32_t& runs, uint32_t before, uint32_t cycles) {
-    const uint32_t t0 = Ruler::now();
-    while (runs == before) {
-        if (Ruler::now() - t0 >= cycles) {
-            return false;
-        }
-    }
-    return true;
-}
-
 /// A post from the Console to Low with nothing to do and nothing traced:
 /// its activate() serves whatever waits above the Console first.
 void flush() {
     post<Low>(Hit{0});
 }
 
-/// Let the console's transmitter fall silent (at most 50 ms, 3.2 M
-/// cycles; 230 bytes at 115200 are 20 ms): its interrupt, landing in a
-/// measured path, would be measured.
-void console_drain() {
-    const uint32_t t0 = Ruler::now();
-    while (!Serial::tx_idle() && Ruler::now() - t0 < 3'200'000u) {
-    }
-}
+/// Let the console's transmitter fall silent (at most 50 ms; 230 bytes at
+/// 115200 are 20 ms): its interrupt, landing in a measured path, would be
+/// measured. False when it did not: the letters whose derived bounds read
+/// the path skip rather than judge a path the console's handler may sit in.
+[[nodiscard]] bool console_quiet() { return brio::console_drain<Ruler, Serial>(50'000u); }
 
 uint32_t ruler_cost() {
     uint32_t best = 0xFFFF'FFFFu;
@@ -382,9 +376,11 @@ uint32_t ruler_cost() {
     return best;
 }
 
-/// One millisecond of HCLK: the letters' wait for a dispatch that should
-/// have run within a few hundred cycles.
+/// One millisecond of HCLK: the rulers' span in letter d.
 constexpr uint32_t one_ms = SysClock::hz / 1000u;
+/// The letters' wait for a dispatch that should have run within a few
+/// hundred cycles: one millisecond.
+constexpr uint32_t dispatch_wait_us = 1000u;
 
 // =============================================================================
 // a - the ceiling, road 1 at depth 1
@@ -568,7 +564,11 @@ void tc_latency() {
     tracing = false;
     // One warm-up event (the cache, the prefetch) not counted, then 100;
     // each waits at most 1 ms for High's first statement.
-    console_drain();
+    if (!console_quiet()) {
+        bench.skip("the console did not drain: the timed events would carry its interrupt");
+        reset_scenario();
+        return;
+    }
     uint32_t missed = 0;
     // An event slower than the path's own count is one a tick landed in:
     // the kernel tick read around each says so.
@@ -579,7 +579,7 @@ void tc_latency() {
         const uint32_t t0 = Ticker::ticks();
         edge_to = 1;
         edge_in(400u);
-        if (!wait_runs(High::runs, r, one_ms)) {
+        if (!brio::wait_until<Ruler>([r] { return High::runs != r; }, dispatch_wait_us)) {
             ++missed;
             flush();
         }
@@ -632,20 +632,40 @@ uint32_t ticker_ruler_cost() {
 }
 
 void td_scan() {
+    if (!console_quiet()) {
+        bench.skip("the console did not drain: the timed paths would carry its interrupt");
+        return;
+    }
     reset_scenario();
     tracing = false;
     const uint32_t ruler = ruler_cost();
     const uint32_t ticker_ruler = ticker_ruler_cost();
     // The two rulers over one span of about 1 ms of HCLK, crossing a
     // reload: TIM2's delta against the composed cycles' delta, each pair
-    // of reads taken back to back in the same order.
+    // of reads taken back to back in the same order AND MASKED, so that no
+    // handler - the tick's, the console's - lands between the two reads of
+    // a pair and stretches the skew the bound below is drawn from; what
+    // lands in the span between the pairs both rulers count alike. The
+    // composed read is valid masked: a reload inside the mask is the
+    // pending bit it reads (cortexm/ticker.hpp, cycles()), and the pair is
+    // far shorter than a period.
     uint32_t agree_hi = 0;
     for (int i = 0; i < 4; ++i) {
-        const uint32_t c0 = Ticker::cycles();
-        const uint32_t r0 = Ruler::now();
+        uint32_t c0 = 0;
+        uint32_t r0 = 0;
+        {
+            InterruptGuard g;
+            c0 = Ticker::cycles();
+            r0 = Ruler::now();
+        }
         spin(one_ms + 1000u * static_cast<uint32_t>(i));
-        const uint32_t c1 = Ticker::cycles();
-        const uint32_t r1 = Ruler::now();
+        uint32_t c1 = 0;
+        uint32_t r1 = 0;
+        {
+            InterruptGuard g;
+            c1 = Ticker::cycles();
+            r1 = Ruler::now();
+        }
         const uint32_t dc = c1 - c0;
         const uint32_t dr = r1 - r0;
         const uint32_t diff = dc > dr ? dc - dr : dr - dc;
@@ -772,7 +792,9 @@ void td_scan() {
 void te_depth2() {
     const char* const want = "Hs1 Hm1 Ts0 Te0 Hr1 He1";
     for (int road = 2; road >= 1; --road) {
-        console_drain();
+        // The verdict is the trace's order, which the console's handler
+        // cannot change; the latencies it could lengthen are printed only.
+        (void)console_quiet();
         uint8_t alike = 0;
         uint32_t least = 0xFFFF'FFFFu;
         uint32_t most = 0;
@@ -791,7 +813,7 @@ void te_depth2() {
             } else {
                 edge_to = 1;     // the first edge starts High over the Console
                 edge_in(400u);
-                if (!wait_runs(High::runs, r, one_ms)) {
+                if (!brio::wait_until<Ruler>([r] { return High::runs != r; }, dispatch_wait_us)) {
                     flush();
                 }
             }
@@ -848,13 +870,6 @@ void base_turn() {
     TE::process();
     P::ceiling = c;
     (void)activate_here();
-}
-
-/// Wait until the kernel tick has moved `ticks` on.
-void wait_ticks(uint32_t ticks) {
-    const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() - t0 < ticks) {
-    }
 }
 
 void tf_timers() {
@@ -930,7 +945,9 @@ void tf_timers() {
     Low::action = [](uint8_t n) { ++fired[n]; };
     base_turn();                           // te_c and te_d: due at once
     const bool turn1 = fired[51] == 0u && fired[52] == 0u && fired[53] == 1u && fired[54] == 1u;
-    wait_ticks(4u);                        // te_a's three ticks, and one more
+    // te_a's three ticks, and two more: 5 ms on the ruler hold five whole
+    // periods of the 1 ms tick, both counting HCLK.
+    spin_us<Ruler>(5'000u);
     base_turn();
     const bool turn2 = fired[51] == 1u && fired[52] == 0u && fired[53] == 1u && fired[54] == 1u;
     base_turn();
@@ -1050,7 +1067,10 @@ constexpr uint32_t primask_bound = 273u;
 constexpr uint32_t primask_tick_bound = 343u;
 
 void tg_primask() {
-    console_drain();
+    if (!console_quiet()) {
+        bench.skip("the console did not drain: the timed events would carry its interrupt");
+        return;
+    }
     pend_inside = true;
     ran_inside = false;
     // From the Console's dispatch (ceiling 4) to Mid, then from Low's (3)

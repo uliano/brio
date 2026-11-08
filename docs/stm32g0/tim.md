@@ -640,9 +640,9 @@ staged; and 2.6.5 (TIM16/TIM17 clocked by SYSCLK) is revision Z's
 alone.
 
 LSI on TIM16's capture reads **31434 Hz** here (the G0B1RE 32586, the
-G071RB 32339), and
-the cross-check is against the watchdog-timed figure of the SAME die
-(31400) rather than one board's number.
+G071RB 32339), against the watchdog-timed figure of the same die (31400);
+letter `e` judges the capture against DS13560 table 46's band alone,
+since a figure carried over from one die is not a reading of another.
 
 ## Not covered yet
 

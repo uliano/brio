@@ -63,6 +63,7 @@
 #include <stdint.h>
 
 #include "stm32f4/clock.hpp"
+#include "stm32f4/dwt.hpp"
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/pin.hpp"
 #include "stm32f4/platform.hpp"
@@ -70,6 +71,7 @@
 #include "stm32f4/ticker.hpp"
 #include "stm32f4/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000>;
@@ -182,29 +184,18 @@ constexpr uint8_t pattern(uint32_t i) {
     return static_cast<uint8_t>(((i * 0x9E37u) >> 8) ^ (i * 31u));
 }
 
-// ---- the rulers ---------------------------------------------------------------------
+// ---- the ruler ----------------------------------------------------------------------
 
-uint32_t systick_period() { return SysTick->LOAD + 1u; }
+/// The DWT's cycle counter, started in main(): the ruler for a page
+/// program and an erase (a 400 ms erase is 72 million cycles, far under
+/// the counter's 23.8 s wrap) and the shared waits' (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 
-/// Microseconds of kernel time from the tick and SysTick's own counter,
-/// read coherently: the ruler for a page program, which outlives a
-/// millisecond only on a tired device.
-uint32_t micros() {
-    uint32_t t1, t2, v;
-    do {
-        t1 = Ticker::ticks();
-        v = SysTick->VAL;
-        t2 = Ticker::ticks();
-    } while (t1 != t2);
-    const uint32_t period = systick_period();
-    return t1 * 1000u + ((period - 1u - v) * 1000u) / period;
-}
-
-void wait_us(uint32_t us) {
-    const uint32_t t0 = micros();
-    while (micros() - t0 < us) {
-    }
-}
+constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
 
 bool same(const uint8_t* a, const uint8_t* b, uint32_t n) {
     for (uint32_t i = 0; i < n; ++i) {
@@ -244,7 +235,7 @@ bool device_reset() {
     if (Quadspi::command(reset_memory) != QspiStatus::ok) {
         return false;
     }
-    wait_us(100);   // the datasheet's reset recovery is tens of microseconds; measured below
+    brio::spin_us<Ruler>(100);   // the datasheet's reset recovery is tens of microseconds; measured below
     return true;
 }
 
@@ -265,9 +256,9 @@ QspiStatus read_subsector(const QspiCommand& c, uint32_t& us) {
     for (uint32_t i = 0; i < subsector_bytes; ++i) {
         buffer[i] = 0;
     }
-    const uint32_t t0 = micros();
+    const uint32_t t0 = Ruler::now();
     const QspiStatus st = Quadspi::read(c, test_subsector, buffer, subsector_bytes);
-    us = micros() - t0;
+    us = (Ruler::now() - t0) / cycles_per_us;
     return st;
 }
 
@@ -451,10 +442,10 @@ void te_subsector() {
                   Quadspi::command(write_enable) == QspiStatus::ok && write_enabled());
 
     // The erase, timed through the status-polling mode.
-    const uint32_t t0 = micros();
+    const uint32_t t0 = Ruler::now();
     const QspiStatus est = Quadspi::command(subsector_erase, test_subsector);
     const QspiStatus pst = wait_write_done(last);
-    const uint32_t erase_us = micros() - t0;
+    const uint32_t erase_us = (Ruler::now() - t0) / cycles_per_us;
     const uint8_t fsr = read_byte_register(read_flag_status);
     print(serial, "  4 KB SUBSECTOR ERASE at ", hex(test_subsector), ": ", erase_us,
           " us until WIP fell (datasheet tSSE 50 ms typical, 400 max); the last poll read ",
@@ -489,11 +480,11 @@ void te_subsector() {
             programmed = false;
             break;
         }
-        const uint32_t p0 = micros();
+        const uint32_t p0 = Ruler::now();
         const QspiStatus wst =
             Quadspi::write(page_program, test_subsector + page * page_bytes, data, page_bytes);
         const QspiStatus ws = wait_write_done(last);
-        const uint32_t pu = micros() - p0;
+        const uint32_t pu = (Ruler::now() - p0) / cycles_per_us;
         page_us_total += pu;
         if (pu > page_us_max) {
             page_us_max = pu;
@@ -637,9 +628,10 @@ void th_fifo() {
     Quadspi::regs().DLR = 64u - 1u;
     Quadspi::regs().CCR = Quadspi::ccr_word(fast_read, 1);
     Quadspi::regs().AR = test_subsector;
-    uint32_t spins = 4'000'000u;
-    while (Quadspi::fifo_level() < 32u && --spins != 0u) {
-    }
+    // 32 bytes at 90 MHz on one line take 3 us; 1 ms is the time-out, and
+    // every wait below is judged by the verdict that reads the state after
+    // it, so the answers are dropped.
+    (void)brio::wait_until<Ruler>([] { return Quadspi::fifo_level() >= 32u; }, 1'000);
     const uint8_t level = Quadspi::fifo_level();
     const bool ftf = Quadspi::fifo_threshold_reached();
     const bool busy = Quadspi::busy();
@@ -654,17 +646,13 @@ void th_fifo() {
     for (uint8_t i = 0; i < 8u; ++i) {
         words[i] = Quadspi::regs().DR;
     }
-    spins = 4'000'000u;
-    while (Quadspi::fifo_level() < 32u && --spins != 0u) {
-    }
+    (void)brio::wait_until<Ruler>([] { return Quadspi::fifo_level() >= 32u; }, 1'000);
     bench.verdict("reading 32 bytes lets the other 32 in", Quadspi::fifo_level() == 32u);
     volatile uint8_t& dr8 = *reinterpret_cast<volatile uint8_t*>(&Quadspi::regs().DR);
     for (uint8_t i = 0; i < 32u; ++i) {
         [[maybe_unused]] const uint8_t b = dr8;
     }
-    spins = 4'000'000u;
-    while (!Quadspi::transfer_complete() && --spins != 0u) {
-    }
+    (void)brio::wait_until<Ruler>([] { return Quadspi::transfer_complete(); }, 1'000);
     const bool done = Quadspi::transfer_complete() && !Quadspi::busy() && Quadspi::fifo_level() == 0u;
     bench.verdict("with the 64th byte out TCF is set, BUSY falls and the FIFO is empty", done);
     Quadspi::clear_flags();
@@ -684,9 +672,7 @@ void th_fifo() {
     Quadspi::regs().DLR = subsector_bytes - 1u;
     Quadspi::regs().CCR = Quadspi::ccr_word(fast_read, 1);
     Quadspi::regs().AR = test_subsector;
-    spins = 4'000'000u;
-    while (Quadspi::fifo_level() < 8u && --spins != 0u) {
-    }
+    (void)brio::wait_until<Ruler>([] { return Quadspi::fifo_level() >= 8u; }, 1'000);
     const bool was_busy = Quadspi::busy();
     const bool aborted = Quadspi::abort();
     print(serial, "  a 4 KB read aborted eight bytes in: BUSY ", was_busy ? "was up" : "was DOWN",
@@ -732,7 +718,7 @@ void ti_interrupt() {
     print(serial, "  SR before arming: ", hex(sr_before), " (cleared before the enable)", crlf);
     uint8_t b[16] = {};
     const QspiStatus st = Quadspi::read(fast_read, test_subsector, b, 16);
-    wait_us(100);
+    brio::spin_us<Ruler>(100);
     Quadspi::interrupts({});
     Nvic::disable(Quadspi::irq);
     print(serial, "  TCIE armed over a 16-byte read: ", irq_entries, " entries, the body saw TCF: ",
@@ -740,7 +726,7 @@ void ti_interrupt() {
     bench.verdict("the vector is entered once for the completed read and the body reports the "
                   "transfer complete",
                   st == QspiStatus::ok && irq_entries == 1u && irq_saw_complete);
-    bench.verdict("the bytes are the pattern", same(b, buffer, 0) && pattern_matches(b, 16));
+    bench.verdict("the bytes are the pattern", pattern_matches(b, 16));
 }
 
 // =============================================================================
@@ -801,11 +787,11 @@ void tj_mapped() {
     }
     bench.verdict("halfword and word loads through the window agree with the byte ones",
                   halfwords_exact && words_exact);
-    const uint32_t t0 = micros();
+    const uint32_t t0 = Ruler::now();
     for (uint32_t i = 0; i < subsector_bytes / 4u; ++i) {
         reinterpret_cast<uint32_t*>(buffer)[i] = v[i];
     }
-    const uint32_t us = micros() - t0;
+    const uint32_t us = (Ruler::now() - t0) / cycles_per_us;
     print(serial, "  4 KB copied out of the window in words: ", us, " us (",
           us != 0u ? (subsector_bytes * 1000u) / us : 0u, " KB/s)", crlf);
     bench.verdict("the copy is exact", pattern_matches(buffer, subsector_bytes));
@@ -825,7 +811,7 @@ void tj_mapped() {
 
 void tk_deep_power_down() {
     const QspiStatus in = Quadspi::command(enter_deep_power_down);
-    wait_us(10);   // tDP: 3 us from NCS high to deep power-down
+    brio::spin_us<Ruler>(10);   // tDP: 3 us from NCS high to deep power-down
     uint8_t id[3] = {};
     (void)Quadspi::read(read_id, 0, id, 3);
     print(serial, "  in deep power-down READ ID gives ", hex(id[0]), " ", hex(id[1]), " ", hex(id[2]),
@@ -833,7 +819,7 @@ void tk_deep_power_down() {
     bench.verdict("ENTER DEEP POWER-DOWN goes out and the device stops answering its identity",
                   in == QspiStatus::ok && !(id[0] == 0x20u && id[1] == 0xBAu && id[2] == 0x18u));
     const QspiStatus out = Quadspi::command(release_deep_power_down);
-    wait_us(40);   // tRDP: 30 us to standby
+    brio::spin_us<Ruler>(40);   // tRDP: 30 us to standby
     (void)Quadspi::read(read_id, 0, id, 3);
     bench.verdict("RELEASE FROM DEEP POWER-DOWN and 30 us later the identity answers again",
                   out == QspiStatus::ok && id[0] == 0x20u && id[1] == 0xBAu && id[2] == 0x18u);
@@ -878,6 +864,7 @@ int main() {
     boot.lptr = brio::Quadspi::regs().LPTR;
 
     const bool clock_ok = SysClock::init();
+    (void)brio::CycleCounter::init();   // every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0)
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
     brio::enable_interrupts();

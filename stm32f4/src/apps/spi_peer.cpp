@@ -122,8 +122,8 @@
 #include <type_traits>
 
 #include "stm32f4/clock.hpp"
-#include "stm32f4/delay.hpp"
 #include "stm32f4/dma.hpp"
+#include "stm32f4/dwt.hpp"
 #include "stm32f4/flash.hpp"
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/pin.hpp"
@@ -131,6 +131,7 @@
 #include "stm32f4/ticker.hpp"
 #include "stm32f4/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
 // register, and every architecture on this link compiles the same file.
@@ -238,25 +239,14 @@ bool engaged() { return engaged_until != 0 && Ticker::millis() < engaged_until; 
 
 // ---- waits ----------------------------------------------------------------
 
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
-
-/// A microsecond hold of arbitrary length: delay_us is capped below one
-/// SysTick period BY DESIGN, and this instrument's holds are exactly the
-/// blocking waits that cap keeps out of KERNEL programs - this is not
-/// one, so the hold is spent in chunks the cap admits.
-void hold_us(uint32_t us) {
-    while (us >= 500u) {
-        (void)delay_us(clock, 500u);
-        us -= 500u;
-    }
-    if (us != 0u) {
-        (void)delay_us(clock, us);
-    }
-}
+/// The instrument's ruler for its holds and waits: the DWT's cycle counter,
+/// started once in main(). Its holds are blocking waits of any length up to
+/// seconds, which this program, with no kernel, may spend.
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 
 // ---- the runs ----------------------------------------------------------------
 //
@@ -368,10 +358,11 @@ bool apply_cfg(const spilink::Cfg& c, bool drive_output = true, bool wide = fals
 
 // ---- answering -------------------------------------------------------------
 
+/// The answer is dropped: every caller goes on either way, and the one that
+/// reports, run_exchange(), reads the select again and says it stood (aux2
+/// bit 0).
 void wait_nss_high(uint16_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Client::selected() && Ticker::millis() - t0 < ms) {
-    }
+    (void)brio::wait_until<Ruler>([] { return !Client::selected(); }, ms * 1000u);
 }
 
 /// Serve ONE answer window: the frame padded with zeros to the most the
@@ -647,9 +638,9 @@ spilink::Report run_exchange(const spilink::Params& a) {
             // and this end's stream follows ONE PLACE LATE - what
             // spilink's regime_normal names on a silicon with no
             // transmit-buffer mode to choose.
-            const uint32_t w0 = Ticker::millis();
-            while (!Client::selected() && Ticker::millis() - w0 < a.ms) {
-            }
+            // The answer is dropped: a select that never falls leaves the
+            // run to its own budget, and the report says what came.
+            (void)brio::wait_until<Ruler>([] { return Client::selected(); }, a.ms * 1000u);
         }
         const uint32_t spins = spins_for_ms(a.ms);
         run = wide ? polled_serve<uint16_t>(n, answer_only, receive_only, crc, spins)
@@ -725,9 +716,9 @@ spilink::Report run_sink_slow(const spilink::Params& a) {
 spilink::Report run_ss_pulse(const spilink::Params& a) {
     spilink::Report r{};
     Client::release();
-    if (a.aux8) wait_ms(a.aux8);
+    brio::spin_us<Ruler>(a.aux8 * 1000u);
     NssPin::output(false);
-    hold_us(a.aux16 ? a.aux16 : 1000u);
+    brio::spin_us<Ruler>(a.aux16 ? a.aux16 : 1000u);
     NssPin::input(PinPull::up);
     r.aux0 = 1;
     r.count = 1;
@@ -755,8 +746,7 @@ spilink::Report run_host_burst(const spilink::Params& a) {
 
     const uint32_t lead = a.aux8 ? a.aux8 : 20u;
     const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < lead) {
-    }
+    brio::spin_us<Ruler>(lead * 1000u);
 
     uint16_t div = a.aux16 ? a.aux16 : spilink::command_division;
     if (div < 2u) div = 2u;
@@ -774,13 +764,13 @@ spilink::Report run_host_burst(const spilink::Params& a) {
     // The mode is primed BEFORE the select falls: a CPOL flip inside an
     // open window is one extra edge and the selected client counts it.
     Host::prime(mode_of(a.cfg.mode), rate);
-    hold_us(200);
+    brio::spin_us<Ruler>(200);
 
     spilink::Stream out(a.pattern, a.seed_a);      // what THIS end sends
     spilink::Stream want(a.pattern, a.seed_b);     // what the client owes
 
     NssPin::clear();                               // select, for the whole burst
-    hold_us(spilink::gap_us);
+    brio::spin_us<Ruler>(spilink::gap_us);
     while (r.count < a.count && Ticker::millis() - t0 < lead + a.ms) {
         burst_tx[0] = out.next();
         burst_rx[0] = 0;
@@ -797,7 +787,7 @@ spilink::Report run_host_burst(const spilink::Params& a) {
             break;                                 // a polled request completes here
         }
         account(r, burst_rx[0], want.next());
-        hold_us(spilink::gap_us);
+        brio::spin_us<Ruler>(spilink::gap_us);
     }
     NssPin::set();
     r.aux0 = static_cast<uint8_t>(Raw::status());
@@ -922,6 +912,7 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool console_ok = Console::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
+    (void)brio::CycleCounter::init();  // every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0)
     brio::enable_interrupts();
 
     // The board's name: the unique device ID's first word, in hex.

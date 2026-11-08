@@ -95,6 +95,7 @@
 
 #include "kernel/tenuto.hpp"
 #include "kernel/post.hpp"
+#include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "stm32g0/adc.hpp"
 #include "stm32g0/clock.hpp"
@@ -112,6 +113,7 @@
 #include "stm32g0/usart.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 namespace {
@@ -383,7 +385,21 @@ uint32_t measure_lsi_hz() {
     static uint32_t samples[33];
     constexpr uint16_t want = 33;
     uint16_t got = 0;
-    for (uint32_t spin = 0; spin < 40'000'000UL && got < want; ++spin) {
+    // THE WAIT IS BOUNDED ON THE METER'S OWN COUNTER, which runs from
+    // setup() at the boot rate's PCLK / 16: this runs at boot, with
+    // interrupts masked and no timebase started, so nothing else here
+    // counts time yet. Thirty-four edges of an LSI inside table 46's band
+    // (29.5 kHz at the slowest) take at most 1.2 ms; the budget is 20 ms.
+    // The counter is 16 bits wide and wraps every 16 ms, so it is read
+    // every turn and the 16-bit differences are summed.
+    constexpr uint32_t budget_counts =
+        20'000u * (Fast::hz / (lsi_meter_prescaler + 1u) / 1'000'000u);
+    uint32_t elapsed = 0;
+    uint16_t last = static_cast<uint16_t>(Tim<16>::count());
+    while (got < want && elapsed < budget_counts) {
+        const uint16_t now = static_cast<uint16_t>(Tim<16>::count());
+        elapsed += static_cast<uint16_t>(now - last);
+        last = now;
         if ((Tim<16>::flags() & LsiMeter::capture_flag) == 0u) {
             continue;
         }
@@ -431,20 +447,21 @@ uint32_t awake_us(uint32_t counts) {
 
 void feed() { Iwdg::refresh(); }
 
-/// Wait on the timebase (the crystal), whatever the core runs at.
-void tb_wait_ms(uint32_t ms) {
-    const uint32_t t0 = Tb::millis();
-    while (Tb::millis() - t0 < ms) {
-        feed();
-    }
-}
+// THE WAITS GO ON THE KERNEL TICK. util/test_wait.hpp's ruler verbs need
+// a cycle counter whose rate is a compile-time constant, and this suite
+// has none: SysTick runs at whatever rate is in force (64, 16 or 2 MHz)
+// and, as the interrupt-less SysTickCounter, does not count its own
+// reloads. What does not move with SYSCLK is the timebase, LPTIM1 at
+// 1024 Hz on the 32 kHz root, so every time-out here is wait_ticks<P>
+// (and a fixed span is a wait_ticks whose condition never holds).
 
 /// A measurement window a transmit interrupt walks through is not a
-/// measurement; and at 2 MHz the console drains slowly.
+/// measurement. The console runs on HSI16 whatever SYSCLK does, so its
+/// 1024-byte ring leaves in 89 ms at 115200; the budget is 200 ms. The
+/// answer is dropped: a wedged console only lengthens what follows, and
+/// no window here is judged by a bound derived from a quiet path.
 void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    tb_wait_ms(3);
+    (void)brio::wait_ticks<P>([] { return Serial::tx_idle(); }, brio::ticks_from_ms<P>(200));
 }
 
 bool within(uint32_t v, uint32_t lo, uint32_t hi) { return v >= lo && v <= hi; }
@@ -533,15 +550,9 @@ uint32_t loop_run(uint32_t count) {
         }
         // One character at 115200 is 87 us; wait on the wall, since
         // a spin is 32 times longer at 2 MHz than at 64.
-        const uint32_t t0 = mono();
-        bool got = false;
+        // Three ticks of the timebase (2.9 to 3.9 ms) is the budget.
         uint8_t b = 0;
-        while (mono_us(mono_delta(t0, mono())) < 2000u) {
-            if (Loop::read_byte(b)) {
-                got = true;
-                break;
-            }
-        }
+        const bool got = brio::wait_ticks<P>([&] { return Loop::read_byte(b); }, 3u);
         if (got && b == v) {
             ++good;
         }
@@ -731,10 +742,12 @@ void ta_boot() {
                       SysClock::rate_source(0) == SysclkSource::pllrclk &&
                       SysClock::rate_source(2) == SysclkSource::hsisys);
 
-    // THE WALL, weighed: two seconds of the timebase on TIM2's count.
+    // THE WALL, weighed: two seconds of the timebase on TIM2's count. The
+    // span is 2048 ticks plus at most one (wait_ticks ends after more than
+    // its budget), half a per mille against the 1 % band below.
     console_drain();
     const uint32_t c0 = t2();
-    tb_wait_ms(2000);
+    (void)brio::wait_ticks<P>([] { feed(); return false; }, brio::ticks_from_ms<P>(2000));
     const uint32_t counted = t2() - c0;
     constexpr uint32_t etr_wall_nominal = etr_wall_hz * 2u;
     if (etr_wall_ok) {
@@ -763,8 +776,7 @@ void ta_boot() {
               "is what letter g needs of it - and every microsecond this suite "
               "prints comes from the RTC's sub-second counter at ",
               mono_resolution_us(), " us a tick.", crlf);
-        print(serial, "  SKIPPED, no verdict claimed: the ETR wall's own rate.",
-              crlf);
+        bench.skip("the ETR wall's own rate: nothing reaches TIM2's ETR on this board");
     }
 
     // The CPU really at 64 MHz: delay_us on SysTick's cycles against the crystal.
@@ -1157,15 +1169,13 @@ void th_delay() {
     // letter says so and claims nothing rather than measuring the
     // quantum instead of the delay.
     if constexpr (!wall_on_mco) {
-        print(serial,
-              "  SKIPPED, no verdict claimed: judging a 20 us delay needs the "
-              "4 us wall, which is TIM2's ETR taking MCO - and RM0444 "
-              "22.4.25's ETRSEL list gives code 0100 to the G0B1/G0C1 sales "
-              "types alone (tim_etrsel_has_mco(2) is false here). The LSE "
-              "code 0011 every part has makes a 30.5 us tick, coarser than "
-              "three of this letter's four spans, so what it would measure is "
-              "its own quantum.",
-              crlf);
+        bench.skip("judging a 20 us delay needs the 4 us wall, which is TIM2's "
+                   "ETR taking MCO - and RM0444 22.4.25's ETRSEL list gives code "
+                   "0100 to the G0B1/G0C1 sales types alone "
+                   "(tim_etrsel_has_mco(2) is false here). The LSE code 0011 "
+                   "every part has makes a 30.5 us tick, coarser than three of "
+                   "this letter's four spans, so what it would measure is its "
+                   "own quantum.");
         return;
     }
     static const uint32_t spans[] = {20, 100, 500, 900};
@@ -1268,7 +1278,7 @@ void ti_systick_ticker() {
     Ticker::pause();
     const bool back = SysTickCounter::start(clock);
     const uint32_t i1 = systick_irqs;
-    tb_wait_ms(20);
+    (void)brio::wait_ticks<P>([] { return false; }, brio::ticks_from_ms<P>(20));   // a fixed 20 ms
     bench.verdict("SysTick handed back to the interrupt-less counter: delay_us works and "
                   "the handler no longer runs",
                   back && delay_us(clock, 10) && systick_irqs == i1);
@@ -1342,7 +1352,6 @@ void tx_durations() {
         print(serial, "  ", names[from[i]], " -> ", names[to[i]], ": ", lo, "..", hi, " us over 8", crlf);
     }
     (void)go(r_fast);
-    bench.verdict("durations printed", true);
 }
 
 void banner() {

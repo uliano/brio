@@ -82,6 +82,7 @@
 #include "kernel/tenuto.hpp"
 #include "kernel/time_event.hpp"
 #include "stm32f4/clock.hpp"
+#include "stm32f4/dwt.hpp"
 #include "stm32f4/exti.hpp"
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/pin.hpp"
@@ -94,6 +95,7 @@
 #include "stm32f4/usart.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 namespace {
@@ -160,6 +162,17 @@ using SysClock = DynamicClock<RatePack, Ticker, Serial>;
 constexpr SysClock clock;
 
 constexpr uint8_t hsi_rate_index = SysClock::rate_count - 1u;
+
+/// The ruler of the suite's time-outs: the DWT's cycle counter, started in
+/// main(), converted at the TOP rate of the ladder (R0). At a lower rung a
+/// budget lasts longer in wall time - harmless for a time-out, and no wait
+/// here times a span on it. The counter runs through a Sleep and stops in
+/// a Stop (stm32f4/dwt.hpp), so no wait on it spans a Stop.
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return R0::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 
 // ---------------------------------------------------------------------------
 // The RTC as the wall clock and as the alarm
@@ -253,14 +266,15 @@ void weigh_wall() {
     // remains is the millisecond ruler's edge over two seconds: 500 ppm.
     auto edge = [] {
         const uint32_t w = wall();
-        uint32_t spins = 2'000'000u;
-        while (wall() == w && spins-- != 0u) {
-        }
+        // A sub-second tick is 4 ms at the reset prescalers; 50 ms is the
+        // time-out, and a wall that does not move fails the weighing below.
+        (void)brio::wait_until<Ruler>([&] { return wall() != w; }, 50'000);
         return wall();
     };
     const uint32_t w0 = edge();
     const uint32_t k0 = Ticker::millis();
-    while (Ticker::millis() - k0 < 2000u) {
+    if (!brio::wait_until<Ruler>([&] { return Ticker::millis() - k0 >= 2000u; }, 4'000'000)) {
+        return;   // the tick stopped: the wall stays unweighed
     }
     const uint32_t w1 = edge();
     const uint32_t k1 = Ticker::millis();
@@ -298,8 +312,9 @@ bool within(uint32_t v, uint32_t lo, uint32_t hi) { return v >= lo && v <= hi; }
 /// the measurement instead of out of the verdict.
 void at_tick_edge() {
     const uint32_t t = Ticker::ticks();
-    while (Ticker::ticks() == t) {
-    }
+    // A tick is 1 ms; a stopped tick leaves the deadline unaligned, which
+    // the wall-judged verdicts after it show.
+    (void)brio::wait_until<Ruler>([&] { return Ticker::ticks() != t; }, 5'000);
 }
 
 // ---------------------------------------------------------------------------
@@ -321,14 +336,11 @@ void feed() {
 /// Stop taken at that instant kills PCLK1 in the middle of it - measured,
 /// the line's own CRLF lost and the host resynchronizing several bytes
 /// into the next line. `tx_idle()` is the wire's (the ring empty and TC
-/// set, stm32f4/usart.hpp); the TC loop after it reads the resource's
-/// flag once more and finds it set.
+/// set, stm32f4/usart.hpp).
+/// A wedged console (false after 200 ms of the top rate's cycles) shows
+/// in the wall-judged verdicts after it, so the answer is dropped here.
 void console_drain() {
-    for (uint32_t i = 0; i < 20'000'000u && !Serial::tx_idle(); ++i) {
-    }
-    for (uint32_t i = 0;
-         i < 2'000'000u && (Usart<console_instance>::status() & UsartFlag::tc) == 0u; ++i) {
-    }
+    (void)brio::console_drain<Ruler, Serial>();
 }
 
 /// The three DBGMCU bits at the very first instruction of main(), before
@@ -701,12 +713,20 @@ void td_variants() {
     // of the part, printed above and judged only in its direction.
     print(serial, "  the flash in power-down costs ", lap_us[2] - lap_us[1],
           " us more than the regulator alone on this part", crlf);
+    // The direction is judged to the measurement's own resolution: a lap
+    // is a wall span over `laps` laps whose two ends are each read to one
+    // sub-second tick (wall_us(1)) and whose division floors, so one lap
+    // is known to within wall_us(1) / laps + 1 us either way, and two laps
+    // compared to twice that. Where two variants cost the same (the LP +
+    // FPDS family on the STM32F446RE: 4637 and 4638 us) the sign of the
+    // difference is that resolution's.
+    const uint32_t lap_slack = 2u * ((wall_us(1) + laps - 1u) / laps + 1u);
     bench.verdict("and the flash in power-down is never cheaper to leave than the "
                   "regulator alone",
-                  lap_us[2] >= lap_us[1] && lap_us[3] >= lap_us[1]);
+                  lap_us[2] + lap_slack >= lap_us[1] && lap_us[3] + lap_slack >= lap_us[1]);
     if (measured[5]) {
         bench.verdict("under-drive is the deepest and the slowest to leave",
-                      lap_us[5] >= lap_us[3]);
+                      lap_us[5] + lap_slack >= lap_us[3]);
         bench.verdict("and PWR_CSR.UDRDY records that the device really entered it",
                       Pwr::under_drive_flag());
         Pwr::clear_under_drive_flag();
@@ -800,11 +820,13 @@ uint32_t weigh_rate() {
     // for every rate in the pack, so 100 ticks IS 100 ms if HCLK is what
     // the rate says - and the LSE is what says otherwise.
     const uint32_t k0 = Ticker::ticks();
-    while (Ticker::ticks() == k0) {
+    if (!brio::wait_until<Ruler>([&] { return Ticker::ticks() != k0; }, 5'000)) {
+        return 0;   // the tick stopped: no figure, and the letter's bands fail it
     }
     const uint32_t w0 = wall();
     const uint32_t k1 = Ticker::ticks();
-    while (Ticker::ticks() - k1 < 100u) {
+    if (!brio::wait_until<Ruler>([&] { return Ticker::ticks() - k1 >= 100u; }, 2'000'000)) {
+        return 0;
     }
     const uint32_t w1 = wall();
     return wall_us(wall_delta(w0, w1));
@@ -1312,8 +1334,7 @@ void ti_surface() {
     for (uint8_t code = 0; code < 8u; ++code) {
         (void)Pwr::pvd_level(code);
         Pwr::pvd_enable(true);
-        for (uint16_t i = 0; i < 2000u; ++i) {
-        }
+        brio::spin_us<Ruler>(100);   // the comparator's settling, well under 100 us
         if (Pwr::pvd_below()) {
             any_below = true;
         }
@@ -1347,11 +1368,13 @@ void ti_surface() {
     Pwr::clear_wakeup_flag();
     const bool quiet_flag = !Pwr::wakeup_flag();
     uint8_t high_pins = 0;
+    bool every_armed = true;
+    bool every_disarmed = true;
     for (uint8_t n = 1; n <= Pwr::wakeup_pin_count; ++n) {
         Pwr::clear_wakeup_flag();
         (void)Pwr::wakeup_pin(n, true);
-        for (uint16_t i = 0; i < 2000u; ++i) {
-        }
+        every_armed = every_armed && Pwr::wakeup_pin_enabled(n);
+        brio::spin_us<Ruler>(100);   // a high pad's event, if any, is in by then
         const PwrWakeupPad pad = Pwr::wakeup_pad(n);
         const bool raised = Pwr::wakeup_flag();
         if (raised) {
@@ -1367,13 +1390,15 @@ void ti_surface() {
                                : "clear",
               crlf);
         (void)Pwr::wakeup_pin(n, false);
+        every_disarmed = every_disarmed && !Pwr::wakeup_pin_enabled(n);
     }
     Pwr::clear_wakeup_flag();
+    print(serial, "  ", static_cast<uint32_t>(high_pins), " of ",
+          static_cast<uint32_t>(Pwr::wakeup_pin_count), " pin(s) raised WUF when armed", crlf);
     bench.verdict("the one wake-up flag this family has is clearable and stays "
                   "down with nothing armed",
                   quiet_flag && !Pwr::wakeup_flag());
-    bench.verdict("every bonded pin arms and disarms",
-                  !Pwr::wakeup_pin_enabled(1) && high_pins <= Pwr::wakeup_pin_count);
+    bench.verdict("every bonded pin arms and disarms", every_armed && every_disarmed);
     // The erratum's own sequence, run for its own sake: it must leave
     // every pin as it found it and the flags down.
     (void)Pwr::wakeup_pin(1, true);
@@ -1500,6 +1525,7 @@ int main() {
     wuf_at_boot = brio::Pwr::wakeup_flag();
 
     const bool clock_ok = SysClock::init();
+    (void)brio::CycleCounter::init();   // every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0)
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
     brio::enable_interrupts();
@@ -1534,14 +1560,17 @@ int main() {
                     " rtc=", rtc_ok ? "up" : "FAILED",
                     " wdt=", feed_iwdg ? "IWDG" : "FAILED", brio::crlf);
         if (sbf_at_boot) {
+            // Letter s's verdict, judged at the boot its Standby caused and
+            // tallied like a letter's, so `brio run` reads it.
             const uint32_t token = brio::Rtc::backup(standby_slot);
             brio::print(serial, "standby: SBF was set at boot and the backup "
                                 "register reads ",
-                        brio::hex(token), " - ",
-                        token == standby_token ? "pass, the device woke from STANDBY "
-                                                 "through the reset vector"
-                                               : "FAIL, the token did not survive",
-                        brio::crlf);
+                        brio::hex(token), brio::crlf);
+            bench.reset_tally();
+            bench.verdict("THE WAKE FROM STANDBY IS A RESET: SBF stood at boot and the "
+                          "token in the backup register survived it",
+                          token == standby_token);
+            bench.end_letter();
             brio::Pwr::clear_standby_flag();
             brio::Pwr::clear_wakeup_flag();
             (void)brio::Rtc::backup(standby_slot, 0u);

@@ -265,7 +265,10 @@ four LPTIM1 signals are on port B at AF5 and LPTIM2's three are PC0, PC3
 and PD6 at AF2, and each pad is walked by its own internal pull (read
 under its pull-up, then under its pull-down: a pull-walk) - which
 letter a proves for the first four and letter j for the last three
-before anything rests on them.
+before anything rests on them. On the desk PB5 is also the SPI MOSI wire
+to the paired board, free only while that board leaves its end
+high-impedance: the suite asks whether PB5 follows its pull, and where it
+does not, the legs that walk it (in letters a, d and f) skip by name.
 
 **A pad handed to an LPTIM INPUT function still follows its own pull.**
 PB5, PB6 and PB7 walk between the rails under AF5 exactly as they do as
@@ -277,7 +280,8 @@ chapter measurable with no wire.)
 **All four kernel clocks drive the counter**, each inside its own band:
 LSE 32740 counts a second against the crystal's 32768 (the RTC judging
 the LPTIM on the same crystal - a consistency check, not a frequency),
-LSI 32660 against the 32586 the platform, tim and rtc suites measure, HSI16
+LSI 32660 (inside table 46's 29.5..34 kHz, the suite's band; the row is
+printed against the rate the suite measures on TIM16's capture at boot), HSI16
 125210 x 128 and PCLK 501040 x 128 against 64 MHz.
 
 **26.4.13's and 26.4.7's latencies are REAL KERNEL CLOCKS, not APB
@@ -350,8 +354,12 @@ after is new (49) - 26.4.11 exactly.
 **THE WAVEFORM ARITHMETIC, WHICH 26.4.10 DESCRIBES IN WORDS AND NEVER
 PRINTS.** Measured off the pad:
 
-- a PERIOD is **ARR + 1** counter ticks (ARR = 499 on a 500 kHz counter
-  gives 1000 Hz, where ARR ticks would give 1002);
+- a PERIOD is **ARR + 1** counter ticks: ARR = 499 on PCLK/128 is 64000
+  PCLK cycles a period where ARR ticks would be 63872, and the suite
+  times two hundred periods on the CPU's own cycle count - the counter's
+  own clock, so HSI16's trim cancels - and judges within 64 cycles of
+  64000 (the 1000 Hz once counted on the RTC wall, a 5 Hz quantum, could
+  not tell 1000 from 1002);
 - the HIGH TIME is **ARR - CMP + 1** ticks - ONE MORE than the
   chapter's two sentences read on their own - so CMP = 0 is a FULL duty
   and not one tick short of it: 1000, 751, 501, 251 and 101 per mille
@@ -517,8 +525,8 @@ named and those legs are compiled out; and the "one vector, two owners"
 leg, which needs the TIM7 this part has not got (below). The crystal
 runs on this board and every LSE row is measured, folded into the same
 verdicts as on the G0B1RE: the kernel-clock census reads the **LSE at
-32740 counts a second**, the LSI at 31430 (against a 32586 nominal, 35
-per mille - the slowest die of the desk), HSI16/128 and PCLK/128 at
+32740 counts a second**, the LSI at 31430 (35 per mille under the
+G0B1RE's 32586 - the slowest die of the desk), HSI16/128 and PCLK/128 at
 125240 and 501010; the Stop letter reads 7434 LSE counts across a 226
 ms Stop 1; and the third sleep site on the crystal matures a 500 ms
 event at 501 ms of wall with six 150 ms rounds at 152 ms, none early.

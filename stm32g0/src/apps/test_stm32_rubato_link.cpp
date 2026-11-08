@@ -199,6 +199,7 @@
 #include "util/line_reader.hpp"
 #include "util/print.hpp"
 #include "util/spi_bus.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // THE PROTOCOL HEADERS ARE SHARED, NOT COPIED: the far board's two
@@ -219,11 +220,14 @@ using P = Stm32g0RubatoPlatform<>;
 constexpr uint32_t core_hz = SysClock::hz;
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
 
-/// TIM2 free-running at HCLK: one load of CNT, a count a cycle.
+/// TIM2 free-running at HCLK: one load of CNT, a count a cycle; it runs
+/// masked too.
 using Clock32 = Tim<2>;
 struct Ruler {
     [[gnu::always_inline]] static uint32_t now() { return Clock32::count(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
+static_assert(CycleRuler<Ruler>);
 
 [[gnu::always_inline]] inline void spin(uint32_t cycles) {
     const uint32_t t0 = Ruler::now();
@@ -414,17 +418,19 @@ void release() {
     U1Rx::release();
 }
 
+/// One character into the transmit FIFO, room awaited at most 50 ms (the
+/// eight-deep FIFO empties in 0.7 ms at 115200). The answer is dropped: a
+/// FIFO that never makes room loses the frame, which command() sees as no
+/// ack, retries and reports.
 void put1(uint8_t b) {
-    const uint32_t t0 = Ticker::millis();
-    while (!U1::flag(UsartFlag::txfnf) && Ticker::millis() - t0 < 50u) {
-    }
+    (void)brio::wait_until<Ruler>([] { return U1::flag(UsartFlag::txfnf); }, 50'000u);
     U1::write_word(b);
 }
 
+/// The frame's last stop bit out, at most 50 ms. Dropped as put1()'s is:
+/// a frame that never left gets no ack.
 void wait_tc() {
-    const uint32_t t0 = Ticker::millis();
-    while (!U1::flag(UsartFlag::tc) && Ticker::millis() - t0 < 50u) {
-    }
+    (void)brio::wait_until<Ruler>([] { return U1::flag(UsartFlag::tc); }, 50'000u);
 }
 
 /// A frame, polled: a character every 87 us at 115200 into an eight-deep

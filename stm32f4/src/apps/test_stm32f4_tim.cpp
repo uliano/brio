@@ -54,6 +54,7 @@
 #include <stdint.h>
 
 #include "stm32f4/clock.hpp"
+#include "stm32f4/dwt.hpp"
 #include "stm32f4/delay.hpp"
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/pin.hpp"
@@ -63,6 +64,7 @@
 #include "stm32f4/tim.hpp"
 #include "stm32f4/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #if defined(STM32F411xE)
@@ -169,11 +171,19 @@ void reset_counters() {
 // ---- a ruler --------------------------------------------------------------------
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
 
-/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
-/// tick count and the counter's position composed right across the reload
-/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
-uint32_t cycles_now() {
-    return Ticker::cycles();
+/// The ruler: the DWT's cycle counter (started in main()), one load, so a
+/// polling loop's stamps are cycles apart; it wraps at 2^32, so only
+/// differences are used.
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
+
+/// The console's last byte off the wire before a polled window a bound
+/// judges; false after 200 ms on a wedged console.
+bool console_drained() {
+    return brio::console_drain<Ruler, Serial>();
 }
 
 /// A wait that cannot hang: true while `ms` milliseconds have not passed
@@ -312,13 +322,13 @@ uint32_t measure_rate(uint32_t ms, uint16_t prescaler) {
     T::init();
     (void)T::configure({.prescaler = prescaler, .period = T::max_period});
     T::enable(true);
-    const uint32_t c0 = cycles_now();
+    const uint32_t c0 = Ruler::now();
     const uint32_t n0 = T::count();
     const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() - t0 < ms) {
-    }
+    // A window on the tick; a stopped tick ends it at twice its length.
+    (void)brio::wait_until<Ruler>([&] { return Ticker::ticks() - t0 >= ms; }, ms * 2'000u);
     const uint32_t n1 = T::count();
-    const uint32_t c1 = cycles_now();
+    const uint32_t c1 = Ruler::now();
     T::enable(false);
     const uint64_t ticks = static_cast<uint64_t>((n1 - n0) & T::max_period) *
                            (static_cast<uint64_t>(prescaler) + 1u);
@@ -457,11 +467,11 @@ void tc_internal_trigger() {
     (void)Wide::configure({.prescaler = 0, .period = 999});
     (void)Wide::master(TimMasterMode::update);
     Wide::enable(true);
-    const uint32_t c0 = cycles_now();
+    const uint32_t c0 = Ruler::now();
     const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() - t0 < 100u) {
-    }
-    const uint32_t c1 = cycles_now();
+    // A window on the tick; a stopped tick ends it at twice its length.
+    (void)brio::wait_until<Ruler>([&] { return Ticker::ticks() - t0 >= 100u; }, 200'000);
+    const uint32_t c1 = Ruler::now();
     const uint32_t events = Wave::count();
     Wide::enable(false);
     const uint32_t expected = static_cast<uint32_t>(
@@ -493,11 +503,11 @@ void td_gated_duty() {
     TimGatedCounter<Meter>::restart();
     Wave::enable(true);
 
-    const uint32_t c0 = cycles_now();
+    const uint32_t c0 = Ruler::now();
     const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() - t0 < 100u) {
-    }
-    const uint32_t c1 = cycles_now();
+    // A window on the tick; a stopped tick ends it at twice its length.
+    (void)brio::wait_until<Ruler>([&] { return Ticker::ticks() - t0 >= 100u; }, 200'000);
+    const uint32_t c1 = Ruler::now();
     const uint32_t high = TimGatedCounter<Meter>::count();
     Wave::enable(false);
 
@@ -517,11 +527,11 @@ void td_gated_duty() {
         Wave::clear_flags(Wave::update_flag);
         TimGatedCounter<Meter>::restart();
         Wave::enable(true);
-        const uint32_t d0 = cycles_now();
+        const uint32_t d0 = Ruler::now();
         const uint32_t s0 = Ticker::ticks();
-        while (Ticker::ticks() - s0 < 20u) {
-        }
-        const uint32_t d1 = cycles_now();
+        // A window on the tick; a stopped tick ends it at twice its length.
+        (void)brio::wait_until<Ruler>([&] { return Ticker::ticks() - s0 >= 20u; }, 40'000);
+        const uint32_t d1 = Ruler::now();
         const uint32_t got = TimGatedCounter<Meter>::count();
         Wave::enable(false);
         const uint32_t window = static_cast<uint32_t>(
@@ -945,14 +955,14 @@ void tq_modes_and_lock() {
     (void)delay_us(clock, 1000);
     const bool waiting = !Pulse::busy() && !WavePad::read();
     const uint32_t deadline = Ticker::ticks();
-    const uint32_t g0 = cycles_now();
+    const uint32_t g0 = Ruler::now();
     Wide::enable(true);
     while (!WavePad::read() && within(deadline, 20)) {
     }
-    const uint32_t g_rise = cycles_now();
+    const uint32_t g_rise = Ruler::now();
     while (WavePad::read() && within(deadline, 40)) {
     }
-    const uint32_t g_fall = cycles_now();
+    const uint32_t g_fall = Ruler::now();
     (void)delay_us(clock, 1000);
     const bool once = !Pulse::busy() && !Wide::enabled();
     const uint32_t rise_us = (g_rise - g0) / cycles_per_us;
@@ -1059,8 +1069,8 @@ void quiet_six() {
 
 void tp_six_instances() {
     if constexpr (!six_present) {
-        print(serial, "  SKIP: this part has none of TIM6, TIM7, TIM8 and "
-              "TIM12..TIM14 (the reserve's tim_present)", crlf);
+        bench.skip("this part has none of TIM6, TIM7, TIM8 and TIM12..TIM14 (the "
+                   "reserve's tim_present)");
         return;
     } else {
         quiet_everything();
@@ -1083,12 +1093,12 @@ void tp_six_instances() {
                         TimPeriodicTick<T13>::setup(psc1, 99) &&
                         TimPeriodicTick<T14>::setup(psc1, 99);
         uint32_t tk = Ticker::ticks();
-        while (Ticker::ticks() == tk) {
-        }
+        // A tick is 1 ms; a stopped one shows in the counts judged after.
+        (void)brio::wait_until<Ruler>([&] { return Ticker::ticks() != tk; }, 5'000);
         reset_six();   // AFTER the tick edge, so the window is the 100 ticks alone
         tk = Ticker::ticks();
-        while (Ticker::ticks() - tk < 100u) {
-        }
+        // A window on the tick; a stopped tick ends it at twice its length.
+        (void)brio::wait_until<Ruler>([&] { return Ticker::ticks() - tk >= 100u; }, 200'000);
         const uint16_t c6 = t6_up, c7 = t7_up, c12 = t12_up, c13 = t13_up, c14 = t14_up;
         TimPeriodicTick<T6>::stop(); TimPeriodicTick<T7>::stop();
         TimPeriodicTick<T12>::stop(); TimPeriodicTick<T13>::stop();
@@ -1146,8 +1156,7 @@ void tp_six_instances() {
         quiet_six();
 
         if constexpr (!six_pads) {
-            print(serial, "  the pad legs SKIP: their pads are chosen on the "
-                  "Nucleo-F446RE", crlf);
+            bench.skip("the pad legs: their pads are chosen on the Nucleo-F446RE");
         } else {
             // --- TIM8's third pair on PC8/PB1 with a dead time: never both
             // high, and what the two duties lack is the dead time.
@@ -1246,29 +1255,37 @@ void ti_one_pulse() {
                   armed && !Pulse::setup(psc, 20, 0) && Pulse::setup(psc, 20, 50));
 
     const bool low_before = !WavePad::read();
+    // The verdict line above is still going out: its transmit interrupts
+    // would land inside the polled stamps the bounds below rest on.
+    if (!console_drained()) {
+        bench.skip("the console did not drain: the polled pulse window would carry its "
+                   "interrupts");
+        quiet_everything();
+        return;
+    }
     // What one turn of the polling loops below costs - the resolution of
     // every stamp they take.
     uint32_t turn = 0;
     {
         const uint32_t d0 = Ticker::ticks();
-        const uint32_t c0 = cycles_now();
+        const uint32_t c0 = Ruler::now();
         for (uint32_t i = 0; i < 100u; ++i) {
             if (WavePad::read() && !within(d0, 20)) {
                 break;
             }
         }
-        turn = (cycles_now() - c0) / 100u;
+        turn = (Ruler::now() - c0) / 100u;
     }
     const uint32_t turn_us = turn / cycles_per_us + 1u;
     const uint32_t deadline = Ticker::ticks();
-    const uint32_t t_fire = cycles_now();
+    const uint32_t t_fire = Ruler::now();
     Pulse::fire();
     while (!WavePad::read() && within(deadline, 20)) {
     }
-    const uint32_t t_rise = cycles_now();
+    const uint32_t t_rise = Ruler::now();
     while (WavePad::read() && within(deadline, 40)) {
     }
-    const uint32_t t_fall = cycles_now();
+    const uint32_t t_fall = Ruler::now();
     const uint32_t delay_us_measured = (t_rise - t_fire) / cycles_per_us;
     const uint32_t width_us = (t_fall - t_rise) / cycles_per_us;
     const bool stopped = !Pulse::busy();
@@ -1326,12 +1343,12 @@ void tj_repetition() {
         // window, and two per cent of slop is more than the thing being
         // measured.
         const uint32_t align = Ticker::ticks();
-        while (Ticker::ticks() == align) {
-        }
+        // A tick is 1 ms; a stopped one shows in the counts judged after.
+        (void)brio::wait_until<Ruler>([&] { return Ticker::ticks() != align; }, 5'000);
         Adv::enable(true);
         const uint32_t t0 = Ticker::ticks();
-        while (Ticker::ticks() - t0 < 50u) {
-        }
+        // A window on the tick; a stopped tick ends it at twice its length.
+        (void)brio::wait_until<Ruler>([&] { return Ticker::ticks() - t0 >= 50u; }, 100'000);
         Adv::enable(false);
         counts[i] = TimEventCounter<Wide>::count();
     }
@@ -1363,10 +1380,10 @@ uint32_t complementary_gap() {
         }
         while (AdvPad::read() && within(deadline, 50)) {
         }
-        const uint32_t t0 = cycles_now();
+        const uint32_t t0 = Ruler::now();
         while (!AdvnPad::read() && within(deadline, 50)) {
         }
-        const uint32_t took = cycles_now() - t0;
+        const uint32_t took = Ruler::now() - t0;
         if (took < best) {
             best = took;
         }
@@ -1962,6 +1979,7 @@ int main() {
     boot.timpre = brio::Rcc::timpre();
 
     const bool clock_ok = SysClock::init();
+    (void)brio::CycleCounter::init();   // every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0)
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
     brio::enable_interrupts();

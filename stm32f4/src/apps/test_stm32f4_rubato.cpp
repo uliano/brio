@@ -89,7 +89,9 @@
 //      a second run has the interrupt handler compute a float too. Every
 //      value bit-exact against the same functions run without preemption
 //      - lazy stacking proved by the values, in the mode the scheduler
-//      runs in.
+//      runs in - and the mark's own record that the edge, and High's
+//      dispatch where road 1 is kept, landed inside its spin: values
+//      that agree because nothing preempted the loop prove nothing.
 //   i  DARK: every object but the Console idle, no time event armed,
 //      TIM9's line quiet, the LED's pad not an output, the ceiling the
 //      Console's own.
@@ -139,6 +141,7 @@
 #include "stm32f4/usart.hpp"
 #include "util/line_writer.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000, brio::HseMode::bypass>;
@@ -154,8 +157,16 @@ using namespace brio;
 constexpr bool scheduler_in_thread_mode = true;
 
 using P = Stm32f4RubatoPlatform<>;
-using Ruler = CycleCounter;
 using Edge = Tim<9>;
+
+/// The ruler: the DWT's cycle counter, started in main(); one load,
+/// forced inline because the letters time paths of a few hundred cycles
+/// with it, and it counts with interrupts masked.
+struct Ruler {
+    [[gnu::always_inline]] static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 
 constexpr UartPins console_pins{.tx = {'A', 2, PinFunction::af7}, .rx = {'A', 3, PinFunction::af7}};
 using Serial = Uart<2, console_pins>;
@@ -253,6 +264,10 @@ volatile uint32_t sp_low_isr = 0xFFFF'FFFFu;
     }
 }
 
+/// A fixed span in cycles, written here rather than taken from
+/// brio::spin_us() because it must inline: letter g spins inside a loop
+/// whose float accumulators live in s0-s15, and a call there would move
+/// them out of the registers lazy stacking covers.
 [[gnu::always_inline]] inline void spin(uint32_t cycles) {
     const uint32_t t0 = Ruler::now();
     while (Ruler::now() - t0 < cycles) {
@@ -268,6 +283,17 @@ volatile uint32_t sp_low_isr = 0xFFFF'FFFFu;
     (void)Edge::set_compare(0, d);
     Edge::interrupts(Edge::compare_interrupt(0), true);
     Edge::enable(true);
+}
+
+/// The same edge on a timer already counting (letter g starts it): the
+/// counter restarted at 0 and the compare armed, every step a register
+/// store inlined here - no call, unlike edge_in(), whose CEN writes are
+/// the driver's enable() and not inlined.
+[[gnu::always_inline]] inline void edge_in_running(uint32_t d) {
+    Edge::set_count(0);
+    Edge::clear_flags(Edge::compare_flag(0));
+    (void)Edge::set_compare(0, d);
+    Edge::interrupts(Edge::compare_interrupt(0), true);
 }
 
 // =============================================================================
@@ -381,18 +407,6 @@ void reset_scenario() {
     edge_float = false;
 }
 
-/// Wait until `runs` moves past `before`, at most `cycles`: true when it
-/// did.
-bool wait_runs(const volatile uint32_t& runs, uint32_t before, uint32_t cycles) {
-    const uint32_t t0 = Ruler::now();
-    while (runs == before) {
-        if (Ruler::now() - t0 >= cycles) {
-            return false;
-        }
-    }
-    return true;
-}
-
 /// A post from the Console to Low with nothing to do and nothing traced:
 /// its activate() serves whatever waits above the Console first - where
 /// road 1 is not kept, the dispatch an interrupt's post left waiting.
@@ -400,13 +414,12 @@ void flush() {
     post<Low>(Hit{0});
 }
 
-/// Let the console's transmitter fall silent (at most 50 ms, 230 bytes at
-/// 115200): its interrupt, landing in a measured path, would be measured.
-void console_drain() {
-    const uint32_t t0 = Ruler::now();
-    while (!Serial::tx_idle() && Ruler::now() - t0 < 9'000'000u) {
-    }
-}
+/// Let the console's transmitter fall silent (at most 200 ms, the
+/// shared drain's budget): its interrupt, landing in a measured path,
+/// would be measured. Where a derived bound judges what follows, the
+/// letter acts on the answer; elsewhere a wedged console only lengthens
+/// the runs that follow, which the letters' counters show.
+[[nodiscard]] bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 
 uint32_t ruler_cost() {
     uint32_t best = 0xFFFF'FFFFu;
@@ -609,7 +622,11 @@ void tc_latency() {
     if constexpr (scheduler_in_thread_mode) {
         // One warm-up event (the caches, the prefetch) not counted, then
         // 100; each waits at most 1 ms for High's first statement.
-        console_drain();
+        if (!console_drain()) {
+            bench.skip("the console did not drain: the timed events would carry its interrupt");
+            reset_scenario();
+            return;
+        }
         uint32_t missed = 0;
         // An event slower than the quiet path (latency_quiet) is one a
         // tick landed in: the kernel tick read around each says so.
@@ -620,7 +637,7 @@ void tc_latency() {
             const uint32_t t0 = Ticker::ticks();
             edge_to = 1;
             edge_in(400u);
-            if (!wait_runs(High::runs, r, 180'000u)) {
+            if (!brio::wait_until<Ruler>([r] { return High::runs != r; }, 1'000)) {
                 ++missed;
                 flush();
             }
@@ -663,7 +680,7 @@ void tc_latency() {
             const uint32_t r = High::runs;
             edge_to = 1;
             edge_in(400u);
-            const bool ran = wait_runs(High::runs, r, 180'000u);
+            const bool ran = brio::wait_until<Ruler>([r] { return High::runs != r; }, 1'000);
             if (!ran) {
                 ++deferred;
                 flush();
@@ -805,7 +822,10 @@ void te_depth2() {
     const char* const want = scheduler_in_thread_mode ? "Hs1 Hm1 Ts0 Te0 Hr1 He1"
                                                       : "Hs1 Hm1 Hr1 He1 Ts0 Te0";
     for (int road = 2; road >= 1; --road) {
-        console_drain();
+        // The latencies printed below would carry a console byte's
+        // handler; the traces the verdicts judge would not, so a wedged
+        // console is not acted on here.
+        (void)console_drain();
         uint8_t alike = 0;
         uint32_t least = 0xFFFF'FFFFu;
         uint32_t most = 0;
@@ -824,7 +844,7 @@ void te_depth2() {
             } else {
                 edge_to = 1;     // the first edge starts High over the Console
                 edge_in(400u);
-                if (!wait_runs(High::runs, r, 180'000u)) {
+                if (!brio::wait_until<Ruler>([r] { return High::runs != r; }, 1'000)) {
                     flush();
                 }
             }
@@ -889,13 +909,6 @@ void base_turn() {
     TE::process();
     P::ceiling = c;
     (void)activate_here();
-}
-
-/// Wait until the kernel tick has moved `ticks` on.
-void wait_ticks(uint32_t ticks) {
-    const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() - t0 < ticks) {
-    }
 }
 
 void tf_timers() {
@@ -975,9 +988,13 @@ void tf_timers() {
     Low::action = [](uint8_t n) { ++fired[n]; };
     base_turn();                           // te_c and te_d: due at once
     const bool turn1 = fired[51] == 0u && fired[52] == 0u && fired[53] == 1u && fired[54] == 1u;
-    wait_ticks(4u);                        // te_a's three ticks, and one more
+    // te_a's three ticks, and one more; a tick is a millisecond, so 10 ms
+    // is the time-out, and a tick that stopped fails the turn's verdict.
+    const uint32_t k0 = Ticker::ticks();
+    const bool ticked = brio::wait_until<Ruler>([k0] { return Ticker::ticks() - k0 >= 4u; }, 10'000);
     base_turn();
-    const bool turn2 = fired[51] == a_fires && fired[52] == 0u && fired[53] == 1u && fired[54] == 1u;
+    const bool turn2 = ticked && fired[51] == a_fires && fired[52] == 0u && fired[53] == 1u &&
+                       fired[54] == 1u;
     base_turn();
     const bool turn3 = fired[51] == a_fires && fired[52] == 0u && fired[53] == 1u && fired[54] == 1u;
     const bool empty = !TE::next_deadline().has_value();
@@ -1037,6 +1054,11 @@ void tf_timers() {
 // =============================================================================
 // g - the FPU
 // =============================================================================
+/// What letter g's mark saw: the edge's handler ran inside the spin, and
+/// High's dispatch did.
+volatile bool mark_edge = false;
+volatile bool mark_high = false;
+
 /// A float series with a mark inside the loop: at i == mark the edge is
 /// armed and the loop spins with every accumulator live. No call inside
 /// the loop, so the accumulators can stay in s0-s15, the registers lazy
@@ -1050,9 +1072,16 @@ void tf_timers() {
         b = b * 0.999f + c;
         c = c * 0.5f + 0.25f;
         if (i == mark) {
+            // Whether the edge landed inside the spin and whether High's
+            // dispatch ran there: volatile loads and stores, no call, so
+            // the accumulators stay where they are.
+            const uint32_t e0 = edge_hits;
+            const uint32_t h0 = High::runs;
             edge_to = 1;
-            edge_in(500u);
+            edge_in_running(500u);
             spin(20000u);
+            mark_edge = edge_hits != e0;
+            mark_high = High::runs != h0;
         }
     }
     return a + b + c;
@@ -1079,16 +1108,29 @@ void tg_fpu() {
     const float ref_edge = 2.0f * 1.5f + 1.0f;
     Low::action = [](uint8_t) { low_sum = series_low(400u, 200u); };
     High::action = [](uint8_t) { high_sum = series_high(300u); };
+    // TIM9 counts through the letter, so the mark arms its edge without a
+    // call (edge_in_running()); stopped again at the end.
+    Edge::enable(true);
     bool exact = true;
     bool edge_exact = true;
+    bool landed = true;
     for (int run = 0; run < 2; ++run) {
         edge_float = run == 1;
         edge_acc = 2.0f;
         low_sum = 0.0f;
         high_sum = 0.0f;
+        mark_edge = false;
+        mark_high = false;
         const uint32_t h = High::runs;
         post<Low>(Hit{1});
-        (void)wait_runs(High::runs, h, 1000u);
+        // Both shapes serve High inside the post; the wait only lets a
+        // late one finish, and the mark's flags judge where it ran.
+        (void)brio::wait_until<Ruler>([h] { return High::runs != h; }, 1'000);
+        // The values prove lazy stacking only if the preemption happened
+        // inside Low's loop: the edge inside the spin, and High's dispatch
+        // there too where road 1 is kept (after Low's end in the handler-
+        // mode shape).
+        landed = landed && mark_edge && mark_high == scheduler_in_thread_mode;
         const bool ok = std::bit_cast<uint32_t>(static_cast<float>(low_sum)) ==
                             std::bit_cast<uint32_t>(ref_low) &&
                         std::bit_cast<uint32_t>(static_cast<float>(high_sum)) ==
@@ -1104,11 +1146,17 @@ void tg_fpu() {
               hex(std::bit_cast<uint32_t>(static_cast<float>(high_sum))), " (",
               hex(std::bit_cast<uint32_t>(ref_high)), ")", crlf);
     }
+    Edge::enable(false);
     reset_scenario();
+    print(Log{}, "  the edge landed inside Low's spin and High's dispatch ",
+          scheduler_in_thread_mode ? "inside it" : "after Low's end", ": ",
+          landed ? "both runs" : "NOT in both runs", crlf);
     bench.verdict(scheduler_in_thread_mode
-                      ? "Low's and High's sums are bit-exact across the preemption (thread mode)"
-                      : "Low's and High's sums are bit-exact, Low inside PendSV in handler mode",
-                  exact);
+                      ? "Low's and High's sums are bit-exact across a preemption inside Low's "
+                        "loop (thread mode)"
+                      : "Low's and High's sums are bit-exact, Low inside PendSV in handler mode, "
+                        "the edge inside Low's loop",
+                  exact && landed);
     bench.verdict("and the handler's own float, computed over Low's live registers, is exact",
                   edge_exact);
 }
@@ -1218,8 +1266,11 @@ void tj_writer() {
     uint32_t most_ticks[4] = {0, 0, 0, 0};
     const uint16_t lost0 = Log::lost();
     for (int i = 0; i < 16; ++i) {
-        // The ring empty, then the four lines from Low's dispatch.
-        console_drain();
+        // The ring empty, then the four lines from Low's dispatch. The
+        // cycles are printed, not judged, and the handler entries counted
+        // around each line say what a wedged console would add: the
+        // answer is dropped.
+        (void)console_drain();
         const uint32_t b0 = Log::bytes_written();
         post<Low>(Hit{0});
         written_all = written_all && Log::bytes_written() - b0 == 240u;
@@ -1237,7 +1288,7 @@ void tj_writer() {
         // alone, with the ring empty. A debug build checks the writer's
         // claim on every write, so there these writes say they are the
         // writer's (a release build compiles nothing of it).
-        console_drain();
+        (void)console_drain();   // printed figures, as above
         if constexpr (debug_checks) {
             WriterClaim<Serial>::writing = true;
         }
@@ -1252,7 +1303,7 @@ void tj_writer() {
         }
         // And the transport's run alone, warm and masked: a run of two
         // bytes and the line's sixty as one run, the shape of a publish.
-        console_drain();
+        (void)console_drain();   // printed figures, as above
         for (uint32_t k = 0; k < 2u; ++k) {
             InterruptGuard g;
             uint32_t t0 = Ruler::now();
@@ -1289,7 +1340,9 @@ void tj_writer() {
           "; lost ", Log::lost(), crlf);
     bench.verdict("each of Low's four lines was published, 60 bytes each", written_all);
     bench.verdict("nothing lost while measuring", Log::lost() == lost0);
-    bench.verdict("the stage peak within the pool", Log::peak_stages() >= 1u && Log::peak_stages() <= log_stages);
+    // The stage peak is printed above and not judged: the writer can
+    // never hold more stages than its pool has, so "within the pool"
+    // could not fail.
 }
 
 // =============================================================================
@@ -1309,8 +1362,10 @@ void tk_interleave() {
     uint32_t inside = 0;
     for (uint32_t run = 0; run < 10u; ++run) {
         // The ring empty first: High may not wait, and its line must find
-        // the room the Console's lines would otherwise have taken.
-        console_drain();
+        // the room the Console's lines would otherwise have taken. A
+        // wedged console leaves High's line no room, which the "no line
+        // lost" verdict judges, so the answer is dropped here.
+        (void)console_drain();
         const uint32_t h0 = High::runs;
         print(Log{}, "#<C ", run, ": the Console composes this line in pieces");
         // TIM9 in 111 us, inside the four 56 us spins between the pieces:
@@ -1478,7 +1533,7 @@ int main() {
     const bool serial_ok = Serial::init(clock, 115200);
     Log::init();
     tick_ok = brio::Ticker::init(clock);
-    ruler_ok = Ruler::init();
+    ruler_ok = CycleCounter::init();   // every Cortex-M4F here implements CYCCNT
     Edge::init();
     (void)Edge::configure(TimConfig{.prescaler = 0, .period = 0xFFFFu});
     brio::Nvic::enable(Edge::irq());

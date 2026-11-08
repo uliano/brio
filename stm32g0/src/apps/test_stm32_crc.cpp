@@ -58,6 +58,7 @@
 #include "stm32g0/usart.hpp"
 #include "util/crc.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
@@ -82,21 +83,22 @@ TestBench<Serial> bench;
 // Instruments
 // ---------------------------------------------------------------------------
 
-/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
-/// tick count and the counter's position composed right across the reload
-/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
-uint32_t cycles_now() {
-    return Ticker::cycles();
-}
+/// The ruler: a cycle count that spans ticks, the kernel ticker's own
+/// cycles() - the tick count and the counter's position composed right
+/// across the reload (util/cycle_count.hpp); it wraps at 2^32, so only
+/// differences are used. Interrupts must be enabled while it is polled.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 
 /// A measurement window a transmit interrupt walks through is not a
-/// measurement. Letter c drains before it counts.
+/// measurement. Letter c drains before it counts; its verdicts compare
+/// two loops measured in the same window, so a wedged console (the drain's
+/// false, after 200 ms) only lengthens both and the answer is dropped.
 void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    const uint32_t t0 = cycles_now();
-    while (cycles_now() - t0 < SysClock::hz / 500u) {
-    }
+    (void)brio::console_drain<Ruler, Serial>();
 }
 
 /// The bit reversal 14.3.3 describes in words, so that REV_OUT can be
@@ -172,7 +174,7 @@ constexpr uint8_t check_string[9] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'
 /// xorshift32, so the buffer is reproducible from run to run and a
 /// mismatch is a fact about the peripheral and not about the data.
 constexpr uint32_t blob_bytes = 4096;
-uint8_t blob[blob_bytes];
+alignas(4) uint8_t blob[blob_bytes];   // letter c reads it as words and half-words
 
 void fill_blob() {
     uint32_t x = 0x2463534Au;
@@ -306,18 +308,20 @@ void ta_block() {
                   "reconfiguration - 14.4.2's \"not affected by CRC resets\"",
                   after_reset == 0xA5C3F00Du && after_configure == 0xA5C3F00Du);
 
-    // A WIDTH UNDER 32 BITS leaves the bits above it holding the wider
-    // datapath's leftovers, which is why value_masked() exists.
+    // A WIDTH UNDER 32 BITS: the result sits in the least significant
+    // bits of DR. What the bits above it hold the chapter does not say,
+    // so value_masked() masks them; they are printed, not judged.
     (void)Crc::configure(CrcConfig{.polynomial = 0x09u, .size = CrcWidth::w7,
                                    .init = 0});
     Crc::feed(std::span<const uint8_t>{check_string});
     const uint32_t whole = Crc::value();
     const uint32_t masked = Crc::value_masked();
     print(serial, "  a 7-bit polynomial leaves DR = ", hex(whole),
-          ", of which the result is ", hex(masked), crlf);
+          ", of which the result is ", hex(masked), "; the bits above it read ",
+          hex(whole >> 7), crlf);
     bench.verdict("14.3.3 is literal: the result of a narrow polynomial is the "
-                  "LEAST SIGNIFICANT bits of DR, and the rest is not zero",
-                  masked == (whole & 0x7Fu));
+                  "LEAST SIGNIFICANT bits of DR - the check string's CRC-7 (0x75)",
+                  masked == (whole & 0x7Fu) && masked == 0x75u);
 
     // THE POLYNOMIAL-CHANGE RULE, MEASURED. 14.3.3 says a change made
     // during a calculation is unreliable; what "unreliable" means on
@@ -470,29 +474,29 @@ void tc_cost() {
     console_drain();
 
     (void)Crc::configure(crc32_ieee_config);
-    const uint32_t w0 = cycles_now();
+    const uint32_t w0 = Ruler::now();
     for (uint32_t i = 0; i < words; ++i) {
         Crc::feed(reinterpret_cast<const uint32_t*>(blob)[i]);
     }
-    const uint32_t w1 = cycles_now();
+    const uint32_t w1 = Ruler::now();
 
     (void)Crc::configure(crc32_ieee_config);
-    const uint32_t h0 = cycles_now();
+    const uint32_t h0 = Ruler::now();
     for (uint32_t i = 0; i < words * 2u; ++i) {
         Crc::feed16(reinterpret_cast<const uint16_t*>(blob)[i]);
     }
-    const uint32_t h1 = cycles_now();
+    const uint32_t h1 = Ruler::now();
 
     (void)Crc::configure(crc32_ieee_config);
-    const uint32_t b0 = cycles_now();
+    const uint32_t b0 = Ruler::now();
     for (uint32_t i = 0; i < words * 4u; ++i) {
         Crc::feed8(blob[i]);
     }
-    const uint32_t b1 = cycles_now();
+    const uint32_t b1 = Ruler::now();
 
-    const uint32_t s0 = cycles_now();
+    const uint32_t s0 = Ruler::now();
     const uint16_t sw = crc16(blob, static_cast<uint16_t>(words * 4u));
-    const uint32_t s1 = cycles_now();
+    const uint32_t s1 = Ruler::now();
 
     const uint32_t bytes = words * 4u;
     const uint32_t word_cycles = w1 - w0;
@@ -550,11 +554,11 @@ void td_dma() {
     // 1. the CPU-fed answer.
     const uint32_t* code = reinterpret_cast<const uint32_t*>(code_base);
     (void)Crc::configure(dma_cfg);
-    const uint32_t c0 = cycles_now();
+    const uint32_t c0 = Ruler::now();
     for (uint32_t i = 0; i < code_bytes / 4u; ++i) {
         Crc::feed(code[i]);
     }
-    const uint32_t c1 = cycles_now();
+    const uint32_t c1 = Ruler::now();
     const uint32_t cpu_value = crc32_ieee_finish(Crc::value());
 
     // 2. the software reference over the same bytes.
@@ -576,13 +580,12 @@ void td_dma() {
                                .peripheral_width = DmaWidth::word,
                                .memory_width = DmaWidth::word,
                                .priority = DmaPriority::high}});
-    const uint32_t d0 = cycles_now();
+    const uint32_t d0 = Ruler::now();
     (void)ChA::enable(true);
-    uint32_t spins = 4'000'000u;
-    while (!ChA::flag(DmaFlag::complete) && spins-- != 0u) {
-    }
-    const uint32_t d1 = cycles_now();
-    const bool done = ChA::flag(DmaFlag::complete);
+    // 4096 word beats at a few cycles each: well under a millisecond.
+    const bool done =
+        brio::wait_until<Ruler>([] { return ChA::flag(DmaFlag::complete); }, 100'000);
+    const uint32_t d1 = Ruler::now();
     ChA::stop();
     const uint32_t dma_value = crc32_ieee_finish(Crc::value());
 
@@ -643,13 +646,12 @@ void td_dma() {
                                    .peripheral_width = n.width,
                                    .memory_width = n.width,
                                    .priority = DmaPriority::high}});
-        const uint32_t n0 = cycles_now();
+        const uint32_t n0 = Ruler::now();
         (void)ChA::enable(true);
-        uint32_t left = 4'000'000u;
-        while (!ChA::flag(DmaFlag::complete) && left-- != 0u) {
-        }
-        const uint32_t n1 = cycles_now();
-        const bool finished = ChA::flag(DmaFlag::complete);
+        // At most 16384 byte beats at a few cycles each: a few milliseconds.
+        const bool finished =
+            brio::wait_until<Ruler>([] { return ChA::flag(DmaFlag::complete); }, 100'000);
+        const uint32_t n1 = Ruler::now();
         ChA::stop();
         const uint32_t value = crc32_ieee_finish(Crc::value());
         print(serial, "  ", n.count, " ", n.name, " beats into CRC_DR: ", hex(value),
@@ -764,13 +766,12 @@ void te_refusals() {
                   "the one that was there",
                   after == before);
 
-    bench.verdict("the compile-time twin is the family fixture's "
-                  "(test/family_stm32g0/neg/crc_even_polynomial.cpp and "
-                  "crc_polynomial_too_wide.cpp) - both refuse to compile",
-                  !crc_config_valid(CrcConfig{.polynomial = 0x1020u,
-                                              .size = CrcWidth::w16}) &&
-                      !crc_config_valid(CrcConfig{.polynomial = 0x1021u,
-                                                  .size = CrcWidth::w8}));
+    // The compile-time twin is the family fixture's
+    // (test/family_stm32g0/neg/crc_even_polynomial.cpp and
+    // crc_polynomial_too_wide.cpp, both refusing to compile); the same
+    // predicate is a constant here, so it is asserted, not judged.
+    static_assert(!crc_config_valid(CrcConfig{.polynomial = 0x1020u, .size = CrcWidth::w16}) &&
+                  !crc_config_valid(CrcConfig{.polynomial = 0x1021u, .size = CrcWidth::w8}));
 }
 
 // ---------------------------------------------------------------------------

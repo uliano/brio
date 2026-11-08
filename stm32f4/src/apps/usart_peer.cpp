@@ -114,6 +114,7 @@
 #include "stm32f4/tim.hpp"
 #include "stm32f4/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
 // register, and every architecture on this link compiles the same file.
@@ -174,19 +175,22 @@ constexpr uint32_t counts_of(uint32_t ticks) {
 }
 static_assert(ticks_of(180'000'000u) == 24'000'000u && counts_of(24'000'000u) == 180'000'000u);
 
-[[gnu::always_inline]] inline uint32_t now_counts() { return CycleCounter::now(); }
+/// The ruler for util/test_wait.hpp's waits: the DWT's cycle counter at
+/// the core's rate, started once in main() (it counts with interrupts
+/// masked and through a Sleep, and stops only in a Stop, which the peer
+/// never enters: stm32f4/dwt.hpp).
+struct Ruler {
+    static uint32_t now() { return CycleCounter::now(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<Ruler>);
 
+/// A span of `n` core counts. It stays beside brio::spin_us() because the
+/// protocol's spans are in core counts and some are shorter than a
+/// microsecond (two bit times at 6.4 Mbaud are 56 counts).
 void wait_counts(uint32_t n) {
-    const uint32_t t0 = now_counts();
-    while (now_counts() - t0 < n) {
-    }
-}
-
-void wait_us(uint32_t us) { wait_counts(us * (core_hz / 1'000'000u)); }
-
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
+    const uint32_t t0 = Ruler::now();
+    while (Ruler::now() - t0 < n) {
     }
 }
 
@@ -419,23 +423,28 @@ bool apply_cfg(const link::Cfg& c, uint16_t& mask) {
 // Talking
 // ---------------------------------------------------------------------------
 
-constexpr uint32_t spin_bound = 2'000'000u;
+/// What a transmitter wait allows: 50 ms, some forty frames of the
+/// slowest the peer is asked for (a 12-bit frame a few per cent under
+/// 9600). A time-out, not a bound: a transmitter stuck that long is.
+constexpr uint32_t tx_wait_us = 50'000;
 
+/// One frame into DR once TXE allows; false when it never did. TXE is
+/// asked first, so a frame with room goes with no call - the echo's
+/// path - and only the wait for room is the shared verb's loop.
 [[gnu::always_inline]] inline bool put_frame(uint16_t v) {
     USART_TypeDef& u = Link::regs();
-    for (uint32_t n = spin_bound; (u.SR & USART_SR_TXE) == 0u; --n) {
-        if (n == 0u) return false;
+    if ((u.SR & USART_SR_TXE) == 0u &&
+        !brio::wait_until<Ruler>([&u] { return (u.SR & USART_SR_TXE) != 0u; }, tx_wait_us)) {
+        return false;
     }
     u.DR = v;
     return true;
 }
 
-void wait_tx_done() {
-    for (uint32_t n = spin_bound; !Link::tx_complete() && n != 0u; --n) {
-    }
-}
+/// The last frame off the wire (TC), within tx_wait_us.
+void wait_tx_done() { (void)brio::wait_until<Ruler>([] { return Link::tx_complete(); }, tx_wait_us); }
 
-void turnaround_guard() { wait_us(35u); }
+void turnaround_guard() { brio::spin_us<Ruler>(35u); }
 
 void put_link(uint8_t b) { (void)put_frame(b); }
 
@@ -789,13 +798,12 @@ link::Report run_send(const link::Params& a, uint16_t mask, bool blast) {
     link::Report r{};
     settle();
     if (!blast && a.aux16 != 0u) {
-        wait_ms(a.aux16);
+        brio::spin_us<Ruler>(static_cast<uint32_t>(a.aux16) * 1000u);
     }
     const uint32_t gap_counts = blast ? 0u : 2u * (core_hz / (a.cfg.rate ? a.cfg.rate : 1u));
     const uint16_t repeats = blast && a.aux16 > 1u ? a.aux16 : 1u;
     const uint32_t repeat_gap_us = static_cast<uint32_t>(a.aux8) * 100u;
     link::Stream stream(a.pattern, a.value);
-    USART_TypeDef& u = Link::regs();
     const uint16_t n = a.count;
     const uint32_t t0 = Ticker::millis();
     uint16_t count = 0, sum = 0;
@@ -807,23 +815,16 @@ link::Report run_send(const link::Params& a, uint16_t mask, bool blast) {
             }
             if (repeat_gap_us != 0u) {
                 wait_tx_done();
-                wait_us(repeat_gap_us);
+                brio::spin_us<Ruler>(repeat_gap_us);
             }
         }
         bool sent = true;
         for (uint16_t i = 0; i < n; ++i) {
             const uint16_t v = static_cast<uint16_t>(stream.next() & mask);
-            uint32_t spins = spin_bound;
-            while ((u.SR & USART_SR_TXE) == 0u) {
-                if (--spins == 0u) {
-                    sent = false;
-                    break;
-                }
-            }
-            if (!sent) {
+            if (!put_frame(v)) {
+                sent = false;
                 break;
             }
-            u.DR = v;
             sum = static_cast<uint16_t>(sum + v);
             ++count;
             if (gap_counts != 0u) {
@@ -1100,8 +1101,9 @@ link::Report run_onewire(const link::Params& a) {
         r.flags |= link::report_cfg_failed;
         return r;
     }
-    const uint32_t guard = 4u * (core_hz / (a.cfg.rate ? a.cfg.rate : link::command_baud));
-    const uint32_t bit2 = guard / 2u;
+    const uint32_t rate = a.cfg.rate ? a.cfg.rate : link::command_baud;
+    const uint32_t guard = 4u * (core_hz / rate);
+    const uint32_t echo_us = (2'000'000u + rate - 1u) / rate;   // two bit times, rounded up
     settle();
     const uint32_t t0 = Ticker::millis();
     while (r.count < a.count) {
@@ -1120,8 +1122,7 @@ link::Report run_onewire(const link::Params& a) {
             // echo standing, the loop answered it inside the DUT's next
             // frame). So the echo is waited for, bounded by two bit times,
             // and only then flushed.
-            for (uint32_t c0 = now_counts(); (Link::status() & USART_SR_RXNE) == 0u && now_counts() - c0 < bit2;) {
-            }
+            (void)brio::wait_until<Ruler>([] { return (Link::status() & USART_SR_RXNE) != 0u; }, echo_us);
             flush_rx();
             continue;
         }
@@ -1314,14 +1315,14 @@ void wire_probe() {
     for (uint16_t t = 0; t < probe_ms; ++t) {
         if (((t / 125u) & 1u) != 0u) TxPad::set(); else TxPad::clear();
         if (((t / 250u) & 1u) != 0u) RxPad::set(); else RxPad::clear();
-        wait_us(1000u);
+        brio::spin_us<Ruler>(1000u);
     }
     TxPad::input(PinPull::up);
     RxPad::input(PinPull::up);
     uint16_t e9 = 0, e10 = 0;
     bool p9 = TxPad::read(), p10 = RxPad::read();
     for (uint16_t t = 0; t < probe_ms; ++t) {
-        wait_us(1000u);
+        brio::spin_us<Ruler>(1000u);
         const bool n9 = TxPad::read(), n10 = RxPad::read();
         if (n9 != p9) ++e9;
         if (n10 != p10) ++e10;
@@ -1374,7 +1375,7 @@ int main() {
     crystal_ok = SysClock::init();
     (void)Console::init(clock, 115200);
     (void)Ticker::init(clock);
-    (void)CycleCounter::init();
+    (void)CycleCounter::init();  // every Cortex-M4F here implements CYCCNT (DWT_CTRL.NOCYCCNT reads 0)
     brio::enable_interrupts();
 
     const uint32_t w0 = DeviceUid::read().word[0];

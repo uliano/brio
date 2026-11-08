@@ -300,13 +300,16 @@ maximum 40.0. One double word programs in **92 us** and eight in one call
 in **705 us**, i.e. **88 us each** against a typical of 85 and a maximum
 of 125 - so the high-voltage ramp is per double word and not per call.
 
-**Fast programming beats its own datasheet by a factor.** A whole row of
-32 double words under FSTPG takes **683 us** where table 48 gives 1.7 ms
-typical; the same 256 bytes the ordinary way take **2808 us**, which
-matches that table's 2.7 ms exactly. 683 us over 32 double words is 21 us
-each, which is precisely the figure 3.3.8's own note gives for the
-interval the data must arrive within ("around 20 us") - so the note is
-exact and the datasheet's fast-row typical is conservative.
+**Fast programming is what the datasheet says.** A whole row of 32
+double words under FSTPG takes **1682 us**, table 48's 1.7 ms typical
+(2.8 ms maximum); the same 256 bytes the ordinary way take **2801 us**,
+that table's 2.7 ms. 1682 us over 32 double words is about 52 us each:
+3.3.8's "around 20 us" bounds the interval between two double words'
+requests, not what each costs. The row is timed inside the critical
+section the mode needs, where the tick is frozen, so the window opens
+right after a tick and is read on `Ticker::cycles()`, which folds in the
+one reload its pending bit records: a single difference of SysTick's
+VAL reads a 1.68 ms row as 0.68 ms.
 
 **EOP: 3.7.4 wins.** With EOPIE clear a successful program leaves
 FLASH_SR at **0x0**; with EOPIE set the same program leaves **0x1**, with
@@ -317,11 +320,14 @@ shows the other half: with EOPIE and ERRIE set and the line enabled the
 handler runs once per erase and is given EOP to clear; with the enables
 down the same erase raises nothing at all.
 
-**Read-while-write, measured rather than assumed.** During a 22039 us
+**Read-while-write, measured rather than assumed.** During a 22037 us
 erase of a bank-2 page, the polling loop in `flash.hpp` - which lives in
-bank 1 - completed **174260 turns**, one every 8 core cycles. A stalled
-bus would have allowed none. A double-word program leaves about 664 turns
-in the same way. The letter states what it cannot do: there is no
+bank 1 - completed **87879 turns**, one every 16 core cycles, with the
+instruction cache off for the measurement: a loop that small runs out of
+the cache without reading bank 1 at all, and would count its turns on a
+stalled bank too. With the cache off every turn fetches from bank 1, and
+a stalled bus would have allowed none. A double-word program leaves about
+679 turns in the same way. The letter states what it cannot do: there is no
 control, because the only same-bank erase available is an erase of the
 running image.
 

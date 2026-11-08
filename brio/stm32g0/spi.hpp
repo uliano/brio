@@ -1365,17 +1365,49 @@ struct Spi {
     }
 
     /**
-     * 35.5.11's MODF sequence: "a read or write access to the SPIx_SR
-     * register while the MODF bit is set. Then write to the SPIx_CR1
-     * register." The silicon has already cleared SPE and MSTR for the
-     * program - it forced this instance into slave mode - so the caller
-     * decides what to restore; this verb only performs the ritual and
-     * hands CR1 back unchanged.
+     * 35.5.11's MODF sequence: "Make a read or write access to the
+     * SPIx_SR register while the MODF bit is set. Then write to the
+     * SPIx_CR1 register." The silicon has already cleared SPE and MSTR
+     * for the program - it forced this instance into slave mode - so the
+     * caller decides what to restore; this verb only performs the
+     * sequence and hands CR1 back unchanged.
+     *
+     * The two steps are kept adjacent: CR1 is read BEFORE the SR access
+     * and the value kept is written back, so no other access to the block
+     * falls between step one and step two (`CR1 = CR1` would load CR1
+     * between them). The chapter does not forbid such an access, but a
+     * QingKe part of the same SPI generation leaves MODF standing after
+     * one (brio/ch32vx03/spi.hpp), and the strict order costs nothing.
+     * Measured on the STM32G0B1RE by test_stm32_spi's letter a (SPI1,
+     * from a fresh fault each time, interrupts masked): the strict
+     * sequence clears the flag, and so does the sequence with a CR1, a
+     * CR2 or a second SR read between the steps - on this part the extra
+     * access costs nothing either way.
+     *
+     * Returns whether the flag went down - a report, not a promise. The
+     * chapter does not say the flag is down on the very next read (the
+     * peripheral's register interface runs on PCLK), so the answer is SR
+     * read up to `mode_fault_settle_reads` times, leaving at the first read
+     * that finds it down: every APB read takes at least two PCLK cycles (a
+     * setup and an access phase), so the bound covers 64 PCLK cycles at
+     * any prescaler. On the STM32G0B1RE the first read already finds it
+     * down. Main context or a handler; does not mask; on a fault that will
+     * not clear it spends those reads and answers false.
      */
-    static void clear_mode_fault() {
+    static bool clear_mode_fault() {
+        const uint32_t cr1 = regs().CR1;
         (void)regs().SR;
-        regs().CR1 = regs().CR1;
+        regs().CR1 = cr1;
+        for (uint8_t i = 0; i < mode_fault_settle_reads; ++i) {
+            if (!mode_fault()) {
+                return true;
+            }
+        }
+        return false;
     }
+
+    /// clear_mode_fault()'s bound on its re-reads of SR (its comment).
+    static constexpr uint8_t mode_fault_settle_reads = 32;
 
     /// 35.9.3: CRCERR is rc_w0 - "cleared by software writing 0".
     static void clear_crc_error() { regs().SR = regs().SR & ~SPI_SR_CRCERR; }
