@@ -360,7 +360,7 @@ STATR's eight bits, and what each costs (20.2.7, 20.4.3):
 | RXNE | a DATAR read |
 | TXE | a DATAR write |
 | OVR | a DATAR read followed by a STATR read, which still reads it up; the load after it reads it down (letter v) |
-| MODF | nothing software can do (measured below); the block's RCC reset pulse |
+| MODF | a STATR read followed by a CTLR1 write with nothing between them (measured below); the block's RCC reset pulse |
 | CRCERR | a zero into its bit and ones elsewhere (the one rc_w0 bit) |
 | BSY | hardware's, never software's |
 | UDR | the I2S face's: a read of STATR (20.3.7.1) |
@@ -369,10 +369,14 @@ STATR's eight bits, and what each costs (20.2.7, 20.4.3):
 **MODF is a demotion**, not a report: the silicon clears SPE and MSTR
 with it (measured). That is why this driver's bus engine keeps its chip
 select as an ordinary GPIO and never hands the NSS pad to a host. And
-20.2.7's recipe for clearing it does not work here - six sequences
-measured in this driver and eight more with WCH's own peripheral library
-on the same board, its documented one among them, and only the RCC
-reset pulse puts the flag down (the findings below list them).
+20.2.7's recipe for clearing it is stricter on the CH32V203C8T6 than its
+words: with nothing between the STATR read and the CTLR1 write it
+clears the flag, and a read of CTLR1 or CTLR2 between the two steps
+leaves the flag standing there, where the CH32V303CBT6 clears it all the
+same. `clear_mode_fault()` therefore reads CTLR1 before the STATR read
+and writes the value it kept, the two steps adjacent, and clears the
+flag on both; the RCC reset pulse puts it down on both as well (the
+findings below).
 
 Five interrupt sources over one vector per instance in the SPI face:
 TXE and RXNE under their own enables, and CRCERR, OVR and MODF together
@@ -1308,30 +1312,29 @@ other's `spi_peer` - in the one after it.
   port, every frame comes back all ones or all zeros with the level, at
   both widths, both bit orders and all four modes - the wireless proof
   that the receive path is the pad and not a leftover.
-- **The mode fault takes the role away, AND THE CHAPTER'S WAY BACK IS
-  NOT ONE.** Clearing SSI on a software-managed host raises MODF and the
-  block loses MSTR and SPE with it (CTLR1 0x228, STATR 0x22 at the
-  fault), and the error reaches the instance's vector under ERRIE - one
-  entry carrying the mode-fault bit. But 20.2.7's "a read or write
-  operation to STATR, then a write to CTLR1" leaves the flag standing
-  under every shape of those two steps the bench tried: the CTLR1 write
-  rewriting the register as it stands, the write that RAISES SPE (which
-  is the shape WCH's own library documents, and the one the chapter's
-  words leave open), the write that restores SSI, the sequence with SSI
-  raised BEFORE it, and a STATR WRITE in place of the read. The block's
-  RCC reset pulse is what puts MODF down. WCH's own peripheral library,
-  built with the vendor's compiler and run on the same board, does no
-  better: its documented sequence (`SPI_I2S_GetFlagStatus` then
-  `SPI_Cmd`) with SSI still low and with SSI raised first, its
-  `SPI_I2S_ClearFlag`, a CTLR1 rewrite, a disable-then-enable, a whole
-  `SPI_Init` again - eight sequences, the flag standing through every
-  one, and `RCC_APB2PeriphResetCmd` the one thing that clears it. And
-  the register shows why no sequence can work: while MODF stands a
-  CTLR1 write LANDS (SSI moves) but SPE NEVER TAKES - the bit reads
-  zero after every write that sets it - so a demoted host cannot be
-  re-enabled at all without the reset line. Since MODF has taken SPE
-  and MSTR with it, a demoted host must be reconfigured anyway, and
-  that reset is the first step of it.
+- **The mode fault takes the role away, and the chapter's way back
+  wants nothing between its two steps** (letter e, twelve runs on each
+  part, every attempt from a fresh fault with interrupts masked).
+  Clearing SSI on a software-managed host raises MODF and the block
+  loses MSTR and SPE with it (CTLR1 0x228, STATR 0x22 at the fault), and
+  the error reaches the instance's vector under ERRIE - one entry
+  carrying the mode-fault bit. 20.2.7's "a read or write operation to
+  STATR, then a write to CTLR1" clears the flag on the CH32V203C8T6 and
+  on the CH32V303CBT6 with nothing between the STATR read and the CTLR1
+  write, and a write raising SPE takes after it; a second STATR read
+  between the two changes nothing. A read of CTLR1 or
+  of CTLR2 between them leaves MODF standing on the CH32V203C8T6, every
+  time, and on the CH32V303CBT6 the flag clears all the same. The
+  manual says nothing of the order. The shape WCH's own library
+  documents (`SPI_I2S_GetFlagStatus` then `SPI_Cmd`, a read-modify-write
+  of CTLR1) has that read in it; `clear_mode_fault()` reads CTLR1 before
+  the STATR read and writes the value it kept, and clears the flag on
+  both parts (letter e judges it). While MODF
+  stands, a CTLR1 write raising SPE does not take, so a demoted host
+  cannot be re-enabled until the flag is down. Since MODF has taken SPE
+  and MSTR with it, a demoted host must be reconfigured anyway, and the
+  block's RCC reset pulse, which puts the flag down on both parts, is
+  the first step of that.
 - **The one-wire line mode turns around on the same pad**: BIDIMODE with
   BIDIOE drives a frame out of MOSI, and clearing BIDIOE makes that same
   pad the receiver, with the clock running on either side of the turn.
@@ -1531,9 +1534,8 @@ each way, green; `y` whole at 52 verdicts, green each way, three runs.
   multi-host input, the far chip's ss_pulse pulling the shared select low
   - MODF set within the pulse (CTLR1 0x28 after it: MSTR and SPE gone,
   STATR 0x22), one entry of the instance's vector under ERRIE carrying
-  the mode-fault bit, 20.2.7's sequence leaving it standing (the finding
-  above, now from a real second host) and the RCC reset pulse clearing
-  it.
+  the mode-fault bit, and the RCC reset pulse clearing it on all three
+  parts.
 - **SSOE'S SELECT FALLS WITH THE FIRST FRAME, NOT WITH SPE**: a host with
   SSOE set keeps its NSS pad high under SPE until the first frame is
   written, drives it low from then to the disable, and the far client it

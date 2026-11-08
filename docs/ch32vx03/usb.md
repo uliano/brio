@@ -542,7 +542,14 @@ the platform's WFE idle on command.
   the four). A CDC port with its three endpoints and the control pair
   spends 328 of the 384 bytes the CAN-safe budget leaves, 56 free. The
   host's frame counter advances 9 or 10 in 10 ms, and the whole
-  enumeration passes with no bus error and no packet-memory overflow.
+  enumeration passes with no packet-memory overflow. The bus error
+  counter is printed beside it and not judged: it counts packets the
+  block saw damaged (a missing handshake, a CRC, a bit-stuffing or a
+  frame-format error), which RM 21.3.2 says the block and the host both
+  retry and a program may ignore. It reads 0 in most enumerations and 1
+  in about one in ten to thirty, the non-zero counts clustered in time,
+  with the enumeration completing every time (letters `a`, `k` and `x`
+  print it the same way).
 - **THE COUNT, AND THE LOOP IT FREES.** With the device attached the
   platform reports one bus master, and a thousand `idle()` calls out of
   the kernel's own idle path cost 0 to 1 ms - a thousand tick periods

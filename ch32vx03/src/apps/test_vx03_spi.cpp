@@ -1380,58 +1380,84 @@ void te_flags() {
 
     // WHICH SEQUENCE PUTS MODF DOWN. 20.2.7 names two steps - "first
     // perform a read or write operation to STATR, and then write to
-    // CTLR1" - and this walks the variants of them in order, reporting
-    // the first that works rather than assuming the words.
-    uint8_t cleared_by = 0;
-    const char* names[] = {"none of them",
-                           "STATR read, then CTLR1 written with the value it holds",
-                           "STATR read, then the CTLR1 write that RAISES SPE",
-                           "STATR read, then CTLR1 written with SSI set",
-                           "SSI raised first, then the STATR read and the CTLR1 write",
-                           "STATR WRITTEN (not read), then the CTLR1 write",
-                           "the RCC reset pulse"};
-    for (uint8_t k = 1; k <= 6u && cleared_by == 0u; ++k) {
-        if (!S1::mode_fault()) {
-            break;
+    // CTLR1". Each attempt below starts from a fresh fault (the block
+    // reset, a software-managed host, SSI dropped) with interrupts masked,
+    // and differs only in what happens between the two steps: nothing,
+    // which is the chapter's sequence done strictly and the one judged;
+    // then a CTLR1 read (the shape `CTLR1 = CTLR1` compiles to, and so
+    // clear_mode_fault()'s), a CTLR2 read, and a second STATR read, each
+    // printed. The CH32V203C8T6 leaves the flag standing after an access
+    // to another register of the block between the two steps, the
+    // CH32V303CBT6 clears it all the same; the manual does not say which,
+    // and brio depends on neither answer once the driver writes the
+    // strict sequence - so those are measurements, and the strict one
+    // is the verdict.
+    const auto raise_fault = [] {
+        S1::reset();
+        (void)S1::configure({.role = SpiRole::host, .clock = SpiClock::div64,
+                             .nss = SpiNss::software});
+        S1::enable();
+        S1::software_select(true);
+        (void)delay_us(clock, 5);
+        return S1::mode_fault();
+    };
+    // between: 0 nothing, 1 a CTLR1 read, 2 a CTLR2 read, 3 a second STATR read.
+    // Returns whether MODF went down; `took` says whether a write raising
+    // MSTR, SSI and SPE then took (SPE never takes while the flag stands).
+    const auto attempt = [&](uint8_t between, bool& raised, bool& took) {
+        raised = raise_fault();
+        bool down = false;
+        {
+            P::CriticalSection cs;
+            auto& r = S1::regs();
+            const uint16_t c = r.CTLR1;
+            (void)r.STATR;
+            if (between == 1u) {
+                (void)r.CTLR1;
+            } else if (between == 2u) {
+                (void)r.CTLR2;
+            } else if (between == 3u) {
+                (void)r.STATR;
+            }
+            r.CTLR1 = c;
+            down = (r.STATR & spi_modf) == 0u;
         }
-        switch (k) {
-            case 1:
-                (void)S1::status();
-                S1::regs().CTLR1 = S1::regs().CTLR1;
-                break;
-            // MODF has cleared SPE with MSTR, so the write that puts SPE
-            // back IS a CTLR1 write with something in it - which is the
-            // one shape the chapter's "then write to CTLR1" does not
-            // spell out.
-            case 2:
-                (void)S1::status();
-                S1::regs().CTLR1 = static_cast<uint16_t>(S1::regs().CTLR1 | spi_spe);
-                break;
-            case 3:
-                (void)S1::status();
-                S1::regs().CTLR1 = static_cast<uint16_t>(S1::regs().CTLR1 | spi_ssi);
-                break;
-            case 4:
-                S1::software_select(false);
-                (void)S1::status();
-                S1::regs().CTLR1 = S1::regs().CTLR1;
-                break;
-            case 5:
-                S1::regs().STATR = S1::regs().STATR;
-                S1::regs().CTLR1 = S1::regs().CTLR1;
-                break;
-            default:
-                S1::reset();
-                break;
-        }
-        if (!S1::mode_fault()) {
-            cleared_by = k;
-        }
+        S1::regs().CTLR1 =
+            static_cast<uint16_t>(S1::regs().CTLR1 | spi_ssi | spi_mstr | spi_spe);
+        took = (S1::regs().CTLR1 & spi_spe) != 0u;
+        return down;
+    };
+    const char* between_names[] = {"nothing (20.2.7 done strictly)", "a CTLR1 read",
+                                   "a CTLR2 read", "a second STATR read"};
+    bool strict_raised = false;
+    bool strict_took = false;
+    const bool strict_down = attempt(0, strict_raised, strict_took);
+    print(serial, "  MODF, a STATR read and the CTLR1 write with nothing between: ",
+          strict_down ? "cleared" : "LEFT STANDING", ", and a write raising SPE ",
+          strict_took ? "took" : "did not take", " after it", crlf);
+    for (uint8_t k = 1; k <= 3u; ++k) {
+        bool raised = false;
+        bool took = false;
+        const bool down = attempt(k, raised, took);
+        print(serial, "  measured: with ", between_names[k], " between the two steps, MODF ",
+              !raised ? "was not raised" : down ? "cleared" : "stood", ", SPE ",
+              took ? "took" : "did not take", crlf);
     }
-    print(serial, "  MODF goes down on: ", names[cleared_by], crlf);
-    bench.verdict("MODF HAS A WAY DOWN, and the suite names which of six sequences it is - "
-                  "20.2.7's own two steps are measured here and not taken on trust",
-                  cleared_by != 0u);
+    bool driver_raised = false;
+    {
+        driver_raised = raise_fault();
+        const bool driver_down = S1::clear_mode_fault();
+        print(serial, "  clear_mode_fault(): ",
+              !driver_raised ? "found no fault" : driver_down ? "cleared it" : "LEFT IT STANDING",
+              crlf);
+        bench.verdict("and clear_mode_fault(), which keeps the two steps adjacent, clears it too",
+                      driver_raised && driver_down);
+    }
+    bench.verdict("MODF HAS A WAY DOWN IN SOFTWARE: 20.2.7's STATR read followed by the CTLR1 "
+                  "write, with no other access to the block between them, clears the flag, and "
+                  "a write raising SPE takes after it",
+                  strict_raised && strict_down && strict_took && driver_raised);
+    S1::reset();
     (void)S1::disable();
 
     // ---- the interrupt: the error line reaches the vector ----
@@ -3586,7 +3612,7 @@ void tm_select() {
         print(serial, "  MODF from the far chip's ss_pulse: ", modf ? "SET" : "not seen", " ", at,
               " ms after this end's enable (the peer's lead-in ", a.aux8, " ms), CTLR1=", hex(ctlr1), " STATR=",
               hex(statr), ", the error vector entered ", pair_err_entries, " time(s) with ", hex(pair_err_flags),
-              "; 20.2.7's sequence ", chapter_clears ? "cleared it" : "LEFT IT STANDING", ", the reset pulse ",
+              "; clear_mode_fault() ", chapter_clears ? "cleared it" : "LEFT IT STANDING", ", the reset pulse ",
               reset_clears ? "cleared it" : "did not", crlf);
         bench.verdict("A SECOND HOST ON THE HARDWARE NSS INPUT: the far chip's low select raises MODF on this "
                       "host",
@@ -3595,8 +3621,8 @@ void tm_select() {
                       "under ERRIE",
                       (ctlr1 & spi_mstr) == 0u && (ctlr1 & spi_spe) == 0u && pair_err_entries >= 1u &&
                           (pair_err_flags & SpiFlag::mode_fault) != 0u);
-        bench.verdict("... and the block's RCC reset pulse puts it down (the chapter's sequence is printed, the "
-                      "finding of letter e)",
+        bench.verdict("... and the block's RCC reset pulse puts it down (clear_mode_fault()'s answer is printed, "
+                      "the finding of letter e)",
                       reset_clears);
         PairSck::release();
         PairMosi::release();

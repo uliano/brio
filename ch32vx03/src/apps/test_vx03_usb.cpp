@@ -58,7 +58,8 @@
 //      descriptors, the address, the configuration - watched to
 //      CONFIGURED, the setups and the stalls counted, the class's
 //      endpoints armed, the shared memory they spent, the frame counter
-//      advancing, the error and overflow counters at zero, and THE BUS
+//      advancing, the overflow counter at zero (the bus error counter
+//      printed beside it, a measurement of the wire), and THE BUS
 //      COUNT at one with a thousand idle() calls costing nothing
 //   u  A RECONNECT, no host action needed: the pull-up dropped for half
 //      a second and raised again, the host's fresh bus reset counted and
@@ -378,9 +379,18 @@ void ta_enumerate() {
           Port::dtr() ? 1 : 0, crlf);
     bench.verdict("the host's start-of-frame counter advances a frame a millisecond",
                   frames >= 9u && frames <= 11u);
-    print(serial, "  errors=", Usb::errors(), " packet-memory overflows=", Usb::overruns(), crlf);
-    bench.verdict("no bus error and no packet-memory overflow through the whole enumeration",
-                  Usb::errors() == 0u && Usb::overruns() == 0u);
+    // THE BUS ERROR COUNT IS A MEASUREMENT, NOT A VERDICT. ERR counts
+    // the packets the block saw arrive damaged (a missing handshake, a
+    // CRC, a bit-stuffing or a frame-format error); RM 21.3.2 says a
+    // program may ignore them because the block and the host both
+    // retransmit, and offers the count as a gauge of the wire's quality.
+    // A non-zero count here says what the cable and the host did and
+    // nothing of this driver, so it is printed; the overflow - a packet
+    // the block took and could not store - stays the verdict.
+    print(serial, "  bus errors (a measurement of the wire, RM 21.3.2)=", Usb::errors(),
+          " packet-memory overflows=", Usb::overruns(), crlf);
+    bench.verdict("no packet-memory overflow through the whole enumeration",
+                  Usb::overruns() == 0u);
 
     // THE COUNT, AND THE IDLE PATH IT GOVERNS. A thousand calls at a
     // count of one are a thousand returns; the same thousand at zero
@@ -800,8 +810,8 @@ void tk_divider() {
     const bool port_ok = Port::configured() && Port::out_armed();
     print(serial, "  the PLL at 48 MHz: USBPRE code ", code48, " (/",
           usbpre_divider(code48), "; it was ", code96, ", /", usbpre_divider(code96),
-          ", at 96), configured in ", took, " ms, ", frames, " frames in 10 ms, errors ", errors,
-          ", overflows ", overruns, crlf);
+          ", at 96), configured in ", took, " ms, ", frames, " frames in 10 ms, bus errors ",
+          errors, " (a measurement of the wire, letter a's reason), overflows ", overruns, crlf);
     // And back to the suite's own tree.
     Device::stop();
     Usb::release();
@@ -820,9 +830,8 @@ void tk_divider() {
                   "before the controller's gate opens",
                   code96 == 1u && tree && code48 == 0u && up);
     bench.verdict("and on /1 the host enumerates the device to CONFIGURED, the port armed, a "
-                  "frame a millisecond, no bus error and no overflow",
-                  took != 0u && port_ok && frames >= 9u && frames <= 11u && errors == 0u &&
-                      overruns == 0u);
+                  "frame a millisecond, no overflow",
+                  took != 0u && port_ok && frames >= 9u && frames <= 11u && overruns == 0u);
     bench.verdict("and the suite's own tree is back, enumerated again", back != 0u);
 }
 
@@ -994,19 +1003,18 @@ void tx_two_ports() {
     }
     print(serial, "  port A echoed ", a_echo, " of ", Port2A::rx_bytes() - a0, ", port B ", b_echo,
           " of ", Port2B::rx_bytes() - b0, "; ring overruns ", Port2A::rx_overruns(), " / ",
-          Port2B::rx_overruns(), ", bus errors ", Usb2::errors(), ", overflows ",
-          Usb2::overruns(), crlf);
+          Port2B::rx_overruns(), ", bus errors ", Usb2::errors(),
+          " (a measurement of the wire, letter a's reason), overflows ", Usb2::overruns(), crlf);
     if (a_echo == 0u && b_echo == 0u) {
         print(serial, "  SKIPPED, and it passes as a skip: the host wrote neither port", crlf);
         bench.verdict("the host letter is skipped and says so", true);
     } else {
         bench.verdict("each port carried its own stream, port B's through the memory above 384: "
-                      "every byte received was echoed, no overrun, no bus error, no overflow (the "
-                      "host judges the bytes)",
+                      "every byte received was echoed, no overrun, no overflow (the host judges "
+                      "the bytes)",
                       a_echo != 0u && b_echo != 0u && Port2A::rx_bytes() - a0 == a_echo &&
                           Port2B::rx_bytes() - b0 == b_echo && Port2A::rx_overruns() == 0u &&
-                          Port2B::rx_overruns() == 0u && Usb2::errors() == 0u &&
-                          Usb2::overruns() == 0u);
+                          Port2B::rx_overruns() == 0u && Usb2::overruns() == 0u);
     }
     Device2::stop();
     Usb2::release();

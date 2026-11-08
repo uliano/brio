@@ -8,8 +8,9 @@ manual's CH32V20x_D6 ([../ch32vx03/README.md](../ch32vx03/README.md)).
 What the board offers a brio program is a 144 MHz RISC-V core with two
 crystals, a USB device controller on its own connector, a LED, a button,
 and a two-wire debug port whose probe also carries the console. It is
-one half of a two-board pair with WCH's CH32V303 evaluation board, and
-the wires between them are listed here.
+one half of a two-board pair with either CH32V303 board - WeAct's
+CH32V303CBT6 board or WCH's evaluation board - and the wires to each are
+listed here.
 
 The documents of record are the CH32V203 datasheet V2.8 and the
 CH32F/V20x_V30x_V31x reference manual V2.3
@@ -42,6 +43,16 @@ pattern ([../ch32vx03/nvm.md](../ch32vx03/nvm.md)).
   LED; a KEY button on PA0 (the vendor's page; the pad carries no
   external resistor, so a press is what would prove it). PB2 is BOOT1
   as well.
+
+## The wires to the WeAct CH32V303CBT6 board
+
+The same printed circuit board with the other part
+([weact-ch32v303cb.md](weact-ch32v303cb.md)), every wire between pads
+of the same name: SPI2 on PB12..PB15, I2C1 on PB6/PB7 pulled up to this
+board's 3.3 V by 2.2 kOhm each, and USART3 on PB10/PB11 crossed. That
+page has the table and the SPI cable: the same flat with SCK's 33 Ohm
+at both ends, MISO's 56 Ohm at this board's PB14 and MOSI's at the other
+board's PB15.
 
 ## The wires to the CH32V303 evaluation board
 

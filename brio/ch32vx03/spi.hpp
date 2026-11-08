@@ -169,11 +169,15 @@
  * LSBFIRST, MSTR, CPOL and CPHA "cannot be modified during
  * communication".
  *
- * One of the chapter's sequences does not work here. 20.2.7's recipe
- * for clearing MODF - a STATR access then a CTLR1 write - leaves the
- * flag standing on this silicon under every variant the bench tried
- * (clear_mode_fault()'s own comment lists them), and the block's RCC
- * reset pulse is the way back. The verb reports rather than promises.
+ * One of the chapter's sequences is stricter on some silicon than its
+ * words. 20.2.7's recipe for clearing MODF - a STATR access then a CTLR1
+ * write - clears the flag on both parts measured with nothing between
+ * the two steps; on the CH32V203C8T6 a read of another of the block's
+ * registers between them leaves the flag standing, where the
+ * CH32V303CBT6 clears it all the same (clear_mode_fault()'s own comment
+ * has the measurements). The verb keeps the two steps adjacent, reports
+ * rather than promises, and the block's RCC reset pulse puts the flag
+ * down on every part measured.
  *
  * The pads are a column (afio.hpp, tables 10-32 and 10-33). SPI1 has two:
  * the default PA4/PA5/PA6/PA7 and code 1's PA15/PB3/PB4/PB5. SPI2 has no
@@ -854,24 +858,29 @@ struct Spi {
      * 20.2.7's sequence: "first perform a read or write operation to
      * STATR, and then write to CTLR1".
      *
-     * MEASURED ON THIS SILICON: IT DOES NOT PUT THE FLAG DOWN. Five
-     * variants of those two steps were tried and all leave MODF
-     * standing - the CTLR1 write rewriting the register as it stands,
-     * the write that RAISES SPE (which is the shape the vendor's own
-     * library documents, and the one the chapter's words leave open),
-     * the write that restores SSI, the sequence with SSI raised BEFORE
-     * it, and a STATR WRITE in place of the read. The only way back
-     * measured is the block's RCC reset pulse.
+     * Measured on the CH32V203C8T6 and the CH32V303CBT6 (test_vx03_spi's
+     * letter e, from a fresh fault each time, interrupts masked): a STATR
+     * read followed by the CTLR1 write with nothing between them clears
+     * MODF on both parts, and a second STATR read between them changes
+     * nothing. A read of another register of the block between the two
+     * steps - CTLR1 or CTLR2 - leaves the flag standing on the
+     * CH32V203C8T6 and not on the CH32V303CBT6; the manual says nothing
+     * of it. While the flag stands, a CTLR1 write raising SPE does not
+     * take.
      *
-     * So the verb runs the chapter's sequence and REPORTS whether the
-     * flag went down, rather than promising what the words say. A host
-     * that has been demoted has lost SPE and MSTR with the flag and must
-     * be reconfigured anyway: reset() then configure() is that path, and
-     * SpiHost's reset_block() is it written out.
+     * So this body reads CTLR1 BEFORE the STATR read and writes the value
+     * it kept, which is the strict sequence on every part and costs
+     * nothing where the stricter silicon does not care. It reports
+     * whether the flag went down rather than promising it. A host that
+     * has been demoted has lost SPE and MSTR with the flag and must be
+     * reconfigured anyway: reset() then configure() is that path, the RCC
+     * reset pulse putting the flag down on both parts, and SpiHost's
+     * reset_block() is it written out.
      */
     static bool clear_mode_fault() {
+        const uint16_t ctlr1 = static_cast<uint16_t>(regs().CTLR1);
         (void)regs().STATR;
-        regs().CTLR1 = regs().CTLR1;
+        regs().CTLR1 = ctlr1;
         return !mode_fault();
     }
     static bool crc_error() { return (regs().STATR & spi_crcerr) != 0u; }
