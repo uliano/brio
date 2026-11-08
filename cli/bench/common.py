@@ -173,6 +173,9 @@ SUMMARY_RE = re.compile(r"(\d+)\s+pass,\s*(\d+)\s+fail")
 # itself puts on the wire where lines are missing (util/line_writer.hpp).
 LOSS_RE = re.compile(r"(\d+)\s+pass,\s*(\d+)\s+fail,\s*(\d+)\s+lost")
 LOST_MARK_RE = re.compile(r"lost\s+(\d+)")
+# The field a tally carries last when its letter or run skipped checks
+# (TestBench::skip(), util/testbench.hpp), after the lost count if any.
+SKIP_RE = re.compile(r"(\d+)\s+pass,\s*(\d+)\s+fail(?:,\s*\d+\s+lost)?,\s*(\d+)\s+skipped")
 # A line a suite marks for the judge to read whole: "#<T ... :T>#", the
 # same tag at both ends; "#count N" says how many the run printed.
 MARKED_RE = re.compile(r"#<(\w+)\b.*:\1>#")

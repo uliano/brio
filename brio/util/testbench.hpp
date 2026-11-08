@@ -27,7 +27,9 @@
  *         bench.prompt();
  *     }
  *
- * and inside a test, `bench.verdict("what must be true", expression)`.
+ * and inside a test, `bench.verdict("what must be true", expression)`,
+ * or `bench.skip("why this check cannot run here")` where the board or
+ * the desk does not give what the check needs.
  *
  * Who calls what. A bench is one object driven from one context, the
  * suite's main loop: letter() at startup, then handle(), which runs the
@@ -67,19 +69,32 @@
  *     -- <title>                       (one letter starts)
  *       PASS  <name>                   (verdict, two spaces of indent)
  *       FAIL  <name>
+ *       SKIP  <reason>                 (a check that did not run)
  *       -> N pass, M fail              (that letter's tally, blank line)
  *     ALL: N pass, M fail              (the all-key's total)
  *     >                                (the prompt bin/brio waits for)
+ *
+ * A skip is neither a pass nor a fail: a check the letter could not run
+ * (no peer wired, a part without the feature, a premise the desk does
+ * not give) says so with skip() instead of claiming a pass it did not
+ * earn. Skips are counted apart, and a tally whose letter or run skipped
+ * any carries the count last:
+ *
+ *       -> N pass, M fail, K skipped
+ *     ALL: N pass, M fail, K skipped
+ *
+ * while a tally with none reads exactly as above. The judge reads N and
+ * M as before, fails nothing for K, and reports it.
  *
  * A suite prints its own measurements between verdicts with plain
  * print(): the bench is about the scaffolding, not about what a test has
  * to say.
  *
- * Counters. passed/failed are reset at the start of each letter, so a
- * test never inherits the previous one's tally; the all-key accumulates
- * the letters' totals separately. A test that spans a reset (the reset
- * suites bank their tally in .noinit and resume) drives end_letter() by
- * hand - which is why it is public.
+ * Counters. The pass, fail and skip counts are reset at the start of
+ * each letter, so a test never inherits the previous one's tally; the
+ * all-key accumulates the letters' totals separately. A test that spans
+ * a reset (the reset suites bank their tally in .noinit and resume)
+ * drives end_letter() by hand - which is why it is public.
  *
  * A second set. A suite whose letters fall into two classes that must
  * never run under one key - the single-board letters, runnable with the
@@ -295,7 +310,10 @@ public:
     using TestFn = void (*)();
 
     /// What a run scored. Returned by handle() for one letter and for
-    /// the whole all-key set.
+    /// the whole all-key set. The skips are not in it: the tally lines
+    /// carry them, and skipped() answers for the letter that just ran
+    /// (a third member would widen every image's return path, a cost
+    /// measured on the smallest parts, for a figure no caller reads).
     struct Totals {
         uint16_t pass;
         uint16_t fail;
@@ -384,17 +402,30 @@ public:
         print(Sink{}, "  ", ok ? "PASS" : "FAIL", "  ", name, suffix, crlf);
     }
 
+    /// A check that did not run, and why: one SKIP line, and one tick on
+    /// the letter's skip count (saturating at 255), apart from passes
+    /// and fails (the file header's grammar). For a check whose premise
+    /// this board or desk does not give - never for one that ran and
+    /// failed. From the running test, in main context.
+    void skip(const char* reason) {
+        count_skip();
+        print(Sink{}, "  SKIP  ", reason, crlf);
+    }
+
+    /// The same, for a reason built from two pieces (a fixed phrase and
+    /// a runtime label).
+    void skip(const char* reason, const char* suffix) {
+        count_skip();
+        print(Sink{}, "  SKIP  ", reason, suffix, crlf);
+    }
+
     /// Close a letter: its tally and a blank line. handle() calls this;
-    /// a test that spans a reset calls it itself when it resumes. Through
-    /// a writer the tally carries the lines the writer lost during the
-    /// letter, when there were any.
+    /// a test that spans a reset calls it itself when it resumes. The
+    /// tally carries the letter's skips when there were any and, through
+    /// a writer, the lines the writer lost during the letter.
     void end_letter() {
-        if constexpr (through_writer) {
-            tally("  -> ", passed_, failed_, marks_.letter_lost);
-            print(Sink{}, crlf, crlf);
-        } else {
-            print(Sink{}, "  -> ", passed_, " pass, ", failed_, " fail", crlf, crlf);
-        }
+        tally("  -> ", passed_, failed_, skipped_, letter_lost());
+        print(Sink{}, crlf, crlf);
     }
 
     /**
@@ -417,40 +448,32 @@ public:
         if (is_all_key(c)) {
             mark_run();
             Totals t{0, 0};
+            uint16_t skips = 0;
             for (uint8_t i = 0; i < count_; ++i) {
                 if (!letters_[i].in_all) {
                     continue;
                 }
                 run(letters_[i]);
-                t.pass = static_cast<uint16_t>(t.pass + passed_);
-                t.fail = static_cast<uint16_t>(t.fail + failed_);
+                add_letter(t, skips);
             }
             report_refused(t);
-            if constexpr (through_writer) {
-                all_line(t);
-            } else {
-                print(Sink{}, "ALL: ", t.pass, " pass, ", t.fail, " fail", crlf);
-            }
+            all_line(t, skips);
             return t;
         }
         if constexpr (has_second_set) {
             if (is_key(second_all_key, c)) {
                 mark_run();
                 Totals t{0, 0};
+                uint16_t skips = 0;
                 for (uint8_t i = 0; i < count_; ++i) {
                     if (!in_second_set(i)) {
                         continue;
                     }
                     run(letters_[i]);
-                    t.pass = static_cast<uint16_t>(t.pass + passed_);
-                    t.fail = static_cast<uint16_t>(t.fail + failed_);
+                    add_letter(t, skips);
                 }
                 report_refused(t);
-                if constexpr (through_writer) {
-                    all_line(t);
-                } else {
-                    print(Sink{}, "ALL: ", t.pass, " pass, ", t.fail, " fail", crlf);
-                }
+                all_line(t, skips);
                 return t;
             }
         }
@@ -476,19 +499,24 @@ public:
     /// The tally of the letter that just ran (or is running).
     uint16_t passed() const { return passed_; }
     uint16_t failed() const { return failed_; }
+    uint8_t skipped() const { return skipped_; }
 
     /// Clear the tally by hand - the counters a resuming test resets
     /// before it prints its half of the verdicts.
-    void reset_tally() { passed_ = failed_ = 0; }
+    void reset_tally() {
+        passed_ = failed_ = 0;
+        skipped_ = 0;
+    }
 
     /// Restore a tally banked before a reset. The other half of
     /// end_letter()'s reason to be public: a test that reboots the board
     /// keeps its counts in reset-surviving storage and hands them back
     /// here when it resumes, so the letter's closing line counts the
     /// verdicts from before the reset as well as after.
-    void resume_tally(uint16_t pass, uint16_t fail) {
+    void resume_tally(uint16_t pass, uint16_t fail, uint8_t skipped = 0) {
         passed_ = pass;
         failed_ = fail;
+        skipped_ = skipped;
     }
 
     /// How many letters are registered, and whether one is.
@@ -569,8 +597,22 @@ private:
         }
     }
 
+    void count_skip() {
+        if (skipped_ != UINT8_MAX) {
+            ++skipped_;
+        }
+    }
+
+    /// A letter's tally added to the run's, its skips to the run's count.
+    void add_letter(Totals& t, uint16_t& skips) const {
+        t.pass = static_cast<uint16_t>(t.pass + passed_);
+        t.fail = static_cast<uint16_t>(t.fail + failed_);
+        skips = static_cast<uint16_t>(skips + skipped_);
+    }
+
     void run(const Entry& e) {
         passed_ = failed_ = 0;
+        skipped_ = 0;
         if constexpr (through_writer) {
             marks_.letter_lost = Sink::lost();
         }
@@ -579,13 +621,28 @@ private:
         end_letter();
     }
 
-    /// The ALL: line through a writer, with the run's lost lines. (Over a
-    /// transport handle() prints it in place, at each of its two sites.)
-    void all_line(const Totals& t)
-        requires through_writer
-    {
-        tally("ALL: ", t.pass, t.fail, marks_.run_lost);
+    /// The ALL: line, with the run's skips and, through a writer, the
+    /// run's lost lines.
+    void all_line(const Totals& t, uint16_t skips) {
+        tally("ALL: ", t.pass, t.fail, skips, run_lost());
         print(Sink{}, crlf);
+    }
+
+    /// The writer's count of refused lines as the letter and the run
+    /// started; 0 over a transport, where tally() never reads it.
+    uint16_t letter_lost() const {
+        if constexpr (through_writer) {
+            return marks_.letter_lost;
+        } else {
+            return 0;
+        }
+    }
+    uint16_t run_lost() const {
+        if constexpr (through_writer) {
+            return marks_.run_lost;
+        } else {
+            return 0;
+        }
     }
 
     /// An all-key run starts: the writer's count noted.
@@ -595,15 +652,22 @@ private:
         }
     }
 
-    /// "<head>N pass, M fail" and, when the writer lost lines since
-    /// `lost0` was noted, ", L lost": the line left open for its end.
-    void tally(const char* head, uint16_t pass, uint16_t fail, uint16_t lost0)
-        requires through_writer
-    {
+    /// "<head>N pass, M fail"; through a writer that lost lines since
+    /// `lost0` was noted, ", L lost"; then ", K skipped" when K is not
+    /// zero: the line left open for its end. The skips come last, so a
+    /// reader of "N pass, M fail, L lost" finds the same text it would
+    /// without them.
+    void tally(const char* head, uint16_t pass, uint16_t fail, uint16_t skipped,
+               [[maybe_unused]] uint16_t lost0) {
         print(Sink{}, head, pass, " pass, ", fail, " fail");
-        const uint16_t lost = static_cast<uint16_t>(Sink::lost() - lost0);
-        if (lost != 0u) {
-            print(Sink{}, ", ", lost, " lost");
+        if constexpr (through_writer) {
+            const uint16_t lost = static_cast<uint16_t>(Sink::lost() - lost0);
+            if (lost != 0u) {
+                print(Sink{}, ", ", lost, " lost");
+            }
+        }
+        if (skipped != 0u) {
+            print(Sink{}, ", ", skipped, " skipped");
         }
     }
 
@@ -613,6 +677,7 @@ private:
     uint16_t passed_ = 0;
     uint16_t failed_ = 0;
     char all_key_ = 'z';
+    uint8_t skipped_ = 0;
     /// The second set as one bit per registered letter.
     [[no_unique_address]] std::conditional_t<has_second_set, SecondMask, detail::NoSecondSet> second_{};
     /// The writer's count of refused lines at the letter's and the run's

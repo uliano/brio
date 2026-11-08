@@ -39,6 +39,7 @@
 #include "util/sha256.hpp"
 #include "util/spi_bus.hpp"
 #include "util/stream.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 #include "util/timestamp.hpp"
 #include "util/trace.hpp"
@@ -95,6 +96,10 @@ IsrMeter<SysTickRuler, BenchPlatform> bench_meter;
 struct DropSink {
     static bool write_byte(uint8_t) { return true; }
 };
+/// A console for the waits to drain: the answer is all they ask of it.
+struct IdleConsole {
+    static bool tx_idle() { return true; }
+};
 
 void util_all_verbs() {
     Loop::init_all();
@@ -122,6 +127,17 @@ void util_all_verbs() {
     bench_line(DropSink{}, "op", 16u,
                bench_sample(sw.elapsed(), before, bench_counters<BenchPlatform>(bench_meter)),
                SysTickRuler::hz(), 11520u);
+
+    // the test letters' waits (util/test_wait.hpp)
+    (void)wait_until<SysTickRuler>([] { return IdleConsole::tx_idle(); }, 1'000);
+    (void)cycles_until<SysTickRuler>([] { return IdleConsole::tx_idle(); }, 1'000);
+    spin_us<SysTickRuler>(10);
+    (void)wait_ticks<P>([] { return IdleConsole::tx_idle(); }, ticks_from_ms<P>(5));
+    (void)console_drain<SysTickRuler, IdleConsole>();
+    TickWitness<P> witness;
+    (void)witness.quiet();
+    (void)witness.ticks();
+    static_assert(span_fits<24>(1000) && since_clamped(5, 3) == 2);
 }
 
 // gfx/ is target-independent, so what this adds is the COMPILER's

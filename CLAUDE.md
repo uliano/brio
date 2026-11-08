@@ -261,8 +261,9 @@ caught it. The antidote to both, in practice:
   or one whose verdict changes, runs MANY times (ten to twenty) before
   it is called green, and a letter judging a rare event states the rate
   it observed; (3) test code is held to the driver's standard: waits,
-  time-outs and pad hand-overs go through shared, reviewed helpers, not
-  loops written anew in each suite (a counter that wraps on a time-out,
+  time-outs and pad hand-overs go through shared, reviewed helpers
+  (`brio/util/test_wait.hpp` for the waits, the time-outs and the
+  console drain), not loops written anew in each suite (a counter that wraps on a time-out,
   a pad given back without its pull, a selection helper that stops
   inlining - each made a verdict lie).
 - **Package variability pattern** (full rule: overview.md "Target

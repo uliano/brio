@@ -65,6 +65,7 @@
 #include "util/sha256.hpp"
 #include "util/spi_bus.hpp"
 #include "util/stream.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 #include "util/timestamp.hpp"
 #include "util/trace.hpp"
@@ -230,6 +231,13 @@ static_assert(crc16(three, 3) != 0);
 
 using Bench = TestBench<Serial, 8>;
 
+// The test letters' ruler: the STK's cycle count at the system clock.
+struct StkRuler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<StkRuler>);
+
 void letter_a() {}
 
 void util_verbs() {
@@ -283,6 +291,18 @@ void util_verbs() {
     (void)bench.letter('a', "a letter", letter_a);
     bench.verdict("thing", true);
     bench.end_letter();
+
+    // the test letters' waits (util/test_wait.hpp)
+    (void)wait_until<StkRuler>([] { return Serial::tx_idle(); }, 1'000);
+    (void)cycles_until<StkRuler>([] { return Serial::tx_idle(); }, 1'000);
+    spin_us<StkRuler>(10);
+    (void)wait_ticks<P>([] { return Serial::tx_idle(); }, ticks_from_ms<P>(5));
+    (void)console_drain<StkRuler, Serial>();
+    TickWitness<P> witness;
+    (void)witness.quiet();
+    (void)witness.ticks();
+    static_assert(span_fits<24>(1000) && since_clamped(5, 3) == 2);
+    bench.skip("no peer here");
 
     // printing, time, wire, ring
     TimeStamp stamp{};

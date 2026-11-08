@@ -1,6 +1,7 @@
 """The console protocol of the bench suites (single-char commands, the
 "> " prompt, the "ALL: N pass, M fail" summary, with ", L lost" when the
-suite prints through a LineWriter that lost lines, and the lines
+suite prints through a LineWriter that lost lines and ", K skipped" when
+checks were skipped, and the lines
 a suite marks "#<T ... :T>#" for the judge to read whole) and the verbs
 over it: brio run, brio console, brio duo."""
 
@@ -93,6 +94,17 @@ def verdict(text, marker):
     return 0, None
 
 
+def skips(text, marker):
+    """The checks the run skipped (TestBench::skip()): the summary line's
+    optional last field, or the letters' tallies summed; 0 when no tally
+    carries one. A skip fails nothing; the judge reports the count."""
+    for line in text.splitlines():
+        if marker and marker in line and SUMMARY_RE.search(line):
+            m = SKIP_RE.search(line)
+            return int(m.group(3)) if m else 0
+    return sum(int(m.group(3)) for m in SKIP_RE.finditer(text))
+
+
 def losses(text, marker):
     """The lines the run's writer lost: the summary line's optional field,
     or the letters' tallies summed - and, when no tally carries one, the
@@ -140,10 +152,14 @@ def marked_lines(text):
 
 def judge(text, marker, strict, name):
     """The run's verdict: the suite's own failures, the marked lines read
-    whole, and - under --strict - the lines a writer lost. Dies on any."""
+    whole, and - under --strict - the lines a writer lost. Dies on any.
+    The checks the suite skipped are reported and fail nothing."""
     fails, summary = verdict(text, marker)
     if summary:
         print("bench: %s" % summary)
+    skipped = skips(text, marker)
+    if skipped:
+        print("bench: %d check(s) skipped" % skipped)
     problems, whole = marked_lines(text)
     if whole or problems:
         print("bench: %d marked line(s) read whole" % whole)

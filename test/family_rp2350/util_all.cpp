@@ -40,6 +40,7 @@
 #include "util/sha256.hpp"
 #include "util/spi_bus.hpp"
 #include "util/stream.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 #include "util/timestamp.hpp"
 #include "util/trace.hpp"
@@ -96,6 +97,15 @@ struct BenchSink {
     static bool write_byte(uint8_t) { return true; }
 };
 IsrMeter<BenchRuler, BenchP> bench_meter;
+/// The waits' ruler: the same microsecond, its rate a constant as the
+/// waits require; and a console for them to drain.
+struct WaitRuler {
+    static uint32_t now() { return Mtime::micros(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+struct IdleConsole {
+    static bool tx_idle() { return true; }
+};
 
 void util_all_verbs() {
     Loop::init_all();
@@ -119,6 +129,17 @@ void util_all_verbs() {
     const BenchCounters after = bench_counters<BenchP>(bench_meter);
     bench_line(BenchSink{}, "op", 16u, bench_sample(watch.elapsed(), before, after),
                BenchRuler::hz(), 11520u);
+
+    // the test letters' waits (util/test_wait.hpp)
+    (void)wait_until<WaitRuler>([] { return IdleConsole::tx_idle(); }, 1'000);
+    (void)cycles_until<WaitRuler>([] { return IdleConsole::tx_idle(); }, 1'000);
+    spin_us<WaitRuler>(10);
+    (void)wait_ticks<P>([] { return IdleConsole::tx_idle(); }, ticks_from_ms<P>(5));
+    (void)console_drain<WaitRuler, IdleConsole>();
+    TickWitness<P> witness;
+    (void)witness.quiet();
+    (void)witness.ticks();
+    static_assert(span_fits<24>(1000) && since_clamped(5, 3) == 2);
 }
 
 // gfx/ is target-independent, so what this adds is the COMPILER's

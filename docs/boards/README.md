@@ -121,7 +121,9 @@ manifest is read (`cli/bench/common.py`, `board_entry`).
 **The tool puts the two together.** `brio flash <board> <app>` builds
 the app for the board's type and flashes it through the board's
 programmer; `brio run <board> z` drives the board's console and judges
-the suite's `ALL: N pass, M fail` line; `brio console <board>` prints
+the suite's `ALL: N pass, M fail` line, reporting the count of checks
+skipped when the line carries one (below, "How a suite's letters wait
+and decline"); `brio console <board>` prints
 the device path and speed for a monitor of your own. On a board that
 splits a suite, `brio flash` takes the group image's name
 (`test_ch32_tim-2`) and refuses the bare name with the list of its
@@ -278,3 +280,36 @@ reference tests of the drivers they cover, which must keep passing
 through every restructuring of the driver under them. Breadboard
 experiments that were assembled once live under `experiments/`, each
 with its own README.
+
+## How a suite's letters wait and decline
+
+A test suite prints its letters through one grammar, `util/testbench.hpp`'s
+`TestBench`: each letter is a command key whose checks print `PASS` or
+`FAIL` lines, close with the letter's tally and, under the all-key, with
+the `ALL:` line `brio run` judges. Two things in it serve the letters'
+honesty rather than their bookkeeping.
+
+**A check that cannot run is skipped, not passed.** Where the board or
+the desk does not give a check its premise - no peer wired, a part
+without the feature, an instrument absent - the letter calls
+`bench.skip("reason")`, which prints `  SKIP  <reason>` and counts the
+skip apart from passes and fails. A tally whose letter skipped checks
+ends with the count, `-> N pass, M fail, K skipped`, and so does the
+`ALL:` line; with no skips the line is unchanged. `brio run` reads N and
+M as always, fails nothing for K, and prints the count.
+
+**Waits are times, and timed windows are quiet.** `util/test_wait.hpp`
+holds the waits every suite shares, over a ruler the suite names (a
+free-running cycle counter whose rate is a constant whole number of
+megahertz), its kernel platform and its console. A time-out is a budget
+in microseconds on that ruler, or in kernel ticks, never a loop count
+whose length depends on the clock and the compiler; a wait that can run
+out returns whether its condition held, and the letter acts on the
+answer. A letter that times something drains the console first, so
+that no transmit interrupt lands inside the span, and prints its
+readings after the span closes. A bound derived from the code's cost
+judges only the runs the tick witness calls quiet - no kernel tick
+landed inside the span - and the other runs are printed with their
+figures, not judged. The header's comment states each verb's context
+and limits, among them the longest budget a ruler can time (half its
+32-bit range, about 44 s at 48 MHz).
