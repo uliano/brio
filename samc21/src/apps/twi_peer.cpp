@@ -52,7 +52,6 @@
 #include <stdint.h>
 
 #include "samc21/clock.hpp"
-#include "samc21/delay.hpp"
 #include "samc21/i2c.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/nvm.hpp"
@@ -60,6 +59,7 @@
 #include "samc21/sercom.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
 // register, and every architecture on this link compiles the same
@@ -126,27 +126,17 @@ volatile bool host_done = false;
 volatile uint8_t host_status = i2c_ok;
 
 // ---- waits ----------------------------------------------------------------------
+//
+// Every hold and time-out here is a time on the ruler, the SysTick ticker
+// read as CPU cycles (util/test_wait.hpp): the commanded stretches (40 ms
+// a byte in the suite's longest), the host action's lead-in, its tenure's
+// deadline. This instrument is not a kernel program, so it may block for
+// as long as a command asks.
 
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
-
-/// A microsecond hold of arbitrary length: delay_us is capped below a
-/// tick BY DESIGN, and this instrument's commanded stretches (2 ms per
-/// byte in the suite) are exactly the blocking waits the cap exists to
-/// keep out of KERNEL programs - this is not one, so the hold is spent
-/// in chunks the cap admits.
-void hold_us(uint32_t us) {
-    while (us >= 500u) {
-        (void)delay_us(clock, 500u);
-        us -= 500u;
-    }
-    if (us != 0u) {
-        (void)delay_us(clock, us);
-    }
-}
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
 // ---- the two standing configurations --------------------------------------------
 
@@ -301,7 +291,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
         if (!Client::data_ready()) {
             continue;
         }
-        if (a.hold_us) hold_us(a.hold_us);
+        if (a.hold_us) brio::spin_us<Ruler>(a.hold_us);
         if (Client::host_reads()) {
             const bool first = Client::first_drdy();
             if (!first && Client::host_nacked()) {
@@ -371,8 +361,7 @@ twilink::Report run_arb(const twilink::Params& a) {
         return r;
     }
     if (a.aux16) {
-        // The lead-in, in MILLISECOND chunks (it arrives in us).
-        wait_ms(a.aux16 / 1000u);
+        brio::spin_us<Ruler>(a.aux16);   // the lead-in, in microseconds (twi_link.hpp)
     }
 
     static uint8_t burst[32];
@@ -394,9 +383,10 @@ twilink::Report run_arb(const twilink::Params& a) {
     if (sync_fail) {
         r.mstatus = Host::status();
     } else {
-        while (!host_done && Ticker::millis() - t0 < a.ms) {
-        }
-        if (!host_done) {
+        // What is left of the action's deadline, counted from the rendezvous.
+        const uint32_t spent_ms = Ticker::millis() - t0;
+        const uint32_t left_ms = spent_ms < a.ms ? a.ms - spent_ms : 0u;
+        if (!brio::wait_until<Ruler>([] { return host_done; }, left_ms * 1000u)) {
             r.flags |= twilink::report_timed_out;
             Host::release();
         } else {
@@ -423,9 +413,8 @@ twilink::Report run_hold_sda(const twilink::Params& a) {
     // the DUT's host Owner with that STOP pending - a tenure stuck in its
     // STOP, not the IDLE bus held low this action promises (measured: the
     // DUT read BUSSTATE Owner, not Busy). The deadline bounds the wait.
-    const uint32_t t_stop = Ticker::millis();
-    while (!Client::stop_seen() && Ticker::millis() - t_stop < a.ms) {
-    }
+    // Should the STOP never come, the hold starts at the deadline anyway.
+    (void)brio::wait_until<Ruler>([] { return Client::stop_seen(); }, a.ms * 1000u);
     Client::release();
     Sda::clear();
     Scl::clear();
@@ -460,7 +449,7 @@ twilink::Report run_hold_sda(const twilink::Params& a) {
 twilink::Report run_quiet(const twilink::Params& a) {
     twilink::Report r{};
     Client::release();
-    wait_ms(a.ms);
+    brio::spin_us<Ruler>(a.ms * 1000u);
     r.count = 1;
     return r;
 }

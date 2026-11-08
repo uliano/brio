@@ -49,6 +49,7 @@
 #include "samc21/tc.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -68,6 +69,13 @@ using Serial = Uart<5, console_pads>;
 constexpr Serial serial;
 
 TestBench<Serial> bench;
+
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's
+/// fixed spans (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
 using brio::crlf;
 using brio::print;
@@ -109,14 +117,11 @@ bool witness_arm() {
 /// How many events the witness has counted - a READSYNC read (35.6.8).
 uint16_t witnessed() { return Witness::count16(); }
 
-/// A short wait, long enough for any channel clock this suite uses to
-/// tick several times over.
-void settle() {
-    volatile uint32_t sink = 0;
-    for (uint32_t i = 0; i < 100'000UL; ++i) {
-        sink = sink + 1u;
-    }
-}
+/// A fixed pause, long enough for any channel clock this suite uses to
+/// tick many times over: 5 ms is over 150 periods of the slowest, the
+/// OSCULP32K channel clock (about 30 us), where a synchronous delivery
+/// takes a few (29.6.2.6) and erratum 1.12.4's blind tick one.
+void settle() { brio::spin_us<Ruler>(5'000u); }
 
 // =============================================================================
 // a - the fabric

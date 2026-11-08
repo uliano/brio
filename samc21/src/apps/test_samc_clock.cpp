@@ -16,11 +16,11 @@
 // THE INSTRUMENT IS AGAIN samc21/freqm.hpp, and the measurement is
 // arranged so the answers are RATIOS wherever a ratio is what is being
 // claimed:
-//   - generator 5 carries the crystal divided by 512 (46875 Hz) and is
+//   - generator 5 carries the crystal divided by 250 (96000 Hz) and is
 //     the frequency meter's REFERENCE, because the meter needs its
 //     reference to be the slower clock and a big ratio is what buys
 //     resolution: 255 reference periods against a 48 MHz measurand is a
-//     count of 261120, i.e. about 4 ppm a step;
+//     count of 127500, i.e. about 8 ppm a step;
 //   - measuring OSC48M against that reference weighs the INTERNAL RC on
 //     the crystal's scale, which is the one number this bench has never
 //     had;
@@ -58,6 +58,7 @@
 #include "samc21/tc.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -97,7 +98,7 @@ constexpr XoscStartup crystal_startup = 4;
 constexpr uint8_t gen_sys = 0;      ///< OSC48M, the CPU's own generator
 constexpr uint8_t gen_ref_1m = 3;   ///< OSC48M / 48 = 1 MHz, the DPLL's GCLK reference
 constexpr uint8_t gen_dpll = 4;     ///< whatever the DPLL is producing
-constexpr uint8_t gen_xtal = 5;     ///< the crystal divided by 512
+constexpr uint8_t gen_xtal = 5;     ///< the crystal divided by 250
 constexpr uint8_t gen_ulp = 6;      ///< OSCULP32K, the second opinion
 
 using GenRef1M = Gclk<gen_ref_1m>;
@@ -126,11 +127,18 @@ constexpr uint32_t coarse_hz = sys_hz / 1024u;  // 46875 Hz, 21.3 us a tick
 // Helpers
 // ---------------------------------------------------------------------------
 
-void wait_ms(uint32_t ms) {
-    const uint32_t deadline = Ticker::millis() + ms;
-    while (static_cast<int32_t>(Ticker::millis() - deadline) < 0) {
-    }
-}
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's
+/// fixed pauses (util/test_wait.hpp). Its rate is the build's 48 MHz.
+/// Letter e moves the CPU's generator from OSC48M to a DPLL making 48 MHz
+/// and back - the same nominal rate, so the conversion stays true - and
+/// no pause runs across either switch.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// A fixed pause of `ms` milliseconds on the ruler.
+void pause_ms(uint32_t ms) { brio::spin_us<Ruler>(ms * 1000u); }
 
 // NB the printed lines below never contain "->": brio's judge
 // looks for that arrow to find a letter's tally line, and a stray one in
@@ -195,7 +203,7 @@ constexpr uint32_t expect_count(uint32_t hz) {
 }
 
 /// Start the crystal if it is not already running, and put generator 5
-/// on it divided by 512. Every letter that measures anything calls this,
+/// on it divided by 250. Every letter that measures anything calls this,
 /// so each letter stands alone and `z` re-runs in one power-on.
 bool crystal_up() {
     if (!Xosc::enabled() || !Xosc::ready()) {
@@ -317,7 +325,7 @@ void tb_crystal() {
     // so the start-up time measured is a real start-up.
     (void)GenXtal::configure(GclkConfig{.source = GclkSource::osc48m});
     Xosc::stop();
-    wait_ms(5);
+    pause_ms(5);
     bench.verdict("the oscillator is stopped before it is timed", !Xosc::enabled());
 
     const uint16_t t0 = Stopwatch::count16();
@@ -393,18 +401,21 @@ void tb_crystal() {
         // disagreement, not its direction.
         bench.verdict("OSC48M lands within 1% of nominal on the crystal's scale",
                       ppm_off(rc_hz, sys_hz) < 10'000u);
+        // The disagreement is OSCULP32K's own error from 32768 Hz, and an
+        // open-loop RC's error has no floor: it sits wherever the die and
+        // the moment put it, near nominal included. Printed, not judged -
+        // fourteen runs on one board read 1500 to 4000 ppm, and one read
+        // 36 ppm; a verdict that the error is large fails whenever the RC
+        // happens to sit near 32768 Hz.
         print(serial, "  the two determinations of OSC48M disagree by ",
               ppm_off(rc_ulp_hz, rc_hz), " ppm - OSCULP32K's own error", crlf);
-        bench.verdict("and the OSCULP32K-referenced one is off from it by per "
-                      "mille, not ppm - an ultra-low-power RC, not a reference",
-                      ppm_off(rc_ulp_hz, rc_hz) > 500u);
 
-        // The crystal read back through the RC has to agree with the RC
-        // read back through the crystal - it is one ratio, and this is
-        // the arithmetic checking itself.
-        bench.verdict("the two readings of one ratio agree",
-                      near(ppm_off(xtal_hz, crystal_hz), ppm_off(rc_hz, sys_hz),
-                           200u));
+        // The crystal read back through the RC and the RC read back
+        // through the crystal are one count read two ways, so they agree
+        // by construction: printed, not judged.
+        print(serial, "  the two readings of one ratio: ", ppm_off(xtal_hz, crystal_hz),
+              " and ", ppm_off(rc_hz, sys_hz), " ppm (one count, agreeing by arithmetic)",
+              crlf);
 
         // AND THE CONSEQUENCE FOR EVERY OTHER ABSOLUTE FREQUENCY ON
         // THIS BOARD. Anything measured as a ratio against OSC48M and
@@ -423,12 +434,11 @@ void tb_crystal() {
             (static_cast<uint64_t>(ulp_refnum) * sys_hz) / *rc_ulp);
         print(serial, "  OSCULP32K on the CRYSTAL's scale : ", ulp_hz, " Hz (",
               ppm_off(ulp_hz, 32768u), " ppm from 32768)", crlf);
+        // The two scalings differ by OSC48M's own error by construction
+        // (one count, two multipliers): printed, not judged.
         print(serial, "  ... where the 48 MHz nominal makes it look like ",
-              ulp_rc_scaled, " Hz", crlf);
-        bench.verdict("the RC-scaled reading of OSCULP32K is off the crystal-scaled "
-                      "one by exactly OSC48M's own error",
-                      near(ppm_off(ulp_hz, ulp_rc_scaled), ppm_off(rc_hz, sys_hz),
-                           200u));
+              ulp_rc_scaled, " Hz, ", ppm_off(ulp_hz, ulp_rc_scaled),
+              " ppm away - OSC48M's own error, by arithmetic", crlf);
     }
 
     Stopwatch::release();
@@ -472,9 +482,24 @@ void tc_failure_detector() {
                                         .cfd_prescaler = p}));
     bench.verdict("CFDEN reads back", Xosc::failure_detector());
     bench.verdict("CFDPRESC reads back", Xosc::cfd_prescaler() == p);
+    // ARMING ITSELF CAN TRIP THE DETECTOR. Setting CFDEN on a crystal that
+    // has run for milliseconds sometimes latches XOSCFAIL and switches the
+    // output to the safe clock at once: measured 6 runs in 60, the crystal
+    // healthy before and after. Printed, then undone the way 20.6.3 says
+    // a failure is undone (the flag cleared, SWBEN), so the verdicts below
+    // judge the healthy crystal and not the arming's transient.
+    const bool armed_latched = (Oscctrl::flags() & OscctrlFlag::xosc_fail) != 0u;
+    const bool armed_switched = Xosc::switched_to_safe_clock();
+    print(serial, "  right after arming: XOSCFAIL latched ", armed_latched ? 1 : 0,
+          ", switched to the safe clock ", armed_switched ? 1 : 0, crlf);
+    if (armed_switched) {
+        Oscctrl::clear_flags(OscctrlFlag::xosc_fail);
+        Xosc::switch_back();
+        pause_ms(5);
+    }
 
     Oscctrl::clear_flags(OscctrlFlag::xosc_fail);
-    wait_ms(5);
+    pause_ms(5);
     bench.verdict("a healthy crystal raises no failure", !Xosc::failing());
     bench.verdict("and no latched flag either",
                   (Oscctrl::flags() & OscctrlFlag::xosc_fail) == 0u);
@@ -485,7 +510,7 @@ void tc_failure_detector() {
     // nothing driving it.
     OSCCTRL_REGS->OSCCTRL_XOSCCTRL = static_cast<uint16_t>(
         Xosc::reg() & static_cast<uint16_t>(~OSCCTRL_XOSCCTRL_XTALEN_Msk));
-    wait_ms(20);
+    pause_ms(20);
 
     const bool failing = Xosc::failing();
     const bool latched = (Oscctrl::flags() & OscctrlFlag::xosc_fail) != 0u;
@@ -505,13 +530,13 @@ void tc_failure_detector() {
     // SWBEN - which the hardware clears when the switch happens.
     OSCCTRL_REGS->OSCCTRL_XOSCCTRL =
         static_cast<uint16_t>(Xosc::reg() | OSCCTRL_XOSCCTRL_XTALEN_Msk);
-    wait_ms(20);
+    pause_ms(20);
     Oscctrl::clear_flags(OscctrlFlag::xosc_fail);
-    wait_ms(5);
+    pause_ms(5);
     bench.verdict("with the amplifier back the failure clears", !Xosc::failing());
 
     Xosc::switch_back();
-    wait_ms(5);
+    pause_ms(5);
     bench.verdict("SWBEN is consumed by the hardware", !Xosc::switch_back_pending());
     bench.verdict("and the output is back on the crystal",
                   !Xosc::switched_to_safe_clock());
@@ -747,8 +772,7 @@ void te_cpu_on_dpll() {
     if (!before || !near(*before, want, 50u)) {
         // The precondition failed: do not move the CPU's clock onto a
         // loop that is not doing what it claims.
-        print(serial, "  DPLL not proven - the switch is NOT attempted", crlf);
-        bench.verdict("the switch is skipped rather than risked", false);
+        bench.skip("the CPU switch: the DPLL was not proven at 48 MHz, so it is not risked");
         (void)crystal_down();
         return;
     }

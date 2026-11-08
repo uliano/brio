@@ -8,8 +8,10 @@
 //
 // NOTHING TO WIRE, and it rests on three facts about this family's
 // pads:
-//   - a pad handed to a peripheral still moves under its own INTERNAL
-//     PULL (28.6.3.2), which is how an input gets its edges;
+//   - a pad handed to an INPUT-only peripheral function (the EIC's)
+//     still moves under its own INTERNAL PULL (28.6.3.2), which is how
+//     an input gets its edges - while a function that drives the pad (a
+//     TC's WO) takes it and holds it, as letter e measures;
 //   - a pad a peripheral DRIVES can be read back through PORT.IN with
 //     the input buffer on, which is how a waveform is observed;
 //   - a timer counting another timer's EVENTS is a frequency meter with
@@ -28,10 +30,10 @@
 //   d  PWM: an 8-bit channel on the LED, its duty read back off the pad
 //      and its FREQUENCY measured by a second timer counting its
 //      overflow events
-//   e  CAPTURE, both sources: period and pulse width through EVSYS from
-//      an EIC line, and capture ON THE PIN - the thing erratum 1.20.2
-//      says does not work, on a revision where the erratum does not
-//      apply
+//   e  CAPTURE: period and pulse width through EVSYS from an EIC line;
+//      and capture ON THE PIN, which no controlled edge from inside the
+//      chip can reach on this board - erratum 1.20.2 printed, not
+//      judged
 //   f  the util contract, live: a MeterSampler AO inside a running
 //      kernel, paced by a time event, publishing MeterSample from a
 //      MeterLatch that the TC's own capture ISR fills
@@ -60,6 +62,7 @@
 #include "samc21/ticker.hpp"
 #include "util/meter_sampler.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -134,19 +137,29 @@ volatile uint32_t tc2_captures = 0;
 // Helpers
 // ---------------------------------------------------------------------------
 
-void spin(uint32_t turns) {
-    volatile uint32_t sink = 0;
-    for (uint32_t i = 0; i < turns; ++i) {
-        sink = sink + 1u;
-    }
-}
+/// The SysTick ticker read as CPU cycles - the one clock in this suite
+/// that is not a TC - as the ruler of util/test_wait.hpp.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
-/// Wait `ms` milliseconds on the SysTick timebase - the one clock in
-/// this suite that is not a TC.
-void wait_ms(uint32_t ms) {
-    const uint32_t deadline = Ticker::millis() + ms;
-    while (static_cast<int32_t>(Ticker::millis() - deadline) < 0) {
+/// A fixed pause of `ms` milliseconds on the ruler: the measurement
+/// windows below, timed on SysTick against a TC's count.
+void pause_ms(uint32_t ms) { brio::spin_us<Ruler>(ms * 1000u); }
+
+/// Every queued console byte off the wire, bounded (util/test_wait.hpp):
+/// false on a wedged console.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
+
+/// The console drained before a timed window opens; otherwise a failed
+/// verdict says so and the letter returns.
+bool drained_before_window() {
+    if (console_drain()) {
+        return true;
     }
+    bench.verdict("the console drained before the timed window", false);
+    return false;
 }
 
 /// Sample a pad through PORT.IN many times and report how many reads
@@ -274,13 +287,16 @@ void tb_counter() {
     // 16-bit counter wraps in 350 ms, which would make the delta
     // ambiguous. A measurement window has to fit the counter it reads.
     constexpr uint32_t window_ms = 250;
+    if (!drained_before_window()) {
+        return;
+    }
     for (uint8_t i = 0; i < 2u; ++i) {
         configured = configured && Timer0::enable(false) &&
                      Timer0::configure(TcConfig{.mode = TcMode::count16,
                                                 .prescaler = scales[i]}) &&
                      Timer0::set_count16(0) && Timer0::enable(true);
         const uint16_t before = Timer0::count16();
-        wait_ms(window_ms);
+        pause_ms(window_ms);
         const uint16_t after = Timer0::count16();
         delta[i] = static_cast<uint16_t>(after - before);
     }
@@ -302,7 +318,7 @@ void tb_counter() {
     // Reading COUNT is a COMMAND (35.6.8): two reads a moment apart must
     // differ, and the raw read must be the value the command fetched.
     const uint16_t a = Timer0::count16();
-    spin(2000);
+    brio::spin_us<Ruler>(400u);
     const uint16_t b = Timer0::count16();
     bench.verdict("two READSYNC'd reads of a running counter differ", a != b);
     bench.verdict("and the raw accessor returns what the last command "
@@ -314,7 +330,7 @@ void tb_counter() {
     bench.verdict("the direction reverses", Timer0::count_down(true) &&
                                                 Timer0::counting_down());
     const uint16_t down_a = Timer0::count16();
-    wait_ms(20);
+    pause_ms(20);
     const uint16_t down_b = Timer0::count16();
     bench.verdict("and the counter now counts DOWN", down_b < down_a);
     bench.verdict("back up again", Timer0::count_down(false) &&
@@ -323,11 +339,11 @@ void tb_counter() {
     // STOP and RETRIGGER.
     bench.verdict("the STOP command stops it", Timer0::stop() && Timer0::stopped());
     const uint16_t frozen = Timer0::count16();
-    wait_ms(20);
+    pause_ms(20);
     bench.verdict("and the counter is frozen", Timer0::count16() == frozen);
     bench.verdict("RETRIGGER restarts it, and STATUS.STOP clears itself",
                   Timer0::retrigger() && !Timer0::stopped());
-    wait_ms(20);
+    pause_ms(20);
     bench.verdict("the counter moves again", Timer0::count16() != frozen);
 
     // ONE-SHOT: stop at the next overflow, by itself (35.6.3.1).
@@ -340,7 +356,7 @@ void tb_counter() {
                       Timer0::enable(true));
     bench.verdict("it starts running", !Timer0::stopped());
     // 200 ticks at 46875 Hz is ~4.3 ms; 50 ms is many times that.
-    wait_ms(50);
+    pause_ms(50);
     bench.verdict("and stops itself at the first overflow, with no software in "
                   "the path",
                   Timer0::stopped() && (Timer0::flags() & Timer0::overflow_flag) != 0u);
@@ -365,7 +381,7 @@ void tc_pair() {
     // 32-bit one is nowhere near its own MAX.
     // A delta again, and for the same reason as letter b.
     const uint32_t before32 = Timer0::count32();
-    wait_ms(200);
+    pause_ms(200);
     const uint32_t wide = Timer0::count32() - before32;
     const uint32_t expect = tc_hz / 5u;
     print(serial, "  200 ms at 48 MHz, no prescaler: COUNT32 advanced ", wide,
@@ -391,7 +407,7 @@ void tc_pair() {
                       Timer0::configure(TcConfig{.mode = TcMode::count16,
                                                  .prescaler = TcPrescaler::div1}) &&
                       Timer0::set_count16(0) && Timer0::enable(true));
-    wait_ms(200);
+    pause_ms(200);
     const uint32_t narrow = Timer0::count16();
     print(serial, "  the same 200 ms in 16-bit mode: COUNT = ", narrow,
           " - the counter wrapped ", wide >> 16, " times to get there", crlf);
@@ -429,7 +445,7 @@ void td_pwm() {
         LedPwm::duty(c.duty);
         // The buffered write lands at the next UPDATE, so give the
         // waveform a few periods before believing the pad.
-        wait_ms(20);
+        pause_ms(20);
         const uint32_t measured = duty_permille();
         print(serial, "  duty ", c.duty, "/", pwm_top, ": pad high ", measured,
               " per mille (expected ~", c.expect_permille, ")", crlf);
@@ -474,8 +490,11 @@ void td_pwm() {
     bench.verdict("the counting timer enables",
                   Timer0::set_count16(0) && Timer0::enable(true));
 
+    if (!drained_before_window()) {
+        return;
+    }
     (void)Timer0::set_count16(0);
-    wait_ms(1000);
+    pause_ms(1000);
     const uint32_t counted = Timer0::count16();
     print(serial, "  TC3 overflows counted by TC0 in 1 s: ", counted,
           " (48 MHz / 256 / ", pwm_top + 1u, " = ", pwm_hz, " Hz)", crlf);
@@ -540,9 +559,9 @@ void te_capture() {
     Timer2::clear_flags(0xFFu);
     for (uint8_t i = 0; i < 4u; ++i) {
         EicPad::set();
-        wait_ms(20);
+        pause_ms(20);
         EicPad::clear();
-        wait_ms(30);
+        pause_ms(30);
     }
     const bool overran = (Timer2::flags() & Timer2::error_flag) != 0u;
 
@@ -556,9 +575,9 @@ void te_capture() {
     Timer2::clear_flags(0xFFu);
     for (uint8_t i = 0; i < 4u; ++i) {
         EicPad::set();
-        wait_ms(20);
+        pause_ms(20);
         EicPad::clear();
-        wait_ms(30);
+        pause_ms(30);
         period = Meter::period_ticks();
         width = Meter::width_ticks();
     }
@@ -591,10 +610,10 @@ void te_capture() {
     // checked under PORT before the timer ever sees it (not every pad
     // on a board does).
     PwmPad::input(PinPull::up);
-    wait_ms(2);
+    pause_ms(2);
     const bool pull_up = PwmPad::read();
     PwmPad::input(PinPull::down);
-    wait_ms(2);
+    pause_ms(2);
     const bool pull_down = PwmPad::read();
     print(serial, "  PB12 under its own pull: up -> ", pull_up ? "1" : "0",
           ", down -> ", pull_down ? "1" : "0", crlf);
@@ -630,32 +649,32 @@ void te_capture() {
     PwmPad::release();
     PwmPad::output();
     PwmPad::clear();
-    wait_ms(5);
+    pause_ms(5);
     (void)Timer0::cc16(0);
     Timer0::clear_flags(0xFFu);
-    wait_ms(5);
+    pause_ms(5);
     const bool quiet = (Timer0::flags() & Timer0::match_flag(0)) == 0u;
     PwmPad::set();
-    wait_ms(5);
+    pause_ms(5);
     driven.moved = PwmPad::read();
     driven.captured = (Timer0::flags() & Timer0::match_flag(0)) != 0u;
     driven.stamp = Timer0::cc16(0);
     PwmPad::clear();
-    wait_ms(5);
+    pause_ms(5);
 
     PwmPad::function(PinFunction::e,
                      PinConfig{.input_enable = true, .pull = PinPull::down});
-    wait_ms(5);
+    pause_ms(5);
     (void)Timer0::cc16(0);
     Timer0::clear_flags(0xFFu);
     const bool muxed_low = PwmPad::read();
     PwmPad::set();     // the pull's direction is the OUT bit (28.6.3.2)
-    wait_ms(5);
+    pause_ms(5);
     muxed.moved = PwmPad::read() && !muxed_low;
     muxed.captured = (Timer0::flags() & Timer0::match_flag(0)) != 0u;
     muxed.stamp = Timer0::cc16(0);
     PwmPad::clear();
-    wait_ms(5);
+    pause_ms(5);
 
     print(serial, "  capture-on-pin, pad under PORT and driven: moved ",
           driven.moved ? "yes" : "no", ", captured ",
@@ -690,7 +709,10 @@ void te_capture() {
           ", so the path is not obviously dead.", crlf);
 
     PwmPad::release();
+    // Back to PORT as an input held by its pull: the first attempt above
+    // drove the pad, and configure() alone keeps DIR.
     PwmPad::configure({});
+    PwmPad::input(PinPull::down);
     Timer0::release();
     (void)Eic::enable(false);
     Eic::release();
@@ -739,9 +761,9 @@ void th_capture_down() {
     Timer2::clear_flags(0xFFu);
     for (uint8_t i = 0; i < 4u; ++i) {
         EicPad::set();
-        wait_ms(20);
+        pause_ms(20);
         EicPad::clear();
-        wait_ms(30);
+        pause_ms(30);
         period = Meter::period_ticks();
         width = Meter::width_ticks();
     }
@@ -915,8 +937,12 @@ void tg_tc1_alone() {
                     Timer1::configure(TcConfig{.mode = TcMode::count16,
                                                .prescaler = TcPrescaler::div1024}) &&
                     Timer1::set_count16(0) && Timer1::enable(true);
+    if (!drained_before_window()) {
+        Timer1::release();
+        return;
+    }
     const uint16_t before = Timer1::count16();
-    wait_ms(window_ms);
+    pause_ms(window_ms);
     const uint16_t after = Timer1::count16();
     const uint32_t delta = static_cast<uint16_t>(after - before);
     const uint32_t expect = (tc_hz / 1024u) * window_ms / 1000u;

@@ -65,6 +65,7 @@
 #include "samc21/sercom.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
 constexpr SysClock clock;
@@ -126,7 +127,6 @@ void say(A... a) {
     }
 }
 
-bool tx_idle() { return engined ? Engined::tx_idle() : Plain::tx_idle(); }
 bool read_byte(uint8_t& b) {
     return engined ? Engined::read_byte(b) : Plain::read_byte(b);
 }
@@ -152,24 +152,23 @@ uint32_t read_bulk(uint8_t* p, uint32_t len) {
 }
 
 // ---------------------------------------------------------------------------
-// A cycle-resolution stopwatch (the same one the SAM suites use): the kernel ticker's own cycles(), the tick count
-// and the counter's position composed right across the reload
-// (util/cycle_count.hpp).
+// The ruler: the kernel ticker's own cycles(), the tick count and the
+// counter's position composed right across the reload
+// (util/cycle_count.hpp), for the spans and the bounded waits
+// (util/test_wait.hpp).
 // ---------------------------------------------------------------------------
-uint32_t cycles_now() {
-    return Ticker::cycles();
-}
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
 uint32_t cycles_to_us(uint32_t c) { return c / (SysClock::hz / 1'000'000UL); }
 
-/// Wait until the last byte has physically left the shifter.
-void drain() {
-    uint32_t spins = 40'000'000UL;
-    while (!tx_idle() && spins-- != 0u) {
-    }
-    spins = 2'000'000UL;
-    while (!Sc5::txc_flag() && spins-- != 0u) {
-    }
+/// Wait until the last byte has physically left the shifter (tx_idle()
+/// covers it, util/test_wait.hpp), bounded at 200 ms - the 1 KB ring at
+/// 115200, the slowest rate offered, is 89 ms: false when it did not.
+bool drain() {
+    return engined ? brio::console_drain<Ruler, Engined>() : brio::console_drain<Ruler, Plain>();
 }
 
 // ---------------------------------------------------------------------------
@@ -208,9 +207,9 @@ uint32_t job_steps_per_ms = 0;
 
 void calibrate_job() {
     const uint32_t window = SysClock::hz / 50u;   // 20 ms
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     uint32_t steps = 0;
-    while (cycles_now() - t0 < window) {
+    while (Ruler::now() - t0 < window) {
         for (uint32_t k = 0; k < job_batch; ++k) {
             job_step();
         }
@@ -230,7 +229,9 @@ bool start_transport(uint32_t baud) {
 }
 
 void stop_transport() {
-    drain();
+    // Dropped: a console that did not drain loses its last line, and the
+    // rate changes all the same (the host follows the SWITCH line).
+    (void)drain();
     if (engined) {
         Engined::release();
     } else {
@@ -251,9 +252,7 @@ void set_rate(uint8_t i) {
     const bool ok = start_transport(rates[rate_index]);
     // A settling pause at the new rate: the host needs to close and
     // reopen its own end, and anything sent into that gap is lost.
-    const uint32_t t0 = cycles_now();
-    while (cycles_now() - t0 < SysClock::hz / 4u) {
-    }
+    brio::spin_us<Ruler>(250'000);
     say("AT ", rates[rate_index], " actual ",
         engined ? Engined::actual_baud(SysClock::hz)
                 : Plain::actual_baud(SysClock::hz),
@@ -268,9 +267,7 @@ void set_transport(bool want_engined) {
     stop_transport();
     engined = want_engined;
     const bool ok = start_transport(rates[rate_index]);
-    const uint32_t t0 = cycles_now();
-    while (cycles_now() - t0 < SysClock::hz / 4u) {
-    }
+    brio::spin_us<Ruler>(250'000);
     say("AT ", rates[rate_index], " transport ",
         engined ? "DMA" : "irq", ok ? " ok" : " INIT FAILED", crlf);
 }
@@ -281,16 +278,16 @@ void set_transport(bool want_engined) {
 void transmit_burst() {
     say("BURST ", burst_bytes, " ", rates[rate_index], " ",
         engined ? "dma" : "irq", crlf);
-    drain();
+    if (!drain()) {
+        return;   // a wedged console: nothing to measure through it
+    }
 
     // The host needs a moment to stop reading lines and start counting
     // bytes; the burst begins after it.
-    const uint32_t settle = cycles_now();
-    while (cycles_now() - settle < SysClock::hz / 20u) {   // 50 ms
-    }
+    brio::spin_us<Ruler>(50'000);
 
     uint32_t sent = 0, steps = 0, visits = 0, full_turns = 0;
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     while (sent < burst_bytes) {
         const uint32_t room = burst_bytes - sent;
         const uint8_t want = room > 255u ? 255u : static_cast<uint8_t>(room);
@@ -305,8 +302,8 @@ void transmit_burst() {
         }
         steps += job_batch;
     }
-    drain();
-    const uint32_t took = cycles_now() - t0;
+    const bool drained = drain();
+    const uint32_t took = Ruler::now() - t0;
 
     // The report goes out at the SAME rate the burst used, right after
     // it - the host is still listening there.
@@ -319,7 +316,8 @@ void transmit_burst() {
                                                 : 100u - (steps * 100u) / free_steps);
 
     say("DONE bytes=", sent, " us=", us, " Bps=", bytes_per_s,
-        " baud_eq=", bytes_per_s * 10u, crlf);
+        " baud_eq=", bytes_per_s * 10u, drained ? "" : " (the ring NOT drained: 200 ms ran out)",
+        crlf);
     say("     steps=", steps, " of ", free_steps, " free -> cpu ", busy_pct,
         "% visits=", visits, " ring_full=", full_turns, crlf);
 }
@@ -335,14 +333,14 @@ void transmit_burst() {
 void bulk_burst() {
     say("BULK ", burst_bytes, " ", rates[rate_index], " ",
         engined ? "dma" : "irq", crlf);
-    drain();
-
-    const uint32_t settle = cycles_now();
-    while (cycles_now() - settle < SysClock::hz / 20u) {
+    if (!drain()) {
+        return;   // a wedged console: nothing to measure through it
     }
 
+    brio::spin_us<Ruler>(50'000);
+
     uint32_t sent = 0, steps = 0, visits = 0, full_turns = 0;
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     while (sent < burst_bytes) {
         const uint32_t room = burst_bytes - sent;
         const uint32_t want = room > 256u ? 256u : room;
@@ -357,8 +355,8 @@ void bulk_burst() {
         }
         steps += job_batch;
     }
-    drain();
-    const uint32_t took = cycles_now() - t0;
+    const bool drained = drain();
+    const uint32_t took = Ruler::now() - t0;
 
     const uint32_t us = cycles_to_us(took);
     const uint32_t bytes_per_s = us == 0u ? 0u : (burst_bytes * 1000UL) / (us / 1000UL + 1u);
@@ -368,7 +366,8 @@ void bulk_burst() {
                          : (steps >= free_steps ? 0u
                                                 : 100u - (steps * 100u) / free_steps);
     say("DONE bytes=", sent, " us=", us, " Bps=", bytes_per_s,
-        " baud_eq=", bytes_per_s * 10u, crlf);
+        " baud_eq=", bytes_per_s * 10u, drained ? "" : " (the ring NOT drained: 200 ms ran out)",
+        crlf);
     say("     steps=", steps, " of ", free_steps, " free -> cpu ", busy_pct,
         "% visits=", visits, " ring_full=", full_turns, crlf);
 }
@@ -388,28 +387,34 @@ void bulk_burst() {
 // disarmed whenever it is: nothing else is trying to write DATA.
 void raw_burst() {
     say("RAW ", burst_bytes, " ", rates[rate_index], crlf);
-    drain();
+    if (!drain()) {
+        return;   // a wedged console: nothing to measure through it
+    }
     Sc5::enable_dre_interrupt(false);
 
-    const uint32_t settle = cycles_now();
-    while (cycles_now() - settle < SysClock::hz / 20u) {
-    }
+    brio::spin_us<Ruler>(50'000);
 
-    const uint32_t t0 = cycles_now();
-    for (uint32_t k = 0; k < burst_bytes; ++k) {
-        while (!Sc5::dre_flag()) {
+    // DRE tested first and the ruler read only when DATA is full, so a
+    // write follows DRE's rise within a ruler read (some 70 cycles) - inside
+    // the frame of slack DATA gives, 160 cycles at 3 Mbaud - and each wait
+    // is bounded at 2 ms, twenty frames at 115200, the slowest rate offered.
+    const uint32_t t0 = Ruler::now();
+    uint32_t sent = 0;
+    for (; sent < burst_bytes; ++sent) {
+        if (!Sc5::dre_flag() &&
+            !brio::wait_until<Ruler>([] { return Sc5::dre_flag(); }, 2'000u)) {
+            break;
         }
-        Sc5::data(ramp[k & 0xFFu]);
+        Sc5::data(ramp[sent & 0xFFu]);
     }
-    uint32_t spins = 2'000'000UL;
-    while (!Sc5::txc_flag() && spins-- != 0u) {
-    }
-    const uint32_t took = cycles_now() - t0;
+    const bool out = brio::wait_until<Ruler>([] { return Sc5::txc_flag(); }, 2'000u);
+    const uint32_t took = Ruler::now() - t0;
 
     const uint32_t us = cycles_to_us(took);
-    const uint32_t bytes_per_s = us == 0u ? 0u : (burst_bytes * 1000UL) / (us / 1000UL + 1u);
-    say("DONE bytes=", burst_bytes, " us=", us, " Bps=", bytes_per_s,
-        " baud_eq=", bytes_per_s * 10u, crlf);
+    const uint32_t bytes_per_s = us == 0u ? 0u : (sent * 1000UL) / (us / 1000UL + 1u);
+    say("DONE bytes=", sent, " us=", us, " Bps=", bytes_per_s,
+        " baud_eq=", bytes_per_s * 10u,
+        out && sent == burst_bytes ? "" : " (DATA or TXC stalled: 2 ms ran out)", crlf);
     say("     raw: no ring, no interrupt, no DMA - the link's own ceiling",
         crlf);
 }
@@ -420,11 +425,11 @@ void raw_burst() {
 void echo_window() {
     say("ECHO ", echo_ms, " ", rates[rate_index], " ", engined ? "dma" : "irq",
         crlf);
-    drain();
-
-    const uint32_t settle = cycles_now();
-    while (cycles_now() - settle < SysClock::hz / 20u) {
+    if (!drain()) {
+        return;   // a wedged console: nothing to measure through it
     }
+
+    brio::spin_us<Ruler>(50'000);
 
     if (engined) {
         Engined::clear_errors();
@@ -434,8 +439,8 @@ void echo_window() {
 
     uint32_t echoed = 0, dropped = 0, steps = 0;
     const uint32_t window = (SysClock::hz / 1000u) * echo_ms;
-    const uint32_t t0 = cycles_now();
-    while (cycles_now() - t0 < window) {
+    const uint32_t t0 = Ruler::now();
+    while (Ruler::now() - t0 < window) {
         uint8_t b = 0;
         while (read_byte(b)) {
             if (!write_byte(b)) {
@@ -449,8 +454,8 @@ void echo_window() {
         }
         steps += job_batch;
     }
-    drain();
-    const uint32_t us = cycles_to_us(cycles_now() - t0);
+    const bool drained = drain();
+    const uint32_t us = cycles_to_us(Ruler::now() - t0);
     const uint32_t free_steps = job_steps_per_ms * (us / 1000u);
     const uint32_t busy_pct =
         free_steps == 0u ? 0u
@@ -458,7 +463,8 @@ void echo_window() {
                                                 : 100u - (steps * 100u) / free_steps);
 
     say("DONE echoed=", echoed, " dropped=", dropped, " us=", us,
-        " Bps=", us == 0u ? 0u : (echoed * 1000UL) / (us / 1000UL + 1u), crlf);
+        " Bps=", us == 0u ? 0u : (echoed * 1000UL) / (us / 1000UL + 1u),
+        drained ? "" : " (the ring NOT drained: 200 ms ran out)", crlf);
     say("     steps=", steps, " of ", free_steps, " free -> cpu ", busy_pct,
         "%", crlf);
     say("     rx_overrun=",
@@ -481,11 +487,11 @@ void echo_window() {
 void echo_window_bulk() {
     say("ECHO ", echo_ms, " ", rates[rate_index], " ", engined ? "dma" : "irq",
         " bulk", crlf);
-    drain();
-
-    const uint32_t settle = cycles_now();
-    while (cycles_now() - settle < SysClock::hz / 20u) {
+    if (!drain()) {
+        return;   // a wedged console: nothing to measure through it
     }
+
+    brio::spin_us<Ruler>(50'000);
 
     if (engined) {
         Engined::clear_errors();
@@ -496,8 +502,8 @@ void echo_window_bulk() {
     static uint8_t hop[256];
     uint32_t echoed = 0, dropped = 0, steps = 0;
     const uint32_t window = (SysClock::hz / 1000u) * echo_ms;
-    const uint32_t t0 = cycles_now();
-    while (cycles_now() - t0 < window) {
+    const uint32_t t0 = Ruler::now();
+    while (Ruler::now() - t0 < window) {
         // THE PACE IS THE PORT OWNER'S, and at these rates it has to be
         // brisk: a loop that drained once per whole job batch (~385 us)
         // would leave 115 bytes of 3 Mbaud traffic to pile up behind it.
@@ -520,8 +526,8 @@ void echo_window_bulk() {
         }
         steps += job_batch;
     }
-    drain();
-    const uint32_t us = cycles_to_us(cycles_now() - t0);
+    const bool drained = drain();
+    const uint32_t us = cycles_to_us(Ruler::now() - t0);
     const uint32_t free_steps = job_steps_per_ms * (us / 1000u);
     const uint32_t busy_pct =
         free_steps == 0u ? 0u
@@ -529,7 +535,8 @@ void echo_window_bulk() {
                                                 : 100u - (steps * 100u) / free_steps);
 
     say("DONE echoed=", echoed, " dropped=", dropped, " us=", us,
-        " Bps=", us == 0u ? 0u : (echoed * 1000UL) / (us / 1000UL + 1u), crlf);
+        " Bps=", us == 0u ? 0u : (echoed * 1000UL) / (us / 1000UL + 1u),
+        drained ? "" : " (the ring NOT drained: 200 ms ran out)", crlf);
     say("     steps=", steps, " of ", free_steps, " free -> cpu ", busy_pct,
         "%", crlf);
     say("     rx_overrun=",

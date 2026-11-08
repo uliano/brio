@@ -12,7 +12,7 @@
 // page-buffer command model, the three page operations and their times;
 // c the services on the store's run path (a run per page), each beside
 // the byte path of a store without the run verb, the panic record's time
-// on both; d and u print why they are skipped; e what an EEPROM operation
+// on both; d and u skip, each with its reason; e what an EEPROM operation
 // costs the CPU and its interrupts, a record store's included; f the
 // persistent panic and EEWP across two resets. No g, no m.
 //
@@ -84,6 +84,7 @@
 #include "util/nv_writer.hpp"
 #include "util/persistent_panic.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 
 #include "board.hpp"
 
@@ -116,8 +117,10 @@ struct Token {
     uint8_t context;    ///< its context byte
     uint16_t all_pass;  ///< tallies banked by the tests before this one
     uint16_t all_fail;
+    uint16_t all_skip;
     uint16_t f_pass;    ///< test f's own tallies so far
     uint16_t f_fail;
+    uint8_t f_skip;
 };
 [[gnu::section(".noinit")]] inline Token token;
 
@@ -193,7 +196,19 @@ using ChSnap = EventChannel<5>;
 constexpr uint32_t crystal_hz = SysClock::hz;
 constexpr uint32_t cycles_per_us = crystal_hz / 1'000'000u;
 
-uint32_t cycles_now() { return Watch::read(); }
+/// The cascade read as CLK_PER cycles: the ruler of this suite's spans
+/// and of every one of its waits (util/test_wait.hpp). The waits go on it
+/// rather than on the kernel tick because letter e pauses the tick while
+/// it measures an interrupt's latency and letters c and e measure the
+/// tick itself, while the cascade runs through every letter (quiesce()
+/// restarts it) and keeps counting through a Flash operation's halt. Its
+/// read latches the pair through a software event: the alarm's handler
+/// reads it too, and where that handler keeps a gap of its own (letter
+/// e's alarm_mode 2) the main context leaves the cascade alone.
+struct Ruler {
+    static uint32_t now() { return Watch::read(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
 void stopwatch_init() {
     Watch::init(TcbClock::div1, ChCarry{}, ChSnap{});
@@ -208,8 +223,8 @@ uint32_t stamp_cost() {
     uint32_t best = 0xFFFFFFFFu;
     for (uint8_t i = 0; i < 8; ++i) {
         P::CriticalSection cs;
-        const uint32_t a = cycles_now();
-        const uint32_t b = cycles_now();
+        const uint32_t a = Ruler::now();
+        const uint32_t b = Ruler::now();
         if (b - a < best) best = b - a;
     }
     return best;
@@ -265,12 +280,32 @@ struct SaveAndResetReporter {
 };
 
 // ---- tiny test harness --------------------------------------------------------
+// The suite keeps its own tallies instead of util/testbench.hpp's because
+// letter f carries them across resets and closes the all-key's ALL: line
+// itself after the last one; the lines it prints are that header's
+// grammar (PASS, FAIL, SKIP, "-> N pass, M fail[, K skipped]").
 uint16_t passed = 0, failed = 0;
+uint8_t skipped = 0;
 bool in_all_run = false;
 
 void verdict(const char* name, bool ok) {
     if (ok) ++passed; else ++failed;
     print(serial, "  ", ok ? "PASS" : "FAIL", "  ", name, crlf);
+}
+
+/// A check that did not run, and why: a premise this board or this boot
+/// does not give (a fuse geometry, a fresh FLMAPLOCK, a declined path).
+/// Counted apart from passes and fails, saturating at 255.
+void skip(const char* reason) {
+    if (skipped != UINT8_MAX) ++skipped;
+    print(serial, "  SKIP  ", reason, crlf);
+}
+
+/// "<head>N pass, M fail", then ", K skipped" when K is not zero, the
+/// line left open for its end.
+void tally(const char* head, uint16_t pass, uint16_t fail, uint16_t skips) {
+    print(serial, head, pass, " pass, ", fail, " fail");
+    if (skips != 0u) print(serial, ", ", skips, " skipped");
 }
 #if !defined(NVMCTRL_FLBUSY_bm)
 bool near(int32_t a, int32_t b, int32_t tol) {
@@ -279,10 +314,29 @@ bool near(int32_t a, int32_t b, int32_t tol) {
 }
 #endif
 
-void console_drain() {
-    while (!Serial::tx_idle()) {
-    }
-    delay_us(clock, 2000);
+/// Every queued console byte off the wire, bounded on the cascade
+/// (util/test_wait.hpp): false on a wedged console.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
+
+/// The console drained before a timed window opens: the transmit
+/// interrupt would otherwise run inside it. A wedged console fails the
+/// letter here and the letter returns.
+bool drained_for_window() {
+    if (console_drain()) return true;
+    verdict("the console drained before the timed window", false);
+    return false;
+}
+
+/// The budgets of the waits on an EEPROM operation, in microseconds. The
+/// DA/DB's table 39-7 gives about 10 ms for the longest (an erase), so
+/// 50 ms is five of them; the EA's table 35-8 gives 2 ms typical and no
+/// maximum, and the same 50 ms is twenty-five.
+constexpr uint32_t eeprom_budget_us = 50'000;
+
+/// One EEPROM operation waited out on the ruler: false when it was still
+/// running after eeprom_budget_us.
+bool eeprom_ended() {
+    return brio::wait_until<Ruler>([] { return !Nvm::eeprom_busy(); }, eeprom_budget_us);
 }
 
 void quiesce() {
@@ -388,12 +442,17 @@ void ta_identity() {
     verdict("the temperature calibration is programmed",
             Sigrow::tempsense0() != 0xFFFFu && Sigrow::tempsense1() != 0xFFFFu);
 
-    verdict("the Flash is the header's 128 KB in 512-byte pages",
-            flash_size == 131072u && flash_page_size == 512u);
-    verdict("the EEPROM is 512 bytes at 0x1400",
-            eeprom_size == 512u && eeprom_base == 0x1400u);
-    verdict("the User Row is 32 bytes at 0x1080",
-            userrow_size == 32u && userrow_base == 0x1080u);
+    // The geometry the suite's offsets are written for, from the device
+    // header: checked when the image is built, printed here.
+    static_assert(flash_size == 131072u && flash_page_size == 512u,
+                  "the DA/DB letters are written for 128 KB of Flash in 512-byte pages");
+    static_assert(eeprom_size == 512u && eeprom_base == 0x1400u,
+                  "the DA/DB letters are written for 512 bytes of EEPROM at 0x1400");
+    static_assert(userrow_size == 32u && userrow_base == 0x1080u,
+                  "the DA/DB letters are written for a 32-byte User Row at 0x1080");
+    print(serial, "  the header's geometry: Flash ", flash_size, " bytes in ", flash_page_size,
+          "-byte pages, EEPROM ", eeprom_size, " at ", hex(eeprom_base), ", User Row ",
+          userrow_size, " at ", hex(userrow_base), crlf);
 
     // The fuses, and the geometry they produce.
     print(serial, "  fuses: BOOTSIZE ", FUSE.BOOTSIZE, ", CODESIZE ", FUSE.CODESIZE,
@@ -456,12 +515,10 @@ void ta_identity() {
     // The mobility half needs the field open: skip it then, instead of
     // failing tests whose precondition is a fresh boot.
     if (Nvm::flmap_locked()) {
-        print(serial, "  FLMAPLOCK already set (an earlier run of this letter "
-                      "locked it): the mobility half is skipped - reset or "
-                      "reflash for the full letter", crlf);
+        skip("FLMAPLOCK already set (an earlier run of this letter locked it): the "
+             "mobility half needs a fresh boot - reset or reflash for the full letter");
     } else {
-        verdict("this image was linked with FLMAPLOCK left open",
-                !Nvm::flmap_locked());
+        print(serial, "  FLMAPLOCK open: this image was linked with it left open", crlf);
         bool moved = true;
         for (uint8_t s = 0; s < 4; ++s) {
             if (!Nvm::set_flmap(s) || Nvm::flmap() != s) moved = false;
@@ -555,45 +612,50 @@ void tb_eeprom() {
     Row rows[4];
     uint32_t t0;
 
-    // A bare write (EEWR) on an erased byte.
+    // A bare write (EEWR) on an erased byte. Each operation is waited out
+    // on the ruler (a poll turn is one STATUS read and one cascade read,
+    // a few microseconds against the 70 us of the shortest), the console
+    // drained first and the rows printed after the last.
+    if (!drained_for_window()) {
+        quiesce();
+        return;
+    }
+    bool rows_ended = true;
     (void)Nvm::eeprom_erase(raw_base);
     (void)Nvm::wait_eeprom();
     Nvm::clear_command();
-    t0 = cycles_now();
+    t0 = Ruler::now();
     (void)Nvm::eeprom_write(raw_base, 0x00u);
-    while (Nvm::eeprom_busy()) {
-    }
-    rows[0] = {"byte write (EEWR)", cycles_now() - t0};
+    rows_ended = eeprom_ended() && rows_ended;
+    rows[0] = {"byte write (EEWR)", Ruler::now() - t0};
     Nvm::clear_command();
 
     // Erase and write in one operation.
-    t0 = cycles_now();
+    t0 = Ruler::now();
     (void)Nvm::eeprom_erase_write(raw_base, 0x77u);
-    while (Nvm::eeprom_busy()) {
-    }
-    rows[1] = {"byte erase-and-write (EEERWR)", cycles_now() - t0};
+    rows_ended = eeprom_ended() && rows_ended;
+    rows[1] = {"byte erase-and-write (EEERWR)", Ruler::now() - t0};
     Nvm::clear_command();
 
     // A byte erase.
-    t0 = cycles_now();
+    t0 = Ruler::now();
     (void)Nvm::eeprom_erase(raw_base);
-    while (Nvm::eeprom_busy()) {
-    }
-    rows[2] = {"byte erase (EEBER)", cycles_now() - t0};
+    rows_ended = eeprom_ended() && rows_ended;
+    rows[2] = {"byte erase (EEBER)", Ruler::now() - t0};
     Nvm::clear_command();
 
     // A 32-byte erase: the same command class over 32 times the data.
-    t0 = cycles_now();
+    t0 = Ruler::now();
     (void)Nvm::eeprom_erase(raw_base, EepromErase::bytes32);
-    while (Nvm::eeprom_busy()) {
-    }
-    rows[3] = {"32-byte erase (EEMBER32)", cycles_now() - t0};
+    rows_ended = eeprom_ended() && rows_ended;
+    rows[3] = {"32-byte erase (EEMBER32)", Ruler::now() - t0};
     Nvm::clear_command();
 
     for (const Row& r : rows) {
         print(serial, "  ", r.what, ": ", us_of(r.cycles), " us (", r.cycles,
               " CLK_PER cycles)", crlf);
     }
+    if (!rows_ended) verdict("every timed operation ended within 50 ms", false);
     verdict("a bare byte write is the table's ~70 us",
             near(static_cast<int32_t>(us_of(rows[0].cycles)), 70, 25));
     verdict("erase-and-write is the table's ~10 ms",
@@ -611,13 +673,20 @@ void tb_eeprom() {
     Nvm::clear_command();
     uint32_t turns = 0;
     (void)Nvm::eeprom_erase_write(raw_base, 0x33u);
-    while (Nvm::eeprom_busy()) {
+    const bool turned_out = brio::wait_until<Ruler>([&turns] {
+        if (!Nvm::eeprom_busy()) return true;
         ++turns;
-    }
+        return false;
+    }, eeprom_budget_us);
     Nvm::clear_command();
     print(serial, "  the CPU turned a polling loop ", turns,
           " times while the byte was being written", crlf);
-    verdict("the CPU keeps running through an EEPROM write", turns > 1000u);
+    // A turn is the STATUS read, the 32-bit increment and the ruler's
+    // read of the cascade - about 100 cycles in the release listing, the
+    // read some 60 of them (a software event, the two capture flags, four
+    // loads) - so some 2400 turns fit a 10 ms erase-and-write at 24 MHz;
+    // a halted CPU would turn at most once. 100 sits a decade from both.
+    verdict("the CPU keeps running through an EEPROM write", turned_out && turns > 100u);
 
     // ---- the error field ----
     Nvm::clear_error();
@@ -702,8 +771,9 @@ const char* command_name(NvmCommand c) {
 /// |a - b| <= a / 100: two operation times that the silicon makes
 /// equal, measured within one letter. The bound: both are timed by the
 /// same crystal (50 ppm, common to both, so it cancels), each stamp
-/// pair's own cost is the same in both legs, the wait loop polls every
-/// ~8 cycles (a 0.01 % quantization of a 54 000-cycle erase), and the
+/// pair's own cost is the same in both legs, the wait polls once per
+/// STATUS read and cascade read (about 100 cycles, a 0.2 % quantization of
+/// a 54 000-cycle erase), and the
 /// controller's own timebase moves between two legs a few milliseconds
 /// apart only with the die's temperature, which a letter does not move
 /// by a degree (an internal RC oscillator drifts well under 0.5 % per
@@ -741,12 +811,17 @@ void ta_identity() {
             static_cast<uint16_t>(Sigrow::tempsense0()) != 0xFFFFu &&
                 Sigrow::tempsense1() != 0xFFFFu);
 
-    verdict("the Flash is the header's 64 KB in 128-byte pages",
-            flash_size == 65536u && flash_page_size == 128u);
-    verdict("the EEPROM is 512 bytes in 8-byte pages at 0x1400",
-            eeprom_size == 512u && eeprom_page_size == 8u && eeprom_base == 0x1400u);
-    verdict("the User Row is 64 bytes at 0x1080",
-            userrow_size == 64u && userrow_base == 0x1080u);
+    // The geometry the suite's offsets are written for, from the device
+    // header: checked when the image is built, printed here.
+    static_assert(flash_size == 65536u && flash_page_size == 128u,
+                  "the EA letters are written for 64 KB of Flash in 128-byte pages");
+    static_assert(eeprom_size == 512u && eeprom_page_size == 8u && eeprom_base == 0x1400u,
+                  "the EA letters are written for 512 bytes of EEPROM in 8-byte pages at 0x1400");
+    static_assert(userrow_size == 64u && userrow_base == 0x1080u,
+                  "the EA letters are written for a 64-byte User Row at 0x1080");
+    print(serial, "  the header's geometry: Flash ", flash_size, " bytes in ", flash_page_size,
+          "-byte pages, EEPROM ", eeprom_size, " in ", eeprom_page_size, "-byte pages at ",
+          hex(eeprom_base), ", User Row ", userrow_size, " at ", hex(userrow_base), crlf);
 
     print(serial, "  fuses: BOOTSIZE ", FUSE.BOOTSIZE, ", CODESIZE ", FUSE.CODESIZE,
           ", SYSCFG0 ", hex(FUSE.SYSCFG0), " (EESAVE ",
@@ -781,11 +856,10 @@ void ta_identity() {
     verdict("the C runtime mapped the half .rodata was linked into",
             static_cast<uint32_t>(boot_map & 1u) * 32768u == rodata / 32768u * 32768u);
     if (Nvm::flmap_locked()) {
-        print(serial, "  FLMAPLOCK already set (an earlier run of this letter "
-                      "locked it): the mobility half is skipped - reset or "
-                      "reflash for the full letter", crlf);
+        skip("FLMAPLOCK already set (an earlier run of this letter locked it): the "
+             "mobility half needs a fresh boot - reset or reflash for the full letter");
     } else {
-        verdict("this image was linked with FLMAPLOCK left open", !Nvm::flmap_locked());
+        print(serial, "  FLMAPLOCK open: this image was linked with it left open", crlf);
         // A plain store, no key: FLMAP 1 -> 3, which maps the SAME half
         // on 64 KB (11.5.2), so .rodata stays readable whatever happens.
         const uint8_t before = NVMCTRL.CTRLB;
@@ -872,11 +946,11 @@ void tb_eeprom() {
                 Nvm::eeprom_read(static_cast<uint16_t>(page_a + 4)) == 0x44u);
     // The AVR DA/DB order: the command first, then the store.
     (void)Nvm::eeprom_open();
-    uint32_t t0 = cycles_now();
+    uint32_t t0 = Ruler::now();
     Nvm::eeprom_commit(EepromOp::write);
     const bool empty_ran = Nvm::eeprom_busy();
     (void)Nvm::wait_eeprom();
-    const uint32_t empty_cycles = cycles_now() - t0;
+    const uint32_t empty_cycles = Ruler::now() - t0;
     Nvm::eeprom_load(static_cast<uint16_t>(page_a + 5), 0x55u);
     const bool started_late = Nvm::eeprom_busy();
     (void)Nvm::wait_eeprom();
@@ -1012,17 +1086,22 @@ void tb_eeprom() {
             !Nvm::eeprom_write_block(static_cast<uint16_t>(eeprom_size - 4), block, 8));
 
     // ---- the times (table 35-8: 2 ms typical for a byte or page erase
-    // and for a write, no maximum; an erase-and-write is not listed) ----
+    // and for a write, no maximum; an erase-and-write is not listed),
+    // the console drained first and the legs printed after the last ----
+    if (!drained_for_window()) {
+        quiesce();
+        return;
+    }
     const uint32_t cost = stamp_cost();
     uint8_t zeros[8] = {};
     struct Leg { const char* what; uint32_t cycles; };
     Leg legs[6];
+    bool legs_ended = true;
     auto timed = [&](const char* what, bool started) -> Leg {
-        const uint32_t start = cycles_now();
-        (void)started;
-        while (Nvm::eeprom_busy()) {
-        }
-        return Leg{what, cycles_now() - start};
+        const uint32_t start = Ruler::now();
+        (void)started;   // the leg's figure judges it: a refused call times nothing
+        legs_ended = eeprom_ended() && legs_ended;
+        return Leg{what, Ruler::now() - start};
     };
     // Each leg: the engine's call, then the wait; the call's own cycles
     // (tens, measured below) are not in the figure.
@@ -1040,6 +1119,7 @@ void tb_eeprom() {
         print(serial, "  ", l.what, ": ", us_of(l.cycles), " us (", l.cycles,
               " CLK_PER cycles)", crlf);
     }
+    if (!legs_ended) verdict("every timed operation ended within 50 ms", false);
     verdict("eight bytes cost what one does: write",
             same_time(legs[0].cycles, legs[4].cycles));
     verdict("eight bytes cost what one does: erase",
@@ -1062,30 +1142,30 @@ void tb_eeprom() {
     uint32_t clear_cost = 0, load_cost = 0;
     {
         P::CriticalSection cs;
-        a = cycles_now();
+        a = Ruler::now();
         (void)Nvm::eeprom_erase_write(page_b, 0x11u);
-        call1 = cycles_now() - a - cost;
+        call1 = Ruler::now() - a - cost;
     }
     (void)Nvm::wait_eeprom();
     {
         P::CriticalSection cs;
-        a = cycles_now();
+        a = Ruler::now();
         (void)Nvm::eeprom_run(page_b, pattern, 8, EepromOp::erase_write);
-        call8 = cycles_now() - a - cost;
+        call8 = Ruler::now() - a - cost;
     }
     (void)Nvm::wait_eeprom();
     {
         P::CriticalSection cs;
-        a = cycles_now();
+        a = Ruler::now();
         (void)Nvm::eeprom_store_run(page_b, pattern, 8);
-        call_same = cycles_now() - a - cost;
+        call_same = Ruler::now() - a - cost;
     }
     const uint8_t one = 0x11u;
     {
         P::CriticalSection cs;
-        a = cycles_now();
+        a = Ruler::now();
         (void)EepromStore::write(page_b, one);
-        call_store = cycles_now() - a - cost;
+        call_store = Ruler::now() - a - cost;
     }
     (void)Nvm::wait_eeprom();
     // The NVM accesses inside those calls, one at a time: the buffer
@@ -1094,12 +1174,12 @@ void tb_eeprom() {
     // set, plus whatever the bus adds).
     {
         P::CriticalSection cs;
-        a = cycles_now();
+        a = Ruler::now();
         Nvm::issue(NvmCommand::eeprom_buffer_clear);
-        clear_cost = cycles_now() - a - cost;
-        a = cycles_now();
+        clear_cost = Ruler::now() - a - cost;
+        a = Ruler::now();
         Nvm::eeprom_load(page_b, 0xFFu);
-        load_cost = cycles_now() - a - cost;
+        load_cost = Ruler::now() - a - cost;
     }
     Nvm::issue(NvmCommand::eeprom_buffer_clear);
     Nvm::clear_command();
@@ -1125,6 +1205,26 @@ void tb_eeprom() {
 #endif // the EA's letters a and b
 
 // ---- c the record, the writer AO, the endurance policy ---------------------------
+
+/// One turn of the loop the kernel would run for writer W and the
+/// requester: each queue served once. True once the requester has its
+/// reply, so that a wait can end on it.
+template <typename W>
+bool serve_turn() {
+    if (const std::optional<typename W::Event> e = W::queue.pop()) {
+        W::dispatch(*e);
+    }
+    if (const std::optional<Requester::Event> r = Requester::queue.pop()) {
+        Requester::dispatch(*r);
+    }
+    return Requester::replies != 0;
+}
+
+/// The longest a writer's whole request may take: eight byte operations
+/// of the DA/DB's 10 ms each (table 39-7) are 80 ms, and 500 ms is six of
+/// them; a request answered without an operation takes microseconds.
+constexpr uint32_t request_budget_us = 500'000;
+
 void tc_services() {
     print(serial, "c the typed record, its endurance policy and the writer AO", crlf);
     quiesce();
@@ -1189,7 +1289,7 @@ void tc_services() {
     nvm_interrupts = 0;
     sei();
 
-    const uint32_t t_start = cycles_now();
+    const uint32_t t_start = Ruler::now();
     const uint32_t tick_start = P::now();
     uint32_t loop_turns = 0;
 #if defined(NVMCTRL_FLBUSY_bm)
@@ -1201,22 +1301,18 @@ void tc_services() {
     // The main loop the kernel would be running: it must keep turning
     // for the whole transfer, and every byte must arrive on an
     // interrupt, not on a wait inside a dispatch.
-    for (uint32_t guard = 0; guard < 20'000'000u && Requester::replies == 0;
-         ++guard) {
+    // The wait ends on the reply or on the budget; the verdicts below
+    // judge the reply, so the wait's own answer is not needed.
+    (void)brio::wait_until<Ruler>([&] {
         ++loop_turns;
 #if defined(NVMCTRL_FLBUSY_bm)
-        const uint32_t turn_now = cycles_now();
+        const uint32_t turn_now = Ruler::now();
         if (turn_now - turn_last > turn_gap) turn_gap = turn_now - turn_last;
         turn_last = turn_now;
 #endif
-        if (const std::optional<Writer::Event> e = Writer::queue.pop()) {
-            Writer::dispatch(*e);
-        }
-        if (const std::optional<Requester::Event> r = Requester::queue.pop()) {
-            Requester::dispatch(*r);
-        }
-    }
-    const uint32_t elapsed = cycles_now() - t_start;
+        return serve_turn<Writer>();
+    }, request_budget_us);
+    const uint32_t elapsed = Ruler::now() - t_start;
     const uint32_t ticks = P::now() - tick_start;
 
     print(serial, "  8 bytes in ", us_of(elapsed) / 1000u, " ms, ", nvm_interrupts,
@@ -1241,8 +1337,13 @@ void tc_services() {
             nvm_interrupts == 1);
 #endif
 #if !defined(NVMCTRL_FLBUSY_bm)
+    // Eight byte operations of about 10 ms each are 1.9 M cycles; a turn
+    // (the two queues served, the counter, the ruler's read) is under 250
+    // cycles in the release listing: over 7600 turns. A writer that waited
+    // inside its dispatch would turn about once a byte, a dozen times in
+    // all; 1000 sits between.
     verdict("the main loop kept turning throughout (no busy wait anywhere)",
-            loop_turns > 10000u);
+            loop_turns > 1000u);
     verdict("the 1024 Hz timebase never stopped", ticks > 50u);
 #else
     // A wait for an operation anywhere in a turn would show as a gap of
@@ -1269,14 +1370,8 @@ void tc_services() {
     nvm_interrupts = 0;
     post<Writer>(NvWrite{writer_base, lend<Lease::reply>(payload), sizeof payload,
                          reply_to<Requester, NvDone>()});
-    for (uint32_t guard = 0; guard < 100000u && Requester::replies == 0; ++guard) {
-        if (const std::optional<Writer::Event> e = Writer::queue.pop()) {
-            Writer::dispatch(*e);
-        }
-        if (const std::optional<Requester::Event> r = Requester::queue.pop()) {
-            Requester::dispatch(*r);
-        }
-    }
+    // The verdict below judges the reply; the wait only bounds it.
+    (void)brio::wait_until<Ruler>([] { return serve_turn<Writer>(); }, request_budget_us);
     verdict("an unchanged run is answered without a single write",
             Requester::replies == 1 && Requester::last.written == 0 &&
                 nvm_interrupts == 0);
@@ -1285,14 +1380,8 @@ void tc_services() {
     Requester::init();
     post<Writer>(NvWrite{static_cast<uint16_t>(eeprom_size - 2), lend<Lease::reply>(payload), 8,
                          reply_to<Requester, NvDone>()});
-    for (uint32_t guard = 0; guard < 100000u && Requester::replies == 0; ++guard) {
-        if (const std::optional<Writer::Event> e = Writer::queue.pop()) {
-            Writer::dispatch(*e);
-        }
-        if (const std::optional<Requester::Event> r = Requester::queue.pop()) {
-            Requester::dispatch(*r);
-        }
-    }
+    // The verdict below judges the reply; the wait only bounds it.
+    (void)brio::wait_until<Ruler>([] { return serve_turn<Writer>(); }, request_budget_us);
     verdict("a request past the end of the store is refused with nv_bad_range",
             Requester::replies == 1 && Requester::last.status == nv_bad_range);
 #if defined(NVMCTRL_FLBUSY_bm)
@@ -1308,18 +1397,12 @@ void tc_services() {
     ByteWriter::init();
     ready_target = 1;
     nvm_interrupts = 0;
-    const uint32_t byte_start = cycles_now();
+    const uint32_t byte_start = Ruler::now();
     post<ByteWriter>(NvWrite{writer_base, lend<Lease::reply>(payload), sizeof payload,
                              reply_to<Requester, NvDone>()});
-    for (uint32_t guard = 0; guard < 20'000'000u && Requester::replies == 0; ++guard) {
-        if (const std::optional<ByteWriter::Event> e = ByteWriter::queue.pop()) {
-            ByteWriter::dispatch(*e);
-        }
-        if (const std::optional<Requester::Event> r = Requester::queue.pop()) {
-            Requester::dispatch(*r);
-        }
-    }
-    const uint32_t byte_elapsed = cycles_now() - byte_start;
+    // The verdict below judges the reply; the wait only bounds it.
+    (void)brio::wait_until<Ruler>([] { return serve_turn<ByteWriter>(); }, request_budget_us);
+    const uint32_t byte_elapsed = Ruler::now() - byte_start;
     ready_target = 0;
     bool byte_bytes = Requester::replies == 1 && Requester::last.status == nv_ok &&
                       Requester::last.written == 8;
@@ -1351,12 +1434,12 @@ void tc_services() {
     {
         const uint32_t ruler = stamp_cost();
         P::CriticalSection cs;
-        const uint32_t c0 = cycles_now();
+        const uint32_t c0 = Ruler::now();
         const NvRunScan r = nv_scan_run<Store>(writer_base, payload, 0, sizeof payload);
-        const uint32_t c1 = cycles_now();
+        const uint32_t c1 = Ruler::now();
         cost_ok = Store::write_run(static_cast<uint16_t>(writer_base + r.from),
                                    payload + r.from, r.len);
-        const uint32_t c2 = cycles_now();
+        const uint32_t c2 = Ruler::now();
         t_scan = c1 - c0 - ruler;
         t_start_run = c2 - c1 - ruler;
         cost_ok = cost_ok && r.from == 0 && r.len == 8 && r.changed == 8;
@@ -1377,13 +1460,13 @@ void tc_services() {
     bool panic_back = false, panic_byte_back = false;
     {
         P::CriticalSection cs;
-        uint32_t t0 = cycles_now();
+        uint32_t t0 = Ruler::now();
         (void)Nvm::eeprom_erase(0, EepromErase::bytes8);
         (void)Nvm::wait_eeprom();
-        t_ref = cycles_now() - t0;
-        t0 = cycles_now();
+        t_ref = Ruler::now() - t0;
+        t0 = Ruler::now();
         Panic::report(PanicCode::assert_failed, 0x3C);
-        t_run = cycles_now() - t0;
+        t_run = Ruler::now() - t0;
     }
     {
         const std::optional<PanicRecord> r = Panic::peek();
@@ -1394,9 +1477,9 @@ void tc_services() {
         P::CriticalSection cs;
         (void)Nvm::eeprom_erase(0, EepromErase::bytes8);
         (void)Nvm::wait_eeprom();
-        const uint32_t t0 = cycles_now();
+        const uint32_t t0 = Ruler::now();
         BytePanic::report(PanicCode::assert_failed, 0x3C);
-        t_byte = cycles_now() - t0;
+        t_byte = Ruler::now() - t0;
     }
     {
         const std::optional<PanicRecord> r = Panic::take();
@@ -1432,9 +1515,9 @@ void td_flash() {
                   "multi-page spans", crlf);
     quiesce();
     if (!scratch_usable()) {
-        print(serial, "  no writable scratch region under these fuses "
-                      "(BOOTSIZE ", FUSE.BOOTSIZE, "): SKIPPED. Write the bench "
-                      "geometry with bench.py fuses A bootsize=128 codesize=0", crlf);
+        skip("no writable scratch region under these fuses");
+        print(serial, "  (BOOTSIZE ", FUSE.BOOTSIZE, "; write the bench geometry with "
+                      "brio fuses <board> bootsize=128 codesize=0)", crlf);
         return;
     }
     const uint32_t page = scratch_page(scratch_page_single);
@@ -1545,7 +1628,7 @@ void te_stall() {
     print(serial, "e what a Flash operation costs the rest of the system", crlf);
     quiesce();
     if (!scratch_usable()) {
-        print(serial, "  no writable scratch region under these fuses: SKIPPED", crlf);
+        skip("no writable scratch region under these fuses");
         return;
     }
     const uint32_t page = scratch_page(scratch_page_time);
@@ -1557,11 +1640,11 @@ void te_stall() {
     // A software counter only advances while the CPU runs, so the
     // difference between the two is the CPU time that was LOST.
     volatile uint32_t spin = 0;
-    const uint32_t reference_start = cycles_now();
+    const uint32_t reference_start = Ruler::now();
     for (uint32_t i = 0; i < 20000u; ++i) {
         spin = spin + 1;
     }
-    const uint32_t reference = cycles_now() - reference_start - cost;
+    const uint32_t reference = Ruler::now() - reference_start - cost;
     const uint32_t cycles_per_turn = reference / 20000u;
     print(serial, "  two back-to-back stamps cost ", cost,
           " CLK_PER cycles (subtracted below); the reference loop turns once "
@@ -1570,15 +1653,20 @@ void te_stall() {
     struct Leg { const char* what; uint32_t wall; uint32_t ticks; };
     Leg legs[2];
 
-    uint32_t t0 = cycles_now();
+    if (!drained_for_window()) {
+        (void)Nvm::erase(page);
+        quiesce();
+        return;
+    }
+    uint32_t t0 = Ruler::now();
     uint32_t k0 = P::now();
     (void)Nvm::write_word(page, 0x00FFu);
-    legs[0] = {"word write (FLWR)", cycles_now() - t0 - cost, P::now() - k0};
+    legs[0] = {"word write (FLWR)", Ruler::now() - t0 - cost, P::now() - k0};
 
-    t0 = cycles_now();
+    t0 = Ruler::now();
     k0 = P::now();
     (void)Nvm::erase(page);
-    legs[1] = {"page erase (FLPER)", cycles_now() - t0 - cost, P::now() - k0};
+    legs[1] = {"page erase (FLPER)", Ruler::now() - t0 - cost, P::now() - k0};
 
     for (const Leg& l : legs) {
         print(serial, "  ", l.what, ": ", us_of(l.wall), " us wall (", l.wall,
@@ -1614,24 +1702,35 @@ void te_stall() {
 
     // Interrupt latency across an operation. The alarm is due at a known
     // cycle; the ISR stamps the cascade itself, so what is measured is
-    // how long the interrupt had to wait.
+    // how long the interrupt had to wait. The console is drained first:
+    // its transmit interrupt inside the window would be the latency.
+    if (!drained_for_window()) {
+        (void)Nvm::erase(page);
+        quiesce();
+        return;
+    }
     Ticker::pause();
     alarm_mode = 1;
+    constexpr uint16_t one_ms = static_cast<uint16_t>(cycles_per_us * 1000u);
     (void)Alarm::init({.mode = TcbMode::periodic,
                        .clock = TcbClock::div1,
-                       .compare = 24000});          // 1 ms
+                       .compare = one_ms});
     Alarm::enable_capt_interrupt(true);
 
+    // Each wait for the alarm: due 1 ms after its arming, held by a page
+    // erase of the table's ~10 ms at most; 50 ms is five erases.
+    constexpr uint32_t alarm_budget_us = 50'000;
+    bool alarms_ran = true;
     uint32_t quiet_worst = 0, during_worst = 0;
     for (uint8_t i = 0; i < 4; ++i) {
         cli();
         alarm_ran = false;
         Alarm::count(0);
         Alarm::clear_capt();
-        uint32_t due = cycles_now() + 24000u;
+        uint32_t due = Ruler::now() + one_ms;
         sei();
-        while (!alarm_ran) {
-        }
+        alarms_ran = brio::wait_until<Ruler>([] { return alarm_ran; }, alarm_budget_us) &&
+                     alarms_ran;
         uint32_t late = alarm_stamp - due;
         if (late > quiet_worst) quiet_worst = late;
 
@@ -1639,13 +1738,13 @@ void te_stall() {
         alarm_ran = false;
         Alarm::count(0);
         Alarm::clear_capt();
-        due = cycles_now() + 24000u;
+        due = Ruler::now() + one_ms;
         sei();
         // A different page each time: the wear budget in nvm.md counts
         // erase cycles per page, and four on one page would dominate it.
         (void)Nvm::erase(scratch_page(scratch_page_latency + i));
-        while (!alarm_ran) {
-        }
+        alarms_ran = brio::wait_until<Ruler>([] { return alarm_ran; }, alarm_budget_us) &&
+                     alarms_ran;
         late = alarm_stamp - due;
         if (late > during_worst) during_worst = late;
     }
@@ -1658,9 +1757,14 @@ void te_stall() {
           " CLK_PER cycles on a quiet CPU, ", during_worst, " (", us_of(during_worst),
           " us) with a page erase in the way", crlf);
     verdict("an interrupt is answered in a handful of cycles when nothing "
-            "is happening", quiet_worst < 100u);
+            "is happening", alarms_ran && quiet_worst < 100u);
+    // The alarm falls due 1 ms after its arming and the erase that follows
+    // holds the CPU for its whole length (the erase leg above, 7.5 ms at
+    // the least by its verdict), so the alarm waits the erase less 1 ms:
+    // more than 0.86 of it; half of the erase timed above leaves the rest
+    // to the difference between one page's erase and another's.
     verdict("a page erase delays it by most of the erase time",
-            during_worst > 24000u * 100u);
+            alarms_ran && during_worst > legs[1].wall / 2u);
     print(serial, "  this is the price of writing Flash from a running system: "
                   "the whole machine stops, interrupts included.", crlf);
 
@@ -1672,9 +1776,9 @@ void te_stall() {
 
 // ---- d Flash: declined on this part ------------------------------------------------
 void td_flash() {
-    print(serial, "d Flash: SKIPPED - flash self-programming is declined on the "
-                  "AVR EA (the part keeps its small values in its EEPROM; "
-                  "docs/avrxt/nvm.md)", crlf);
+    print(serial, "d Flash", crlf);
+    skip("flash self-programming is declined on the AVR EA (the part keeps its "
+         "small values in its EEPROM; docs/avrxt/nvm.md)");
 }
 
 // ---- e what an EEPROM operation costs the rest of the system -----------------------
@@ -1687,26 +1791,30 @@ void te_stall() {
     // The CPU runs while the EEPROM is programmed, as long as it touches
     // no EEPROM: a loop that reads STATUS alone keeps turning.
     uint32_t turns = 0;
-    uint32_t t0 = cycles_now();
+    uint32_t t0 = Ruler::now();
     (void)Nvm::eeprom_erase_write(page_e, 0x33u);
-    while (Nvm::eeprom_busy()) {
+    const bool op_ended = brio::wait_until<Ruler>([&turns] {
+        if (!Nvm::eeprom_busy()) return true;
         ++turns;
-    }
-    const uint32_t op = cycles_now() - t0;
+        return false;
+    }, eeprom_budget_us);
+    const uint32_t op = Ruler::now() - t0;
     print(serial, "  an erase-and-write of ", us_of(op), " us: a loop polling STATUS "
                   "turned ", turns, " times", crlf);
-    // The loop (STATUS load, test, a 32-bit increment, the branch) is
-    // about ten cycles: some 10 000 turns in a 107 000-cycle operation; a
-    // halted CPU would turn at most once. 1000 sits a decade from both.
-    verdict("the CPU keeps running through an EEPROM operation", turns > 1000u);
+    // A turn is the STATUS read, the 32-bit increment and the ruler's
+    // read of the cascade - about 100 cycles in the release listing, the
+    // read some 60 of them (a software event, the two capture flags, four
+    // loads) - so some 1000 turns fit a 107 000-cycle operation; a halted
+    // CPU would turn at most once. 100 sits a decade from both.
+    verdict("the CPU keeps running through an EEPROM operation", op_ended && turns > 100u);
 
     // A READ of the EEPROM during an operation is a bus wait (11.3.2.1):
     // the instruction is suspended until the operation ends.
-    t0 = cycles_now();
+    t0 = Ruler::now();
     (void)Nvm::eeprom_erase_write(page_e, 0x44u);
-    const uint32_t issued = cycles_now();
+    const uint32_t issued = Ruler::now();
     const uint8_t seen = Nvm::eeprom_read(static_cast<uint16_t>(page_e + 1));
-    const uint32_t read_done = cycles_now();
+    const uint32_t read_done = Ruler::now();
     const bool idle_after_read = !Nvm::eeprom_busy();
     const uint32_t read_stall = read_done - issued - cost;
     const uint32_t rest = op - (issued - t0);
@@ -1716,11 +1824,12 @@ void te_stall() {
     uint32_t after_worst = 0;
     for (uint8_t i = 0; i < 4; ++i) {
         (void)Nvm::eeprom_erase_write(page_e, static_cast<uint8_t>(0x60u + i));
-        while (Nvm::eeprom_busy()) {
-        }
-        const uint32_t c0 = cycles_now();
+        // A run past the budget is caught by the read below: it then
+        // waits the operation out (11.3.2.1) and prints as a long stall.
+        (void)eeprom_ended();
+        const uint32_t c0 = Ruler::now();
         (void)Nvm::eeprom_read(static_cast<uint16_t>(page_e + 1));
-        const uint32_t took = cycles_now() - c0 - cost;
+        const uint32_t took = Ruler::now() - c0 - cost;
         if (took > after_worst) after_worst = took;
     }
     print(serial, "  a read right after EEBUSY drops took ", after_worst,
@@ -1733,11 +1842,11 @@ void te_stall() {
 
     // A buffer LOAD during an operation halts the CPU likewise
     // (11.3.2.2's note). The load is a stray afterwards: dropped.
-    t0 = cycles_now();
+    t0 = Ruler::now();
     (void)Nvm::eeprom_erase_write(page_e, 0x55u);
-    const uint32_t issued2 = cycles_now();
+    const uint32_t issued2 = Ruler::now();
     Nvm::eeprom_load(static_cast<uint16_t>(page_e + 2), 0xFFu);
-    const uint32_t load_done = cycles_now();
+    const uint32_t load_done = Ruler::now();
     const bool idle_after_load = !Nvm::eeprom_busy();
     const uint32_t load_stall = load_done - issued2 - cost;
     const uint32_t rest2 = op - (issued2 - t0);
@@ -1749,7 +1858,14 @@ void te_stall() {
 
     // And an interrupt waits with the instruction. The alarm falls due
     // one millisecond into an erase-and-write; the ISR stamps the cascade
-    // itself, so what is measured is how late it ran.
+    // itself, so what is measured is how late it ran. The console is
+    // drained first: its transmit interrupt inside the window would be
+    // the latency.
+    if (!drained_for_window()) {
+        (void)erase_page(page_e);
+        quiesce();
+        return;
+    }
     Ticker::pause();
     alarm_mode = 1;
     constexpr uint16_t one_ms = static_cast<uint16_t>(cycles_per_us * 1000u);
@@ -1757,6 +1873,10 @@ void te_stall() {
                        .clock = TcbClock::div1,
                        .compare = one_ms});
     Alarm::enable_capt_interrupt(true);
+    // Each wait for the alarm: due 1 ms after its arming, held at most by
+    // the rest of an erase-and-write (letter b: about 5 ms); 50 ms is ten.
+    constexpr uint32_t alarm_budget_us = 50'000;
+    bool alarms_ran = true;
     uint32_t quiet_worst = 0, polling_worst = 0, reading_worst = 0;
     struct Probe { uint32_t late; uint32_t spins; uint32_t gap; bool busy; };
     Probe probes[3][3] = {};
@@ -1766,7 +1886,7 @@ void te_stall() {
             alarm_ran = false;
             Alarm::count(0);
             Alarm::clear_capt();
-            const uint32_t due = cycles_now() + one_ms;
+            const uint32_t due = Ruler::now() + one_ms;
             sei();
             uint32_t last = 0, gap = 0, spins = 0;
             if (leg != 0) {
@@ -1775,13 +1895,15 @@ void te_stall() {
                     (void)Nvm::eeprom_read(static_cast<uint16_t>(page_e + 1));
                 }
             }
-            last = cycles_now();
-            while (!alarm_ran) {
-                const uint32_t t = cycles_now();
+            last = Ruler::now();
+            alarms_ran = brio::wait_until<Ruler>([&] {
+                if (alarm_ran) return true;
+                const uint32_t t = Ruler::now();
                 if (t - last > gap) gap = t - last;
                 last = t;
                 ++spins;
-            }
+                return false;
+            }, alarm_budget_us) && alarms_ran;
             // Taken now: the alarm is periodic and stamps again every
             // millisecond while the operation below is waited out.
             const uint32_t late = alarm_stamp - due;
@@ -1810,13 +1932,13 @@ void te_stall() {
     // Quiet: the response (5 cycles), the prologue's pushes before the
     // stamp and the instruction in flight - the DA/DB letter's own bound.
     verdict("an interrupt is answered in a handful of cycles when nothing "
-            "is happening", quiet_worst < 100u);
+            "is happening", alarms_ran && quiet_worst < 100u);
     verdict("and just as fast while an EEPROM operation runs, the CPU free",
-            polling_worst < 100u && ran_during);
+            alarms_ran && polling_worst < 100u && ran_during);
     // Reading: the alarm (1 ms in) waits for the operation's end, some
     // 4.4 ms on: more than half the operation is a floor with room.
     verdict("but a read of the EEPROM holds it for the rest of the operation",
-            reading_worst > op / 2u);
+            alarms_ran && reading_worst > op / 2u);
 
     // ---- a record store, on each path, under a 1 ms alarm ----
     // The record straddles two pages. On the store's run path it waits
@@ -1825,8 +1947,18 @@ void te_stall() {
     // one is being written, and that read holds the CPU and the alarm
     // to the operation's end (above). The ISR keeps the longest gap
     // between two of its runs; the main context reads no stopwatch
-    // meanwhile (the cascade's latch is shared with the ISR).
-    const auto worst_gap = [](bool run_path, uint8_t seed) -> uint32_t {
+    // meanwhile (the cascade's latch is shared with the ISR), so its two
+    // waits for the alarm's runs are bounded on the delay verb instead
+    // of the ruler: at least 10 us a turn, 2000 turns, 20 ms - ten
+    // periods of the alarm, which runs every millisecond when it runs.
+    const auto alarm_runs_reach = [](uint8_t from, uint8_t n) {
+        for (uint16_t turn = 0; turn < 2000u; ++turn) {
+            if (static_cast<uint8_t>(alarm_runs - from) >= n || alarm_runs == 0xFFu) return true;
+            delay_us(clock, 10);
+        }
+        return static_cast<uint8_t>(alarm_runs - from) >= n || alarm_runs == 0xFFu;
+    };
+    const auto worst_gap = [&alarm_runs_reach](bool run_path, uint8_t seed) -> uint32_t {
         Wide8 v{};
         for (uint8_t i = 0; i < sizeof v.b; ++i) {
             v.b[i] = static_cast<uint8_t>(seed + 17u * i);
@@ -1842,18 +1974,16 @@ void te_stall() {
         Alarm::count(0);
         Alarm::clear_capt();
         sei();
-        while (alarm_runs < 2) {
-        }
+        const bool armed = alarm_runs_reach(0, 2);
         const uint16_t written = run_path ? RunRecordE::store(v) : ByteRecordE::store(v);
         const uint8_t after = alarm_runs;
-        while (static_cast<uint8_t>(alarm_runs - after) < 2u && alarm_runs != 0xFFu) {
-        }
+        const bool ran_after = alarm_runs_reach(after, 2);
         cli();
         alarm_mode = 0;
         const uint32_t gap = alarm_gap;
         sei();
         const std::optional<Wide8> back = RunRecordE::load();
-        const bool ok = written == nv_record_size<Wide8> && back &&
+        const bool ok = armed && ran_after && written == nv_record_size<Wide8> && back &&
                         back->b[7] == static_cast<uint8_t>(seed + 17u * 7u);
         return ok ? gap : 0u;
     };
@@ -1862,7 +1992,14 @@ void te_stall() {
                        .clock = TcbClock::div1,
                        .compare = one_ms});
     Alarm::enable_capt_interrupt(true);
-    console_drain();
+    if (!drained_for_window()) {
+        Alarm::enable_capt_interrupt(false);
+        Alarm::disable();
+        Ticker::resume();
+        (void)erase_page(page_e);
+        quiesce();
+        return;
+    }
     const uint32_t gap_run = worst_gap(true, 0x21u);
     const uint32_t gap_byte = worst_gap(false, 0x43u);
     Alarm::enable_capt_interrupt(false);
@@ -1880,7 +2017,7 @@ void te_stall() {
     // a lateness is under 100 cycles with the CPU free (the verdicts
     // above), so the gap stays under period + 100 when nothing holds
     // the alarm; 200 is the bound. A zero gap is a record that did not
-    // store or load back.
+    // store or load back, or an alarm that stopped running.
     verdict("the run path's record store holds no interrupt",
             gap_run >= one_ms && gap_run < one_ms + 200u);
     // On the byte path each read of the next byte holds the alarm for
@@ -1909,6 +2046,7 @@ void bank(uint8_t phase) {
     token.in_all = in_all_run ? 1 : 0;
     token.f_pass = passed;
     token.f_fail = failed;
+    token.f_skip = skipped;
 }
 
 void report_boot() {
@@ -1945,13 +2083,16 @@ void tf_protections() {
     bank(1);
     print(serial, "  panicking into a reporter that stores the record in the "
                   "EEPROM and resets (the board will reboot) ...", crlf);
-    console_drain();
+    // The line above is the reset's announcement: a wedged console loses
+    // it and nothing else, and the reset is the leg either way.
+    (void)console_drain();
     panic<P, SaveAndResetReporter>(PanicCode::assert_failed, 0x5A);
 }
 
 void tf_resume() {
     passed = token.f_pass;
     failed = token.f_fail;
+    skipped = token.f_skip;
     in_all_run = token.in_all != 0;
     const uint8_t phase = token.phase;
 #if !defined(NVMCTRL_FLBUSY_bm)
@@ -1980,8 +2121,7 @@ void tf_resume() {
         // refuse a write to the protected section before the silicon
         // sees it.
         if (!scratch_usable()) {
-            print(serial, "  no writable scratch region under these fuses: the "
-                          "protection legs are SKIPPED", crlf);
+            skip("no writable scratch region under these fuses: the protection legs");
         } else {
             const uint32_t page = scratch_page(scratch_page_single);
             verdict("a scratch write works before the protection is set",
@@ -2043,7 +2183,9 @@ void tf_resume() {
         bank(2);
         print(serial, "  resetting to prove the protection is cleared by a "
                       "reset ...", crlf);
-        console_drain();
+        // The line above is the reset's announcement: a wedged console loses
+        // it and nothing else, and the reset is the leg either way.
+        (void)console_drain();
         Reset::software();
     }
 
@@ -2082,7 +2224,9 @@ void tf_resume() {
                 Nvm::flash_read_word(0) != 0xFFFFu);
         bank(3);
         print(serial, "  resetting to release BOOTRP ...", crlf);
-        console_drain();
+        // The line above is the reset's announcement: a wedged console loses
+        // it and nothing else, and the reset is the leg either way.
+        (void)console_drain();
         Reset::software();
     }
 
@@ -2098,11 +2242,13 @@ void tf_resume() {
 #endif
     token.magic = 0;
     token.phase = 0;
-    print(serial, "  -> ", passed, " pass, ", failed, " fail", crlf, crlf);
+    tally("  -> ", passed, failed, skipped);
+    print(serial, crlf, crlf);
     if (in_all_run) {
-        print(serial, "ALL: ", static_cast<uint16_t>(token.all_pass + passed),
-              " pass, ", static_cast<uint16_t>(token.all_fail + failed), " fail",
-              crlf);
+        tally("ALL: ", static_cast<uint16_t>(token.all_pass + passed),
+              static_cast<uint16_t>(token.all_fail + failed),
+              static_cast<uint16_t>(token.all_skip + skipped));
+        print(serial, crlf);
     }
 }
 
@@ -2122,7 +2268,9 @@ void tu_userrow() {
         print(serial, " ", hex(saved[i]));
     }
     print(serial, crlf);
-    console_drain();
+    // The row printed whole before its erase: a wedged console loses the
+    // copy, which the row written back below makes unneeded on success.
+    (void)console_drain();
 
     // A write into a byte that is already erased needs no erase: Flash
     // writes can always clear bits.
@@ -2177,14 +2325,14 @@ void tg_appdata() {
           " -> APPCODE ends at ", append, ", APPDATA ",
           has_appdata ? "exists" : "does not exist", crlf);
     if (!has_appdata) {
-        print(serial, "  SKIPPED. This test needs an APPDATA section ABOVE the "
-                      "image. With .rodata loading at ", Nvm::rodata_load_start(),
+        skip("no APPDATA section above the image under these fuses");
+        print(serial, "  With .rodata loading at ", Nvm::rodata_load_start(),
               " .. ", Nvm::rodata_load_end(), ", write", crlf,
-              "    bench.py fuses A bootsize=128 codesize=223", crlf,
+              "    brio fuses <board> bootsize=128 codesize=223", crlf,
               "  (APPEND = 223 * 512 = 114176: APPCODE ends mid-way through the "
               "last free page, so a 2-page erase block straddles the boundary "
               "- which is what the erratum needs), reset the board and run g "
-              "again. Restore with bench.py fuses A codesize=0.", crlf);
+              "again. Restore with brio fuses <board> codesize=0.", crlf);
         return;
     }
     verdict("an address above APPEND is APPDATA",
@@ -2207,8 +2355,7 @@ void tg_appdata() {
     verdict("both pages are free Flash, above the image",
             lower > Nvm::rodata_load_end());
     if (!straddles || lower <= Nvm::rodata_load_end()) {
-        print(serial, "  the geometry does not place a straddling block over free "
-                      "Flash: the erratum leg is SKIPPED", crlf);
+        skip("the geometry places no straddling block over free Flash: the erratum leg");
         return;
     }
 
@@ -2254,7 +2401,7 @@ void tg_appdata() {
     Nvm::clear_error();
     (void)Nvm::erase_ignoring_protection(lower);
     print(serial, "  APPDATAWP is one-way: only a reset clears it. Restore the "
-                  "standing geometry with bench.py fuses A codesize=0.", crlf);
+                  "standing geometry with brio fuses <board> codesize=0.", crlf);
     quiesce();
 }
 
@@ -2281,11 +2428,11 @@ void tm_window() {
                   "erase through the window, into APPCODE", crlf);
     quiesce();
     if (!scratch_usable()) {
-        print(serial, "  no writable scratch region under these fuses: SKIPPED", crlf);
+        skip("no writable scratch region under these fuses");
         return;
     }
     if (Nvm::flmap_locked()) {
-        verdict("FLMAPLOCK is clear (letter a sets it: run m first after a reset)", false);
+        skip("FLMAPLOCK is set (letter a sets it): run m first after a reset");
         return;
     }
     const uint32_t page = scratch_page(scratch_page_window);
@@ -2339,10 +2486,9 @@ void tm_window() {
 
 // ---- u the User Row: declined on this part -----------------------------------------
 void tu_userrow() {
-    print(serial, "u the User Row write path: SKIPPED - the AVR EA's CPU never "
-                  "writes its User Row (its write path is the declined flash "
-                  "one); UPDI writes it, even on a locked part "
-                  "(docs/avrxt/nvm.md)", crlf);
+    print(serial, "u the User Row write path", crlf);
+    skip("the AVR EA's CPU never writes its User Row (its write path is the declined "
+         "flash one); UPDI writes it, even on a locked part (docs/avrxt/nvm.md)");
 }
 
 #endif // the DA/DB's letters u, g, m and the EA's u
@@ -2367,25 +2513,30 @@ constexpr char all_keys[] = "abcdef";
 
 void run(TestFn fn) {
     passed = failed = 0;
+    skipped = 0;
     fn();
-    print(serial, "  -> ", passed, " pass, ", failed, " fail", crlf, crlf);
+    tally("  -> ", passed, failed, skipped);
+    print(serial, crlf, crlf);
 }
 
 void run_set(const char* keys) {
-    uint16_t tp = 0, tf = 0;
+    uint16_t tp = 0, tf = 0, ts = 0;
     in_all_run = true;
     for (const char* k = keys; *k != 0; ++k) {
         for (const Test& t : tests) {
             if (t.key != *k) continue;
             token.all_pass = tp;      // banked before the test that may reset
             token.all_fail = tf;
+            token.all_skip = ts;
             run(t.fn);
             tp = static_cast<uint16_t>(tp + passed);
             tf = static_cast<uint16_t>(tf + failed);
+            ts = static_cast<uint16_t>(ts + skipped);
         }
     }
     in_all_run = false;
-    print(serial, "ALL: ", tp, " pass, ", tf, " fail", crlf);
+    tally("ALL: ", tp, tf, ts);
+    print(serial, crlf);
 }
 
 #if !defined(NVMCTRL_FLBUSY_bm)
@@ -2444,7 +2595,7 @@ ISR(NVMCTRL_EEREADY_vect) {
 ISR(TCB0_INT_vect) {
     (void)Alarm::take_flags();
     if (alarm_mode == 1) {
-        alarm_stamp = cycles_now();
+        alarm_stamp = Ruler::now();
 #if defined(NVMCTRL_FLBUSY_bm)
         alarm_saw_busy = Nvm::eeprom_busy();
 #endif
@@ -2452,7 +2603,7 @@ ISR(TCB0_INT_vect) {
     }
 #if defined(NVMCTRL_FLBUSY_bm)
     if (alarm_mode == 2) {
-        const uint32_t now = cycles_now();
+        const uint32_t now = Ruler::now();
         if (alarm_runs != 0 && now - alarm_last > alarm_gap) {
             alarm_gap = now - alarm_last;
         }

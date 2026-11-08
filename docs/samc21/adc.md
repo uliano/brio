@@ -327,8 +327,10 @@ zero length because PA02 is DAC/VOUT and ADC0/AIN0 at once.
 
 ## Bench findings
 
-From `test_samc_adc`, 11 letters / 118 verdicts, wireless, on the C21J at
-~5.2 V.
+From `test_samc_adc`, 11 letters, wireless, on the C21J at ~5.2 V. The
+suite reads VDDANA first, through the 1.024 V bandgap level, and skips a
+leg whose bandgap level the supply does not hold (the 4.096 V level on a
+3.3 V supply).
 
 - **THE BANDGAP CHANNEL IS DEAD WITHOUT SUPC.VREF.VREFOE.** MUXPOS =
   INTREF reads a **flat zero** with that bit clear and **795 counts of
@@ -412,10 +414,10 @@ From `test_samc_adc`, 11 letters / 118 verdicts, wireless, on the C21J at
   three internal sources span 1 count (1/4 VDDANA), 4 counts (1/4
   VDDCORE) and 5 counts (INTREF) over 64 single 12-bit readings. On the
   noisiest of them a 64x average spans **0**, on the same mean. The
-  suite measures the noise before choosing the measurand and declines
-  the reduction verdict in print if even the noisiest source spans fewer
-  than four counts - a comparison between spreads of one and zero would
-  be a coin toss dressed as a measurement.
+  suite measures the noise before choosing the measurand and skips the
+  reduction verdict if even the noisiest source spans fewer than four
+  counts - a comparison between spreads of one and zero would be a coin
+  toss dressed as a measurement.
 - **THE TWO SCALES AGREE THROUGH `util/analog.hpp`.** A 256-sample
   16-bit oversampled reading of the same source is 12714 of 65536, which
   is 794 of 4096 - the 12-bit reading exactly - and both convert to the
@@ -428,9 +430,8 @@ From `test_samc_adc`, 11 letters / 118 verdicts, wireless, on the C21J at
   sequencer does not disturb the shape, because the sampler does not use
   it.
 - **ERRATUM 1.4.10 REPRODUCES, AND IT IS WORSE THAN ITS OWN SENTENCE.**
-  A narrow probe sees nothing: with ADC1 enabled and ADC0 disabled,
-  ADC0.SYNCBUSY reads 0x0000. Running the two converters in earnest is
-  what shows it ([dac.md](dac.md)). Once ADC1 has been enabled in a
+  Running the two converters in earnest is what shows it
+  ([dac.md](dac.md)). Once ADC1 has been enabled in a
   power cycle, ADC0.SYNCBUSY.ENABLE is stuck at one and STAYS stuck,
   ADC0 will not enable at all - `Adc<0>::init()` returns false and the
   converter reads zero - and a software reset does not clear it, SWRST's
@@ -496,7 +497,7 @@ result (T = 4869..4871 ticks of a 750 kHz stopwatch, 6.5 ms):
 
 ## The host/client pair, the sequence, differential mode
 
-From `test_samc_analog` letters a to d, 47 verdicts.
+From `test_samc_analog` letters a to d.
 
 **One trigger on the host really does start both converters, and the
 client's own ENABLE bit is not how it is turned on.** With
@@ -612,6 +613,14 @@ Driver gaps:
   two channels ([dmac.md](dmac.md), "The rule").
 
 Implemented but not bench-verified:
+- **What enters erratum 1.4.10's state.** `test_samc_dac` f leaves the
+  bit standing, while `test_samc_adc` brings ADC1 up alone in letter d
+  and its later letters bring ADC0 up after it. Letter d prints
+  ADC0.SYNCBUSY with ADC0's bus clock on (a register behind a stopped
+  bus clock reads zero, whatever the state) and what a direct
+  `Adc<0>::init()` answers then; the suite's later letters bring ADC0
+  up through the errata's order when the bit stands, and say so. A run
+  of letter d settles whether ADC1 enabled alone enters the state.
 - **WINMON and OVERRUN as WAKE sources** (RESRDY's is measured, and
   both interrupts are measured awake): the same slow-result leg with
   either armed instead would measure them.

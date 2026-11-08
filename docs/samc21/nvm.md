@@ -88,7 +88,7 @@ command code and who stalls. Reading the main array while the main array
 is programmed or erased stalls the AHB until the operation ends - and
 since instruction fetch is a main-array read, that means the CPU. The
 main array can be read freely while the RWWEE array is written (27.6.4.1,
-27.6.4.2). Measured: through a row erase the CPU completes about 3950
+27.6.4.2). Measured: through a row erase the CPU completes thousands of
 turns of a polling loop on RWWEE and exactly one on the main array.
 
 The RWWEE array is also the more durable of the two - 100k cycles against
@@ -350,7 +350,7 @@ by name. Nothing to wire: everything under test is inside the chip.
   microsecond across runs, against the 6 ms and 2.5 ms maxima of table
   45-42.
 - **The stall is real and one-sided.** Through an RWWEE row erase the CPU
-  completes ~3950 polling turns; through a main-array row erase, ONE.
+  completes thousands of polling turns; through a main-array row erase, ONE.
 - **A stalled operation cannot be timed by the software clock, and the
   reason is not the obvious one.** Single main-array erases measured
   between 234 and 1233 us across runs - a whole tick period of spread.
@@ -393,10 +393,9 @@ by name. Nothing to wire: everything under test is inside the chip.
     each) plus one page program per live id, and the meter confirms
     exactly that count;
   - the CPU is **not stalled**, measured the way `test_samc_nvm` letter
-    `d` measures it - about 2500 polling turns inside one RWWEE row erase
-    - and the software timebase keeps up with the cycle stopwatch through
-    three consecutive collections (18 ms against 17.5 ms), which is the
-    thing a main-array operation makes impossible;
+    `d` measures it - thousands of polling turns inside one RWWEE row
+    erase (whether the tick count keeps step through it is in the second
+    list below);
   - **the panic reserve holds on silicon**: after every completed save,
     `save_reserved()` of a maximum-size value succeeds and **costs no
     erase**, measured against the real page program;
@@ -451,7 +450,7 @@ Driver gaps (not built):
   small values in rows 28..31 - so nothing is waiting for room, and a
   main-array backend would import back the three things the RWWEE array
   deletes: the stall (the CPU completes ONE polling turn inside a
-  main-array row erase against about 2500 inside an RWWEE one), a quarter
+  main-array row erase against thousands inside an RWWEE one), a quarter
   of the endurance (25k cycles against 100k, 45-43 and 45-44), and
   linker-symbol zone arithmetic with the reflash preflight that goes with
   it. It is built when something genuinely needs more than 8 KB of
@@ -474,6 +473,11 @@ Implemented but not bench-verified:
   the sleep modes that give it meaning.
 - `Nvm::isr()` from a real handler - every command in the suite is
   awaited by polling READY, and the vector is deliberately unbound.
+- The tick count keeping step through an RWWEE operation, which a
+  main-array operation makes impossible: `test_samc_journal` letter `d`
+  holds it, over three consecutive collections, against TC0+TC1 counting
+  OSC48M - a counter no handler drives - within two ticks either way; a
+  `z` run on the board measures it.
 - The 15/16/17 flash sizes: compile-checked only. The geometry comes
   from the device header, so a smaller part is expected to work, and
   `geometry_matches()` is the runtime check that would catch it not

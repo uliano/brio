@@ -50,11 +50,13 @@
 #include "samc21/evsys.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/pin.hpp"
+#include "samc21/platform.hpp"
 #include "samc21/sercom.hpp"
 #include "samc21/tc.hpp"
 #include "samc21/tcc.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -131,17 +133,30 @@ constexpr uint8_t gen_fast = 0;          // generator 0: OSC48M, always up
 // ---------------------------------------------------------------------------
 // The cycle stopwatch: the kernel ticker's own cycles(), the tick count
 // and the counter's position composed right across the reload
-// (util/cycle_count.hpp).
+// (util/cycle_count.hpp), read as the ruler of util/test_wait.hpp.
 // ---------------------------------------------------------------------------
-uint32_t cycles_now() {
-    return Ticker::cycles();
-}
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
+using Plat = SamPlatform;
+
+/// Every queued console byte off the wire, bounded (util/test_wait.hpp):
+/// false on a wedged console. Each timed shot opens after it, so no
+/// transmit interrupt lands inside a measured span.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
+
+/// Spin until the ruler reaches `target`: a fixed span at CPU-cycle
+/// resolution. The spans here are counted in GCLK_CCL periods of 4096
+/// cycles (85.3 us) and letter g anchors its phase sweep in steps of 128
+/// cycles, neither of which brio::spin_us's whole microseconds can
+/// express, so this one verb stays.
 void spin_until(uint32_t target) {
-    while (static_cast<int32_t>(cycles_now() - target) < 0) {
+    while (static_cast<int32_t>(Ruler::now() - target) < 0) {
     }
 }
-void settle(uint32_t cycles) { spin_until(cycles_now() + cycles); }
+void settle(uint32_t cycles) { spin_until(Ruler::now() + cycles); }
 
 /// Long enough for any pull-driven pad to reach its rail and for any
 /// combinational path to follow it.
@@ -149,14 +164,32 @@ void settle_pad() { settle(20'000u); }
 
 constexpr uint32_t no_flip = 0xFFFFFFFFu;
 
+/**
+ * The ruler's reading at the first turn cond() held, or no_flip once
+ * `periods` GCLK_CCL periods have passed: the measuring poll of letters
+ * f and g. The budget runs on the kernel tick (brio::wait_ticks), whose
+ * read is one load, so each turn is one cond() and that load - a handful
+ * of cycles, the resolution letter g's eight-cycle differences need; a
+ * ruler read in every turn (brio::cycles_until, about 70 cycles) would
+ * blur them. The budget is rounded up to whole ticks of 1 ms, and the
+ * time-out comes one tick later at most.
+ */
 template <typename F>
-uint32_t time_until(F cond, uint32_t spins) {
-    while (spins-- != 0u) {
-        if (cond()) {
-            return cycles_now();
-        }
-    }
-    return no_flip;
+uint32_t time_until(F cond, uint32_t periods) {
+    constexpr uint32_t cycles_per_tick = SysClock::hz / Plat::ticks_per_second;
+    const uint32_t ticks = (periods * slow_period + cycles_per_tick - 1u) / cycles_per_tick;
+    uint32_t at = no_flip;
+    // The answer is `at`: no_flip on the time-out, so the bool adds nothing.
+    (void)brio::wait_ticks<Plat>(
+        [&] [[gnu::always_inline]] {
+            if (cond()) {
+                at = Ruler::now();
+                return true;
+            }
+            return false;
+        },
+        ticks);
+    return at;
 }
 
 uint32_t lcg_state = 0x51A3C7D9u;
@@ -220,8 +253,8 @@ template <class Claimed>
 void sample_levels(uint32_t cycles, bool& saw_high, bool& saw_low) {
     saw_high = false;
     saw_low = false;
-    const uint32_t deadline = cycles_now() + cycles;
-    while (static_cast<int32_t>(cycles_now() - deadline) < 0) {
+    const uint32_t deadline = Ruler::now() + cycles;
+    while (static_cast<int32_t>(Ruler::now() - deadline) < 0) {
         if (Claimed::read()) {
             saw_high = true;
         } else {
@@ -429,8 +462,7 @@ void ta_block() {
     print(serial, "  ERRATUM 1.7.4 (every revision): the PAC protection flag "
           "for the CCL is ", (after & ccl_bit) != 0u ? "RAISED" : "NOT raised",
           " by CTRL.SWRST", crlf);
-    bench.verdict("either way the CPU walked past it - no bus fault, no hang",
-                  true);
+    print(serial, "  either way the CPU walked past it - no bus fault, no hang", crlf);
     PAC_REGS->PAC_INTFLAGC = after;
 
     // ---- the driver's own refusals ----------------------------------------
@@ -753,8 +785,8 @@ void tc_tcc_and_sercom() {
     PadD::function(PinFunction::e, {.input_enable = true});   // TCC0/WO[0]
     bool wo_hi = false, wo_lo = false;
     {
-        const uint32_t deadline = cycles_now() + 400'000u;
-        while (static_cast<int32_t>(cycles_now() - deadline) < 0) {
+        const uint32_t deadline = Ruler::now() + 400'000u;
+        while (static_cast<int32_t>(Ruler::now() - deadline) < 0) {
             if (PadD::read()) wo_hi = true; else wo_lo = true;
         }
     }
@@ -901,17 +933,16 @@ void td_stages() {
 
     uint32_t width_min = no_flip, width_max = 0;
     uint8_t caught = 0;
-    for (uint8_t r = 0; r < 8u; ++r) {
+    // A wedged console leaves nothing caught, which the verdict fails.
+    for (uint8_t r = 0; r < 8u && console_drain(); ++r) {
         drive<In0>(false);
         settle(8u * slow_period);
         drive<In0>(true);
-        const uint32_t rise = time_until([] { return Out0::read(); },
-                                         40u * slow_period);
+        const uint32_t rise = time_until([] { return Out0::read(); }, 40u);
         if (rise == no_flip) {
             continue;
         }
-        const uint32_t fall = time_until([] { return !Out0::read(); },
-                                         40u * slow_period);
+        const uint32_t fall = time_until([] { return !Out0::read(); }, 40u);
         if (fall == no_flip) {
             continue;
         }
@@ -1314,8 +1345,8 @@ void tf_events() {
     settle(8u * slow_period);
 
     auto ever_high = [](uint32_t cycles) {
-        const uint32_t end = cycles_now() + cycles;
-        while (static_cast<int32_t>(cycles_now() - end) < 0) {
+        const uint32_t end = Ruler::now() + cycles;
+        while (static_cast<int32_t>(Ruler::now() - end) < 0) {
             if (Out0::read()) {
                 return true;
             }
@@ -1344,9 +1375,9 @@ void tf_events() {
 
     // And the same channel HAMMERED: a trigger every few hundred
     // nanoseconds for two hundred periods.
-    const uint32_t hammer_end = cycles_now() + 200u * slow_period;
+    const uint32_t hammer_end = Ruler::now() + 200u * slow_period;
     bool hammered_high = false;
-    while (static_cast<int32_t>(cycles_now() - hammer_end) < 0) {
+    while (static_cast<int32_t>(Ruler::now() - hammer_end) < 0) {
         Evsys::trigger(ev_ch);
         if (Out0::read()) {
             hammered_high = true;
@@ -1438,11 +1469,11 @@ bool comp_up(AcOut out) {
     if (!Comp::enable(true)) {
         return false;
     }
-    const uint32_t deadline = cycles_now() + 32u * slow_period;
-    while (!Comp::ready()) {
-        if (static_cast<int32_t>(cycles_now() - deadline) >= 0) {
-            return false;
-        }
+    // 3 ms is 32 periods of GCLK_AC at 11.719 kHz, where the comparator's
+    // start-up at high speed is 2-3 us, after the ENABLE command's 2-3
+    // GCLK_AC cycles (figures 40-3/40-4, quoted in samc21/ac.hpp).
+    if (!brio::wait_until<Ruler>([] { return Comp::ready(); }, 3'000u)) {
+        return false;
     }
     settle(4u * slow_period);
     return true;
@@ -1454,15 +1485,18 @@ bool comp_up(AcOut out) {
 /// time the flip.
 template <typename F>
 uint32_t timed_edge(F cond, uint32_t phase, uint32_t budget_periods) {
+    if (!console_drain()) {
+        return no_flip;
+    }
     AcStim::clear();
-    const uint32_t low = time_until([&] { return !cond(); }, 40u * slow_period);
+    const uint32_t low = time_until([&] { return !cond(); }, 40u);
     if (low == no_flip) {
         return no_flip;
     }
     spin_until(low + 4u * slow_period + phase);
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     AcStim::set();
-    const uint32_t t1 = time_until(cond, budget_periods * slow_period);
+    const uint32_t t1 = time_until(cond, budget_periods);
     return (t1 == no_flip) ? no_flip : (t1 - t0);
 }
 

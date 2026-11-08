@@ -69,11 +69,14 @@
 #include "samc21/evsys.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/pin.hpp"
+#include "samc21/platform.hpp"
 #include "samc21/sercom.hpp"
 #include "samc21/tc.hpp"
 #include "samc21/tcc.hpp"
 #include "samc21/ticker.hpp"
+#include "kernel/time.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #include "bench_sleep.hpp"
@@ -152,11 +155,21 @@ constexpr uint32_t stopwatch_hz = sys_hz / 16u;
 // Helpers
 // ---------------------------------------------------------------------------
 
-void wait_ms(uint32_t ms) {
-    const uint32_t deadline = Ticker::millis() + ms;
-    while (static_cast<int32_t>(Ticker::millis() - deadline) < 0) {
-    }
-}
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's
+/// waits and fixed pauses (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+using P = SamPlatform;
+
+/// A fixed pause of `ms` milliseconds on the ruler.
+void pause_ms(uint32_t ms) { brio::spin_us<Ruler>(ms * 1000u); }
+
+/// Every queued console byte off the wire, bounded (util/test_wait.hpp):
+/// false on a wedged console.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 
 bool near(uint32_t got, uint32_t want, uint32_t band) {
     return got + band >= want && want + band >= got;
@@ -207,25 +220,20 @@ bool stopwatch_up() {
  * appears at both ends and cancels out of the difference.
  */
 uint32_t both_low_ticks() {
-    constexpr uint32_t limit = 300'000UL;
-    uint32_t i = 0;
-    while (!(Wo0Pin::read() || Wo4Pin::read())) {
-        if (++i > limit) {
-            return 0;
-        }
-    }
-    i = 0;
-    while (Wo0Pin::read() || Wo4Pin::read()) {
-        if (++i > limit) {
-            return 0;
-        }
+    // Each wait is bounded at 20 ms on the kernel tick - many periods of
+    // any waveform this suite times - and its turn is the two pad reads
+    // and one load of the tick count, so an edge is seen within a few
+    // cycles, as the stopwatch reads around it need.
+    const auto either_high = [] { return Wo0Pin::read() || Wo4Pin::read(); };
+    const auto both_low = [] { return !(Wo0Pin::read() || Wo4Pin::read()); };
+    constexpr uint32_t budget = brio::ticks_from_ms<P>(20);
+    if (!brio::wait_ticks<P>(either_high, budget) ||
+        !brio::wait_ticks<P>(both_low, budget)) {
+        return 0;
     }
     const uint16_t t0 = Stopwatch::count16();
-    i = 0;
-    while (!(Wo0Pin::read() || Wo4Pin::read())) {
-        if (++i > limit) {
-            return 0;
-        }
+    if (!brio::wait_ticks<P>(either_high, budget)) {
+        return 0;
     }
     const uint16_t t1 = Stopwatch::count16();
     return static_cast<uint16_t>(t1 - t0);
@@ -278,7 +286,7 @@ bool count_events_from(uint8_t generator) {
 /// and closed by two counter accesses with nothing printed between them.
 uint32_t events_in(uint32_t ms) {
     (void)EventCounter::set_count16(0);
-    wait_ms(ms);
+    pause_ms(ms);
     return EventCounter::count16();
 }
 
@@ -313,11 +321,11 @@ void fault_pin_down() {
 
 void raise_fault() {
     EicPad::set();
-    wait_ms(2);
+    pause_ms(2);
 }
 void clear_fault_input() {
     EicPad::clear();
-    wait_ms(2);
+    pause_ms(2);
 }
 
 /// Hand every output pad this suite uses back to PORT, quiet.
@@ -512,7 +520,7 @@ void tb_counter() {
                       Timer::set_period(Timer::max_count) &&
                       Timer::set_count(0) && Timer::enable(true));
     const uint32_t before = Timer::count();
-    wait_ms(200);
+    pause_ms(200);
     const uint32_t wide = Timer::count() - before;
     const uint32_t expect_wide = sys_hz / 16u / 5u;
     print(serial, "  200 ms at 3 MHz: COUNT advanced ", wide, " (exact ",
@@ -541,7 +549,7 @@ void tb_counter() {
              Timer::configure(TccConfig{.prescaler = scales[i]}) &&
              Timer::set_count(0) && Timer::enable(true);
         const uint32_t t0 = Timer::count();
-        wait_ms(window_ms);
+        pause_ms(window_ms);
         delta[i] = Timer::count() - t0;
     }
     print(serial, "  ", window_ms, " ms at /1024: ", delta[0], " ticks, at "
@@ -557,7 +565,7 @@ void tb_counter() {
     bench.verdict("the direction reverses under a running counter",
                   Timer::count_down(true) && Timer::counting_down());
     const uint32_t down_a = Timer::count();
-    wait_ms(20);
+    pause_ms(20);
     bench.verdict("and the counter now counts DOWN", Timer::count() < down_a);
     bench.verdict("back up again",
                   Timer::count_down(false) && !Timer::counting_down());
@@ -565,11 +573,11 @@ void tb_counter() {
     // STOP and RETRIGGER.
     bench.verdict("the STOP command stops it", Timer::stop() && Timer::stopped());
     const uint32_t frozen = Timer::count();
-    wait_ms(20);
+    pause_ms(20);
     bench.verdict("and the counter is frozen", Timer::count() == frozen);
     bench.verdict("RETRIGGER restarts it, and STATUS.STOP clears itself",
                   Timer::retrigger() && !Timer::stopped());
-    wait_ms(20);
+    pause_ms(20);
     bench.verdict("the counter moves again", Timer::count() != frozen);
 
     // PER IS TOP IN EVERY MODE BUT MFRQ - the register the TC only has
@@ -605,7 +613,7 @@ void tb_counter() {
     Timer::clear_flags(0xFFFFFFFFul);
     bench.verdict("one-shot is armed live", Timer::one_shot(true) &&
                                                 Timer::retrigger());
-    wait_ms(50);
+    pause_ms(50);
     bench.verdict("and the counter stops itself at the first overflow, with no "
                   "software in the path",
                   Timer::stopped() &&
@@ -661,7 +669,7 @@ void tc_pwm() {
     };
     for (const auto& c : cases) {
         (void)Timer::set_cc_buffer(0, c.duty);
-        wait_ms(20);
+        pause_ms(20);
         const uint32_t measured = duty_permille<Wo0Pin>();
         print(serial, "  CC0 ", c.duty, "/", pwm_top + 1u, ": PA08 high ",
               measured, " per mille (expected ~", c.expect, ")", crlf);
@@ -696,7 +704,7 @@ void tc_pwm() {
     // off by one.
     // 36.6.2.5.6 prints fPWM_DS = fGCLK / (2 N PER); the natural
     // alternative, if the counter visited TOP and ZERO both, would be
-    // 2 (PER + 1). Over two seconds they are eight counts apart.
+    // 2 (PER + 1). Over two seconds they are five counts apart.
     bench.verdict("the waveform switches to dual-slope, live",
                   Timer::wave(TccWaveConfig{
                       .waveform = TccWaveform::dual_slope_bottom}));
@@ -737,7 +745,7 @@ void td_buffers() {
                       Timer::set_period(buf_top) && Timer::set_cc(0, low_duty) &&
                       Timer::enable(true));
     Wo0::claim();
-    wait_ms(20);
+    pause_ms(20);
     const uint32_t duty_start = duty_permille<Wo0Pin>();
 
     // THE PAD IS THE WITNESS, not the register: a compare value only
@@ -746,7 +754,7 @@ void td_buffers() {
     const bool wrote = Timer::set_cc_buffer(0, high_duty);
     const bool valid_after_write = Timer::cc_buffer_valid(0);
     const bool busy_after_write = Timer::cc_sync_busy(0);
-    wait_ms(20);
+    pause_ms(20);
     const uint32_t duty_taken = duty_permille<Wo0Pin>();
     print(serial, "  LUPD clear: duty ", duty_start, " -> ", duty_taken,
           " per mille after writing CCBUF0; CCBUFV0 ",
@@ -765,23 +773,39 @@ void td_buffers() {
 
     // HOW LONG THE WAIT WOULD HAVE BEEN, measured: the whole reason the
     // setter does not take it.
+    //
+    // THE WRITE IS ANCHORED JUST AFTER AN UPDATE (the overflow flag seen
+    // rising), so the wait it starts runs nearly a whole period - 4000
+    // stopwatch ticks at 750 Hz - rather than a phase-random fraction of
+    // one: unanchored, one write in forty lands within 33 us of the next
+    // update and a "longer than a crossing" bound had to cut into a
+    // correct reading. The bound, derived: the write lands within the
+    // overflow poll's turn and set_cc_buffer() (microseconds) after the
+    // update, so the wait is the period less that; half a period (2000
+    // ticks) is three orders of magnitude above a clock-domain crossing
+    // at 48 MHz and far below the wait; the period plus 5 % (4200) is
+    // the top, the stopwatch's own reads subtracted below.
     (void)Timer::update();
     const uint16_t base0 = Stopwatch::count16();
     const uint16_t base1 = Stopwatch::count16();
+    Timer::clear_flags(Timer::overflow_flag);
+    // 5 ms: almost four periods of the 750 Hz waveform.
+    const bool anchored = brio::wait_until<Ruler>(
+        [] { return (Timer::flags() & Timer::overflow_flag) != 0u; }, 5'000u);
     const uint16_t w0 = Stopwatch::count16();
     (void)Timer::set_cc_buffer(0, high_duty);
     const bool waited = Timer::sync_wait(TCC_SYNCBUSY_CC0_Msk);
     const uint16_t w1 = Stopwatch::count16();
     const uint32_t wait_ticks =
         static_cast<uint16_t>(w1 - w0) - static_cast<uint16_t>(base1 - base0);
-    print(serial, "  waiting SYNCBUSY.CC0 out after a buffered write took ",
-          wait_ticks, " stopwatch ticks (", wait_ticks / 3u, " us) and "
-          "returned ", waited ? "true" : "false", "; the PWM period is 1333 us",
-          crlf);
+    print(serial, "  waiting SYNCBUSY.CC0 out after a buffered write just past an "
+          "update took ", wait_ticks, " stopwatch ticks (", wait_ticks / 3u,
+          " us) and returned ", waited ? "true" : "false",
+          "; the PWM period is 1333 us", crlf);
     bench.verdict("SYNCBUSY.CCx STANDS UNTIL THE UPDATE CONSUMES THE BUFFER, "
-                  "not merely for the clock-domain crossing: the wait is a "
-                  "fraction of a whole PWM period, and no chapter says so",
-                  waited && wait_ticks > 100u && wait_ticks < 4200u);
+                  "not merely for the clock-domain crossing: a write just past "
+                  "an update waits more than half a PWM period, and no chapter says so",
+                  anchored && waited && wait_ticks > 2000u && wait_ticks < 4200u);
 
     // A WRITE ISSUED INSIDE THAT WINDOW IS DISCARDED, which is why the
     // setter refuses rather than overwriting.
@@ -793,13 +817,16 @@ void td_buffers() {
     print(serial, "  with LUPD set: the first buffered write returned ",
           first ? "true" : "false", ", a second one ",
           second ? "true" : "false", ", and CCBUF0 holds ", buf_reads, crlf);
-    bench.verdict("A SECOND BUFFERED WRITE INSIDE THE SAME WINDOW IS "
-                  "DISCARDED BY THE SILICON - so the setter refuses it "
-                  "instead, and false means 'the last value has not been "
-                  "taken yet'",
+    // The setter refuses the second write before it reaches the
+    // register, so what is judged is the driver's contract; what the
+    // silicon would do with a second store inside the window is the
+    // reason for the refusal, not something this verdict observes.
+    bench.verdict("A SECOND BUFFERED WRITE INSIDE THE SAME WINDOW IS REFUSED "
+                  "by the setter and CCBUF0 keeps the first - false means "
+                  "'the last value has not been taken yet'",
                   first && !second && buf_reads == low_duty);
 
-    wait_ms(20);
+    pause_ms(20);
     const uint32_t duty_locked = duty_permille<Wo0Pin>();
     const uint32_t cc_reads_locked = Timer::cc(0);
     print(serial, "  LUPD set: duty stays ", duty_locked,
@@ -814,7 +841,7 @@ void td_buffers() {
                       near(duty_locked, high_duty, 40u));
 
     (void)Timer::update();
-    wait_ms(20);
+    pause_ms(20);
     const uint32_t duty_forced = duty_permille<Wo0Pin>();
     print(serial, "  after the UPDATE command: duty ", duty_forced,
           " per mille", crlf);
@@ -908,7 +935,7 @@ void td_buffers() {
     (void)Timer::lock_update(false);
     (void)Timer::set_count(0);
     (void)Timer::enable(true);
-    wait_ms(100);   // nine overflows at 46875 Hz / 500
+    pause_ms(100);   // nine overflows at 46875 Hz / 500
     const bool lupd_after = Timer::update_locked();
     print(serial, "  CTRLA.ALOCK written back as ", alock_written ? "1" : "0",
           "; CTRLB.LUPD after ~9 overflows: ", lupd_after ? "1" : "0",
@@ -963,7 +990,7 @@ void te_dither() {
     for (uint8_t i = 0; i < 3u; ++i) {
         (void)Timer::set_period_buffer(
             tcc_dither(per_value, extras[i], TccResolution::dither64));
-        wait_ms(50);
+        pause_ms(50);
         counted[i] = events_in(2000);
         // 2 s x tick_hz x 64 / (64 (PER+1) + DITHERCY), in whole ticks.
         predicted[i] = (2ul * tick_hz * 64ul) /
@@ -1014,7 +1041,7 @@ void tf_extension() {
                                                .dead_time_high = 180}));
     Wo0::claim();
     Wo4::claim();
-    wait_ms(20);
+    pause_ms(20);
 
     const uint32_t d_low = duty_permille<Wo0Pin>(slow_samples);
     const uint32_t d_high = duty_permille<Wo4Pin>(slow_samples);
@@ -1068,7 +1095,7 @@ void tf_extension() {
     (void)Timer::set_period(slow_top / 4u);
     (void)Timer::set_cc(0, (slow_top / 4u + 1u) / 2u);
     (void)Timer::enable(true);
-    wait_ms(20);
+    pause_ms(20);
     uint32_t p_short = 0xFFFFFFFFul;
     for (uint8_t i = 0; i < 8u; ++i) {
         const uint32_t t = both_low_ticks();
@@ -1094,7 +1121,7 @@ void tf_extension() {
     (void)Timer::set_cc(2, (3ul * (pad_top + 1u)) / 4u);
     Wo0::claim();
     Wo6::claim();
-    wait_ms(20);
+    pause_ms(20);
     const uint32_t m0_default = duty_permille<Wo0Pin>();
     const uint32_t m6_default = duty_permille<Wo6Pin>();
 
@@ -1102,7 +1129,7 @@ void tf_extension() {
     const bool matrix_set = Timer::wave_extension(TccWaveExtConfig{
         .output_matrix = TccOutputMatrix::broadcast_cc0});
     (void)Timer::enable(true);
-    wait_ms(20);
+    pause_ms(20);
     const uint32_t m0_broadcast = duty_permille<Wo0Pin>();
     const uint32_t m6_broadcast = duty_permille<Wo6Pin>();
     print(serial, "  OTMX per-channel: PA08 (WO0) ", m0_default, ", PA12 (WO6) ",
@@ -1127,12 +1154,12 @@ void tf_extension() {
                                                .dead_time_high = 20}));
     Wo0::claim();
     Wo4::claim();
-    wait_ms(20);
+    pause_ms(20);
     const uint32_t s0_before = duty_permille<Wo0Pin>();
     const uint32_t s4_before = duty_permille<Wo4Pin>();
     const bool swapped = Timer::wave(TccWaveConfig{
         .waveform = TccWaveform::normal_pwm, .swap = 0x1});
-    wait_ms(20);
+    pause_ms(20);
     const uint32_t s0_after = duty_permille<Wo0Pin>();
     const uint32_t s4_after = duty_permille<Wo4Pin>();
     print(serial, "  before SWAP0: PA08 ", s0_before, ", PA22 ", s4_before,
@@ -1157,14 +1184,14 @@ void tg_pattern() {
                   slow_pwm_up(pad_top, (pad_top + 1u) / 2u));
     Wo0::claim();
     Wo4::claim();
-    wait_ms(20);
+    pause_ms(20);
     const uint32_t free0 = duty_permille<Wo0Pin>();
     const uint32_t free4 = duty_permille<Wo4Pin>();
 
     // PATT sits AFTER the swap stage, so it beats everything the
     // waveform generator produced.
     const bool patt = Timer::pattern(0x11, 0x01);
-    wait_ms(20);
+    pause_ms(20);
     const uint32_t patt0 = duty_permille<Wo0Pin>();
     const uint32_t patt4 = duty_permille<Wo4Pin>();
     print(serial, "  free-running: PA08 ", free0, ", PA22 ", free4,
@@ -1183,11 +1210,11 @@ void tg_pattern() {
     const bool buffered = Timer::pattern_buffer(0x11, 0x10);
     const bool buf_valid = Timer::pattern_buffer_valid();
     const bool patt_busy = Timer::pattern_sync_busy();
-    wait_ms(20);
+    pause_ms(20);
     const bool valid_later = Timer::pattern_buffer_valid();
     const uint32_t held0 = duty_permille<Wo0Pin>();
     (void)Timer::lock_update(false);
-    wait_ms(20);
+    pause_ms(20);
     const uint32_t taken0 = duty_permille<Wo0Pin>();
     const uint32_t taken4 = duty_permille<Wo4Pin>();
     print(serial, "  PATTBUF = 0x10 with LUPD set: PA08 still ", held0,
@@ -1210,7 +1237,7 @@ void tg_pattern() {
     bench.verdict("clearing PGE gives the outputs back to the waveform "
                   "generator",
                   Timer::pattern(0, 0));
-    wait_ms(20);
+    pause_ms(20);
     const uint32_t back0 = duty_permille<Wo0Pin>();
     bench.verdict("and they toggle again", near(back0, 500u, 60u));
 
@@ -1263,7 +1290,7 @@ void th_recoverable() {
                   "that event",
                   fault_pwm_up(TccFaultConfig{.source = TccFaultSource::event}));
     Wo0::claim();
-    wait_ms(20);
+    pause_ms(20);
 
     const uint32_t clean = duty_permille<Wo0Pin>();
     Timer::clear_flags(0xFFFFFFFFul);
@@ -1273,7 +1300,7 @@ void th_recoverable() {
     const bool flag_seen = (Timer::flags() & Timer::fault_a_flag) != 0u;
     const uint32_t clamped = duty_permille<Wo0Pin>();
     clear_fault_input();
-    wait_ms(20);
+    pause_ms(20);
     const uint32_t released = duty_permille<Wo0Pin>();
     print(serial, "  PA08 duty: free ", clean, " per mille, with the fault "
           "held ", clamped, ", after release ", released, "; FAULTAIN ",
@@ -1308,7 +1335,7 @@ void th_recoverable() {
                          EventChannelConfig{.generator = EicLine::event_generator,
                                             .path = EventPath::asynchronous});
     (void)Timer::enable(true);
-    wait_ms(20);
+    pause_ms(20);
     raise_fault();
     const bool without_mcei = Timer::fault_state(TccFault::a);
     const uint32_t without_duty = duty_permille<Wo0Pin>();
@@ -1338,35 +1365,60 @@ void th_recoverable() {
     (void)Timer::wave(TccWaveConfig{.waveform = TccWaveform::normal_pwm});
     (void)Timer::set_period(pad_top);
     (void)Timer::set_cc(0, (pad_top + 1u) / 2u);
+    // A SYNCHRONOUS PATH CARRIES NOTHING WITHOUT THE CHANNEL'S OWN
+    // GENERIC CLOCK (29.5.3), so an untouched waveform on an unclocked
+    // channel says nothing about the TCC. The channel is clocked, and a
+    // TC counting events listens on the same channel as the control: it
+    // must count the pad's two edges, or the channel delivered nothing.
+    // What the TCC then does is the erratum's claim - printed, not judged
+    // (an erratum's presence on one die is not a contract).
+    const bool sync_clocked =
+        EvGclk::configure(GclkConfig{.source = GclkSource::osculp32k}) &&
+        GclkChannel::connect(Evsys::gclk_id(ev_pin_channel), ev_gen);
     const bool sync_connected =
         Evsys::connect(Timer::fault_user(TccFault::a), ev_pin_channel,
                        EventChannelConfig{.generator = EicLine::event_generator,
                                           .path = EventPath::synchronous,
                                           .edge = EventEdge::both});
+    const bool control_up =
+        EventCounter::init(fast_gen) &&
+        EventCounter::configure(TcConfig{.mode = TcMode::count16}) &&
+        EventCounter::event_config(TcConfig{.mode = TcMode::count16},
+                                   TcEventConfig{.action = TcEventAction::count,
+                                                 .input_enable = true}) &&
+        Evsys::attach(EventCounter::event_user, ev_pin_channel) &&
+        EventCounter::enable(true);
     (void)Timer::enable(true);
-    wait_ms(20);
+    pause_ms(20);   // also past erratum 1.12.4's first blind channel tick
+    (void)EventCounter::set_count16(0);
     raise_fault();
     const bool sync_fault = Timer::fault_state(TccFault::a);
     const uint32_t sync_duty = duty_permille<Wo0Pin>();
     clear_fault_input();
-    print(serial, "  the SAME generator on a SYNCHRONOUS channel (erratum "
+    const uint16_t control_edges = EventCounter::count16();
+    print(serial, "  the SAME generator on a CLOCKED SYNCHRONOUS channel (erratum "
           "1.21.9 forbids it): connect ", sync_connected ? "ok" : "refused",
-          ", FAULTA ", sync_fault ? "1" : "0", ", duty ", sync_duty,
-          " per mille", crlf);
-    bench.verdict("ERRATUM 1.21.9 MEASURED, not taken on trust: the same pad, "
-                  "the same generator and the same fault configuration on a "
-                  "SYNCHRONOUS event channel leave the waveform untouched - "
-                  "the asynchronous path is the only one a TCC hears",
-                  sync_connected && !sync_fault && near(sync_duty, 500u, 60u));
+          ", the control TC counted ", control_edges, " edges of 2; the TCC: FAULTA ",
+          sync_fault ? "1" : "0", ", duty ", sync_duty, " per mille - ",
+          !sync_fault && near(sync_duty, 500u, 60u) ? "untouched, as 1.21.9 says"
+                                                     : "the fault was HEARD",
+          " (printed, not judged)", crlf);
+    bench.verdict("the synchronous channel is clocked and DELIVERS: a TC on the "
+                  "same channel counts the pad's two edges, so what the TCC does "
+                  "with it is a statement about the TCC",
+                  sync_clocked && sync_connected && control_up && control_edges == 2u);
+    Evsys::disconnect(EventCounter::event_user);
+    EventCounter::release();
     Evsys::disconnect(Timer::fault_user(TccFault::a));
     Evsys::release_channel(ev_pin_channel);
+    GclkChannel::disconnect(Evsys::gclk_id(ev_pin_channel));
     Timer::release();
 
     // RESTART, and the two HALT modes.
     bench.verdict("the fault is rebuilt with the RESTART action",
                   fault_pwm_up(TccFaultConfig{.source = TccFaultSource::event,
                                               .restart = true}));
-    wait_ms(20);
+    pause_ms(20);
     Timer::clear_flags(0xFFFFFFFFul);
     raise_fault();
     const bool restart_flag = (Timer::flags() & Timer::retrigger_flag) != 0u;
@@ -1376,7 +1428,7 @@ void th_recoverable() {
 
     bench.verdict("and again without it", fault_pwm_up(TccFaultConfig{
                       .source = TccFaultSource::event}));
-    wait_ms(20);
+    pause_ms(20);
     Timer::clear_flags(0xFFFFFFFFul);
     raise_fault();
     const bool no_restart_flag = (Timer::flags() & Timer::retrigger_flag) != 0u;
@@ -1401,10 +1453,10 @@ void th_recoverable() {
     // overflow in thirty of them and a running one cannot help showing
     // one. (Two reads of COUNT are not a witness here at all - see the
     // note the software-halt leg prints.)
-    wait_ms(20);
+    pause_ms(20);
     raise_fault();
     Timer::clear_flags(0xFFFFFFFFul);
-    wait_ms(30);
+    pause_ms(30);
     const bool overflowed_halted =
         (Timer::flags() & Timer::overflow_flag) != 0u;
     // For the record, and as a warning: two READSYNC'd reads of a HALTED
@@ -1412,11 +1464,11 @@ void th_recoverable() {
     // cross into a clock domain the halt has stopped, so it returns
     // whatever it last managed to fetch.
     const uint32_t halted_a = Timer::count();
-    wait_ms(20);
+    pause_ms(20);
     const uint32_t halted_b = Timer::count();
     clear_fault_input();
     Timer::clear_flags(0xFFFFFFFFul);
-    wait_ms(30);
+    pause_ms(30);
     const bool overflowed_free = (Timer::flags() & Timer::overflow_flag) != 0u;
     print(serial, "  hardware halt: overflows in 30 ms with the fault held: ",
           overflowed_halted ? "yes" : "none", "; after release: ",
@@ -1439,28 +1491,35 @@ void th_recoverable() {
                                               .halt = TccFaultHalt::software,
                                               .capture = TccFaultCapture::capture,
                                               .capture_channel = 2}));
-    wait_ms(20);
+    pause_ms(20);
     (void)Timer::cc(2);
+    Timer::clear_flags(Timer::match_flag(2));
     raise_fault();
+    // A capture raises INTFLAG.MC2; read before CC2, whose read may clear
+    // it. COUNT = 0 is a legitimate capture - one in two hundred at
+    // PER = 199 - so the flag, not a non-zero value, is what says a
+    // capture happened when the value is zero.
+    const bool capture_flag = (Timer::flags() & Timer::match_flag(2)) != 0u;
     const uint32_t captured = Timer::cc(2);
     clear_fault_input();
     Timer::clear_flags(0xFFFFFFFFul);
-    wait_ms(30);
+    pause_ms(30);
     const bool still_halted = (Timer::flags() & Timer::overflow_flag) == 0u;
     const bool state_stands = Timer::fault_state(TccFault::a);
     const bool cleared = Timer::clear_fault_state(TccFault::a);
     Timer::clear_flags(0xFFFFFFFFul);
-    wait_ms(30);
+    pause_ms(30);
     const bool sw_released = (Timer::flags() & Timer::overflow_flag) != 0u;
     print(serial, "  software halt: the fault captured COUNT = ", captured,
-          " into CC2; after the input went low, overflows in 30 ms: ",
+          " into CC2 (MC2 ", capture_flag ? "1" : "0",
+          "); after the input went low, overflows in 30 ms: ",
           still_halted ? "none" : "yes", ", STATUS.FAULTA ",
           state_stands ? "1" : "0", "; after the software clear: ",
           sw_released ? "yes" : "none", crlf);
     bench.verdict("THE CAPTURE ACTION TIMESTAMPS THE FAULT into the channel "
                   "FCTRLA.CHSEL names - a plain CAPT, which erratum 1.21.5 "
                   "does not touch",
-                  captured > 0u && captured <= pad_top);
+                  captured <= pad_top && (capture_flag || captured > 0u));
     bench.verdict("THE SOFTWARE HALT OUTLIVES THE FAULT: the counter stays "
                   "frozen after the input is gone, the fault STATE stands, "
                   "and only a write to STATUS.FAULTA releases it (36.8.14)",
@@ -1524,7 +1583,7 @@ void ti_non_recoverable() {
                   non_recoverable_up(0x11, 0x01));
     Wo0::claim();
     Wo4::claim();
-    wait_ms(20);
+    pause_ms(20);
 
     const uint32_t free0 = duty_permille<Wo0Pin>();
     const uint32_t free4 = duty_permille<Wo4Pin>();
@@ -1540,7 +1599,7 @@ void ti_non_recoverable() {
     // produce one. (Reading COUNT is not a witness while the counter is
     // stopped - letter h prints why.)
     Timer::clear_flags(Timer::overflow_flag);
-    wait_ms(30);
+    pause_ms(30);
     const bool overflowed_stopped =
         (Timer::flags() & Timer::overflow_flag) != 0u;
     print(serial, "  free: PA08 ", free0, ", PA22 ", free4, " per mille; under "
@@ -1558,11 +1617,11 @@ void ti_non_recoverable() {
 
     // The state is latched: dropping the input is not enough.
     clear_fault_input();
-    wait_ms(20);
+    pause_ms(20);
     const bool latched = Timer::non_recoverable_state(0);
     const uint32_t still0 = duty_permille<Wo0Pin>();
     const bool cleared = Timer::clear_non_recoverable(0);
-    wait_ms(20);
+    pause_ms(20);
     const uint32_t back0 = duty_permille<Wo0Pin>();
     const uint32_t back4 = duty_permille<Wo4Pin>();
     print(serial, "  after the input went low: FAULT0 still ",
@@ -1586,7 +1645,7 @@ void ti_non_recoverable() {
                   non_recoverable_up(0x11, 0x10));
     Wo0::claim();
     Wo4::claim();
-    wait_ms(20);
+    pause_ms(20);
     raise_fault();
     const uint32_t inv0 = duty_permille<Wo0Pin>();
     const uint32_t inv4 = duty_permille<Wo4Pin>();
@@ -1623,7 +1682,7 @@ void tj_ramp() {
                                             .ramp = TccRamp::ramp1}));
     Wo0::claim();
     Wo1::claim();
-    wait_ms(20);
+    pause_ms(20);
     const uint32_t r1_wo0 = duty_permille<Wo0Pin>();
     const uint32_t r1_wo1 = duty_permille<Wo1Pin>();
     const uint32_t idx_ramp1 = ramp_index_permille(50);
@@ -1631,7 +1690,7 @@ void tj_ramp() {
     // RAMP2, applied live - WAVE again.
     const bool ramped = Timer::wave(TccWaveConfig{
         .waveform = TccWaveform::normal_pwm, .ramp = TccRamp::ramp2});
-    wait_ms(20);
+    pause_ms(20);
     const uint32_t r2_wo0 = duty_permille<Wo0Pin>();
     const uint32_t r2_wo1 = duty_permille<Wo1Pin>();
     const uint32_t idx_ramp2 = ramp_index_permille(50);
@@ -1654,7 +1713,7 @@ void tj_ramp() {
     // hold for more than one cycle, which is what this loop does.
     const uint32_t idx_held = ramp_index_permille(50, true);
     (void)Timer::ramp_index_command(TccRampIndexCommand::off);
-    wait_ms(20);
+    pause_ms(20);
     const uint32_t idx_free = ramp_index_permille(50);
     print(serial, "  with IDXCMD = HOLD re-issued at every read, IDX high ",
           idx_held, " per mille; with the command cancelled through CTRLBCLR, ",
@@ -1701,9 +1760,9 @@ void tk_capture() {
     Timer::clear_flags(0xFFFFFFFFul);
     for (uint8_t i = 0; i < 4u; ++i) {
         EicPad::set();
-        wait_ms(20);
+        pause_ms(20);
         EicPad::clear();
-        wait_ms(30);
+        pause_ms(30);
         period = Timer::cc(0);
         width = Timer::cc(1);
     }
@@ -1723,9 +1782,9 @@ void tk_capture() {
     Timer::clear_flags(0xFFFFFFFFul);
     for (uint8_t i = 0; i < 4u; ++i) {
         EicPad::set();
-        wait_ms(20);
+        pause_ms(20);
         EicPad::clear();
-        wait_ms(30);
+        pause_ms(30);
     }
     const bool overran = (Timer::flags() & Timer::error_flag) != 0u;
     bench.verdict("CAPTURES LEFT UNREAD ARE DROPPED and raise INTFLAG.ERR, "
@@ -1765,7 +1824,7 @@ void tk_capture() {
                                          .path = EventPath::asynchronous}) &&
                       Timer::enable(true));
     (void)Timer::set_count(0);
-    wait_ms(2000);
+    pause_ms(2000);
     const uint32_t counted = Timer::count();
     print(serial, "  TCC2 overflows counted by TCC0 in 2 s: ", counted,
           " (48 MHz / 1024 / ", src_top + 1u, " = ", src_hz, " Hz)", crlf);
@@ -1905,7 +1964,13 @@ void tm_wake() {
         m_mode = true;
         Timer::arm(Timer::overflow_flag);
         Nvic::enable(Timer::irq());
-        while (!Serial::tx_idle()) {
+        // The console's SERCOM stops in standby mid-character: drained
+        // first, or the leg is abandoned with no wake counted.
+        if (!console_drain()) {
+            Timer::disarm(Timer::overflow_flag);
+            Nvic::disable(Timer::irq());
+            m_mode = false;
+            return;
         }
         (void)Timer::set_count(0);
         (void)Timer::enable(true);
@@ -1984,13 +2049,8 @@ void pin_pulse() {
 /// first, so the edge found is a fresh one.
 bool wait_overflow(uint32_t ms) {
     Timer::clear_flags(Timer::overflow_flag);
-    const uint32_t start = Ticker::millis();
-    while ((Timer::flags() & Timer::overflow_flag) == 0u) {
-        if (Ticker::millis() - start > ms) {
-            return false;
-        }
-    }
-    return true;
+    return brio::wait_until<Ruler>(
+        [] { return (Timer::flags() & Timer::overflow_flag) != 0u; }, ms * 1000u);
 }
 
 void tn_events() {
@@ -2001,7 +2061,7 @@ void tn_events() {
                   "WO0 high",
                   non_recoverable_up(0x01, 0x01, 1));
     Wo0::claim();
-    wait_ms(20);
+    pause_ms(20);
     const uint32_t nr_free = duty_permille<Wo0Pin>();
     Timer::clear_flags(0xFFFFFFFFul);
     raise_fault();
@@ -2011,11 +2071,11 @@ void tn_events() {
     const bool nr_fl1 = (Timer::flags() & Timer::non_recoverable_flag(1)) != 0u;
     const uint32_t nr_held = duty_permille<Wo0Pin>();
     Timer::clear_flags(Timer::overflow_flag);
-    wait_ms(30);
+    pause_ms(30);
     const bool nr_ran = (Timer::flags() & Timer::overflow_flag) != 0u;
     clear_fault_input();
     const bool nr_cleared = Timer::clear_non_recoverable(1);
-    wait_ms(20);
+    pause_ms(20);
     const uint32_t nr_back = duty_permille<Wo0Pin>();
     print(serial, "  TCE1 fault: PA08 free ", nr_free, ", held ", nr_held,
           ", after the clear ", nr_back, " per mille; FAULT1IN ",
@@ -2044,7 +2104,7 @@ void tn_events() {
                                  TccEventConfig{.action1 = TccEvent1Action::stop,
                                                 .input1_enable = true},
                                  1, pad_top));
-    wait_ms(5);
+    pause_ms(5);
     const bool stop_ran_before = wait_overflow(5);
     raise_fault();
     const bool stop_ran_held = wait_overflow(30);
@@ -2080,7 +2140,7 @@ void tn_events() {
     event_input_down(1);
     // ---- EVACT1 = DIR: the event LEVEL is the direction -------------------
     // 48 MHz / 1024 = 46875 Hz on the 24-bit counter, started mid-range so
-    // nothing wraps: a 10 ms window is 468.75 ticks. wait_ms() on the 1 ms
+    // nothing wraps: a 10 ms window is 468.75 ticks. pause_ms() on the 1 ms
     // tick lasts between 9 and 10 ms, and each READSYNC'd read costs ~6
     // us (0.3 tick), so a window reads 421..470 - judged as >= 400 in the
     // expected direction.
@@ -2093,13 +2153,13 @@ void tn_events() {
                       Timer::set_count(0x800000ul));
     auto window = []() {
         const uint32_t a = Timer::count();
-        wait_ms(10);
+        pause_ms(10);
         return static_cast<int32_t>(Timer::count() - a);
     };
     const int32_t up_low = window();
     const bool dir_low = Timer::counting_down();
     EicPad::set();
-    wait_ms(2);
+    pause_ms(2);
     const bool dir_high = Timer::counting_down();
     const int32_t down_high = window();
     clear_fault_input();
@@ -2130,7 +2190,7 @@ void tn_events() {
                                                 .input1_enable = true},
                                  1, Timer::max_count) &&
                       Timer::set_count(1000));
-    wait_ms(5);
+    pause_ms(5);
     const uint32_t dec_idle = Timer::count();
     for (uint8_t i = 0; i < 5u; ++i) {
         pin_pulse();
@@ -2151,8 +2211,8 @@ void tn_events() {
     // action. 46875 Hz with PER 46874 is a one-second cycle; the pulse
     // rises when COUNT first reads 10000, and the capture lands after the
     // EIC's synchronization (three CLK_ULP32K periods, 92 us at most) and
-    // one ~6 us READSYNC read of the poll: (92 + 6) / 21.3 = 4.6, so CC0
-    // is judged in [10000, 10006].
+    // one turn of the poll - a ~6 us READSYNC read and a ruler read under
+    // 2 us: (92 + 8) / 21.3 = 4.7, so CC0 is judged in [10000, 10006].
     constexpr uint32_t stamp_top = 46874;
     const TccConfig stamp_cfg{.prescaler = TccPrescaler::div1024,
                               .capture_enable = 0x1};
@@ -2181,16 +2241,17 @@ void tn_events() {
         (void)Timer::cc(0);
         (void)Timer::cc(0);
         Timer::clear_flags(0xFFFFFFFFul);
-        const uint32_t t0 = Ticker::millis();
-        while (Timer::count() < 10000u && Ticker::millis() - t0 < 1100u) {
-        }
+        // Bounded at 1.1 s, the counter's whole period; a time-out fires
+        // the event wherever the count is, and the capture judged below
+        // shows it.
+        (void)brio::wait_until<Ruler>([] { return Timer::count() >= 10000u; }, 1'100'000u);
         EicPad::set();
-        wait_ms(2);
+        pause_ms(2);
         r.event_mc = (Timer::flags() & Timer::match_flag(0)) != 0u;
         r.event_cc = Timer::cc(0);
         EicPad::clear();
         r.ovf_seen = wait_overflow(1100);
-        wait_ms(2);
+        pause_ms(2);
         r.ovf_mc = (Timer::flags() & Timer::match_flag(0)) != 0u;
         r.ovf_cc = Timer::cc(0);
         EicPad::clear();
@@ -2260,10 +2321,10 @@ void tn_events() {
     auto retriggers = [](uint8_t& flags) {
         flags = 0;
         for (uint8_t i = 0; i < 10u; ++i) {
-            wait_ms(3);
+            pause_ms(3);
             Timer::clear_flags(Timer::retrigger_flag);
             (void)Timer::retrigger();
-            wait_ms(2);
+            pause_ms(2);
             if ((Timer::flags() & Timer::retrigger_flag) != 0u) {
                 ++flags;
             }
@@ -2272,7 +2333,7 @@ void tn_events() {
     bench.verdict("TCC0 runs with TRGEO, and a TC counts its retrigger events",
                   trg_up(Timer::max_count));
     (void)EventCounter::set_count16(0);
-    wait_ms(5);
+    pause_ms(5);
     const uint32_t trg_idle = EventCounter::count16();
     uint8_t trg_flags = 0;
     retriggers(trg_flags);
@@ -2282,10 +2343,10 @@ void tn_events() {
     uint8_t resumed = 0;
     for (uint8_t i = 0; i < 10u; ++i) {
         (void)Timer::stop();
-        wait_ms(2);
+        pause_ms(2);
         Timer::clear_flags(Timer::retrigger_flag);
         (void)Timer::retrigger();
-        wait_ms(2);
+        pause_ms(2);
         if (!Timer::stopped() && (Timer::flags() & Timer::retrigger_flag) == 0u) {
             ++resumed;
         }
@@ -2316,15 +2377,15 @@ void tn_events() {
         (void)Timer::set_cc(0, x);
         uint8_t taken = 0;
         for (uint8_t i = 0; i < 10u; ++i) {
-            wait_ms(3);
+            pause_ms(3);
             Timer::clear_flags(Timer::match_flag(0));
-            const uint32_t t0 = Ticker::millis();
-            while ((Timer::flags() & Timer::match_flag(0)) == 0u &&
-                   Ticker::millis() - t0 < 5u) {
-            }
+            // 5 ms: five periods of the 1 kHz counter. A time-out issues
+            // the command off the match, and the count printed shows it.
+            (void)brio::wait_until<Ruler>(
+                [] { return (Timer::flags() & Timer::match_flag(0)) != 0u; }, 5'000u);
             Timer::clear_flags(Timer::retrigger_flag);
             (void)Timer::retrigger();
-            wait_ms(2);
+            pause_ms(2);
             if ((Timer::flags() & Timer::retrigger_flag) != 0u) {
                 ++taken;
             }
@@ -2333,12 +2394,14 @@ void tn_events() {
     }
     release_event_counter();
     Timer::release();
+    // Printed, not judged: no chapter says what a command crossing the
+    // wrap does, so this is a measurement of one die's timing, and the
+    // die rule keeps it out of the tally.
     print(serial, "  RETRIGGER issued on the match at 179 of TOP 199: ", at_179,
-          "/10 taken; at 195: ", at_195, "/10", crlf);
-    bench.verdict("A RETRIGGER COMMAND THAT LANDS ON THE WRAP IS LOST, and "
-                  "command() cannot tell: every one issued at 195 of 199 "
-                  "vanished, every one at 179 was taken",
-                  at_179 == 10u && at_195 == 0u);
+          "/10 taken; at 195: ", at_195, "/10 - a command landing on the wrap ",
+          at_179 == 10u && at_195 == 0u ? "is lost, and command() cannot tell"
+                                        : "is not always lost here",
+          " (printed, not judged)", crlf);
 }
 
 // =============================================================================
@@ -2400,9 +2463,9 @@ Shot fault_at(uint32_t at, uint8_t ch) {
     if (Timer::count() >= at) {
         (void)wait_overflow(1100);
     }
-    const uint32_t t0 = Ticker::millis();
-    while (Timer::count() < at && Ticker::millis() - t0 < 1100u) {
-    }
+    // Bounded at 1.1 s, the counter's whole period; a time-out raises the
+    // fault wherever the count is, and the shot's capture shows it.
+    (void)brio::wait_until<Ruler>([at] { return Timer::count() >= at; }, 1'100'000u);
     raise_fault();
     const uint32_t flags = Timer::flags();
     Timer::clear_flags(0xFFFFFFFFul);
@@ -2428,22 +2491,22 @@ void to_faults() {
     Wo1::claim();
     const bool alt_sync = wait_overflow(30);
     EicPad::set();
-    wait_ms(2);                      // the period ends 18 ms from here
+    pause_ms(2);                      // the period ends 18 ms from here
     const bool a_now = Timer::fault_state(TccFault::a);
     const bool b_now = Timer::fault_state(TccFault::b);
     const bool b_flag_now = (Timer::flags() & Timer::fault_b_flag) != 0u;
     (void)wait_overflow(30);
-    wait_ms(2);
+    pause_ms(2);
     const bool b_next = Timer::fault_state(TccFault::b);
     const bool b_flag_next = (Timer::flags() & Timer::fault_b_flag) != 0u;
     const uint32_t wo1_held = duty_permille<Wo1Pin>();
     (void)wait_overflow(30);
     EicPad::clear();
-    wait_ms(2);
+    pause_ms(2);
     const bool a_gone = Timer::fault_state(TccFault::a);
     const bool b_stays = Timer::fault_state(TccFault::b);
     (void)wait_overflow(30);
-    wait_ms(2);
+    pause_ms(2);
     const bool b_gone = Timer::fault_state(TccFault::b);
     const uint32_t wo1_free = duty_permille<Wo1Pin>(200'000UL);
     print(serial, "  ALTFAULT: 2 ms into the period A ", a_now ? "1" : "0", " B ",
@@ -2471,9 +2534,9 @@ void to_faults() {
     // capture on CC3 - the TOP channel, so erratum 1.21.5's "every upper
     // channel" is empty - and raises three faults at chosen COUNT values.
     // A capture lands after the EIC's synchronization (three CLK_ULP32K
-    // periods, 92 us at most) and one ~6 us READSYNC read of the poll:
-    // (92 + 6) / 21.3 us = 4.6 ticks, so a captured value is judged in
-    // [at, at + 6].
+    // periods, 92 us at most) and one turn of the poll - a ~6 us READSYNC
+    // read and a ruler read under 2 us: (92 + 8) / 21.3 us = 4.7 ticks, so
+    // a captured value is judged in [at, at + 6].
     constexpr uint32_t cap_top = 46874;
     const TccConfig cap_cfg{.prescaler = TccPrescaler::div1024,
                             .capture_enable = 0x8};

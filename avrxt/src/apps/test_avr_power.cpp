@@ -48,9 +48,11 @@
 #include "avrxt/usart.hpp"
 #include "avrxt/userrow.hpp"
 #include "kernel/tenuto.hpp"
+#include "kernel/time.hpp"
 #include "util/bus_master.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #include "board.hpp"
@@ -171,11 +173,60 @@ TestBench<Serial> bench;
 
 void verdict(const char* name, bool ok) { bench.verdict(name, ok); }
 
-void console_drain() {
-    while (!Serial::tx_idle()) {
-    }
-    delay_us(clock, 2000);            // the shift register, generously
+/// Every queued console byte off the wire, bounded on the kernel tick
+/// (the TCBs belong to the letters): false on a wedged console.
+bool console_drain() {
+    return wait_ticks<P>([] { return Serial::tx_idle(); }, ticks_from_ms<P>(200));
 }
+
+/// The drain before a timed window, acted on: a console still busy after
+/// the drain's budget fails a verdict, and the caller does not open the
+/// window (its interrupt would be a wake source inside it).
+bool quiet_console() {
+    if (console_drain()) return true;
+    verdict("the console drained before the timed window", false);
+    return false;
+}
+
+/// A spin on a flag the PIT's handler sets, or on the tick count, bounded
+/// with no clock read in the loop: TCB3 (bound as a net, never used here,
+/// its interrupt left off by init) counts CLK_PER / 2 to TOP, a period of
+/// 131072 cycles (5.46 ms at 24 MHz, 6.55 ms at 20 MHz), and the spin
+/// gives up after `periods` of them. The shared waits (util/test_wait.hpp)
+/// read a clock every turn: the tick under a mask, which would delay the
+/// very handler whose stamp b and f compare, or the cascade, which that
+/// handler stamps itself (a snapshot taken in the loop would race it).
+/// True when done() held, asked once more after the last period.
+template <typename F>
+bool spin_until(F done, uint16_t periods) {
+    using Bound = Tcb<3>;
+    (void)Bound::init({.mode = TcbMode::periodic, .clock = TcbClock::div2, .compare = 0xFFFF});
+    uint16_t seen = 0;
+    while (!done()) {
+        if (Bound::capt_flag()) {
+            Bound::clear_capt();
+            if (++seen >= periods) {
+                Bound::disable();
+                return done();
+            }
+        }
+    }
+    Bound::disable();
+    return true;
+}
+
+/// TCB3's periods in `ms` milliseconds, rounded up, at the board rate.
+constexpr uint16_t bound_periods(uint32_t ms) {
+    return static_cast<uint16_t>((ms * (crystal_hz / 1000u) + 131071u) / 131072u);
+}
+
+/// The PIT's next interrupt, waited for at most 10 ms (ten tick periods).
+bool next_pit() {
+    return spin_until([] { return pit_ran; }, bound_periods(10));
+}
+
+/// False once any tick leg's PIT interrupt failed to come (b, f).
+bool pit_came = true;
 
 /// The kernel loop, minus the sleep: serve matured time events and every
 /// queued event until the system is quiet. Bounded, so a test that has
@@ -236,6 +287,7 @@ void quiesce() {
     FakeBus::started = 0;
     pit_irqs = 0;
     pit_ran = false;
+    pit_came = true;
     sei();
     K::init_all();                 // Pm::init() disarms the site
     watch_init();
@@ -315,14 +367,18 @@ void ta_ladder() {
 /// t0 -> the next PIT interrupt's own stamp, best of eight, starting
 /// right after a tick edge so both legs measure a whole period. `stop`
 /// takes the kernel's idle hook (which takes whatever is ARMED); the
-/// other leg just spins. The difference is what stopping cost.
+/// other leg just spins. The difference is what stopping cost. A PIT
+/// interrupt that does not come within 10 ms clears pit_came and ends
+/// the leg.
 uint32_t tick_leg(bool stop) {
     uint32_t best = 0xFFFFFFFFu;
     for (uint8_t i = 0; i < 8; ++i) {
         cli();
         pit_ran = false;
         sei();
-        while (!pit_ran) {                       // sync to a tick edge
+        if (!next_pit()) {                       // sync to a tick edge
+            pit_came = false;
+            return best;
         }
         cli();
         pit_ran = false;
@@ -332,7 +388,10 @@ uint32_t tick_leg(bool stop) {
         } else {
             sei();
         }
-        while (!pit_ran) {
+        sei();
+        if (!next_pit()) {
+            pit_came = false;
+            return best;
         }
         cli();
         const uint32_t d = pit_stamp - t0;
@@ -358,7 +417,9 @@ TickRange tick_range(bool stop) {
         cli();
         pit_ran = false;
         sei();
-        while (!pit_ran) {                       // sync to a tick edge
+        if (!next_pit()) {                       // sync to a tick edge
+            pit_came = false;
+            return r;
         }
         cli();
         pit_ran = false;
@@ -368,7 +429,10 @@ TickRange tick_range(bool stop) {
         } else {
             sei();
         }
-        while (!pit_ran) {
+        sei();
+        if (!next_pit()) {
+            pit_came = false;
+            return r;
         }
         cli();
         const uint32_t d = pit_stamp - t0;
@@ -388,7 +452,10 @@ void tb_standby() {
     quiesce();
 
     // The round itself, timed.
-    console_drain();
+    if (!quiet_console()) {
+        quiesce();
+        return;
+    }
     const uint32_t r0 = cycles_now();
     ask(SleepDepth::standby);
     const uint32_t r1 = cycles_now();
@@ -404,15 +471,30 @@ void tb_standby() {
 
     // The CPU really stops. Over the same wall-clock span, a loop that
     // only turns when the CPU runs turns thousands of times awake and
-    // once per wake asleep.
-    console_drain();
+    // once per wake asleep. The busy span is bounded by spin_until()
+    // (100 ms of TCB3 periods against 32 ticks, 31.25 ms on the nominal
+    // rate, OSC32K +-10 %): its turns are what is counted, so no clock
+    // read goes into them; a tick that does not run ends the letter here,
+    // before the sleeps that only a tick would end.
+    if (!quiet_console()) {
+        quiesce();
+        return;
+    }
     volatile uint32_t work_busy = 0;
     volatile uint32_t work_sleep = 0;
     sei();
     {
         const uint32_t t0 = P::now();
-        while (P::now() - t0 < 32u) {
-            work_busy = work_busy + 1;
+        const bool spanned = spin_until(
+            [&] {
+                work_busy = work_busy + 1;
+                return P::now() - t0 >= 32u;
+            },
+            bound_periods(100));
+        if (!spanned) {
+            verdict("32 ticks passed within 100 ms", false);
+            quiesce();
+            return;
         }
     }
     const uint32_t c0 = cycles_now();
@@ -445,7 +527,10 @@ void tb_standby() {
             Pm::armed_depth() == SleepDepth::standby);
 
     // What stopping and restarting cost, against the same span spun.
-    console_drain();
+    if (!quiet_console()) {
+        quiesce();
+        return;
+    }
 #if defined(__AVR_AVR64EA48__)
     // Each leg is the shortest of eight PIT periods, and a period is
     // OSC32K's: the two shortest differ by the wake's cost PLUS at most
@@ -467,9 +552,10 @@ void tb_standby() {
           " (standby costs ", static_cast<int32_t>(slept.best) - static_cast<int32_t>(spun.best),
           " cycles beside a clock the stopwatch keeps alive; the legs' noise bound ", noise,
           ")", crlf);
+    verdict("the PIT's interrupt came in every leg (the instrument)", pit_came);
     verdict("the standby wake costs under two microseconds, within the two legs' own "
             "spread and OSC32K's wander",
-            slept.best + noise >= spun.best &&
+            pit_came && slept.best + noise >= spun.best &&
                 slept.best < spun.best + crystal_hz / 1'000'000u * 2u + noise);
 #else
     const uint32_t slept = tick_leg(true);
@@ -478,8 +564,9 @@ void tb_standby() {
           slept, " CLK_PER, spinning ", spun, " (standby costs ",
           static_cast<int32_t>(slept) - static_cast<int32_t>(spun),
           " cycles beside a clock the stopwatch keeps alive)", crlf);
+    verdict("the PIT's interrupt came in every leg (the instrument)", pit_came);
     verdict("the standby wake costs less than a microsecond here",
-            slept >= spun && slept - spun < crystal_hz / 1'000'000u * 2u);
+            pit_came && slept >= spun && slept - spun < crystal_hz / 1'000'000u * 2u);
 #endif
 
     // The first event after the wake.
@@ -680,29 +767,37 @@ void tf_power_down() {
     verdict("a two-voter round arms power-down",
             Probe::last_ok && SLPCTRL.CTRLA == (SLPCTRL_SMODE_PDOWN_gc | SLPCTRL_SEN_bm) &&
             Pm::armed_depth() == SleepDepth::deep);
-    console_drain();
+    if (!quiet_console()) {
+        quiesce();
+        return;
+    }
     cli();
     pit_ran = false;
     sei();
-    while (!pit_ran) {                       // sync to a tick edge
+    if (!next_pit()) {                       // sync to a tick edge
+        pit_came = false;
     }
     cli();
     pit_ran = false;
     const uint16_t p0 = pit_irqs;
     const uint32_t t0 = cycles_now();
-    K::idle_if_empty();                      // sei + SLEEP in the ARMED mode
+    if (pit_came) {
+        K::idle_if_empty();                  // sei + SLEEP in the ARMED mode
+    }
     sei();
-    while (!pit_ran) {
+    if (pit_came && !next_pit()) {
+        pit_came = false;
     }
     cli();
     const uint32_t d = pit_stamp - t0;
     const uint16_t wakes = static_cast<uint16_t>(pit_irqs - p0);
     sei();
-    const uint32_t spun = tick_leg(false);
+    const uint32_t spun = pit_came ? tick_leg(false) : 0u;
     print(serial, "  one tick through the hook in power-down: the stopwatch counted ", d,
           " CLK_PER cycles (a tick spun: ", spun, "), PIT interrupts ", wakes, crlf);
+    verdict("the PIT's interrupt came in every leg (the instrument)", pit_came);
     verdict("the CPU really entered POWER-DOWN: CLK_PER stopped for the tick",
-            d < cycles_per_tick / 10u && spun > cycles_per_tick / 2u);
+            pit_came && d < cycles_per_tick / 10u && spun > cycles_per_tick / 2u);
     verdict("and the PIT woke it", wakes >= 1);
     verdict("the site is still armed after a wake that says nothing",
             SLPCTRL.CTRLA == (SLPCTRL_SMODE_PDOWN_gc | SLPCTRL_SEN_bm));

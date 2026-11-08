@@ -374,7 +374,9 @@ and its "TCC" source is TCC0's WO[0], so one fabric carries either.
   mille** on the pad with a captured period of **65535**, which is what
   NPWM in COUNT16 fixes TOP at.
 - **DRVCTRL.INVEN inverts the output**: the same 25 % waveform read
-  **757 per mille**.
+  **757 per mille** over the short window; the suite reads it over the
+  ten-times window the `TcPwm` reading uses, whose seventy periods hold
+  a part period's bias under 15 per mille.
 - **PWP is PPW with the two registers exchanged** and nothing else:
   CC0 = 4799 / CC1 = 2398 became CC0 = 2398 / CC1 = 4799. **PW** put the
   same width in CC0 with one channel where PPW needs two.
@@ -389,8 +391,8 @@ and its "TCC" source is TCC0's WO[0], so one fabric carries either.
   spanning one tick at /1024, the mean count after a fixed wait was
   **17.96 for GCLK against 16.90 for PRESC and 17.10 for RESYNC**,
   reproducible to a hundredth of a tick. **PRESC and RESYNC are not
-  distinguishable from the CPU** and the suite declines the distinction
-  in print: RESYNC's extra act is resetting the prescaler, and a
+  distinguishable from the CPU** and the suite skips the distinction
+  (a skip, not a pass): RESYNC's extra act is resetting the prescaler, and a
   RETRIGGER issued through CTRLBSET is itself taken on the next prescaled
   clock, so the reset has nothing left to move.
 - **CTRLA.ALOCK holds a buffered write until the UPDATE command**, with

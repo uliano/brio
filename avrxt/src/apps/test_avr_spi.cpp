@@ -264,6 +264,36 @@ void hold_arm(HoldShape shape, uint16_t offset_us, uint16_t spin_us, uint8_t ski
 
 void verdict(const char* name, bool ok) { bench.verdict(name, ok); }
 void verdict(const char* a, const char* b, bool ok) { bench.verdict(a, b, ok); }
+
+// ---- waits -------------------------------------------------------------------
+// A time-out here is a time on the delay verb, not on the kernel tick or a
+// TCB ruler (util/test_wait.hpp's verbs need one or the other): the tick
+// is not started in this suite, because the RTC's PIT it lives on is
+// letter w's standby backstop and its handler would land inside the
+// spans of b, i, j and u and the cycle-exact sweeps of t; and the TCB
+// ruler runs only around a timed run - TCB2 is letter t's one-shot as
+// well. So a wait polls its condition between turns of delay_us(clock,
+// 1): each turn at least a microsecond at the board clock's rate (two at
+// the half clock letters i and s switch to), the budget a floor on the
+// wait's length, the condition seen at most a turn late. It masks
+// nothing, so it also runs where a letter has masked interrupts.
+
+/// Wait until done() holds or `budget_us` turns of at least a microsecond
+/// have passed; true when it held (asked once more after the budget).
+template <typename F>
+[[nodiscard]] bool wait_us(F done, uint32_t budget_us) {
+    for (uint32_t us = 0; us < budget_us; ++us) {
+        if (done()) return true;
+        delay_us(clock, 1);
+    }
+    return done();
+}
+
+/// Every queued console byte off the wire (a 256-byte ring at 460800 is
+/// 6 ms; a fifth of a second): false on a wedged console.
+bool console_drain() {
+    return wait_us([] { return Serial::tx_idle(); }, 200'000u);
+}
 bool near(int32_t a, int32_t b, int32_t tol) {
     const int32_t d = a > b ? a - b : b - a;
     return d <= tol;
@@ -348,22 +378,26 @@ void raw_flush() {
 constexpr uint32_t block_gap = 2;     ///< CLK_PER cycles between two frames of a block
 
 /// One frame inside a polled block of the engine, in thousandths of a
-/// CLK_PER cycle; 0 when a block did not complete. The engine must be
-/// initialised; the ruler is set up and put away here.
+/// CLK_PER cycle; 0 when a block did not complete, or the console did not
+/// drain before it. The engine must be initialised; the ruler is set up
+/// and put away here.
 /// No interrupt inside a run: the console's transmit vector, some hundred
 /// cycles an entry while a printed line drains, outlasts the three cycles
 /// a frame leaves the engine's loop at CLK_PER/2 (measured: 19.2 to 20.6
 /// cycles a frame with the line before still draining, 18.0 without), and
 /// the SCK meter's capture vector would enter on every SCK period - off
-/// for the run, a caller that meters again turns it back on.
-void quiet() {
-    while (!Serial::tx_idle()) {
-    }
+/// for the run, a caller that meters again turns it back on. False, with
+/// a failed verdict, when the console did not drain: the window is then
+/// not opened.
+bool quiet() {
     T0::enable_capt_interrupt(false);
+    if (console_drain()) return true;
+    verdict("the console drained before the timed window", false);
+    return false;
 }
 
 uint32_t frame_mc(SpiClock c, SpiMode m = SpiMode::mode0) {
-    quiet();
+    if (!quiet()) return 0;
     Ruler::init(TcbClock::div1, ChCarry{}, ChSnap{});
     Ruler::reset();
     auto best = [&](uint16_t n) {
@@ -394,6 +428,12 @@ uint32_t frame_mc(SpiClock c, SpiMode m = SpiMode::mode0) {
 /// loop is the limit.
 /// One run of the bare sequence, everything it calls inlined (flatten):
 /// a poll of DREIF is the flag's load, a test and a branch, five cycles.
+/// Its polls are the one unbounded wait of the suite, on purpose: a frame
+/// at CLK_PER/2 is 18 cycles, and any bound read in the poll - a turn of
+/// the delay verb, a ruler read - is longer than the slack it leaves,
+/// which is what the run measures. The caller enters it only with the
+/// instance an enabled buffered host whose select is ignored (SSD set),
+/// where DREIF rises every frame by 28.3.2.1.2 and TXCIF at the last.
 [[gnu::flatten]] uint32_t bare_run(uint16_t n) {
     const uint32_t t0 = Ruler::read();
     for (uint16_t i = 1; i < n; ++i) {
@@ -413,7 +453,11 @@ uint32_t frame_mc(SpiClock c, SpiMode m = SpiMode::mode0) {
 }
 
 uint32_t bare_frame_mc() {
-    quiet();
+    // bare_run()'s premise, checked: nothing else ends its polls.
+    if (!S0::enabled() || !S0::is_host() || !S0::buffer_mode() || !S0::client_select_disabled()) {
+        return 0;
+    }
+    if (!quiet()) return 0;
     Ruler::init(TcbClock::div1, ChCarry{}, ChSnap{});
     Ruler::reset();
     auto best = [&](uint16_t n) {
@@ -839,11 +883,14 @@ void te_wrcol() {
     verdict("host init at CLK_PER/128", host(SpiClock::div128));
     miso_level(true);
 
+    // A byte at CLK_PER/128 is 1024 CLK_PER - 42.7 us at 24 MHz, 51.2 at
+    // 20: every wait for one below gets ten times that.
+    constexpr uint32_t byte_wait_us = 520;
     S0::write(0x5A);              // starts a 42.7 us byte
     S0::write(0x3C);              // ignored, and WRCOL is set
     verdict("a write during a transfer sets WRCOL", S0::write_collision());
-    for (uint32_t i = 0; i < 200'000u && !S0::if_flag(); ++i) {}
-    verdict("the transfer itself completed (IF)", S0::if_flag());
+    verdict("the transfer itself completed (IF)",
+            wait_us([] { return S0::if_flag(); }, byte_wait_us));
     const uint8_t f = S0::flags();
     const uint8_t d = S0::read();      // INTFLAGS then DATA: the documented sequence
     verdict("the collided transfer's data is unharmed", d == 0xFF);
@@ -857,8 +904,8 @@ void te_wrcol() {
     // write-one-to-clear path at all.
     S0::write(0x5A);
     S0::write(0x3C);
-    for (uint32_t i = 0; i < 200'000u && !S0::if_flag(); ++i) {}
-    const bool both_up = S0::if_flag() && S0::write_collision();
+    const bool both_up =
+        wait_us([] { return S0::if_flag(); }, byte_wait_us) && S0::write_collision();
     S0::clear_if();
     const bool if_gone = !S0::if_flag();
     const bool wrcol_stays = S0::write_collision();
@@ -903,9 +950,11 @@ void tf_buffer() {
     verdict("TXCIF stays down while the two bytes are in flight", !txc_after_two);
 
     // A W1C store to DREIF must NOT clear it: DREIF follows the DATA
-    // register, never a store to INTFLAGS (28.5.5).
-    for (uint32_t i = 0; i < 200'000u && !S0::dre_flag(); ++i) {}
-    const bool dre_back = S0::dre_flag();
+    // register, never a store to INTFLAGS (28.5.5). A byte at CLK_PER/128
+    // is 51.2 us at 20 MHz: a wait for one gets ten times that, for two
+    // twenty.
+    constexpr uint32_t byte_wait_us = 520;
+    const bool dre_back = wait_us([] { return S0::dre_flag(); }, byte_wait_us);
     S0::regs().INTFLAGS = SPI_DREIF_bm;
     const bool dre_survives = S0::dre_flag();
     print(serial, "  FINDING: a W1C store to DREIF ",
@@ -913,8 +962,8 @@ void tf_buffer() {
     verdict("DREIF comes back when the buffer empties", dre_back);
     verdict("a store to DREIF does not clear it", dre_survives);
 
-    for (uint32_t i = 0; i < 200'000u && !S0::txc_flag(); ++i) {}
-    verdict("TXCIF rises when shifter and buffer are both empty", S0::txc_flag());
+    verdict("TXCIF rises when shifter and buffer are both empty",
+            wait_us([] { return S0::txc_flag(); }, 2u * byte_wait_us));
     S0::clear_txc();
     verdict("TXCIF is write-one-to-clear", !S0::txc_flag());
 
@@ -924,17 +973,18 @@ void tf_buffer() {
     verdict("RXCIF is up with the two received bytes unread", S0::rxc_flag());
     S0::clear_txc();
     S0::write(0x33);
-    for (uint32_t i = 0; i < 200'000u && !S0::txc_flag(); ++i) {}
+    const bool third_out = wait_us([] { return S0::txc_flag(); }, byte_wait_us);
     const bool ovf_third = S0::overflow_flag();
     S0::clear_txc();
     S0::write(0x44);
-    for (uint32_t i = 0; i < 200'000u && !S0::txc_flag(); ++i) {}
+    const bool fourth_out = wait_us([] { return S0::txc_flag(); }, byte_wait_us);
     const bool ovf_fourth = S0::overflow_flag();
     print(serial, "  BUFOVF after the third undrained byte: ", ovf_third,
           ", after the fourth: ", ovf_fourth, crlf);
+    // No BUFOVF says something only of a byte that really went.
     verdict("the third undrained byte waits in the shifter (no BUFOVF yet)",
-            !ovf_third);
-    verdict("the next transfer raises BUFOVF", ovf_fourth);
+            third_out && !ovf_third);
+    verdict("the next transfer raises BUFOVF", fourth_out && ovf_fourth);
     S0::clear_overflow();
     verdict("BUFOVF is write-one-to-clear", !S0::overflow_flag());
     for (uint8_t i = 0; i < 4; ++i) (void)S0::read();
@@ -956,8 +1006,7 @@ void tf_buffer() {
     const bool dre2 = S0::dre_flag();
     verdict("BUFWR does not change the host's two transmit levels",
             dre0 && dre1 && !dre2);
-    for (uint32_t i = 0; i < 400'000u && !S0::txc_flag(); ++i) {}
-    verdict("both bytes went out", S0::txc_flag());
+    verdict("both bytes went out", wait_us([] { return S0::txc_flag(); }, 2u * byte_wait_us));
     quiesce();
 }
 
@@ -1073,7 +1122,10 @@ void th_interrupts() {
     isr_count = 0;
     S0::enable_interrupt(true);
     S0::write(0x11);
-    for (uint32_t i = 0; i < 200'000u && isr_count == 0; ++i) {}
+    // A byte at CLK_PER/64 is 25.6 us at 20 MHz: a wait for its interrupt
+    // gets ten times that, and the counts below judge what came.
+    constexpr uint32_t byte_wait_us = 260;
+    (void)wait_us([] { return isr_count != 0u; }, byte_wait_us);
     verdict("one interrupt for one byte (normal layout)", isr_count == 1);
     verdict("the body hands the byte over", isr_data == 0xFF);
     verdict("the body saw IF", (isr_flags & SPI_IF_bm) != 0);
@@ -1082,7 +1134,8 @@ void th_interrupts() {
     isr_count = 0;
     for (uint8_t i = 0; i < 16; ++i) {
         S0::write(i);
-        for (uint32_t k = 0; k < 200'000u && isr_count <= i; ++k) {}
+        // A byte whose interrupt never came is judged by the count below.
+        (void)wait_us([i] { return isr_count > i; }, byte_wait_us);
     }
     verdict("one interrupt per byte over a burst", isr_count == 16);
     S0::enable_interrupt(false);
@@ -1104,7 +1157,8 @@ void th_interrupts() {
         // this board holds high (test c's finding) and the received
         // bytes would not be a clean 0xFF any more.
         S0::write(0x00);
-        for (uint32_t k = 0; k < 200'000u && isr_count == before; ++k) {}
+        // A byte whose interrupt never came is judged by the count below.
+        (void)wait_us([before] { return isr_count != before; }, byte_wait_us);
     }
     delay_us(clock, 500);
     const uint16_t n = isr_count;
@@ -1248,7 +1302,12 @@ void tj_engine() {
     {
         static_assert(!Host::has_dma);
         for (uint8_t i = 0; i < 8; ++i) eng_rx[i] = 0x5A;
-        quiet();
+        if (!quiet()) {
+            Host::release();
+            Ss::input();
+            quiesce();
+            return;
+        }
         ChSck::source(S0::SckEvent{});
         SckCount::init(ChSck{});
         SckCount::reset();
@@ -1402,12 +1461,17 @@ void raw_drain() {
     S0::clear_overflow();
 }
 
+/// The longest byte the sweeps clock - CLK_PER/16, 6.4 us at 20 MHz - a
+/// hundred microseconds for its TXCIF. A byte that never ended leaves the
+/// FIFO without it, which the sweep's own verdict reads as a wrong value:
+/// the waits in the sweeps drop their answer for that reason.
+constexpr uint32_t sweep_wait_us = 100;
+
 /// One byte at the resource level, waited for.
 void raw_one(uint8_t v) {
     S0::clear_txc();
     S0::write(v);
-    while (!S0::txc_flag()) {
-    }
+    (void)wait_us([] { return S0::txc_flag(); }, sweep_wait_us);   // a lost byte: the sweep's verdict
 }
 
 struct Untaken {
@@ -1430,8 +1494,7 @@ void untaken_sweep(uint8_t span, Untaken& u) {
         S0::write(0xFF);                    // B = 0xFF on its way
         spin3<nops>(cnt);
         const uint8_t d = S0::read();       // the read under test
-        while (!S0::txc_flag()) {
-        }
+        (void)wait_us([] { return S0::txc_flag(); }, sweep_wait_us);   // see sweep_wait_us
         const uint8_t f = S0::flags();
         const uint8_t r1 = S0::read();
         const uint8_t f1 = S0::flags();
@@ -1466,8 +1529,7 @@ bool untaken_state_at(uint8_t cnt) {
     S0::write(0xFF);                        // B = 0xFF on its way
     spin3<nops>(cnt);
     const uint8_t d = S0::read();
-    while (!S0::txc_flag()) {
-    }
+    (void)wait_us([] { return S0::txc_flag(); }, sweep_wait_us);   // see sweep_wait_us
     return d == 0x00 && !S0::rxc_flag();
 }
 
@@ -1515,8 +1577,7 @@ void repair_sweep(uint8_t span, Repair& u) {
         uint8_t r = 0x55;
         const bool rep = (f & SPI_RXCIF_bm) == 0;
         if (rep) r = S0::read();            // the repair read, dropped
-        while (!S0::txc_flag()) {
-        }
+        (void)wait_us([] { return S0::txc_flag(); }, sweep_wait_us);   // see sweep_wait_us
         uint8_t left[3] = {0x55, 0x55, 0x55};
         uint8_t n = 0;
         while (S0::rxc_flag() && n < 3) left[n++] = S0::read();
@@ -1557,8 +1618,7 @@ void two_held_sweep(uint8_t span, uint16_t& taken, uint16_t& other) {
         S0::write(0xFF);                    // B = 0xFF on its way
         spin3<nops>(cnt);
         const uint8_t d = S0::read();       // two in the FIFO: one stays
-        while (!S0::txc_flag()) {
-        }
+        (void)wait_us([] { return S0::txc_flag(); }, sweep_wait_us);   // see sweep_wait_us
         uint8_t v[3] = {0x55, 0x55, 0x55};
         uint8_t n = 0;
         while (S0::rxc_flag() && n < 3) v[n++] = S0::read();
@@ -1584,8 +1644,7 @@ void flag_sweep(bool two, uint8_t span, uint16_t& claimed, uint16_t& early) {
         spin3<nops>(cnt);
         const uint8_t f = S0::flags();
         (void)S0::read();
-        while (!S0::txc_flag()) {
-        }
+        (void)wait_us([] { return S0::txc_flag(); }, sweep_wait_us);   // see sweep_wait_us
         uint8_t after = 0;
         while (S0::rxc_flag() && after < 3) {
             (void)S0::read();
@@ -1702,8 +1761,7 @@ void tt_untaken() {
             S0::clear_txc();
             const uint8_t first = S0::read();
             S0::write(0xFF);                // a transfer starts right behind the read
-            while (!S0::txc_flag()) {
-            }
+            (void)wait_us([] { return S0::txc_flag(); }, sweep_wait_us);   // see sweep_wait_us
             uint8_t v[4] = {0x55, 0x55, 0x55, 0x55};
             uint8_t n = 0;
             while (S0::rxc_flag() && n < 4) v[n++] = S0::read();
@@ -2208,7 +2266,13 @@ void tk_bringup() {
     // which board sits where is the manifest's, never the firmware's.
     verdict("the peer names a board, and not this one",
             got && label[0] != 0 && !same_board(label, board_id()));
-    verdict("the peer's 24 MHz crystal started", got && d.xtal == 1);
+    // The peer's crystal is its board's premise, not this one's: a peer
+    // that reports none is a skip, never a failure of this suite.
+    if (got && d.xtal == 0) {
+        bench.skip("the peer's crystal: it reports none, its rates come from its RC oscillator");
+    } else {
+        verdict("the peer's 24 MHz crystal started", got && d.xtal == 1);
+    }
 
     // A frame with an op the protocol knows and a checksum that does
     // not match: nak'ed by name, and the channel usable straight after.
@@ -2526,9 +2590,9 @@ void to_ss_midbyte() {
     S0::write(spilink::pattern_value(a.pattern, a.seed_a, 3));
     delay_us(clock, 21);
     cs_release();
-    // This end is the clock: its own byte finishes whatever SS does.
-    for (uint32_t i = 0; i < 200'000u && !S0::if_flag(); ++i) {}
-    const bool host_finished = S0::if_flag();
+    // This end is the clock: its own byte finishes whatever SS does
+    // (42.7 us at 24 MHz, 51.2 at 20; ten times that).
+    const bool host_finished = wait_us([] { return S0::if_flag(); }, 520u);
     const uint8_t host_last = S0::read();
 
     delay_us(clock, 400'000u);            // let the peer's deadline expire
@@ -2769,16 +2833,16 @@ void tq_demotion() {
     verdict("host with SSD = 0 on the shared select wire", init_ok);
     verdict("it starts out a host", init_ok && S0::is_host() && !S0::demoted());
 
+    // The peer takes the wire 60 ms after its ack window and holds it 20
+    // ms: watched for 400 ms.
     uint8_t flags_at = 0;
-    bool demoted = false;
-    for (uint16_t i = 0; i < 2000 && !demoted; ++i) {
-        if (S0::demoted()) {
-            demoted = true;
+    const bool demoted = wait_us(
+        [&flags_at] {
+            if (!S0::demoted()) return false;
             flags_at = S0::flags();
-            break;
-        }
-        delay_us(clock, 200);
-    }
+            return true;
+        },
+        400'000u);
     print(serial, "  FINDING: the peer's low on PE3 ", demoted ? "DEMOTED" : "did NOT demote",
           " this host; INTFLAGS at the moment = ", hex(flags_at), " (IF=",
           (flags_at & SPI_IF_bm) != 0, "), MASTER now ", S0::is_host(), crlf);
@@ -2912,10 +2976,10 @@ void tr_mspi() {
     // select, and only the avrxt peer's client can select itself (INVEN on
     // its SS pin); any other answers Op::mspi with report_cfg_failed.
     if (!peer_avr()) {
-        print(serial, "  SKIPPED, no verdict claimed: the peer (kind ", hex(peer_arch),
-              ") is not the avrxt spi_peer - the USART's Host SPI frames no select, and "
-              "only that peer's client selects itself. MspiHost needs an AVR peer; the AVR's "
-              "self-selected client is judged in test_samc_spi h", crlf);
+        print(serial, "  the peer is kind ", hex(peer_arch), crlf);
+        bench.skip("the peer is not the avrxt spi_peer - the USART's Host SPI frames no select, "
+                   "and only that peer's client selects itself. MspiHost needs an AVR peer; the "
+                   "AVR's self-selected client is judged in test_samc_spi h");
         quiesce();
         return;
     }
@@ -3012,8 +3076,9 @@ using Osc20 = Clock<ClockSource::internal, 20'000'000>;
 /// board clock, so on a slower source they are longer, never shorter.
 #if defined(CLKCTRL_FRQSEL_gm)   // OSCHF's rate a register field: the DA/DB
 bool rung_clock(uint32_t hz) {
-    while (!Serial::tx_idle()) {
-    }
+    // A console still sending garbles its line across the switch; a wedged
+    // one is switched all the same - there is nothing left to wait for.
+    (void)console_drain();
     bool ok = false;
     if (hz == 16'000'000u) {
         ok = Osc16::init();
@@ -3032,8 +3097,9 @@ bool rung_clock(uint32_t hz) {
 /// The AVR EA board: every rung is its crystal's - OSCHF runs at the
 /// fuse's rate alone (no FRQSEL), so no rung lies between its divisions.
 bool rung_clock(uint32_t) {
-    while (!Serial::tx_idle()) {
-    }
+    // A console still sending garbles its line across the switch; a wedged
+    // one is switched all the same - there is nothing left to wait for.
+    (void)console_drain();
     const bool ok = SysClock::init();
     Serial::init(clock, 460800);
     return ok;
@@ -3071,7 +3137,11 @@ bool b2b_exchange(const Exchange& e, bool answer_only, uint32_t& ticks) {
         xrx[i] = 0xEE;
         b2b_tx[i] = i < n ? out.next() : 0xFF;
     }
-    quiet();
+    if (!quiet()) {
+        Host::release();
+        (void)link_command_mode();
+        return false;
+    }
     Ruler::init(TcbClock::div1, ChCarry{}, ChSnap{});
     Ruler::reset();
     cs_assert();
@@ -3354,7 +3424,13 @@ ClientResult client_leg(const ClientLeg& g) {
         c_in[i] = 0xEE;
     }
     const uint16_t n = g.run_len < client_cap ? g.run_len : client_cap;
-    quiet();
+    // The console's vector would land inside the run: no run without the
+    // drain (the result left stalled, as an unrun run reads).
+    if (!quiet()) {
+        S0::release();
+        (void)link_command_mode();
+        return res;
+    }
     hold_arm(g.shape, g.offset_us, g.spin_us, g.skip);
     switch (g.kind) {
         case RunKind::exchange:
@@ -3519,9 +3595,9 @@ void tv_client() {
         a.aux16 = 40'000u;                // us it holds it low
         const bool took_cmd = peer_act(spilink::Op::ss_pulse, a);
         (void)become_client(true, true);
-        uint32_t w = 0;
-        while (!Client::selected() && w < 2'000'000u) ++w;
-        const bool fell = Client::selected();
+        // The peer takes the wire 20 ms after its ack window: watched for
+        // 200 ms.
+        const bool fell = wait_us([] { return Client::selected(); }, 200'000u);
         Ruler::init(TcbClock::div1, ChCarry{}, ChSnap{});
         Ruler::reset();
         constexpr uint32_t budget = 5'000u;
@@ -3653,7 +3729,13 @@ PinWake pin_wake(PinSense sck, PinSense ss) {
     RtcClock::select(RtcSource::osc32k);
     Pit::init(PitPeriod::cyc16384);
     const uint8_t p0 = pit_irqs;
-    for (uint32_t i = 0; i < 4'000'000u && pit_irqs == p0; ++i) {
+    // One period of the 2 Hz PIT on OSC32K - 500 ms, give or take the
+    // oscillator's ten per cent - waited for a second; a PIT that never
+    // ticks has no backstop to offer, and the leg is not run.
+    if (!wait_us([p0] { return pit_irqs != p0; }, 1'000'000u)) {
+        Pit::enable_interrupt(false);
+        verdict("the 2 Hz PIT, the sleep's backstop, ticks", false);
+        return w;
     }
     spilink::Params a{};
     a.count = 160;
@@ -3683,9 +3765,12 @@ PinWake pin_wake(PinSense sck, PinSense ss) {
     wake_watch = true;
     Sck::sense(sck);
     Ss::sense(ss);
-    quiet();
+    // A console still sending would wake the core on its own vector: no
+    // sleep without the drain (no sleep counted, which every verdict of
+    // the letter fails on).
+    const bool drained = quiet();
     const uint8_t p1 = pit_irqs;
-    while (w.wfis < 8u) {
+    while (drained && w.wfis < 8u) {
         cli();
         if (wake_irqs != 0u || pit_irqs != p1) {
             sei();
@@ -3807,7 +3892,12 @@ void tx_select() {
         for (const SpiClock c : {SpiClock::div128, SpiClock::div16}) {
             for (uint8_t read = 0; read < 2u; ++read) {
                 for (uint8_t cs = 0; cs < 2u; ++cs) {
-                    quiet();
+                    if (!quiet()) {
+                        Host::release();
+                        miso_level(false);
+                        Ss::input();
+                        return;
+                    }
                     ChSck::source(S0::SckEvent{});
                     SckCount::init(ChSck{});
                     SckCount::reset();
@@ -3841,7 +3931,12 @@ void tx_select() {
             "without, ends with SCK idle (/128) and no SCK edge after it (modes 2 and 3, both rates)",
             early_pad == 0u && early_edges == 0u);
 
-    quiet();
+    if (!quiet()) {
+        Host::release();
+        miso_level(false);
+        Ss::input();
+        return;
+    }
     Ruler::init(TcbClock::div1, ChCarry{}, ChSnap{});
     Ruler::reset();
     static const uint8_t one[1] = {0x2C};

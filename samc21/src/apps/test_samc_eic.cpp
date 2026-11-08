@@ -60,6 +60,7 @@
 #include "samc21/tc.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -143,18 +144,21 @@ volatile bool disarm_served = false;
 // Small helpers
 // ---------------------------------------------------------------------------
 
-/// A short, calibrated-enough wait. One iteration is a handful of CPU
-/// cycles at 48 MHz; 5000 of them is a few hundred microseconds, which
-/// is many OSCULP32K periods and far longer than any pull needs to move
-/// an unloaded pad.
-void spin(uint32_t turns) {
-    volatile uint32_t sink = 0;
-    for (uint32_t i = 0; i < turns; ++i) {
-        sink = sink + 1u;
-    }
-}
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's
+/// fixed pauses (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
-void settle() { spin(20'000UL); }
+/// A fixed pause on the ruler. 400 us is over a dozen EIC clock periods
+/// (OSCULP32K, about 30 us) and far longer than any pull needs to move an
+/// unloaded pad.
+void pause_us(uint32_t us) { brio::spin_us<Ruler>(us); }
+
+/// 4 ms: over a hundred EIC clock periods, for a flag, a filter or a
+/// counter to follow a pad that has moved.
+void settle() { pause_us(4'000u); }
 
 /// Move a pad that has been handed to the EIC, by flipping the
 /// direction of its internal pull (PINCFG.PULLEN stays set; PORT.OUT is
@@ -186,13 +190,23 @@ void arm_pad(bool high) {
 template <class P>
 bool pad_is_free() {
     P::input(PinPull::up);
-    spin(2000);
+    pause_us(400u);
     const bool up = P::read();
     P::input(PinPull::down);
-    spin(2000);
+    pause_us(400u);
     const bool down = P::read();
     P::configure({});
     return up && !down;
+}
+
+/// Give a pad back to PORT at the end of a letter: the mux off and an
+/// input held low by its own pull - never left floating, and never left
+/// an output (configure() alone keeps DIR, so a pad a letter drove would
+/// stay driven).
+template <class P>
+void hand_back() {
+    P::configure({});
+    P::input(PinPull::down);
 }
 
 /// Arm the witness from zero: the software reset inside init() clears
@@ -323,15 +337,24 @@ void tb_stimulus() {
     bench.verdict("the block enables", Eic::enable(true));
 
     // --- technique 1: drive the pad from PORT with the peripheral mux on
+    //
+    // If PMUXEN takes the pad from the output driver, the claimed pad has
+    // no driver and no pull: it floats. So it is first pulled LOW and left
+    // charged there, and the question becomes whether driving OUT high
+    // under the mux raises it - a floating pad holds its charge for far
+    // longer than the 400 us each read waits, where an uncharged one
+    // would make the two reads a coin toss.
+    PadA::input(PinPull::down);
+    pause_us(400u);
     PadA::output();
     PadA::clear();
     LineA::claim();
-    spin(2000);
+    pause_us(400u);
     Eic::clear_flags(0xFFFFu);
-    spin(2000);
+    pause_us(400u);
     const bool driven_low_flag = LineA::flag();
     PadA::set();
-    spin(2000);
+    pause_us(400u);
     const bool driven_high_flag = LineA::flag();
     print(serial, "  PORT-driven under PMUXEN: flag with OUT=0 -> ",
           driven_low_flag ? "1" : "0", ", with OUT=1 -> ",
@@ -340,12 +363,12 @@ void tb_stimulus() {
     // --- technique 2: move the pad with its own internal pull
     LineA::release();
     arm_pad<PadA>(false);
-    spin(4000);
+    pause_us(800u);
     Eic::clear_flags(0xFFFFu);
-    spin(2000);
+    pause_us(400u);
     const bool pulled_low_flag = LineA::flag();
     pull_to<PadA>(true);
-    spin(4000);
+    pause_us(800u);
     const bool pulled_high_flag = LineA::flag();
     print(serial, "  pull-driven under PMUXEN: flag with the pull down -> ",
           pulled_low_flag ? "1" : "0", ", with the pull up -> ",
@@ -363,12 +386,12 @@ void tb_stimulus() {
     // only in a printed line - if a later silicon changes it, the suite
     // has to notice.
     bench.verdict("PMUXEN takes the pad away from PORT's OUTPUT DRIVER: "
-                  "driving OUT with the mux on moves nothing",
-                  driven_low_flag == driven_high_flag);
+                  "driving OUT high with the mux on leaves the pulled-low pad low",
+                  !driven_low_flag && !driven_high_flag);
 
     (void)Eic::enable(false);
     Eic::release();
-    PadA::configure({});
+    hand_back<PadA>();
 }
 
 // =============================================================================
@@ -427,7 +450,7 @@ void tc_senses() {
                       Eic::enable(true));
     settle();
     LineA::clear_flag();
-    spin(200);
+    pause_us(40u);
     const bool level_returns = LineA::flag();
 
     (void)Eic::enable(false);
@@ -443,7 +466,7 @@ void tc_senses() {
     settle();
     const bool edge_set = LineA::flag();
     LineA::clear_flag();
-    spin(200);
+    pause_us(40u);
     const bool edge_returns = LineA::flag();
 
     print(serial, "  after clearing: level flag back -> ",
@@ -481,8 +504,8 @@ void tc_senses() {
 
     (void)Eic::enable(false);
     Eic::release();
-    PadA::configure({});
-    PadB::configure({});
+    hand_back<PadA>();
+    hand_back<PadB>();
 }
 
 // =============================================================================
@@ -602,11 +625,19 @@ void td_clock() {
                                       EicLineConfig{.sense = EicSense::both,
                                                     .filter = true}) &&
                       Eic::enable(true));
+    // The pad came down from the previous check's HIGH just before the
+    // enable, so the filter's samples may still hold that level: let it
+    // sample the settled pad (and flag the falling edge, if it sees one)
+    // BEFORE the flags are cleared, or that edge lands on the short
+    // pulse's verdict.
+    settle();
     Eic::clear_flags(0xFFFFu);
 
-    // A pulse far shorter than one sampling period.
+    // A pulse far shorter than one sampling period: about 4 us, an eighth
+    // of the ~30 us CLK_ULP32K period, where the majority filter needs
+    // two samples of three.
     pull_to<PadA>(true);
-    spin(20);
+    pause_us(4u);
     pull_to<PadA>(false);
     settle();
     const bool short_pulse = LineA::flag();
@@ -629,7 +660,7 @@ void td_clock() {
 
     (void)Eic::enable(false);
     Eic::release();
-    PadA::configure({});
+    hand_back<PadA>();
 }
 
 // =============================================================================
@@ -766,8 +797,8 @@ void te_event() {
     GclkChannel::disconnect(Evsys::gclk_id(ev_ch));
     (void)Eic::enable(false);
     Eic::release();
-    PadA::configure({});
-    PadHigh::configure({});
+    hand_back<PadA>();
+    hand_back<PadHigh>();
 }
 
 // =============================================================================
@@ -835,8 +866,8 @@ void tf_interrupt() {
     Eic::disarm(0xFFFFu);
     (void)Eic::enable(false);
     Eic::release();
-    PadA::configure({});
-    PadB::configure({});
+    hand_back<PadA>();
+    hand_back<PadB>();
 }
 
 // =============================================================================
@@ -982,12 +1013,12 @@ void tg_falling_low() {
     const uint32_t on_low = eic_isr_count;
     const uint32_t mask = eic_isr_mask;
     LineB::clear_flag();
-    spin(2000);
+    pause_us(400u);
     const bool back_while_low = LineB::flag();
     pull_to<PadB>(true);
     settle();
     LineB::clear_flag();
-    spin(2000);
+    pause_us(400u);
     const bool back_while_high = LineB::flag();
     Nvic::disable(Eic::irq());
     disarm_served = false;
@@ -1005,8 +1036,8 @@ void tg_falling_low() {
     Eic::disarm(0xFFFFu);
     (void)Eic::enable(false);
     Eic::release();
-    PadA::configure({});
-    PadB::configure({});
+    hand_back<PadA>();
+    hand_back<PadB>();
 }
 
 // =============================================================================
@@ -1026,10 +1057,10 @@ void th_wrconfig() {
     bench.verdict("the three pads are free (each follows its own pull)",
                   pad_is_free<PadA>() && pad_is_free<PadB>() && pad_is_free<PadHigh>());
     PortA::configure_mask(mask, PinConfig{.input_enable = true, .pull = PinPull::up});
-    spin(2000);
+    pause_us(400u);
     const uint32_t up = PortA::in() & mask;
     PortA::configure_mask(mask, PinConfig{.input_enable = true, .pull = PinPull::down});
-    spin(2000);
+    pause_us(400u);
     const uint32_t down = PortA::in() & mask;
     print(serial, "  configure_mask over PA09/PA16/PA17: IN reads ", hex(up), " pulled up, ",
           hex(down), " pulled down (mask ", hex(mask), ")", crlf);
@@ -1095,7 +1126,7 @@ void ti_port_events() {
                                                         .enable = true});
     auto fire = []() {
         Evsys::trigger(ch);
-        spin(200);
+        pause_us(40u);
         return PadA::read();
     };
     // Input 2 alone.
@@ -1124,7 +1155,7 @@ void ti_port_events() {
     Evsys::disconnect(PortA::event_user(3));
     Evsys::release_channel(ch);
     PortA::release_events();
-    PadA::configure({});
+    hand_back<PadA>();
 }
 
 // =============================================================================
@@ -1170,15 +1201,18 @@ void tn_nmi() {
     bench.verdict("sense NONE is how an NMI is turned off",
                   Nmi::configure(EicNmiConfig{}) &&
                       Eic::nmi_config().sense == EicSense::none);
+    // Judged by the handler's entries, not by NMIFLAG: the handler clears
+    // the flag, so a flag read could not tell an NMI taken from none.
+    const uint32_t before_off = nmi_count;
     pull_to<NmiPad>(false);
     settle();
     pull_to<NmiPad>(true);
     settle();
-    bench.verdict("and it stays off across another edge",
-                  Eic::nmi_flag() == false);
+    bench.verdict("and it stays off across another edge: no NMI taken",
+                  nmi_count == before_off && !Eic::nmi_flag());
 
     Nmi::release();
-    NmiPad::configure({});
+    hand_back<NmiPad>();
     Eic::release();
 }
 
@@ -1198,7 +1232,7 @@ void tu_button() {
     // wiring choice.
     const bool free = pad_is_free<Button>();
     Button::input(PinPull::up);
-    spin(2000);
+    pause_us(400u);
     const bool at_rest = Button::read();
     print(serial, "  PB22: follows its own pull -> ", free ? "yes" : "no",
           ", at rest with the pull up -> ", at_rest ? "high" : "LOW", crlf);

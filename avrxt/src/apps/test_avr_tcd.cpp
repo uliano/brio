@@ -51,6 +51,7 @@
 #include "avrxt/delay.hpp"
 #include "avrxt/evsys.hpp"
 #include "avrxt/pin.hpp"
+#include "avrxt/platform.hpp"
 #include "avrxt/tcb.hpp"
 #include "avrxt/tcd.hpp"
 #include "avrxt/usart.hpp"
@@ -66,6 +67,7 @@ namespace {
 
 using namespace brio;
 
+using P = AvrPlatform;
 using Serial = Uart<2, Route::alt1>;
 constexpr Serial serial;
 
@@ -123,6 +125,37 @@ bool near(int32_t a, int32_t b, int32_t tol) {
     return d <= tol;
 }
 
+// ---- waits -------------------------------------------------------------------
+// The suite's time-outs are counted on the delay verb, not on the kernel
+// tick of util/test_wait.hpp: the four TCBs are the instruments, and the
+// tick's 1024 Hz handler, which no letter needs, would be one more
+// interrupt inside the letters' delay windows and pulse edges. Each turn
+// of a wait is one look at its condition and a 1 us delay on the
+// crystal, so a wait of N turns lasts at least N microseconds and sees
+// its condition within about a microsecond.
+
+/// Wait until done() holds, at most `us` turns of at least 1 us each:
+/// false when the condition was still false after them. Main context;
+/// masks nothing.
+template <typename F>
+[[nodiscard]] bool wait_crystal_us(F&& done, uint32_t us) {
+    for (uint32_t turn = 0; turn < us; ++turn) {
+        if (done()) return true;
+        delay_us(clock, 1);
+    }
+    return done();
+}
+
+/// The longest wait for a TCB capture or a WOA edge: a capture of a TCD
+/// cycle comes within a 16-bit count (2.7 ms at 24 MHz) and an edge
+/// within a cycle (1.2 ms at the slowest), so 100 ms is many of either.
+constexpr uint32_t edge_us = 100'000;
+/// The longest wait for a synchronization flag (ENRDY, CMDRDY, the
+/// TCD's disable at the end of a cycle, PLLS): each takes a few cycles
+/// of the TCD's clock, a TCD cycle or the PLL's start-up; 20 ms is many
+/// TCD cycles (1.2 ms at the slowest in these letters).
+constexpr uint32_t sync_us = 20'000;
+
 // ---- measurement -------------------------------------------------------------
 
 struct Stat {
@@ -154,10 +187,7 @@ Stat gather(Read read, uint8_t count = 8, uint8_t discard = 2) {
     T::clear_capt();
     const uint16_t want = static_cast<uint16_t>(count) + discard;
     for (uint16_t got = 0; got < want; ++got) {
-        uint32_t spins = 400'000;
-        while (!T::capt_flag()) {
-            if (--spins == 0) return s;
-        }
+        if (!wait_crystal_us([] { return T::capt_flag(); }, edge_us)) return s;
         const uint16_t v = read();
         if (got >= discard) s.add(v);
     }
@@ -327,11 +357,15 @@ void ta_routes() {
         D::regs().CTRLA &= static_cast<uint8_t>(~TCD_ENABLE_bm);   // raw: no wait
         const bool closed = !D::enable_ready();
         uint16_t spins = 0;
-        while (!D::enable_ready() && spins < 0xFFFF) ++spins;
+        const bool reopened = wait_crystal_us([&spins] {
+            if (D::enable_ready()) return true;
+            ++spins;
+            return false;
+        }, sync_us);
         print(serial, "    ENRDY closed by the ENABLE write: ", closed, ", reopened after ",
-              spins, " spins", crlf);
+              spins, " looks a microsecond apart", crlf);
         verdict("writing ENABLE closes ENRDY", closed);
-        verdict("ENRDY reopens by itself", spins < 0xFFFF);
+        verdict("ENRDY reopens by itself", reopened);
         verdict("the TCD really went down", !D::enabled());
         verdict("enable() under the discipline", D::enable());
     }
@@ -342,11 +376,15 @@ void ta_routes() {
         D::regs().CTRLE = TCD_SYNC_bm;                              // raw: no wait
         const bool closed = !D::command_ready();
         uint16_t spins = 0;
-        while (!D::command_ready() && spins < 0xFFFF) ++spins;
+        const bool reopened = wait_crystal_us([&spins] {
+            if (D::command_ready()) return true;
+            ++spins;
+            return false;
+        }, sync_us);
         print(serial, "    CMDRDY closed by the SYNC strobe: ", closed, ", reopened after ",
-              spins, " spins", crlf);
+              spins, " looks a microsecond apart", crlf);
         verdict("a strobe closes CMDRDY", closed);
-        verdict("CMDRDY reopens by itself", spins < 0xFFFF);
+        verdict("CMDRDY reopens by itself", reopened);
         verdict("CTRLE is a strobe register (self-clearing)", D::regs().CTRLE == 0);
     }
 
@@ -844,20 +882,26 @@ void tf_pll() {
         verdict("PLL stopped: PLLS clear", !Pll::locked());
         verdict("start with RUNSTDBY and no requester",
                 Pll::start(PllSource::oschf, PllMultiplier::x2, true));
-        uint16_t spins = 0;
-        while (!Pll::locked() && spins < 0xFFFF) ++spins;
-        print(serial, "    RUNSTDBY = 1, TCD down: PLLS = ", Pll::locked(), " after ",
-              spins, " spins", crlf);
+        // PLLS is expected to stay clear: the wait runs its budget out, and
+        // the verdict below reads the flag after it.
+        (void)wait_crystal_us([] { return Pll::locked(); }, sync_us);
+        print(serial, "    RUNSTDBY = 1, TCD down: PLLS = ", Pll::locked(), " after 20 ms",
+              crlf);
         verdict(has_xoschf ? "errata 2.5.3: PLLS stays 0 with RUNSTDBY and no requester"
                            : "errata 2.4.1: PLLS stays 0 with RUNSTDBY and no requester",
                 !Pll::locked());
         TcdConfig c = base_one_ramp(50, 150, 200, static_cast<uint16_t>(period - 1));
         c.clock = TcdClock::pll;
         verdict("the TCD becomes the requester", D::init(c));
-        spins = 0;
-        while (!Pll::locked() && spins < 0xFFFF) ++spins;
+        uint16_t spins = 0;
+        // The verdict below reads the flag after the wait.
+        (void)wait_crystal_us([&spins] {
+            if (Pll::locked()) return true;
+            ++spins;
+            return false;
+        }, sync_us);
         print(serial, "    with the TCD requesting: PLLS = ", Pll::locked(), " after ",
-              spins, " spins", crlf);
+              spins, " looks a microsecond apart", crlf);
         verdict("PLLS sets as soon as a peripheral requests the PLL", Pll::locked());
     }
 
@@ -1088,16 +1132,14 @@ uint16_t cycles_in(uint32_t us) {
     return Edges::count();
 }
 
-/// Is this output still moving? Sample the pin flat out for about ten
-/// TCD cycles and report whether both levels were seen. The direct
-/// answer, next to what STATUS.PWMACT claims.
-template <typename P>
-bool output_moving(uint32_t samples = 100'000) {
-    const bool first = P::read();
-    while (samples--) {
-        if (P::read() != first) return true;
-    }
-    return false;
+/// Is this output still moving? Sample the pin for 20 ms - sixteen of
+/// input_base()'s 1.2 ms cycles, each look a microsecond or two apart
+/// against its 500 us on-time - and report whether both levels were
+/// seen. The direct answer, next to what STATUS.PWMACT claims.
+template <typename Pad>
+bool output_moving() {
+    const bool first = Pad::read();
+    return wait_crystal_us([first] { return Pad::read() != first; }, 20'000);
 }
 
 void th_input_modes() {
@@ -1222,23 +1264,19 @@ void th_input_modes() {
         const uint16_t free_run = cycles_in(20'000);
         // Wait for WOA to be high, then fire one edge inside its on-time.
         WidthATcb::clear_capt();
-        uint32_t spins = 400'000;
-        while (!WoaPin::read() && --spins) {
-        }
+        bool edge_ok = wait_crystal_us([] { return WoaPin::read(); }, edge_us);
         delay_us(clock, 20);
         LevelA::set();
         delay_us(clock, 5);
         LevelA::clear();
-        spins = 400'000;
-        while (!WidthATcb::capt_flag() && --spins) {
-        }
+        edge_ok = wait_crystal_us([] { return WidthATcb::capt_flag(); }, edge_us) && edge_ok;
         const uint16_t cut = WidthA::width_ticks();
         const uint16_t held = cycles_in(20'000);
         print(serial, "    ", name, ": nominal WOA on-time ", nominal.mean(),
               " ticks, the interrupted one ", cut, " ticks; cycles 20 ms: ", free_run,
               " free / ", held, " with one edge", crlf);
         verdict("the edge cut the on-time short, ", name,
-                cut < nominal.mean() && cut > 0);
+                edge_ok && cut < nominal.mean() && cut > 0);
         if (which) {
             verdict("mode 9 leaves the counter alone", near(free_run, held, 2));
         }
@@ -1311,6 +1349,7 @@ void th_input_modes() {
     // --- async vs synchronous override latency
     {
         int32_t lat[2] = {0, 0};
+        bool edges_ok = true;
         for (uint8_t leg = 0; leg < 2; ++leg) {
             const TcdEventConfig cfg = leg ? TcdEventConfig::async : TcdEventConfig::neither;
             TcdConfig c = input_base(TcdInputMode::level_trig_freq, cfg,
@@ -1330,16 +1369,19 @@ void th_input_modes() {
             for (uint8_t i = 0; i < 8; ++i) {
                 LevelA::clear();
                 delay_us(clock, 2000);
-                uint32_t spins = 400'000;
-                while (!WoaPin::read() && --spins) {
-                }
+                edges_ok = wait_crystal_us([] { return WoaPin::read(); }, edge_us) && edges_ok;
                 delay_us(clock, 30);
                 CountTcb::clear_capt();
-                LevelA::set();
-                const uint16_t t0 = CountTcb::count();
-                spins = 400'000;
-                while (!CountTcb::capt_flag() && --spins) {
+                uint16_t t0;
+                {
+                    // The store and the read that follows it as one: an
+                    // interrupt between them would move t0 and shorten d.
+                    P::CriticalSection cs;
+                    LevelA::set();
+                    t0 = CountTcb::count();
                 }
+                edges_ok = wait_crystal_us([] { return CountTcb::capt_flag(); }, edge_us) &&
+                           edges_ok;
                 const uint16_t t1 = CountTcb::capture();
                 const int16_t d = static_cast<int16_t>(static_cast<uint16_t>(t1 - t0));
                 if (d < best) best = d;
@@ -1354,6 +1396,7 @@ void th_input_modes() {
         print(serial, "    CLK_TCD_SYNC = CLK_PER / 8 here, so one synchronizer cycle is "
                       "8 CLK_PER ticks; the differential is ", diff, " ticks = ",
               diff / 8, " synchronizer cycles", crlf);
+        if (!edges_ok) verdict("WOA's edges and the stamps came within 100 ms each", false);
         verdict("the asynchronous path overrides the output sooner", lat[1] < lat[0]);
         verdict("the synchronous path costs about two to three CLK_TCD_SYNC cycles",
                 diff >= 8 && diff <= 40);
@@ -1409,13 +1452,11 @@ void th_input_modes() {
               " CLK_TCD_SYNC cycles", crlf);
 
         uint8_t inside = 0, outside = 0;
+        bool edges_ok = true;
         for (uint8_t i = 0; i < 4; ++i) {
-            uint32_t spins = 400'000;
-            while (WoaPin::read() && --spins) {
-            }
-            spins = 400'000;
-            while (!WoaPin::read() && --spins) {
-            }
+            // A WOA rise caught within a microsecond: the window starts on it.
+            edges_ok = wait_crystal_us([] { return !WoaPin::read(); }, edge_us) && edges_ok;
+            edges_ok = wait_crystal_us([] { return WoaPin::read(); }, edge_us) && edges_ok;
             D::clear_flags();
             delay_us(clock, 50);                            // inside the window
             LevelA::set();
@@ -1424,12 +1465,8 @@ void th_input_modes() {
             delay_us(clock, 50);
             if (D::trig_a_flag()) ++inside;
 
-            spins = 400'000;
-            while (WoaPin::read() && --spins) {
-            }
-            spins = 400'000;
-            while (!WoaPin::read() && --spins) {
-            }
+            edges_ok = wait_crystal_us([] { return !WoaPin::read(); }, edge_us) && edges_ok;
+            edges_ok = wait_crystal_us([] { return WoaPin::read(); }, edge_us) && edges_ok;
             D::clear_flags();
             delay_us(clock, 600);                           // past the window
             LevelA::set();
@@ -1440,6 +1477,7 @@ void th_input_modes() {
         }
         print(serial, "    blanking: ", inside, "/4 events honoured INSIDE the window, ",
               outside, "/4 honoured after it", crlf);
+        if (!edges_ok) verdict("WOA's edges came within 100 ms each", false);
         verdict("an event inside the blanking window is ignored", inside == 0);
         verdict("an event after it is honoured", outside == 4);
     }
@@ -1471,9 +1509,14 @@ void th_input_modes() {
                 uint8_t hits = 0;
                 for (uint8_t i = 0; i < 16; ++i) {
                     D::clear_flags();
-                    LevelA::set();
-                    if (widths[wi]) delay_us(clock, widths[wi]);
-                    LevelA::clear();
+                    {
+                        // The pulse's width is the stores' alone: no
+                        // interrupt between them stretches it.
+                        P::CriticalSection cs;
+                        LevelA::set();
+                        if (widths[wi]) delay_us(clock, widths[wi]);
+                        LevelA::clear();
+                    }
                     delay_us(clock, 200);
                     if (D::trig_a_flag()) ++hits;
                 }
@@ -1515,6 +1558,7 @@ void th_input_modes() {
              "SYNCPRES = 8, CNTPRES = 1 (the documented workaround)"},
         };
         uint8_t blocked[2] = {0, 0};
+        bool edges_ok = true;
         for (uint8_t l = 0; l < 2; ++l) {
             TcdConfig c = base_one_ramp(fl[l].a_set, fl[l].a_clr, fl[l].b_set, fl[l].b_clr);
             c.sync_prescaler = fl[l].s;
@@ -1527,25 +1571,27 @@ void th_input_modes() {
             const Stat nominal = gather<WidthATcb>([] { return WidthA::width_ticks(); }, 4);
             uint8_t hits = 0;
             for (uint8_t i = 0; i < 8; ++i) {
-                uint32_t spins = 400'000;
-                while (WoaPin::read() && --spins) {
-                }
-                spins = 400'000;
-                while (!WoaPin::read() && --spins) {
-                }
+                edges_ok = wait_crystal_us([] { return !WoaPin::read(); }, edge_us) && edges_ok;
+                edges_ok = wait_crystal_us([] { return WoaPin::read(); }, edge_us) && edges_ok;
                 WidthATcb::clear_capt();
                 delay_us(clock, 100);                      // a quarter into the on-time
-                LevelA::set();                             // back-to-back: the shortest event
-                LevelA::clear();
-                spins = 400'000;
-                while (!WidthATcb::capt_flag() && --spins) {
+                {
+                    // Back-to-back stores, the shortest event: no
+                    // interrupt between them may stretch it.
+                    P::CriticalSection cs;
+                    LevelA::set();
+                    LevelA::clear();
                 }
-                if (WidthA::width_ticks() + 200 < nominal.mean()) ++hits;
+                const bool captured =
+                    wait_crystal_us([] { return WidthATcb::capt_flag(); }, edge_us);
+                edges_ok = captured && edges_ok;
+                if (captured && WidthA::width_ticks() + 200 < nominal.mean()) ++hits;
             }
             blocked[l] = hits;
             print(serial, "    ", fl[l].name, ": nominal on-time ", nominal.mean(),
                   " ticks, ", hits, "/8 shortest-possible ASYNC events blocked it", crlf);
         }
+        if (!edges_ok) verdict("WOA's edges and the on-time captures came within 100 ms each", false);
         verdict("the SYNCPRES workaround misses no output override", blocked[1] == 8);
         verdict(has_xoschf ? "and on THIS die neither does CNTPRES = 32 - errata 2.14.1 NOT "
                              "reproduced on the output path either"
@@ -1743,10 +1789,15 @@ void tj_outputs() {
         const uint16_t before = cycles_in(5000);
         verdict("DISEOC strobe", D::disable_at_end());
         uint16_t spins = 0;
-        while (D::enabled() && spins < 0xFFFF) ++spins;
+        // The verdict below reads enabled() after the wait.
+        (void)wait_crystal_us([&spins] {
+            if (!D::enabled()) return true;
+            ++spins;
+            return false;
+        }, sync_us);
         const uint16_t after = cycles_in(5000);
         print(serial, "    DISEOC: ", before, " WOA edges in 5 ms before, ", after,
-              " after; the TCD went down in ", spins, " spins", crlf);
+              " after; the TCD went down after ", spins, " looks a microsecond apart", crlf);
         verdict("the TCD disabled itself at the end of the cycle", !D::enabled());
         verdict("and its output stopped", after == 0);
         verdict("ENRDY is open again once it is down", D::enable_ready());
@@ -1870,26 +1921,22 @@ void tk_vectors() {
 
 /// WOA's rising edge (ChA) -> the next PROGEV (ChTcd), in CLK_PER ticks,
 /// TCB0 free-running and polled: the first capture on the pin, the
-/// capture input then moved to the event (the move costs some 30 cycles,
-/// far inside the delays measured). 0xFFFF = missed.
+/// capture input then moved to the event (the wait sees the capture
+/// within a microsecond, 24 cycles, and the move costs some 30 more, far
+/// inside the 200 cycles and more of the delays measured). 0xFFFF =
+/// missed.
 uint16_t woa_to_progev() {
     CycleTcb::init({.mode = TcbMode::capture, .clock = TcbClock::div1, .compare = 0,
                     .event_input = true});
     CycleTcb::enable_capt_interrupt(false);
-    for (uint32_t i = 0; i < 100'000u && WoaPin::read(); ++i) {}
+    if (!wait_crystal_us([] { return !WoaPin::read(); }, edge_us)) return 0xFFFF;
     CycleTcb::capture_on(ChA{});
     CycleTcb::clear_capt();
-    uint32_t spins = 400'000u;
-    while (!CycleTcb::capt_flag()) {
-        if (--spins == 0) return 0xFFFF;
-    }
+    if (!wait_crystal_us([] { return CycleTcb::capt_flag(); }, edge_us)) return 0xFFFF;
     const uint16_t s1 = CycleTcb::capture();
     CycleTcb::capture_on(ChTcd{});
     CycleTcb::clear_capt();
-    spins = 400'000u;
-    while (!CycleTcb::capt_flag()) {
-        if (--spins == 0) return 0xFFFF;
-    }
+    if (!wait_crystal_us([] { return CycleTcb::capt_flag(); }, edge_us)) return 0xFFFF;
     const uint16_t s2 = CycleTcb::capture();
     CycleTcb::disable();
     return static_cast<uint16_t>(s2 - s1);

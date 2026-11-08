@@ -167,7 +167,7 @@ Osc32k::stop();
 
 ## Bench findings
 
-From `test_samc_osc32k` (3 letters, 32 verdicts), measured with
+From `test_samc_osc32k` (3 letters, 31 verdicts and one skip), measured with
 `samc21/freqm.hpp` against OSC48M. Nothing to wire.
 
 **THE SCALE, first.** Every absolute frequency below is a ratio against
@@ -201,12 +201,13 @@ are unaffected; the crystal-scale values live in
   the measurements in [freqm.md](freqm.md) and [reset.md](reset.md) -
   all of which share the OSC48M scale rather than witnessing it
   independently.
-- **XOSC32K, both ways.** The 32.768 kHz crystal is optional on the
-  board design, and letter a of `test_samc_osc32k` judges whichever
-  case it finds. On a board WITHOUT one, the start is a false return
-  and not a hang: the ready flag never rises and the bounded wait
-  reports that instead of spinning. On a board WITH one, the flag
-  rises inside the bound with `startup` 0, a generator takes the
+- **XOSC32K, on a board that carries the crystal.** The 32.768 kHz
+  crystal is optional on the board design; the bench board does not fit
+  it and its page forbids enabling XOSC32K
+  ([samc21j.md](../boards/samc21j.md)), so letter a of
+  `test_samc_osc32k` starts it only where a constant in the suite says
+  the crystal is there, and skips otherwise. On a board WITH one, the
+  flag rises inside the bound with `startup` 0, a generator takes the
   crystal, and the meter weighs it at 32545..32553 Hz on OSC48M's
   scale - a scale that is itself some seven per mille off on that die,
   which puts the crystal within OSC48M's own error of nominal and says
@@ -214,9 +215,9 @@ are unaffected; the crystal-scale values live in
   ringing on its load capacitors, it does not grade a crystal that is
   good to tens of ppm (the 24 MHz crystal is the ruler for that,
   [rtc.md](rtc.md)'s instrument). After the disable the READY FLAG
-  STANDS FOR A WHILE - 265..356 polling turns at 48 MHz, a few tens of
-  microseconds, the order of one 32 kHz period - and then falls; a
-  verdict taken at the store reads it still set.
+  STANDS FOR A WHILE - a few tens of microseconds, the order of one
+  32 kHz period - and then falls; a verdict taken at the store reads it
+  still set.
 - **A generator cannot be moved off a stopped source** (16.6.2.6):
   stopping OSC32K while generator 5 still points at it leaves that
   generator unroutable and every later measurement empty. The rule is
@@ -237,6 +238,10 @@ Driver gaps (not built):
 
 Implemented but not bench-verified:
 
+- **XOSC32K's start on a board with no crystal**: a false return from
+  the bounded wait rather than a hang. The bench board forbids enabling
+  XOSC32K, so letter a skips there; a board with PA00/PA01 free and no
+  crystal would measure it.
 - **XOSC32K beyond its start and its frequency**: the startup codes
   other than 0 (the crystal is only ever started with no masking), the
   external-clock mode (XTALEN clear - it needs a clock source on

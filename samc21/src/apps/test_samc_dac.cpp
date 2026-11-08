@@ -69,6 +69,7 @@
 #include "samc21/ticker.hpp"
 #include "util/analog.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -89,6 +90,17 @@ constexpr Serial serial;
 
 TestBench<Serial> bench;
 
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's
+/// waits (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// Every queued console byte off the wire, bounded (util/test_wait.hpp):
+/// false on a wedged console.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
+
 using brio::crlf;
 using brio::print;
 
@@ -108,11 +120,11 @@ using Comp = AcComparator<0>;
 constexpr uint8_t main_gen = 0;
 constexpr uint32_t main_gen_hz = SysClock::hz;
 
-/// Where this board's supply sits: the comparator's scaler puts it at
-/// 5141 mV, the ADC's own bandgap reading at 5233. A STARTING POINT,
-/// refined by letter b, never a verdict's authority.
-constexpr uint16_t supply_hint_mv = 5150;
-uint16_t vdd_mv = supply_hint_mv;
+/// Where this board's supply sits, in millivolts: 0 until locate_vdd()
+/// has read it, once a boot, before the first verdict that rests on it.
+/// The board takes 3.3 V or 5 V on a jumper (docs/boards/samc21j.md), so
+/// no figure is assumed.
+uint16_t vdd_mv = 0;
 
 // ---------------------------------------------------------------------------
 // The stopwatch (letter i only): TC0 + TC1 as one 32-bit counter on the
@@ -162,22 +174,12 @@ volatile uint32_t feed_empties = 0;  ///< EMPTY interrupts taken
 // Helpers
 // ---------------------------------------------------------------------------
 
-void spin(uint32_t turns) {
-    volatile uint32_t sink = 0;
-    for (uint32_t i = 0; i < turns; ++i) {
-        sink = sink + 1u;
-    }
-}
-
 /// Long enough for the DAC's own conversion (2.9 us at the 350 ksps
-/// ceiling) and for the ADC's input to see the new level: about 200 us.
-void settle() { spin(2'000UL); }
+/// ceiling) and for the ADC's input to see the new level: 400 us.
+void settle() { brio::spin_us<Ruler>(400); }
 
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
+/// The longer pause after a block is set up or a reference changes: 4 ms.
+void settle_long() { brio::spin_us<Ruler>(4'000); }
 
 bool near(uint32_t a, uint32_t b, uint32_t tol) {
     return (a > b ? a - b : b - a) <= tol;
@@ -294,6 +296,81 @@ uint16_t pad_reading(uint16_t code, uint16_t samples = 8) {
     return static_cast<uint16_t>(mean_of<Adc0>(samples));
 }
 
+/**
+ * VDDANA located, once a boot: the 1.024 V bandgap level (MUXPOS INTREF,
+ * VREFOE set - the ADC's bandgap input channel is dead without it,
+ * docs/samc21/adc.md) against VDDANA as the reference, at SAMPLEN 14 (the
+ * 10 us table 45-22 asks of the channel). The level sits under every
+ * supply the device runs on (2.7..5.5 V, DS60001479M table 45-2), so the
+ * reading never saturates; its accuracy is the level's own, +-2.05 %
+ * (table 45-36). Leaves ADC0 released and SUPC.VREF at reset.
+ */
+bool locate_vdd() {
+    if (vdd_mv != 0u) {
+        return true;
+    }
+    if (!adc0_up(AdcConfig{.reference = Ref::vddana,
+                           .prescaler = AdcPresc::div32,
+                           .sample_length = 14})) {
+        return false;
+    }
+    (void)Vref::configure(VrefConfig{.level = VrefLevel::v1_024, .output_enable = true});
+    Adc0::select(AdcInput::intref);
+    settle_long();
+    const uint32_t counts = mean_of<Adc0>(32);
+    (void)Vref::configure(VrefConfig{});
+    Adc0::release();
+    if (counts == 0u) {
+        return false;
+    }
+    vdd_mv = static_cast<uint16_t>((1024UL * 4096UL + counts / 2u) / counts);
+    return true;
+}
+
+/// locate_vdd() for a letter whose verdicts rest on the supply: a failure
+/// is the letter's verdict.
+bool need_vdd() {
+    const bool ok = locate_vdd();
+    if (!ok) {
+        bench.verdict("VDDANA located through the 1.024 V bandgap level", false);
+    }
+    return ok;
+}
+
+/// Whether a bandgap level of `level_mv` can be produced and read under a
+/// supply located at `supply_mv`: the level at most 95 % of the supply.
+/// The 5 % is the level's own +-2.05 % at its top (table 45-36), the
+/// located supply's +-2.05 % at its bottom and the levels' 0.3 %/V
+/// supply coefficient.
+constexpr bool level_below_supply(uint32_t level_mv, uint32_t supply_mv) {
+    return level_mv * 20u < supply_mv * 19u;
+}
+
+/// Letter i's wait on a fast analog edge, at the cost of the condition
+/// alone for its first 64 reads - every edge the letter times arrives
+/// inside them, a few hundred nanoseconds - and only then on the ruler,
+/// whose read (about 1.5 us, util/test_wait.hpp) would otherwise sit in
+/// the waiting loop and not in its control: false after 10 ms.
+template <typename F>
+bool fast_until(F done) {
+    for (uint8_t k = 0; k < 64u; ++k) {
+        if (done()) {
+            return true;
+        }
+    }
+    return brio::wait_until<Ruler>(done, 10'000);
+}
+
+/// Before a timed window: the console drained, or a failed verdict and
+/// false - a line still going out puts its interrupt inside the window.
+bool window_ready() {
+    const bool drained = console_drain();
+    if (!drained) {
+        bench.verdict("the console drained before the timed window", false);
+    }
+    return drained;
+}
+
 // =============================================================================
 // a - the block, its vocabularies, its disciplines, its refusals
 // =============================================================================
@@ -399,12 +476,9 @@ void ta_block() {
                   "and not where the register summary draws it",
                   at_14 == DAC_DBGCTRL_DBGRUN_Msk && at_18 == 0u);
 
-    // The write-only data path, which is why code() is a promise and not
-    // a readback.
-    (void)Dac::set(0x155);
-    bench.verdict("code() reports what was WRITTEN - DATA and DATABUF are "
-                  "write-only in both documents, so there is nothing to read",
-                  Dac::code() == 0x155u);
+    // The write-only data path: DATA and DATABUF are write-only in both
+    // documents, so code() is the driver's own record of what was written
+    // and there is nothing on the silicon to judge it against.
 
     Dac::release();
     bench.verdict("release() puts the block back: the DAC's APB clock off "
@@ -416,6 +490,9 @@ void ta_block() {
 // b - THE LOOP WITH NO WIRE
 // =============================================================================
 void tb_loop() {
+    if (!need_vdd()) {
+        return;
+    }
     bench.verdict("the DAC comes up with the external buffer driving PA02",
                   dac_up());
     bench.verdict("ADC0 comes up", adc0_up(pad_cfg));
@@ -459,21 +536,15 @@ void tb_loop() {
           at_256, " / ", at_512, " / ", at_768, " / ", at_1023,
           " counts of 4096", crlf);
 
-    // VDD from this loop's own arithmetic: full scale IS the reference,
-    // which here is VDDANA, so the top code says nothing about VDD - but
-    // the ADC's own scaled-supply channel does, and it is the number the
-    // rest of the suite uses.
+    // The reference here is VDDANA, so the top code says nothing about the
+    // supply, and neither does the scaled-supply channel - a quarter of
+    // VDD measured against VDD is a self-consistency check, not a supply
+    // meter. The supply is the bandgap's figure, located before the letter.
     Adc0::select(AdcInput::scaled_supply);
     const uint32_t quarter = mean_of<Adc0>(32);
-    vdd_mv = static_cast<uint16_t>(adc_mv(quarter * 4u, Adc0::result_steps(),
-                                          supply_hint_mv));
-    // One Newton step: the reading is a quarter of VDD measured against
-    // VDD, so it is a self-consistency check and not a supply meter -
-    // keep the hint and print the check.
     print(serial, "  1/4 VDDANA reads ", quarter, " counts (a quarter of full "
-          "scale would be 1024); VDD taken as ", supply_hint_mv, " mV from the "
-          "SUPC and ADC campaigns", crlf);
-    vdd_mv = supply_hint_mv;
+          "scale would be 1024); VDDANA located at ", vdd_mv, " mV through the "
+          "1.024 V bandgap level", crlf);
     bench.verdict("the scaled supply is a quarter of full scale to under one "
                   "per cent, so the reference really is VDDANA",
                   near(quarter, 1024u, 20u));
@@ -534,16 +605,29 @@ void tb_loop() {
 // experiment is trivial: set the DAC to full scale, read the pad against
 // VDDANA, and change the bandgap level underneath it.
 void tc_reference() {
+    if (!need_vdd()) {
+        return;
+    }
     bench.verdict("ADC0 comes up on VDDANA", adc0_up(pad_cfg));
     Adc0::select(AnalogIn<Vout>{});
 
+    // A level is produced only where the supply holds it: the DAC's output
+    // cannot rise above VDDANA, so at 3.3 V the 4.096 V level is skipped.
     const VrefLevel levels[3] = {VrefLevel::v1_024, VrefLevel::v2_048,
                                  VrefLevel::v4_096};
     const uint16_t nominal[3] = {1024, 2048, 4096};
     uint16_t measured[3] = {0, 0, 0};
+    bool held[3] = {false, false, false};
     bool all_ok = true;
 
     for (uint8_t i = 0; i < 3u; ++i) {
+        held[i] = level_below_supply(nominal[i], vdd_mv);
+        if (!held[i]) {
+            print(serial, "  SUPC.VREF.SEL = ", nominal[i], " mV not produced: "
+                  "the supply, at ", vdd_mv, " mV, does not hold it", crlf);
+            bench.skip("a bandgap level the supply does not hold");
+            continue;
+        }
         (void)Vref::configure(VrefConfig{.level = levels[i],
                                          .output_enable = false});
         all_ok = dac_up(DacRef::intref) && all_ok;
@@ -566,11 +650,11 @@ void tc_reference() {
                   "LEVEL MOVES WITH SUPC.VREF.SEL - so 41.8.2 is right and the "
                   "device header's INT1V name is the SAM D21's, stale here",
                   measured[1] > measured[0] + 700u &&
-                      measured[2] > measured[1] + 1500u);
+                      (!held[2] || measured[2] > measured[1] + 1500u));
     bench.verdict("...and each level lands within 10 % of its nominal",
                   near(measured[0], nominal[0], 102u) &&
                       near(measured[1], nominal[1], 205u) &&
-                      near(measured[2], nominal[2], 410u));
+                      (!held[2] || near(measured[2], nominal[2], 410u)));
 
     // Does the DAC's reference path need SUPC.VREF.VREFOE, the way the
     // ADC's bandgap INPUT channel does (adc.md)? Same level, bit off
@@ -607,6 +691,9 @@ void tc_reference() {
 // supplies a steady mid-range voltage the ADC can measure against both
 // references and compare.
 void td_adc_intref_reference() {
+    if (!need_vdd()) {
+        return;
+    }
     bench.verdict("the DAC comes up on VDDANA", dac_up());
     (void)Vref::configure(VrefConfig{.level = VrefLevel::v2_048,
                                      .output_enable = false});
@@ -670,6 +757,9 @@ void td_adc_intref_reference() {
 // e - Ref::dac: the DAC as the ADC's reference
 // =============================================================================
 void te_dac_as_reference() {
+    if (!need_vdd()) {
+        return;
+    }
     bench.verdict("the DAC comes up with both outputs enabled", dac_up());
 
     constexpr AdcConfig dacref_cfg{
@@ -782,17 +872,14 @@ void tf_internal_channel() {
                   "it is the same voltage by two routes",
                   near(internal.mean, pad.mean, 82u));
 
-    // 41.6.8.1's claim about EOEN, judged by data.
-    if (near(internal_no_eoen, internal.mean, 82u)) {
-        bench.verdict("41.6.8.1 SAYS THE OUTPUT BUFFER MUST BE ENABLED FOR THE "
-                      "ADC TO SEE THE DAC, AND ON THIS SILICON IT NEED NOT BE "
-                      "- the internal channel reads the same with EOEN clear",
-                      true);
-    } else {
-        bench.verdict("41.6.8.1 IS RIGHT: without CTRLB.EOEN the ADC's "
-                      "internal DAC channel does not carry the DAC's voltage",
-                      internal_no_eoen < 2800u || internal_no_eoen > 3300u);
-    }
+    // 41.6.8.1's claim about EOEN, printed: either answer is a fact about
+    // the silicon, and brio depends on neither (dac_up() sets both).
+    print(serial, "  41.6.8.1 says the output buffer must be enabled for the "
+          "ADC to see the DAC; with EOEN clear the internal channel reads ",
+          internal_no_eoen, " counts against ", internal.mean, " with it set: ",
+          near(internal_no_eoen, internal.mean, 82u) ? "the same voltage"
+                                                     : "not the DAC's voltage",
+          crlf);
 
     // ERRATUM 1.8.9 PREDICTS TWO THINGS and they are separate
     // measurements: a "noisy ADC reading" on the internal channel, and
@@ -811,13 +898,8 @@ void tf_internal_channel() {
                       "channel spreads decisively wider than the pad path",
                       internal_span > pad_span);
     } else {
-        print(serial, "  DECLINED: the two spreads are not decisively apart on "
-              "this board, so no verdict is taken on the erratum's READING "
-              "noise - the numbers above are the whole answer", crlf);
-        bench.verdict("a converter reading the DAC through the internal "
-                      "channel does not see a noisier value than one reading "
-                      "the same voltage through the pad (both spreads printed)",
-                      true);
+        bench.skip("the erratum's reading noise: the two spreads are not "
+                   "decisively apart (both printed above)");
     }
 
     // Second half, and the one only two converters can ask: does a
@@ -862,13 +944,8 @@ void tf_internal_channel() {
                       "pad as quiet as silence does",
                       control.span() <= quiet.span() + 4u);
     } else {
-        print(serial, "  DECLINED: the DAC's output is not decisively noisier "
-              "while that conversion runs, so no verdict is taken on the "
-              "erratum's OUTPUT noise", crlf);
-        bench.verdict("the DAC's output was watched while another converter "
-                      "sampled it internally, and the spreads are printed",
-                      true);
-        bench.verdict("the control ran too", control.span() < 4096u);
+        bench.skip("the erratum's output noise: the pad is not decisively "
+                   "noisier while that conversion runs (spreads printed above)");
     }
 
     dac_set(0);
@@ -893,8 +970,7 @@ void tf_internal_channel() {
     if (!plain_init) {
         bench.verdict("ERRATUM 1.4.10 REPRODUCES ON THIS DIE - once ADC1 has "
                       "run, ADC0.SYNCBUSY.ENABLE is stuck at one and stays "
-                      "there, which corrects test_samc_adc's observation that "
-                      "it did not",
+                      "there",
                       (stuck & ADC_SYNCBUSY_ENABLE_Msk) != 0u);
         bench.verdict("...and it is not a stale bit but a DEAD CONVERTER: "
                       "ADC0 does not enable and reads zero",
@@ -910,9 +986,8 @@ void tf_internal_channel() {
                       "the device",
                       rescued && near(good_read, 1024u, 30u));
     } else {
-        bench.verdict("erratum 1.4.10 did not reproduce in this arrangement - "
-                      "recorded as an observation on one die",
-                      true);
+        print(serial, "  erratum 1.4.10 did not reproduce in this arrangement - "
+              "an observation on one die", crlf);
         bench.verdict("...and ADC0 reads normally", near(dead_read, 1024u, 30u));
     }
 
@@ -948,7 +1023,7 @@ void tg_comparator() {
         while (low < high) {
             const uint16_t mid = static_cast<uint16_t>((low + high) / 2u);
             (void)Dac::set(mid);
-            spin(400UL);   // the DAC's conversion plus the AC's sampling
+            brio::spin_us<Ruler>(80);   // the DAC's conversion plus the AC's sampling
             if (Comp::state()) {
                 low = static_cast<uint16_t>(mid + 1u);   // scaler still above
             } else {
@@ -998,10 +1073,10 @@ void tg_comparator() {
     // A control: with the DAC parked at zero the comparator must see the
     // scaler above it at every step, and at full scale below it.
     (void)Dac::set(0);
-    spin(2'000UL);
+    settle();
     const bool low_side = Comp::state();
     (void)Dac::set(1023);
-    spin(2'000UL);
+    settle();
     const bool high_side = Comp::state();
     bench.verdict("and the comparator follows the DAC to both ends",
                   low_side && !high_side);
@@ -1126,20 +1201,12 @@ void th_curve() {
           " counts where the line predicts ", predicted_bottom / 100,
           ", code 1023 reads ", top, " where it predicts ",
           predicted_top / 100, crlf);
-    // THE BOTTOM CLAMP IS A VERDICT, THE TOP IS A PRINT, and the split
-    // is what the data supports: the TOP endpoint sits ON the line to
-    // within a count (4074 read against a prediction the fit's own
-    // sub-count jitter rounds to 4073 or 4074 between runs) - a coin
-    // toss, not a clipping. The BOTTOM is unambiguous: the line predicts
-    // MINUS 13 hundredth-counts and a converter cannot read below zero,
-    // a 13-count margin no jitter crosses. Whether table 45-30's 50 mV
-    // top-of-range limit shows at code 1023 is DECLINED: at this VDD one
-    // count is ~1.26 mV, and the data puts any top clipping inside one
-    // count of the fit - below this instrument's resolution.
-    bench.verdict("the bottom endpoint is CLAMPED above the line's prediction "
-                  "(the line runs 13 counts below zero at code 0, and a "
-                  "converter cannot follow it there)",
-                  static_cast<int32_t>(bottom) * 100 >= predicted_bottom + 500);
+    // BOTH ENDPOINTS ARE PRINTED, and neither is a verdict. Where the
+    // line runs below zero at code 0, "the reading sits above it" holds
+    // for any reading a converter can give; and the TOP endpoint sits on
+    // the line within a count, the fit's own sub-count jitter - whether
+    // table 45-30's 50 mV top-of-range limit clips there is below this
+    // instrument's resolution.
     print(serial, "  the top endpoint sits within one count of the line (",
           top, " read, ", predicted_top / 100,
           " predicted) - whether 45-30's 50 mV limit clips there is under "
@@ -1164,6 +1231,10 @@ void ti_timing() {
     // its end, and nothing else in this chapter reports anything.
     uint32_t startup_min = 0xFFFFFFFFu;
     bool up = true;
+    if (!window_ready()) {
+        Stopwatch::release();
+        return;
+    }
     for (uint8_t i = 0; i < 8u; ++i) {
         Dac::release();
         // init() waits for READY itself, so the arming is done by hand
@@ -1176,8 +1247,7 @@ void ti_timing() {
             DAC_CTRLB_REFSEL(static_cast<uint8_t>(DacRef::vddana)));
         const uint32_t t0 = ticks_now();
         up = Dac::enable(true) && up;
-        while (!Dac::ready()) {
-        }
+        up = fast_until([] { return Dac::ready(); }) && up;
         const uint32_t dt = ticks_now() - t0;
         if (dt < startup_min) {
             startup_min = dt;
@@ -1211,60 +1281,63 @@ void ti_timing() {
     bench.verdict("COMP0 watches the DAC against a mid-supply threshold",
                   Comp::configure(cfg) && Comp::enable(true));
     Comp::scaler(31);   // VDD x 32 / 64
-    spin(20'000UL);
+    settle_long();
 
     // THE INSTRUMENT'S OWN FLOOR, measured before the measurand: a
     // single-shot timing is not usable here, because reading the
     // stopwatch is itself a READSYNC command across a clock boundary,
     // measured at about two microseconds, which is the same order as
-    // the thing being timed.
+    // the thing being timed. Every window from here to the last loop
+    // opens on a drained console and prints only after it closes.
     (void)Dac::set(1023);
-    spin(4'000UL);
+    brio::spin_us<Ruler>(800);
+    if (!window_ready()) {
+        (void)Comp::enable(false);
+        Ac::release();
+        Dac::release();
+        Stopwatch::release();
+        return;
+    }
     const uint32_t floor_t0 = ticks_now();
     Dac::regs().DAC_DATA = 1023;
-    while (Comp::state()) {
-    }
+    const bool floor_crossed = fast_until([] { return !Comp::state(); });
     const uint32_t floor_ticks = ticks_now() - floor_t0;
-    print(serial, "  a SINGLE-SHOT timing of one step costs ", floor_ticks,
-          " ticks before the DAC does anything at all (two synchronized "
-          "stopwatch reads), so the measurement below is a DIFFERENCE", crlf);
 
     // TWO LOOPS, DIFFERENCED. Loop A waits for the comparator at every
     // step; loop B does the same stores and the same DATA
     // synchronization and waits for nothing. Everything software is in
     // both, so what is left is the analog crossing. Differencing is the
     // only honest shape where a single measurement carries a constant
-    // nobody can name.
+    // nobody can name. Each wait is fast_until(): within its first 64
+    // reads it costs the reads alone, so the two loops differ by the
+    // crossing and nothing else.
     constexpr uint16_t reps = 500;
     auto sync_data = []() {
-        while ((Dac::regs().DAC_SYNCBUSY & DAC_SYNCBUSY_DATA_Msk) != 0u) {
-        }
+        return fast_until(
+            [] { return (Dac::regs().DAC_SYNCBUSY & DAC_SYNCBUSY_DATA_Msk) == 0u; });
     };
 
+    bool crossed = floor_crossed;
     (void)Dac::set(0);
-    spin(4'000UL);
+    brio::spin_us<Ruler>(800);
     const uint32_t a0 = ticks_now();
-    for (uint16_t i = 0; i < reps; ++i) {
+    for (uint16_t i = 0; crossed && i < reps; ++i) {
         Dac::regs().DAC_DATA = 1023;
-        sync_data();
-        while (Comp::state()) {
-        }
+        crossed = sync_data() && fast_until([] { return !Comp::state(); });
         Dac::regs().DAC_DATA = 0;
-        sync_data();
-        while (!Comp::state()) {
-        }
+        crossed = crossed && sync_data() && fast_until([] { return Comp::state(); });
     }
     const uint32_t ta = ticks_now() - a0;
 
     (void)Dac::set(0);
-    spin(4'000UL);
+    brio::spin_us<Ruler>(800);
     const uint32_t b0 = ticks_now();
-    for (uint16_t i = 0; i < reps; ++i) {
+    for (uint16_t i = 0; crossed && i < reps; ++i) {
         Dac::regs().DAC_DATA = 1023;
-        sync_data();
+        crossed = sync_data();
         (void)Comp::state();
         Dac::regs().DAC_DATA = 0;
-        sync_data();
+        crossed = crossed && sync_data();
         (void)Comp::state();
     }
     const uint32_t tb = ticks_now() - b0;
@@ -1277,6 +1350,13 @@ void ti_timing() {
         (void)Comp::state();
     }
     const uint32_t tc = ticks_now() - c0;
+
+    print(serial, "  a SINGLE-SHOT timing of one step costs ", floor_ticks,
+          " ticks before the DAC does anything at all (two synchronized "
+          "stopwatch reads), so the measurement below is a DIFFERENCE", crlf);
+    bench.verdict("the comparator followed every step and every DATA write "
+                  "synchronized, within 10 ms each",
+                  crossed);
 
     const uint32_t crossings = static_cast<uint32_t>(reps) * 2u;
     const uint32_t per_ns =
@@ -1437,7 +1517,7 @@ void tj_event_feed() {
     // and it can only happen when events are what start conversions.
     Dac::clear_flags(Dac::flag_underrun);
     (void)Pacer::enable(true);
-    wait_ms(20);
+    brio::spin_us<Ruler>(20'000);
     (void)Pacer::enable(false);
     const bool under = Dac::underrun();
     print(serial, "  with the table played and the pacer still running, "
@@ -1457,7 +1537,7 @@ void tj_event_feed() {
     feed_next = 1;
     feed_left = static_cast<uint16_t>(wave_len - 1u);
     Dac::arm(Dac::flag_empty);
-    wait_ms(20);
+    brio::spin_us<Ruler>(20'000);
     const Spread still = spread_of<Adc0>(16);
     print(serial, "  with the pacer stopped the pad holds ", still.mean,
           " counts, spread ", still.span(), "; the handler wrote ",
@@ -1492,15 +1572,6 @@ void tj_event_feed() {
 // here.
 volatile bool rtc_fired = false;
 
-void console_drain() {
-    uint32_t spins = 0xFFFFFu;
-    while (!Serial::tx_idle() && spins-- != 0u) {
-    }
-    spins = 0xFFFFFu;
-    while (!Serial::Resource::txc_flag() && spins-- != 0u) {
-    }
-}
-
 bool rtc_up() {
     if (!Rtc::init()) {
         return false;
@@ -1526,7 +1597,9 @@ bool rtc_up() {
 
 /// One standby of about `ticks` RTC ticks (32 kHz), with the watchdog
 /// armed as the anti-wedge backstop: a wake that never comes costs a
-/// reboot and a banner instead of a mute board.
+/// reboot and a banner instead of a mute board. A wake that came early
+/// waits awake for the compare, on the ruler (the SysTick runs again once
+/// the core is out of standby), at most twice the sleep asked for.
 bool standby_for(uint32_t ticks) {
     (void)Watchdog::arm(WdtConfig{.period = WdtCycles::cyc4096});
     const uint32_t now = Rtc::count32();
@@ -1536,8 +1609,7 @@ bool standby_for(uint32_t ticks) {
         (void)Watchdog::disable();
         return false;
     }
-    console_drain();
-    if (!Pm::set_sleep_mode(SleepMode::standby)) {
+    if (!console_drain() || !Pm::set_sleep_mode(SleepMode::standby)) {
         (void)Watchdog::disable();
         return false;
     }
@@ -1546,12 +1618,13 @@ bool standby_for(uint32_t ticks) {
         Pm::sleep();
     }
     __enable_irq();
-    uint32_t spins = 0xFFFFFu;
-    while (!rtc_fired && spins-- != 0u) {
-    }
+    // ticks of 32768 Hz as microseconds: x 1e6 / 32768 = x 15625 / 512,
+    // inside 32 bits for any sleep under 8 s.
+    const uint32_t sleep_us = (ticks * 15'625u) >> 9;
+    const bool fired = brio::wait_until<Ruler>([] { return rtc_fired; }, 2u * sleep_us);
     (void)Pm::set_sleep_mode(SleepMode::idle0);
     (void)Watchdog::disable();
-    return rtc_fired;
+    return fired;
 }
 
 /// Arm the DAC exactly as the erratum's precondition describes: a value
@@ -1571,7 +1644,7 @@ bool arm_full_buffer(bool run_standby) {
         return false;
     }
     Dac::buffer(700);
-    spin(20'000UL);
+    settle_long();
     Dac::clear_flags(Dac::flag_empty | Dac::flag_underrun);
     return true;
 }
@@ -1591,7 +1664,7 @@ void tk_standby_erratum() {
                   Dac::init(main_gen, plain) && Dac::sync_busy() == 0u &&
                       Dac::empty());
     Dac::buffer(100);
-    spin(20'000UL);
+    settle_long();
     const uint32_t after_one = Dac::sync_busy();
     const bool empty_after_write = Dac::empty();
     const bool second_write = Dac::set(512);
@@ -1621,7 +1694,7 @@ void tk_standby_erratum() {
                   "event to consume it",
                   arm_full_buffer(false));
     const bool empty_immediately = Dac::empty();
-    wait_ms(500);
+    brio::spin_us<Ruler>(500'000);
     const bool empty_awake = Dac::empty();
     print(serial, "  awake for half a second with DATABUF full: EMPTY reads ",
           yes_no(empty_awake), " (and ", yes_no(empty_immediately),
@@ -1637,18 +1710,15 @@ void tk_standby_erratum() {
     print(serial, "  the same half second spent in STANDBY: EMPTY reads ",
           yes_no(empty_after), crlf);
     bench.verdict("the board woke from standby", woke);
-    if (empty_after) {
-        bench.verdict("ERRATUM 1.9.2 REPRODUCES: the standby set EMPTY with "
-                      "nothing having consumed DATABUF, where the same wait "
-                      "awake left it clear - a caller must clear the flag "
-                      "after a wake, which no driver can do for it",
-                      true);
-    } else {
-        bench.verdict("erratum 1.9.2 did NOT reproduce on this die in this "
-                      "arrangement - recorded as an observation, not as a "
-                      "claim that the item is wrong",
-                      true);
-    }
+    // Printed, not judged: whether the item reproduces is a fact about the
+    // die, and the caller's duty (clear EMPTY after a wake) holds either way.
+    print(serial, empty_after
+                      ? "  erratum 1.9.2 reproduces: the standby set EMPTY with "
+                        "nothing having consumed DATABUF, where the same wait "
+                        "awake left it clear"
+                      : "  erratum 1.9.2 did not reproduce on this die in this "
+                        "arrangement",
+          crlf);
     Dac::clear_flags(Dac::flag_empty);
 
     // THE CONTROL the item's own precondition asks for: RUNSTDBY = 1,
@@ -1710,7 +1780,7 @@ void tl_wake() {
             return;
         }
         Dac::buffer(700);
-        spin(20'000UL);
+        settle_long();
         Dac::clear_flags(Dac::flag_empty | Dac::flag_underrun);
         feed_left = 0;                    // the handler counts, then disarms
         const uint32_t e0 = feed_empties;
@@ -1722,8 +1792,9 @@ void tl_wake() {
         if (!Rtc::set_comp32(now + 9830u)) {   // 300 ms
             return;
         }
-        console_drain();
-        if (!Pm::set_sleep_mode(SleepMode::standby)) {
+        // A console that does not drain ends the leg with no sleep: its
+        // verdicts fail on the pending word they never got.
+        if (!console_drain() || !Pm::set_sleep_mode(SleepMode::standby)) {
             return;
         }
         (void)Pacer::set_count8(0);

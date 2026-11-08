@@ -42,10 +42,12 @@
 //   stop - a GAP ON THE BUS, never a lost frame - so the verdict under
 //   pressure is STRICT, the host's BUFOVF read at every reply and judged
 //   never set. The host loses no frame;
-//   its one failure is spi_stalled, a polled budget counted in loop turns
-//   (200000 + 6000 a frame) that a preemption does not spend, so a stall
-//   under pressure is a finding. Characters are 8 or 9 bits (CTRLB.CHSIZE,
-//   32.8.2) and the AVR client is 8-bit: byte frames only. The bit order
+//   its one failure is spi_stalled, the polled transaction's one budget -
+//   at least twice its frames' wire time and 4096 core cycles more, held
+//   as a count of poll turns (samc21/spi.hpp's class comment) - that a
+//   preemption does not spend, so a stall under pressure is a finding.
+//   Characters are 8 or 9 bits (CTRLB.CHSIZE, 32.8.2) and the AVR client
+//   is 8-bit: byte frames only. The bit order
 //   is CTRLA.DORD, part of the host's configuration and not of a request
 //   (samc21/spi.hpp's apply() writes CTRLA without it): no LSb-first rows,
 //   the DORD mismatch row kept (the peer LSb, this end MSb).
@@ -239,6 +241,7 @@
 #include "util/line_reader.hpp"
 #include "util/print.hpp"
 #include "util/spi_bus.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // THE PROTOCOL HEADERS ARE SHARED, NOT COPIED: the far board's two
@@ -258,9 +261,11 @@ using P = SamRubatoPlatform;
 constexpr uint32_t core_hz = SysClock::hz;
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
 
-/// The kernel ticker read as CPU cycles (the file header).
+/// The kernel ticker read as CPU cycles (the file header), and the ruler
+/// of the command channel's bounded waits (util/test_wait.hpp).
 struct Ruler {
     [[gnu::always_inline, gnu::flatten]] static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
 
 [[gnu::always_inline]] inline void spin(uint32_t cycles) {
@@ -555,50 +560,67 @@ void release() {
     link_pads_dark();
 }
 
+/// The bound on one character's wait at 115200, DRE or TXC: two frames
+/// (174 us) and the longest preemption here (3000 cycles and the
+/// scheduler, under 70 us), with room - 2 ms.
+constexpr uint32_t char_wait_us = 2'000u;
+
+/// A frame being written stopped at a character DATA had no room for: the
+/// rest of it is not written (put1()), and command_once() fails it.
+bool put_failed = false;
+
 void put1(uint8_t b) {
-    const uint32_t t0 = Ticker::millis();
-    while (!Lk::dre_flag() && Ticker::millis() - t0 < 50u) {
+    if (put_failed) {
+        return;
+    }
+    if (!brio::wait_until<Ruler>([] { return Lk::dre_flag(); }, char_wait_us)) {
+        put_failed = true;
+        return;
     }
     Lk::data(b);
 }
 
-void wait_tc() {
-    const uint32_t t0 = Ticker::millis();
-    while (!Lk::txc_flag() && Ticker::millis() - t0 < 50u) {
-    }
-}
+/// The last stop bit out: TXC, bounded (char_wait_us).
+bool wait_tc() { return brio::wait_until<Ruler>([] { return Lk::txc_flag(); }, char_wait_us); }
 
 /// A frame, polled: a character every 87 us into a two-level buffer, and
 /// the longest preemption here 3000 cycles and the scheduler, under 70 us.
-/// STATUS read before DATA (31.8.11).
+/// STATUS read before DATA (31.8.11). True with `out` filled, false when
+/// `ms` passed first.
 bool recv_frame(link::Frame& out, uint16_t ms) {
-    const uint32_t t0 = Ticker::millis();
     dec.reset();
-    while (Ticker::millis() - t0 < ms) {
-        if (!Lk::rxc_flag()) {
-            continue;
-        }
-        const uint16_t st = Lk::status();
-        const uint8_t b = static_cast<uint8_t>(Lk::data());
-        const uint16_t err = static_cast<uint16_t>(st & SercomStatus::receive_errors);
-        if (err != 0u) {
-            Lk::clear_status(err);
-            dec.reset();
-            continue;
-        }
-        if (dec.feed(b) == link::Decoder::Result::frame) {
-            out = dec.frame();
-            return true;
-        }
+    const bool got = brio::wait_until<Ruler>(
+        [] {
+            if (!Lk::rxc_flag()) {
+                return false;
+            }
+            const uint16_t st = Lk::status();
+            const uint8_t b = static_cast<uint8_t>(Lk::data());
+            const uint16_t err = static_cast<uint16_t>(st & SercomStatus::receive_errors);
+            if (err != 0u) {
+                Lk::clear_status(err);
+                dec.reset();
+                return false;
+            }
+            return dec.feed(b) == link::Decoder::Result::frame;
+        },
+        static_cast<uint32_t>(ms) * 1000u);
+    if (got) {
+        out = dec.frame();
     }
-    return false;
+    return got;
 }
 
+/// One command written and its ack awaited; a frame that could not be
+/// written whole, or whose last stop bit never left, is not answered for.
 bool command_once(link::Op op, const uint8_t* p, uint8_t len, uint16_t ms) {
     Lk::flush_rx();
     Lk::clear_flags(SercomFlag::txc);
+    put_failed = false;
     link::write_frame(put1, op, p, len);
-    wait_tc();
+    if (put_failed || !wait_tc()) {
+        return false;
+    }
     link::Frame f;
     if (!recv_frame(f, ms)) {
         return false;
@@ -630,8 +652,10 @@ bool query(link::Op op, link::Frame& data, uint16_t ms = 80) {
 /// The peer found on the crossed pair, from whichever personality: for
 /// as long as a peer that stopped believing its wiring takes to search
 /// both again (usart_link.hpp's rediscover_ms, and some), RxD held down
-/// until it answers.
-bool ensure() {
+/// until it answers. A peer that never answers is a failed verdict for a
+/// judged letter, and a skip for one that claims no verdict (`judged`
+/// false).
+bool ensure(bool judged = true) {
     spi_down();
     quiet = true;
     rx_held = true;
@@ -647,7 +671,11 @@ bool ensure() {
         return true;
     }
     print(serial, "  THE PEER DID NOT ANSWER: the AVR64EA48 must be running `usart_peer`", crlf);
-    bench.verdict("the peer answers a ping (the peer board running usart_peer)", false);
+    if (judged) {
+        bench.verdict("the peer answers a ping (the peer board running usart_peer)", false);
+    } else {
+        bench.skip("no peer answered: the letter needs usart_peer on the far board");
+    }
     return false;
 }
 
@@ -1056,6 +1084,9 @@ void tw_arbiter() {
         if (pressing) {
             for (auto& row : w::press_rx) for (uint8_t b : row) host_bad = static_cast<uint16_t>(host_bad + (b != w::seed_b));
         }
+        // The arbiter's two counters SATURATE at 255 (util/bus_master.hpp):
+        // a difference reads them only while the later one is below it.
+        const bool countable = SpiArb::rejected_count() != UINT8_MAX && SpiArb::stale_events() != UINT8_MAX;
         const uint8_t rejected = static_cast<uint8_t>(SpiArb::rejected_count() - rejected0);
         const uint8_t stale = static_cast<uint8_t>(SpiArb::stale_events() - stale0);
         const PassStats st = pass_end(s);
@@ -1092,7 +1123,7 @@ void tw_arbiter() {
                       w::client.out_of_order == 0u && w::minor.out_of_order == 0u && w::press.out_of_order == 0u);
         bench.verdict(pass_label(s), "nothing rejected, the per-bus timeout never fired (no spi_timeout, no "
                                      "stale event)",
-                      rejected == 0u && stale == 0u && w::client.timeouts == 0u && w::minor.timeouts == 0u &&
+                      countable && rejected == 0u && stale == 0u && w::client.timeouts == 0u && w::minor.timeouts == 0u &&
                           w::press.timeouts == 0u && w::client.rejected == 0u && w::minor.rejected == 0u &&
                           w::press.rejected == 0u);
         bench.verdict(pass_label(s), "the peer counted every frame exact, and every frame back is the peer's",
@@ -1167,7 +1198,7 @@ constexpr Pace v_pace{.gap_bits = echo_gap_bits, .burst = 2, .char_us = echo_cha
 /// silent - what the peer counted and lost, what the sink took.
 void tq_pace() {
     static const uint8_t gaps[] = {12, 14, 16, 18, 20, 24, 32};
-    if (!ul::ensure()) {
+    if (!ul::ensure(false)) {
         ul::release();
         return;
     }

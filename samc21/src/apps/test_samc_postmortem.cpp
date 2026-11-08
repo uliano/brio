@@ -42,6 +42,7 @@
 #include "samc21/sercom.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -202,19 +203,27 @@ void print_chain_addresses() {
           ", HardFault_Handler at ", hex(handler_address()), crlf);
 }
 
-/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
-/// tick count and the counter's position composed right across the reload
-/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
-uint32_t cycles_now() {
-    return Ticker::cycles();
-}
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's
+/// waits (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
-void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
+/// Every queued console byte off the wire, bounded (util/test_wait.hpp):
+/// false on a wedged console.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
+
+/// The console idle before a trace window opens: a line still going out
+/// puts the transmit interrupt's branches into the window, among the
+/// packets the letter judges. False, with a failed verdict, on a wedged
+/// console; the letter then returns.
+bool console_quiet() {
+    if (console_drain()) {
+        return true;
     }
-    const uint32_t t0 = cycles_now();
-    while (cycles_now() - t0 < SysClock::hz / 500u) {
-    }
+    bench.verdict("the console drained before the trace window", false);
+    return false;
 }
 
 const char* source_name(uint8_t s) {
@@ -246,13 +255,16 @@ void ta_record() {
                   Trace::buffer() != static_cast<const void*>(&Trace::raw()));
     bench.verdict("nothing is pending after a clear()", !Trace::pending());
 
-    // A window, then the capture. Nothing is printed between the two: a
-    // console line is milliseconds of branches.
-    bench.verdict("arm() points the MTB at the store's buffer and starts it",
-                  Trace::arm() && Mtb::enabled());
+    // A window, then the capture. Nothing is printed between the drain and
+    // the capture: a console line is milliseconds of branches.
+    if (!console_quiet()) {
+        return;
+    }
+    const bool armed = Trace::arm() && Mtb::enabled();
     chain();
     const bool captured = Trace::capture(trace_from_fault);
     const bool stopped = !Mtb::enabled();
+    bench.verdict("arm() points the MTB at the store's buffer and starts it", armed);
 
     print(serial, "  the capture kept ",
           static_cast<uint32_t>(Trace::raw().count), " packets, source byte ",
@@ -291,6 +303,11 @@ void ta_record() {
     // so.
     const MtbPacket first_kept =
         Trace::raw().count > 0u ? Trace::raw().packets[0] : MtbPacket{0, 0};
+    if (!console_quiet()) {
+        Trace::clear();
+        Trace::disarm();
+        return;
+    }
     (void)Trace::arm();
     other_chain();
     const bool refused = !Trace::capture(trace_from_panic);
@@ -316,6 +333,10 @@ void ta_record() {
     bench.verdict("and pending() agrees", !Trace::pending());
 
     // THE REPORTER, composed with one that does not end the program.
+    if (!console_quiet()) {
+        Trace::disarm();
+        return;
+    }
     (void)Trace::arm();
     chain();
     QuietTrace::report(PanicCode::assert_failed, 0x33);
@@ -339,6 +360,9 @@ void tb_freeze_first() {
     MtbPacket running[Trace::kept]{};
 
     // Window one: stop the trace, then read it.
+    if (!console_quiet()) {
+        return;
+    }
     (void)Trace::arm();
     chain();
     (void)Mtb::freeze();
@@ -420,6 +444,9 @@ void tc_walk() {
     // THE YOUNG BUFFER: fewer packets than the caller asked for, and the
     // start-of-trace flag on the first one (bit 0 of the DESTINATION
     // word marks it).
+    if (!console_quiet()) {
+        return;
+    }
     (void)Trace::arm();
     leaf_a();
     (void)Mtb::freeze();
@@ -437,6 +464,10 @@ void tc_walk() {
                   young_marked);
 
     // WHAT ONE CHAIN COSTS - the number keep_packets is chosen against.
+    if (!console_quiet()) {
+        Trace::disarm();
+        return;
+    }
     (void)Trace::arm();
     chain();
     (void)Mtb::freeze();
@@ -454,6 +485,10 @@ void tc_walk() {
     // The chain calls a, b, c in that order for ever, so the leaves seen
     // in the snapshot must advance cyclically - which is what proves the
     // walk is oldest-first and not merely "some 16 packets".
+    if (!console_quiet()) {
+        Trace::disarm();
+        return;
+    }
     (void)Trace::arm();
     for (uint32_t i = 0; i < 64u; ++i) {
         chain();
@@ -526,13 +561,22 @@ void tf_fault() {
     print(serial, "  arming the MTB and executing UDF three calls deep ...",
           crlf);
 
+    // Drained before the token is banked: a letter that returns here
+    // leaves nothing for the next boot to resume.
+    if (!console_quiet()) {
+        return;
+    }
     bank(1);
-    console_drain();
 
     (void)Trace::arm();
     dying_chain();
 
-    // Unreachable: the fault body resets the board.
+    // Unreachable: the fault body resets the board. Should it come back,
+    // the token is withdrawn so the next boot does not resume a fault
+    // that never happened.
+    Trace::disarm();
+    token.magic = 0;
+    token.leg = 0;
     bench.verdict("UNREACHABLE: the UDF did not fault", false);
 }
 
@@ -655,10 +699,12 @@ void tp_panic() {
     print(serial, "  panic() through TracingReporter, three calls deep ...",
           crlf);
 
+    if (!console_quiet()) {
+        return;
+    }
     bank(2);
     token.code = static_cast<uint8_t>(PanicCode::assert_failed);
     token.context = panic_context;
-    console_drain();
 
     (void)Trace::arm();
     chain();
@@ -718,20 +764,28 @@ void tp_resume() {
                   "program did was call panic()",
                   i_handler > index_of_destination(p, address_of(leaf_c)));
 
-    // THE FINDING, and it is a property of the debug state and not of
-    // the program: with DHCSR.C_DEBUGEN cleared - which is what
-    // bin/brio leaves after every SAM flash - panic()'s own
-    // break_here() escalates to HardFault BEFORE the reporter runs, so
-    // the body that captures is the fault's. Both are bound, and the
-    // record says which one it was.
+    // WHICH BODY RAN is a property of the debug state and not of the
+    // program: with DHCSR.C_DEBUGEN cleared - which is what bin/brio
+    // leaves after every SAM flash - panic()'s own break_here() escalates
+    // to HardFault BEFORE the reporter runs, so the body that captures is
+    // the fault's; with a debugger holding C_DEBUGEN the BKPT halts
+    // instead, and the reporter captures once the core resumes. This core
+    // cannot read DHCSR (debugger-access-only on ARMv6-M,
+    // samc21/platform.hpp), so the path is printed, and what is judged is
+    // what both paths promise: the record, and a trace whose source byte
+    // names the body that wrote it.
+    print(serial, "  the body that captured: ",
+          token.path == 2u   ? "the HardFault body (the BKPT escalated: C_DEBUGEN clear)"
+          : token.path == 1u ? "the reporter (the BKPT halted and resumed: a debugger)"
+                             : "NEITHER marked the path",
+          crlf);
     bench.verdict("the two entry paths agree on the record: whichever body "
                   "ran, the trace and the panic code are both there",
                   record && trace && trace->packets.size() > 0u);
-    bench.verdict("and the path is the one this board's debug state "
-                  "dictates - the HardFault body, because break_here()'s "
-                  "BKPT escalates before any reporter",
-                  token.path == 2u && trace &&
-                      trace->source == trace_from_fault);
+    bench.verdict("and the trace's source byte names the body that ran - the "
+                  "fault body's after an escalation, the reporter's otherwise",
+                  trace && ((token.path == 2u && trace->source == trace_from_fault) ||
+                            (token.path == 1u && trace->source == trace_from_panic)));
 
     token.magic = 0;
     token.leg = 0;

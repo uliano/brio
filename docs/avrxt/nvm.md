@@ -544,10 +544,15 @@ the silicon's, not the driver's.
   interrupt is one interrupt however long it waited. Anything that
   measures time by counting interrupts is wrong by the duration of
   every Flash erase it sits through.
-- An **EEPROM write does not halt the CPU**: a polling loop turned
-  10476 times during one erase-and-write, and with the writer AO the
-  1024 Hz timebase advanced 84 ticks across an 80 ms eight-byte
-  transfer while the main loop turned 14064 times.
+- An **EEPROM write does not halt the CPU**: a polling loop with no
+  stopwatch read in it turned 10476 times during one erase-and-write,
+  and with the writer AO the 1024 Hz timebase advanced 84 ticks across
+  an 80 ms eight-byte transfer while a main loop with none either
+  turned 14064 times. The suite's loops also read its stopwatch every
+  turn, for their time-outs, and turn fewer times; its verdicts ask for
+  more than a hundred turns of the polling loop and a thousand of the
+  main loop, where a halted CPU would give one and a dispatch that
+  waited a dozen.
 
 ### The multi-page erase erratum, observed
 
@@ -868,7 +873,8 @@ if (!brio::Nvm::supply_guarded()) { /* provision: brio fuses <board> bodcfg=0x4D
 
 ### Bench findings (`test_avr_nvm` on the AVR64EA48, rev B1, 20 MHz quartz, 5 V, BODCFG 0x4D)
 
-`test_avr_nvm z`: **110 of 110 in ten runs of ten.**
+`test_avr_nvm z`: 106 verdicts and one skip, letter d's (flash
+self-programming is declined on this part).
 
 **The times**, the page buffer's operations on letter b's page (bytes
 40..47) against table 35-8 (which publishes typical figures only, 2 ms
@@ -893,7 +899,10 @@ identified; a write that adapts its pulses to the cells it programs
 would show both.
 
 **What an operation costs the rest of the system**: a loop polling
-STATUS turns 7000 to 7450 times through a 5.3 ms EEPERW; an interrupt
+STATUS, with no stopwatch read in it, turns 7000 to 7450 times through a 5.3 ms EEPERW (the
+suite's loop also reads its stopwatch each turn, for its time-out, and
+turns fewer times; its verdict asks for more than a hundred); an
+interrupt
 due 1 ms into it is served 33 cycles late, as on a quiet CPU (and the
 operation is running at its stamp); a read of the EEPROM 1 us into it
 returns only when the operation is over - the alarm waits with it,

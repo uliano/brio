@@ -17,10 +17,12 @@
 // the handler run; repeated until the condition holds or the backstop
 // fired, at most 32 times. The tick's interrupt is off for the whole wait
 // (SysTickInterruptGuard), so only the source under test, the console and
-// the backstop can end a sleep - and the console is drained first: its
-// transmitter's DRE is a wake-up too (measured: an unfinished line woke
-// the core once a character). The NVIC's pending word at the first
-// wake-up is kept: which lines woke it.
+// the backstop can end a sleep - and the console is drained first, for at
+// most 200 ms on the kernel tick (util/test_wait.hpp): its transmitter's
+// DRE is a wake-up too (measured: an unfinished line woke the core once a
+// character), so a console that does not drain ends the leg with no sleep.
+// The NVIC's pending word at the first wake-up is kept: which lines woke
+// it.
 
 #pragma once
 
@@ -31,12 +33,26 @@
 #include "samc21/rtc.hpp"
 #include "samc21/sleep.hpp"
 #include "samc21/ticker.hpp"
+#include "util/test_wait.hpp"
 
 namespace benchsleep {
 
 inline volatile bool rtc_fired = false;
 /// NVIC->ISPR[0] at the first wake-up of the last sleep_until().
 inline uint32_t first_pending = 0;
+
+/// The kernel tick read as microseconds, a millisecond a step: the ruler
+/// of the console drain below. It needs no CPU rate - the ticker's rate is
+/// the project's constant, 1000 ticks a second (samc21/ticker.hpp) - so it
+/// serves every suite that includes this file whatever its clock, and it
+/// needs what each of them has at the call: the tick running and
+/// interrupts enabled. The product wraps with the tick count, and the
+/// difference of two reads stays exact (util/test_wait.hpp, "Half the
+/// wrap").
+struct TickRuler {
+    static uint32_t now() { return brio::Ticker::millis() * 1000u; }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
 
 /// The RTC up on OSCULP32K, 32-bit counter, COMP0 armed as the interrupt.
 inline bool backstop_up() {
@@ -76,13 +92,13 @@ inline void backstop_down() { brio::Rtc::disarm(brio::RtcFlag::all); }
 }
 
 /// Sleep in `mode` until `done()` or the backstop; returns the WFIs it
-/// took (0: the mode could not be set). The SLEEPCFG goes back to IDLE0.
+/// took (0: the console did not drain within 200 ms, or the mode could
+/// not be set - no sleep either way). The SLEEPCFG goes back to IDLE0.
 template <typename Serial, typename Done>
 uint8_t sleep_until(brio::SleepMode mode, Done done) {
     using namespace brio;
     uint8_t wakes = 0;
-    for (uint32_t k = 0; k < 2'000'000u && !Serial::tx_idle(); ++k) {
-    }
+    if (!brio::console_drain<TickRuler, Serial>()) return 0;
     if (!Pm::set_sleep_mode(mode)) return 0;
     SysTickInterruptGuard quiet_tick;
     first_pending = 0;

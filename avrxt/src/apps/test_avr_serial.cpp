@@ -43,7 +43,10 @@
 //
 // Bench diagnostic, NOT a kernel app (sequential, blocking). Console on
 // USART2 ALT1 (PF4/PF5) at 460800 - USART2 is never reconfigured here.
-// The RTC PIT drives brio::Ticker: every two-board bound is milliseconds.
+// The RTC PIT drives brio::Ticker, the kernel tick (1024 Hz on CLK_RTC,
+// which no letter touches): every time-out here is a wait on it
+// (util/test_wait.hpp's wait_ticks), and every two-board bound is
+// milliseconds.
 //
 // Wires: the single-board half needs none - everything that needs a
 // loop-back runs on USART4 at its default position (TXD PE0, RXD PE1,
@@ -94,11 +97,14 @@
 #include "avrxt/delay.hpp"
 #include "avrxt/evsys.hpp"
 #include "avrxt/pin.hpp"
+#include "avrxt/platform.hpp"
 #include "avrxt/tcb.hpp"
 #include "avrxt/ticker.hpp"
 #include "avrxt/usart.hpp"
 #include "avrxt/userrow.hpp"
+#include "kernel/time.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #include "usart_link.hpp"
@@ -182,12 +188,22 @@ void ruler_up() {
     Ruler::init(TcbClock::div1, ChCarry{}, ChSnap{});
     Ruler::reset();
 }
+
 void ruler_down() {
     RulerLo::disable();
     RulerHi::disable();
     ChCarry::off();
     ChSnap::off();
 }
+
+/// The cascaded pair as a CycleRuler (util/bench.hpp), for the spans read
+/// with util/test_wait.hpp's verbs: valid while ruler_up() has it running
+/// and CLK_PER is the board clock (letters e and B; g and t, which halve
+/// the clock, time their runs with Ruler::read() and their own hz).
+struct Cycles {
+    static uint32_t now() { return Ruler::read(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
 // The transport task, used only by the rebase test (its ISRs are bound
 // unconditionally; they are harmless while USART4 is configured as a
@@ -204,23 +220,43 @@ TwoKeyTestBench<Serial, 'y', letters_max> bench;
 /// A leg the peer REFUSED (usart_link.hpp: report_cfg_failed, a
 /// capability it has not got) is skipped, never judged: peer_report()
 /// raises this when it reads the refusal, every verdict of the leg after
-/// it prints SKIP and counts nothing, and the next peer_act() - or the
-/// next letter - lowers it.
+/// it is a skip (TestBench::skip(), counted apart from passes and
+/// fails), and the next peer_act() - or the next letter - lowers it. A
+/// sweep over several legs raises it again for its closing verdict when
+/// any of its legs was refused.
 bool leg_refused = false;
 
 void verdict(const char* name, bool ok) {
     if (leg_refused) {
-        print(serial, "  SKIP  ", name, crlf);
+        bench.skip(name);
         return;
     }
     bench.verdict(name, ok);
 }
 void verdict(const char* a, const char* b, bool ok) {
     if (leg_refused) {
-        print(serial, "  SKIP  ", a, b, crlf);
+        bench.skip(a, b);
         return;
     }
     bench.verdict(a, b, ok);
+}
+
+/// The kernel tick's platform: every time-out of the suite counts its
+/// ticks (util/test_wait.hpp's wait_ticks; main() starts the tick).
+using P = AvrPlatform;
+
+/// Every queued console byte off the wire, bounded on the kernel tick
+/// (the TCBs belong to the letters): false on a wedged console.
+bool console_drain() {
+    return brio::wait_ticks<P>([] { return Serial::tx_idle(); }, brio::ticks_from_ms<P>(200));
+}
+
+/// The drain a timed window opens with, acted on: a console that did not
+/// drain fails a verdict, and the window is not opened.
+bool drained_for_window() {
+    if (console_drain()) return true;
+    verdict("the console drained before the timed window", false);
+    return false;
 }
 bool near(int32_t a, int32_t b, int32_t tol) {
     const int32_t d = a > b ? a - b : b - a;
@@ -318,46 +354,58 @@ uint16_t run_frames(uint32_t baud) {
     return f < 16u ? 16u : (f > 1024u ? 1024u : static_cast<uint16_t>(f));
 }
 
+/// The longest frame any letter times - ten bits at the register's floor
+/// (baud_floor below: 1221 baud at 20 MHz) - is 8.2 ms: a wait for one
+/// frame's DREIF gets more than twice that.
+constexpr uint32_t frame_wait_ms = 22;
+
 /// Through the RESOURCE: `frames` copies of `value` stored the moment
 /// DREIF rises, TXCIF cleared behind the LAST store - masked with it, so
 /// an interrupt between the two cannot let the run end and the clear wipe
 /// the edge - and the ruler read when it rises. What a loop brings back
-/// is flushed after it. 0 when the run never ended. The loop is the
-/// suite's own, the flag read and the store inline, some thirty cycles a
-/// frame: the resource's send() - out of line, with a 32-bit spin bound
-/// and transmit()'s switch on the character size - takes 92 a frame and
-/// idles the line at 3 Mbaud (80 a frame; measured), and the generator is
-/// what is timed here.
+/// is flushed after it. 0 when the run never ended, or the console did
+/// not drain before it. The loop is the suite's own: a frame whose DREIF
+/// is already up costs the flag's read (a call of dre_flag() in the
+/// release listing) and the store, and one whose DREIF is not up enters
+/// the shared wait, bounded on the tick, whose turn is the flag and one
+/// read of the tick count - some forty-five cycles. The
+/// transmit path is three frames deep (TXDATA, the buffer, the shifter:
+/// docs/avrxt/usart.md), so DREIF rises with a frame and more still to
+/// shift and the store's lateness is slack, not line time. The resource's
+/// send() - out of line, with a 32-bit spin bound and transmit()'s switch
+/// on the character size - takes 92 cycles a frame and idles the line at
+/// 3 Mbaud (80 a frame; measured), and the generator is what is timed
+/// here.
 template <typename U, UsartBits B = UsartBits::eight>
 uint32_t wire_permille(uint32_t baud, uint8_t bits, uint16_t frames, uint16_t value = 0x55,
                        uint32_t hz = SysClock::hz) {
+    const auto dre = [] { return U::dre_flag(); };
     // What an earlier store still shifts out is not this run's: the
     // buffer empty, then two frames' time.
-    for (uint32_t s = 0; s < 4'000'000u && !U::dre_flag(); ++s) {
-    }
+    if (!brio::wait_ticks<P>(dre, brio::ticks_from_ms<P>(frame_wait_ms))) return 0u;
     delay_us(clock, 2u * bits * 1'000'000u / baud + 10u);
     // And the console quiet: its transmit vector, some hundred cycles an
     // entry, is longer than the slack a frame leaves the loop at the top
     // rates.
-    while (!Serial::tx_idle()) {
-    }
+    if (!drained_for_window()) return 0u;
     ruler_up();
     U::clear_txc();
     const uint32_t t0 = Ruler::read();
-    for (uint16_t i = 1; i < frames; ++i) {
-        for (uint16_t s = 0; s < 0xFFFFu && !U::dre_flag(); ++s) {
-        }
-        U::template transmit_as<B>(value);
+    bool fed = true;
+    for (uint16_t i = 1; fed && i < frames; ++i) {
+        fed = U::dre_flag() || brio::wait_ticks<P>(dre, brio::ticks_from_ms<P>(frame_wait_ms));
+        if (fed) U::template transmit_as<B>(value);
     }
-    for (uint16_t s = 0; s < 0xFFFFu && !U::dre_flag(); ++s) {
-    }
-    cli();
-    U::template transmit_as<B>(value);
-    U::clear_txc();
-    sei();
+    fed = fed && (U::dre_flag() || brio::wait_ticks<P>(dre, brio::ticks_from_ms<P>(frame_wait_ms)));
     bool done = false;
-    for (uint32_t s = 0; s < 4'000'000u && !done; ++s) {
-        done = U::txc_flag();
+    if (fed) {
+        cli();
+        U::template transmit_as<B>(value);
+        U::clear_txc();
+        sei();
+        // The last store's frame and the two ahead of it.
+        done = brio::wait_ticks<P>([] { return U::txc_flag(); },
+                                   brio::ticks_from_ms<P>(3u * frame_wait_ms));
     }
     const uint32_t took = Ruler::read() - t0;
     ruler_down();
@@ -370,6 +418,8 @@ uint32_t wire_permille(uint32_t baud, uint8_t bits, uint16_t frames, uint16_t va
 /// DRE entry a frame, and tx_idle() - TXCIF, which dre() clears behind a
 /// run's last byte - for the end. A receiver left on is the caller's to
 /// drain.
+/// The callers' runs through the task are 1024 frames at 115200 at most:
+/// 89 ms, against which the run and its drain get a quarter of a second.
 template <typename Port>
 uint32_t task_wire_permille(uint32_t baud, uint16_t frames, uint8_t value = 0x55,
                             uint32_t hz = SysClock::hz) {
@@ -377,21 +427,24 @@ uint32_t task_wire_permille(uint32_t baud, uint16_t frames, uint8_t value = 0x55
     for (uint8_t& b : run) {
         b = value;
     }
-    for (uint32_t s = 0; s < 4'000'000u && !Port::tx_idle(); ++s) {
-    }
-    while (!Serial::tx_idle()) {
-    }
+    // What the task still had queued: its 32-byte ring at 115200 is 3 ms.
+    if (!brio::wait_ticks<P>([] { return Port::tx_idle(); }, brio::ticks_from_ms<P>(50))) return 0u;
+    if (!drained_for_window()) return 0u;
     ruler_up();
     const uint32_t t0 = Ruler::read();
     uint16_t queued = 0;
-    while (queued < frames) {
-        const uint16_t want = frames - queued < 16u ? static_cast<uint16_t>(frames - queued) : 16u;
-        queued = static_cast<uint16_t>(queued + Port::write_bulk({run, want}));
-    }
-    bool done = false;
-    for (uint32_t s = 0; s < 4'000'000u && !done; ++s) {
-        done = Port::tx_idle();
-    }
+    // The run into the ring as dre() makes room: bounded, since a DRE
+    // vector that never ran would leave write_bulk() taking nothing.
+    const bool all_in = brio::wait_ticks<P>(
+        [&] {
+            const uint16_t want =
+                frames - queued < 16u ? static_cast<uint16_t>(frames - queued) : 16u;
+            queued = static_cast<uint16_t>(queued + Port::write_bulk({run, want}));
+            return queued >= frames;
+        },
+        brio::ticks_from_ms<P>(250));
+    const bool done =
+        all_in && brio::wait_ticks<P>([] { return Port::tx_idle(); }, brio::ticks_from_ms<P>(50));
     const uint32_t took = Ruler::read() - t0;
     ruler_down();
     return done ? permille(took, wire_cycles(hz, baud, 10u, frames)) : 0u;
@@ -747,27 +800,18 @@ void td_mpcm() {
 
 // ---- e: what DRE and TXC actually mean ---------------------------------------
 
-/// Spin until `f()` or the budget runs out; returns the iterations used
-/// (budget + 1 means it never happened).
-template <typename F>
-uint32_t spin_until(F f, uint32_t budget = 400'000u) {
-    for (uint32_t i = 0; i <= budget; ++i) {
-        if (f()) return i;
-    }
-    return budget + 1;
-}
-
 void te_txc_dre() {
     print(serial, "e DRE = TXDATA accepts, TXC = the line went idle (9600)", crlf);
     quiesce();
     if (!lbme4({}, 9600u)) { verdict("init", false); quiesce(); return; }
-    verdict("DREIF is set on an idle transmitter", Ul::dre_flag());
+    const bool dre_idle = Ul::dre_flag();
     Ul::clear_txc();
-    verdict("TXCIF cleared by a plain write-one store", !Ul::txc_flag());
+    const bool txc_cleared = !Ul::txc_flag();
 
-    // No printing between the writes and the measurement: a console line
-    // at 460800 lasts longer than a frame at 9600 and every flag would
-    // already have settled.
+    // No printing between the writes and the measurement, and the console
+    // drained before it: a console line at 460800 lasts longer than a
+    // frame at 9600, every flag would already have settled, and the
+    // console's transmit vector would land inside the spans.
     //
     // THREE frames are queued, not two: the transmit path is TXDATA, the
     // buffer and the shift register (27.3.2.3), and with only two loaded
@@ -779,21 +823,43 @@ void te_txc_dre() {
     // lands in its own slot; three bare stores to TXDATA in a row are a
     // race - the second can arrive before the first has been handed on
     // and simply overwrite it.
+    //
+    // THE SPANS, on the ruler, and their bound derived: DREIF rises when
+    // the first frame leaves the shifter and the two behind it move up
+    // (docs/avrxt/usart.md: DREIF low a whole frame, TXCIF two more), so
+    // from DREIF seen to TXCIF seen the shifter sends the two frames left,
+    // twenty bit periods of the BAUD in force. Each end is seen one turn
+    // of the poll late - a flag read and a ruler read, some forty cycles -
+    // and a tick handler landing in a turn adds about a hundred: a bit
+    // period either way (2083 CLK_PER at 20 MHz, 2500 at 24) holds them
+    // twenty times over, and a TXCIF at DREIF or one frame after it fails.
+    if (!drained_for_window()) { quiesce(); return; }
+    ruler_up();
     (void)Ul::send(0xAA);                        // straight through to the shifter
     (void)Ul::send(0x55);                        // into the buffer
     (void)Ul::send(0x3C);                        // into TXDATA: all three slots full
     delay_us(clock, 20);                         // the last write lands
     const bool dre_busy = !Ul::dre_flag();
     const bool txc_busy = !Ul::txc_flag();
-    const uint32_t to_dre = spin_until([] { return Ul::dre_flag(); });
+    // A frame at 9600 is 1.04 ms: five of them for the first span, ten for
+    // the second.
+    const std::optional<uint32_t> to_dre =
+        brio::cycles_until<Cycles>([] { return Ul::dre_flag(); }, 5'200u);
     const bool txc_at_dre = Ul::txc_flag();
-    const uint32_t to_txc = spin_until([] { return Ul::txc_flag(); });
+    const std::optional<uint32_t> to_txc =
+        brio::cycles_until<Cycles>([] { return Ul::txc_flag(); }, 10'400u);
+    ruler_down();
+    const uint32_t bit = (static_cast<uint32_t>(Ul::baud_reg()) * Ul::samples()) / 64u;
 
+    verdict("DREIF is set on an idle transmitter", dre_idle);
+    verdict("TXCIF cleared by a plain write-one store", txc_cleared);
     verdict("DREIF low with three frames queued", dre_busy);
     verdict("TXCIF still low while shifting", txc_busy);
-    print(serial, "  spins to DREIF: ", to_dre, ", then to TXCIF: ", to_txc, crlf);
-    verdict("DREIF returns while the line is still busy", to_dre > 0 && !txc_at_dre);
-    verdict("TXCIF only once the last frame has left", to_txc > 0);
+    print(serial, "  CLK_PER to DREIF: ", to_dre ? *to_dre : 0u, ", then to TXCIF: ",
+          to_txc ? *to_txc : 0u, " (two frames are ", 20u * bit, ", a bit ", bit, ")", crlf);
+    verdict("DREIF returns while the line is still busy", to_dre.has_value() && !txc_at_dre);
+    verdict("TXCIF once the last frame has left: two frames after DREIF, within a bit",
+            to_txc.has_value() && *to_txc + bit >= 20u * bit && *to_txc <= 21u * bit);
 
     const auto a = Ul::poll();
     const auto b = Ul::poll();
@@ -821,12 +887,11 @@ void clear_captures() {
     sei();
 }
 
-bool wait_captures(uint16_t n, uint16_t ms) {
-    for (uint16_t i = 0; i < ms; ++i) {
-        if (captures >= n) return true;
-        delay_us(clock, 1000);
-    }
-    return captures >= n;
+/// Wait for `n` captures of the meter, for at most `ms` milliseconds on
+/// the kernel tick (a constant, so the conversion folds).
+template <uint16_t ms>
+bool wait_captures(uint16_t n) {
+    return brio::wait_ticks<P>([n] { return captures >= n; }, brio::ticks_from_ms<P>(ms));
 }
 
 void measure_baud(uint32_t baud, bool clk2x) {
@@ -844,7 +909,7 @@ void measure_baud(uint32_t baud, bool clk2x) {
     for (uint16_t i = 0; i < 200 && captures < 8; ++i) {
         (void)Ul::send(0xFF);
     }
-    (void)wait_captures(8, 200);
+    (void)wait_captures<200>(8);   // judged below: the verdict asks for 8 captures
     const uint16_t w = last_width;
     // Nominal bit time in tenths of a CLK_PER tick: S x BAUD / 64.
     const uint32_t exp10 = (static_cast<uint32_t>(reg) * s * 10u) / 64u;
@@ -907,20 +972,23 @@ void tg_rebase() {
 
     // 0xFF frames only: the start bit is then the ONLY low pulse on the
     // line, so what the meter reads is exactly one bit time.
+    // The echo of one frame at 115200 (87 us) waited for 20 ms on the
+    // tick, whatever the CPU clock.
     auto exchange = []() {
         (void)UlTx::write_byte(0xFF);
-        for (uint32_t i = 0; i < 400'000u; ++i) {
-            uint8_t b;
-            if (UlTx::read_byte(b)) return b == 0xFF;
+        uint8_t b = 0;
+        if (!brio::wait_ticks<P>([&b] { return UlTx::read_byte(b); }, brio::ticks_from_ms<P>(20))) {
+            return false;
         }
-        return false;
+        return b == 0xFF;
     };
 
     clear_captures();
     bool clean24 = true;
     for (uint8_t i = 0; i < 8; ++i) clean24 = clean24 && exchange();
     verdict(at24 ? "loop-back clean at 24 MHz" : "loop-back clean at 20 MHz", clean24);
-    (void)wait_captures(4, 100);
+    // Four start bits measured, or the widths below are no reading.
+    const bool met24 = wait_captures<100>(4);
     const uint16_t t24 = last_width;
     const uint32_t us24 = Meter::us(t24);
     // The run through the task at each clock, on a ruler that counts
@@ -942,7 +1010,7 @@ void tg_rebase() {
     bool clean12 = true;
     for (uint8_t i = 0; i < 8; ++i) clean12 = clean12 && exchange();
     verdict(at24 ? "loop-back clean at 12 MHz" : "loop-back clean at 10 MHz", clean12);
-    (void)wait_captures(4, 200);
+    const bool met12 = wait_captures<200>(4);
     const uint16_t t12 = last_width;
     const uint32_t us12 = Meter::us(t12);
     const uint32_t pm12 = task_wire_permille<UlTx>(115'200u, 1024u, 0xFF, SysClock::hz / 2u);
@@ -951,9 +1019,9 @@ void tg_rebase() {
     print(serial, at24 ? "  24 MHz: " : "  20 MHz: ", t24, " ticks = ", us24,
           at24 ? " us; 12 MHz: " : " us; 10 MHz: ", t12,
           " ticks = ", us12, " us", crlf);
-    verdict("ticks follow CLK_PER (halved +-2)", near(t12 * 2, t24, 4));
-    verdict("the bit time stands still (+-1 us)", near(static_cast<int32_t>(us12),
-                                                       static_cast<int32_t>(us24), 1));
+    verdict("ticks follow CLK_PER (halved +-2)", met24 && met12 && near(t12 * 2, t24, 4));
+    verdict("the bit time stands still (+-1 us)",
+            met24 && met12 && near(static_cast<int32_t>(us12), static_cast<int32_t>(us24), 1));
     wire_verdict(at24 ? "at 24 MHz, through the task" : "at 20 MHz, through the task", 115'200u,
                  1024u, pm24);
     wire_verdict(at24 ? "at 12 MHz, through the task" : "at 10 MHz, through the task", 115'200u,
@@ -963,8 +1031,8 @@ void tg_rebase() {
     bool back = true;
     for (uint8_t i = 0; i < 8; ++i) back = back && exchange();
     verdict(at24 ? "loop-back clean again at 24 MHz" : "loop-back clean again at 20 MHz", back);
-    (void)wait_captures(4, 100);
-    verdict("bit time restored (+-2 ticks)", near(last_width, t24, 2));
+    const bool met_back = wait_captures<100>(4);
+    verdict("bit time restored (+-2 ticks)", met24 && met_back && near(last_width, t24, 2));
     const uint32_t pm_back = task_wire_permille<UlTx>(115'200u, 1024u, 0xFF);
     drain();
     wire_verdict(at24 ? "back at 24 MHz, through the task" : "back at 20 MHz, through the task",
@@ -1173,15 +1241,23 @@ void tI_injected() {
     uint8_t n = 0;
     uint8_t b = 0;
     const uint32_t skips0 = UlTx::rx_skips();
-    for (uint8_t r = 0; r < runs; ++r) {
+    bool moved = true;
+    for (uint8_t r = 0; moved && r < runs; ++r) {
         const uint8_t* run = sent + r * per_run;
         uint8_t queued = 0;
-        while (queued < per_run) {
-            queued = static_cast<uint8_t>(
-                queued + UlTx::write_bulk({run + queued, static_cast<size_t>(per_run - queued)}));
-        }
-        while (!UlTx::tx_idle()) {
-        }
+        // The run into the ring and onto the wire, 1.3 ms at 115200, each
+        // half bounded on the tick: a transport that stalls fails the
+        // letter instead of hanging it.
+        moved = brio::wait_ticks<P>(
+                    [&] {
+                        queued = static_cast<uint8_t>(
+                            queued + UlTx::write_bulk({run + queued,
+                                                       static_cast<size_t>(per_run - queued)}));
+                        return queued >= per_run;
+                    },
+                    brio::ticks_from_ms<P>(20)) &&
+                brio::wait_ticks<P>([] { return UlTx::tx_idle(); }, brio::ticks_from_ms<P>(20));
+        if (!moved) break;
         // The run is in the ring (RXCIF rises before the sender's TXCIF):
         // taken now, so the task's 32-byte ring holds one run at a time.
         while (n < sizeof got && UlTx::read_byte(b)) {
@@ -1200,7 +1276,7 @@ void tI_injected() {
     while (n < sizeof got && UlTx::read_byte(b)) {
         got[n++] = b;
     }
-    bool in_order = n == sizeof sent;
+    bool in_order = moved && n == sizeof sent;   // a stalled run is no delivery
     for (uint8_t i = 0; in_order && i < n; ++i) {
         in_order = got[i] == sent[i];
     }
@@ -1246,14 +1322,18 @@ void tI_injected() {
 // pad's rising edges (channel 4, EvPin PE0): a burst whose last byte is 0x00
 // has one rising edge in its last frame, the start of the stop bit, so the
 // stop bit ends one bit time (S x BAUD / 64 CLK_PER) after the capture. The
-// thread spins on tx_idle() and reads TCB0 the moment it turns true: never
-// before the stop bit's end, and within one bit time after it where a bit
-// outlasts the poll's turn and the capture's read - at 115200, and at
-// 460800 on a 24 MHz board (52 CLK_PER a bit; 26 to 47 measured after the
-// stop bit). At 1 Mbaud a bit is 24 CLK_PER, and at 20 MHz a bit at 460800
-// is 44 - neither above that turn (15 to 50 measured at 20 MHz, 81 with
-// the PIT's tick handler inside the poll): printed, judged only for "never
-// before". The receiver is off, so no RXC entry lands in the poll.
+// thread waits on tx_idle() - the shared wait, bounded on the kernel tick,
+// its condition reading TCB0 the moment tx_idle() answers true - so the
+// reading is late by at most one turn of that wait - a call of tx_idle(),
+// one of the tick's ticks() under its mask and the 32-bit compare, some
+// sixty-five CLK_PER in the release listing - and the capture's read, and
+// by a tick handler's length when the PIT's interrupt lands in the turn:
+// never before the stop bit's end, and within one bit time after it
+// where a bit outlasts all that - at 115200 (174 CLK_PER a bit at 20 MHz,
+// 208 at 24); at 460800 (44 and 52) and 1 Mbaud (20 and 24) the figure
+// is printed, judged only for "never before". The receiver is off, so no
+// RXC entry lands in the wait, and the console is drained before the
+// burst: every line of the letter is printed after its reading.
 
 void tT_tx_idle() {
     print(serial, "T tx_idle() against the last stop bit on the pad (TCB0 capture of " LINK_TXD ")", crlf);
@@ -1264,26 +1344,39 @@ void tT_tx_idle() {
     for (const uint32_t baud : rates) {
         UlTx::init(clock, baud);
         Ul::enable_rx(false);
-        verdict("tx_idle() true before the first run", UlTx::tx_idle());
+        const bool idle_before = UlTx::tx_idle();
         T0::init({.mode = TcbMode::capture, .clock = TcbClock::div1, .event_input = true});
         ChTx::source(EvPin<TxPin>{});
         T0::capture_on(ChTx{});
+        if (!drained_for_window()) {
+            UlTx::release();
+            T0::disable();
+            ChTx::off();
+            break;
+        }
         const uint32_t queued = UlTx::write_bulk({burst, sizeof burst});
         const bool busy = !UlTx::tx_idle();
-        while (!UlTx::tx_idle()) {
-        }
-        const uint16_t at = T0::count();
+        uint16_t at = 0;
+        // Sixteen frames at 115200 are 1.4 ms.
+        const bool ended = brio::wait_ticks<P>(
+            [&at] {
+                if (!UlTx::tx_idle()) return false;
+                at = T0::count();
+                return true;
+            },
+            brio::ticks_from_ms<P>(20));
         delay_us(clock, 200);
         const uint16_t cap = T0::capture();
         const int32_t bit = static_cast<int32_t>(
             (static_cast<uint32_t>(Ul::baud_reg()) * Ul::samples() + 32u) / 64u);
         const int32_t after = static_cast<int32_t>(static_cast<int16_t>(at - cap)) - bit;
         print(serial, "  ", baud, ": bit ", bit, " CLK_PER, tx_idle() turned true ", after,
-              " CLK_PER after the last stop bit", crlf);
+              " CLK_PER after the last stop bit", ended ? "" : " (it never did: no reading)", crlf);
+        verdict("tx_idle() true before the first run", idle_before);
         verdict("the run queued whole and tx_idle() false behind it", queued == sizeof burst && busy);
-        verdict("tx_idle() never before the last stop bit's end", after >= 0);
-        if (baud <= (at24 ? 460'800u : 115'200u)) {
-            verdict("and within one bit time after it", after <= bit);
+        verdict("tx_idle() never before the last stop bit's end", ended && after >= 0);
+        if (baud <= 115'200u) {
+            verdict("and within one bit time after it", ended && after <= bit);
         }
         wire_verdict("through the task", baud, 1024u, task_wire_permille<UlTx>(baud, 1024u));
         UlTx::release();
@@ -1322,19 +1415,25 @@ void tF_sfden_active() {
         if (leg == 1) Ul::arm_start_of_frame();
         uint16_t sent = 0;
         uint8_t next = 0;
-        for (uint32_t spins = 0; got[leg] < 256u && spins < 2'000'000u; ++spins) {
-            if (sent < 256u && Ul::dre_flag()) {
-                Ul::transmit_as<UsartBits::eight>(static_cast<uint8_t>(0x40u + sent));
-                ++sent;
-            }
-            if (Ul::rxc_flag()) {
-                delay_us(clock, 3u * 1'000'000u / 115'200u);   // three bit times: inside the next frame
-                const UsartFrame f = Ul::receive();
-                if (!f.clean() || f.data != static_cast<uint8_t>(0x40u + next)) ++bad[leg];
-                ++next;
-                ++got[leg];
-            }
-        }
+        // 256 frames at 115200 are 22 ms; the leg's turns are bounded at
+        // 200 ms on the tick, and the count judged below says whether it
+        // ended on the count or on the bound.
+        (void)brio::wait_ticks<P>(
+            [&] {
+                if (sent < 256u && Ul::dre_flag()) {
+                    Ul::transmit_as<UsartBits::eight>(static_cast<uint8_t>(0x40u + sent));
+                    ++sent;
+                }
+                if (Ul::rxc_flag()) {
+                    delay_us(clock, 3u * 1'000'000u / 115'200u);   // three bit times: inside the next frame
+                    const UsartFrame f = Ul::receive();
+                    if (!f.clean() || f.data != static_cast<uint8_t>(0x40u + next)) ++bad[leg];
+                    ++next;
+                    ++got[leg];
+                }
+                return got[leg] >= 256u;
+            },
+            brio::ticks_from_ms<P>(200));
         if (leg == 1) Ul::disarm_start_of_frame();
         Ul::release();
     }
@@ -1622,9 +1721,9 @@ bool peer_report(link::Report& r, uint16_t wait_ms) {
             r = link::get_report(f.data);
             if ((r.flags & link::report_cfg_failed) != 0 && !leg_refused) {
                 leg_refused = true;
-                print(serial, "  SKIPPED, no verdict claimed: the peer REFUSED op ", hex(r.op),
+                print(serial, "  the peer REFUSED op ", hex(r.op),
                       " (report_cfg_failed) - a configuration its silicon cannot serve, "
-                      "so nothing of this leg was measured", crlf);
+                      "so nothing of this leg was measured: its verdicts are skips", crlf);
             }
             return true;
         }
@@ -1646,6 +1745,34 @@ bool peer_act(link::Op op, const link::Params& a,
     if (!command(op, p, static_cast<uint8_t>(link::params_size + n))) return false;
     delay_us(clock, static_cast<uint32_t>(link::settle_ms) * 1000u);
     return true;
+}
+
+/// peer_act() for a leg that is judged: a command the link lost fails the
+/// leg by name - `what`, then "the peer acknowledged the command" - and
+/// leaves the link in command mode, where a leg left out without a word
+/// would take its verdicts out of the tally.
+bool act(link::Op op, const link::Params& a, const char* what,
+         const uint8_t* extra = nullptr, uint8_t n = 0) {
+    if (peer_act(op, a, extra, n)) return true;
+    verdict(what, ": the peer acknowledged the command", false);
+    (void)link_command_mode();
+    return false;
+}
+
+/// What the peer said of the leg just measured (peer_report()): whether
+/// its report came and whether the action really ran (report_ran). A
+/// refusal in it raises leg_refused, as peer_report() does, so a leg is
+/// read with this AFTER its own measurement and BEFORE its verdicts. A
+/// verdict that expects silence - nothing received, nothing learned -
+/// asks `ran`: silence from a peer that never sent is no evidence.
+struct PeerSaid {
+    bool have;
+    bool ran;
+};
+PeerSaid peer_said(uint16_t wait_ms = 10) {
+    link::Report r{};
+    const bool have = peer_report(r, wait_ms);
+    return {have, have && (r.flags & link::report_ran) != 0};
 }
 
 // ---- the DUT's own end of the link --------------------------------------------
@@ -1731,6 +1858,21 @@ uint16_t bound_ms(uint32_t rate, uint16_t frames) {
 /// never the thing that gets flushed.
 void wait_for_peer_window() { delay_us(clock, 6000); }
 
+/// How long one echo is waited for, in kernel ticks: four frame times at
+/// the rate in force (from the BAUD register, as turnaround_guard()) plus
+/// two ticks for the peer's turnaround and the tick's own granularity.
+/// Six echoes missed in a row then end well inside the peer's ECHO
+/// window (bound_ms(rate, 24): 96 frame times plus 80 ms), so a receiver
+/// that rejects every echo still leaves the peer echoing all six - the
+/// evidence a verdict on silence asks for. A tick is under a millisecond
+/// here, so the budget in ticks is at least the time in milliseconds.
+uint32_t echo_wait_ticks() {
+    static_assert(P::ticks_per_second >= 1000u, "a tick of a millisecond or less");
+    const uint32_t bit = (static_cast<uint32_t>(Ul::baud_reg()) * Ul::samples()) / 64u;
+    const uint32_t four_frames_us = (48u * bit) / (SysClock::hz / 1'000'000u);
+    return 2u + (four_frames_us + 999u) / 1000u;
+}
+
 uint16_t echo_first_sent = 0, echo_first_got = 0, echo_first_flags = 0;
 uint16_t echo_mismatches(uint8_t bits, uint16_t n) {
     const uint16_t mask = mask_of(bits);
@@ -1742,7 +1884,10 @@ uint16_t echo_mismatches(uint8_t bits, uint16_t n) {
         line_talk();
         if (!Ul::send(v, 400'000u)) { line_listen(); ++bad; continue; }
         line_listen();
-        const auto got = Ul::wait(400'000u);
+        const std::optional<UsartFrame> got =
+            brio::wait_ticks<P>([] { return Ul::rxc_flag(); }, echo_wait_ticks())
+                ? std::optional<UsartFrame>(Ul::receive())
+                : std::nullopt;
         if (!got || !got->clean() || got->data != v) {
             if (bad == 0) {
                 echo_first_sent = v;
@@ -1917,20 +2062,31 @@ void tx_clocks() {
     uint32_t sum = 0;
     uint16_t seen = 0, wmin = 0xFFFF, wmax = 0, discard = 2;
     uint16_t last_n = captures;
-    for (uint16_t guard = 0; guard < 400 && seen < 16; ++guard) {
-        delay_us(clock, 1000);
-        const uint16_t n = captures;
-        if (n == last_n) continue;
-        last_n = n;
-        const uint16_t w = static_cast<uint16_t>(last_width + 1);   // the div1 short-read
-        if (discard) { --discard; continue; }                       // mode-switch edges
-        sum += w;
-        if (w < wmin) wmin = w;
-        if (w > wmax) wmax = w;
-        ++seen;
-    }
+    // Forty frames at 4000 baud are 100 ms (110 ms at 3600): the pulses
+    // are taken for at most 400 ms on the tick, and the count judged below
+    // says whether the window ended on sixteen or on the bound.
+    (void)brio::wait_ticks<P>(
+        [&] {
+            const uint16_t n = captures;
+            if (n == last_n) return false;
+            last_n = n;
+            const uint16_t w = static_cast<uint16_t>(last_width + 1);   // the div1 short-read
+            if (discard) {                                              // mode-switch edges
+                --discard;
+                return false;
+            }
+            sum += w;
+            if (w < wmin) wmin = w;
+            if (w > wmax) wmax = w;
+            ++seen;
+            return seen >= 16;
+        },
+        brio::ticks_from_ms<P>(400));
     T0::enable_capt_interrupt(false);
     T0::disable();
+    // The rest of the forty frames out first; a refusal in the report
+    // makes the verdicts below skips.
+    (void)peer_said(150);
     verdict("16 pulses captured", seen == 16);
     if (seen == 16) {
         const int64_t expected4 = 16LL * 9 * reg;                   // 4 x expected sum
@@ -2151,10 +2307,13 @@ void tj_link() {
     verdict("the peer accepts SEND", sending);
     watch_incoming();                   // only now: command mode runs at 115200
     clear_captures();
-    (void)wait_captures(8, 400);
+    (void)wait_captures<400>(8);        // judged below: the verdict asks for 8 captures
     const uint16_t w = last_width;
     T0::enable_capt_interrupt(false);
     T0::disable();
+    // The peer's report before the verdicts: a refusal skips the leg.
+    link::Report r{};
+    const bool reported = peer_report(r, 20);
     const int32_t nominal = static_cast<int32_t>(SysClock::hz / 9600u);
     const int32_t err_ppm = nominal ? ((static_cast<int32_t>(w) - nominal) * 10000L) / nominal : 0;
     print(serial, "  peer start bit at 9600: ", w, " DUT ticks (nominal ", nominal,
@@ -2164,9 +2323,7 @@ void tj_link() {
           " % against the DUT's crystal", crlf);
     verdict("the peer's bit time is within 3 % of the DUT's",
             captures >= 8 && near(w, nominal, nominal / 33));
-    link::Report r{};
-    verdict("the peer reports the 24 frames it sent",
-            peer_report(r, 20) && r.count == 24);
+    verdict("the peer reports the 24 frames it sent", reported && r.count == 24);
     quiesce();
     (void)link_command_mode();
 }
@@ -2194,11 +2351,7 @@ void tk_baud() {
         a.cfg = c;
         a.count = 8;
         a.ms = bound_ms(rc.rate, 16);
-        if (!peer_act(link::Op::echo, a)) {
-            verdict(num(rc.rate), " baud: the peer refused ECHO", false);
-            (void)link_command_mode();
-            continue;
-        }
+        if (!act(link::Op::echo, a, num(rc.rate))) continue;
         const bool up = dut_link(c);
         const uint16_t bad = up ? echo_mismatches(8, 8) : 8;
         link::Report r{};
@@ -2244,11 +2397,7 @@ void tl_frames_cross() {
         a.cfg = c;
         a.count = 6;
         a.ms = bound_ms(115'200, 20);
-        if (!peer_act(link::Op::echo, a)) {
-            verdict(fc.name, " across the wire: the peer refused", false);
-            (void)link_command_mode();
-            continue;
-        }
+        if (!act(link::Op::echo, a, fc.name)) continue;
         const bool up = dut_link(c);
         const uint16_t bad = up ? echo_mismatches(fc.bits, 6) : 6;
         link::Report r{};
@@ -2310,6 +2459,7 @@ void tm_errors() {
         const bool sent = peer_act(link::Op::send, a);
         const bool up = sent && dut_link(dc);
         const Drain d = collect(bound_ms(115'200, 12));
+        (void)peer_said();              // a refusal makes the verdicts below skips
         print(serial, "  odd into even: frames=", d.frames, " perr=", d.perr,
               " ferr=", d.ferr, " last=", hex(d.last), crlf);
         verdict("every frame of a wrong parity flags PERR",
@@ -2357,6 +2507,7 @@ void tm_errors() {
         const uint8_t pe = UlTx::parity_errors();
         const bool any = delivered != 0;
         Ul::enable_rxc_interrupt(false);
+        (void)peer_said();              // a refusal makes the verdicts below skips
         print(serial, "  Uart task: parity_errors=", pe, " bytes delivered=", delivered,
               crlf);
         verdict("the Uart task counts the parity errors", sent && pe == 6);
@@ -2369,6 +2520,7 @@ void tm_errors() {
     {
         const int8_t errs[] = {0, 2, 4, 5, 6, 8, -2, -4, -5, -6, -8};
         int16_t first_pos = 0, first_neg = 0;
+        bool refused = false;
         for (int8_t e : errs) {
             const uint32_t rate =
                 static_cast<uint32_t>(115'200L + (115'200L * e) / 100L);
@@ -2382,12 +2534,14 @@ void tm_errors() {
             a.ms = bound_ms(rate, 16);
             a.value = 0x00;
             a.pattern = link::pattern_fixed;
-            if (!peer_act(link::Op::send, a)) { (void)link_command_mode(); continue; }
+            if (!act(link::Op::send, a, "a rate off the nominal")) continue;
             (void)dut_link(dc);
             const Drain d = collect(bound_ms(rate, 16));
+            (void)peer_said();
+            refused = refused || leg_refused;
             print(serial, "  ", e >= 0 ? "+" : "-", e >= 0 ? e : -e, " %: frames=",
-                  d.frames, " ferr=", d.ferr, crlf);
-            if (d.ferr != 0) {
+                  d.frames, " ferr=", d.ferr, leg_refused ? " (refused)" : "", crlf);
+            if (!leg_refused && d.ferr != 0) {
                 if (e > 0 && first_pos == 0) first_pos = e;
                 if (e < 0 && first_neg == 0) first_neg = e;
             }
@@ -2396,6 +2550,7 @@ void tm_errors() {
         }
         print(serial, "  FERR onset: +", first_pos, " %, ", first_neg, " % (table 27-4 "
               "gives -4.19/+4.14 % for D = 9)", crlf);
+        leg_refused = refused;          // a refused rate takes the sweep's verdicts with it
         verdict("a rate error inside the operational range is clean",
                 first_pos == 0 || first_pos >= 4);
         verdict("a rate error outside it does flag FERR",
@@ -2416,6 +2571,7 @@ void tm_errors() {
         (void)dut_link(pc);
         quiet(bound_ms(115'200, 16));       // read LATE on purpose: the FIFO must overflow
         const Drain d = drain();
+        (void)peer_said();                  // a refusal makes the verdicts below skips
         print(serial, "  blast of 8: drained=", d.frames, " ovf=", d.ovf,
               " last=", hex(d.last), crlf);
         verdict("only three frames survive a flood", sent && d.frames == 3);
@@ -2435,6 +2591,7 @@ void tm_errors() {
         const bool sent = peer_act(link::Op::brk, a);
         (void)dut_link(pc);
         const Drain d = collect(120);
+        (void)peer_said();                  // a refusal makes the verdict below a skip
         print(serial, "  break of 20 bit times: frames=", d.frames, " ferr=", d.ferr,
               " last=", hex(d.last), crlf);
         verdict("a break arrives as FERR with data 0x00",
@@ -2447,7 +2604,9 @@ void tm_errors() {
 
 // ---- n: waveforms only a bit-banger can make ----------------------------------
 
-/// One bit-bang action and what the DUT made of it.
+/// One bit-bang action and what the DUT made of it, the peer's report
+/// read after it: a refusal leaves leg_refused raised for the caller. A
+/// command the link lost fails by name (act()) and returns nothing.
 Drain bitbang_run(uint32_t rate, uint8_t value, uint16_t frames, int8_t cell, int8_t pct,
                   uint16_t break_bits, const link::Cfg& dut_cfg, uint16_t extra_ms = 0) {
     link::Params a{};
@@ -2458,9 +2617,11 @@ Drain bitbang_run(uint32_t rate, uint8_t value, uint16_t frames, int8_t cell, in
     a.cell = cell;
     a.pct = pct;
     a.aux16 = break_bits;
-    if (!peer_act(link::Op::bitbang, a)) return Drain{};
+    if (!act(link::Op::bitbang, a, "a bit-banged run")) return Drain{};
     (void)dut_link(dut_cfg);
-    return collect(static_cast<uint16_t>(a.ms + extra_ms));
+    const Drain d = collect(static_cast<uint16_t>(a.ms + extra_ms));
+    (void)peer_said();
+    return d;
 }
 
 void tn_waveforms() {
@@ -2477,29 +2638,38 @@ void tn_waveforms() {
     {
         const uint16_t widths[] = {6, 30, 150, 625, 1250, 1562, 1875, 2500};
         uint16_t first_accepted = 0;
+        bool refused = false, all_ran = true;
         for (uint16_t w : widths) {
             link::Params a{};
             a.cfg.rate = 9600;
             a.count = 4;
             a.ms = 300;
             a.aux16 = w;
-            a.aux8 = 3;                                  // milliseconds... microseconds
             a.aux8 = 200;                                // gap between pulses, us
-            if (!peer_act(link::Op::glitch, a)) { (void)link_command_mode(); continue; }
+            if (!act(link::Op::glitch, a, "a glitch run")) {
+                all_ran = false;
+                continue;
+            }
             (void)dut_link(base);
             const Drain d = collect(80);
+            // Nothing received proves nothing unless the peer pulsed: the
+            // verdicts that expect silence ask its report.
+            const PeerSaid said = peer_said();
+            refused = refused || leg_refused;
+            all_ran = all_ran && (said.ran || leg_refused);
             print(serial, "  low pulse of ", w, " CPU cycles: frames=", d.frames,
-                  " ferr=", d.ferr, crlf);
-            if (d.frames != 0 && first_accepted == 0) first_accepted = w;
-            if (w == 6) verdict("a 6-cycle glitch is not a start bit", d.frames == 0);
-            if (w == 625) verdict("a quarter-bit glitch is not a start bit", d.frames == 0);
+                  " ferr=", d.ferr, said.ran ? "" : " (the peer did not report it ran)", crlf);
+            if (said.ran && d.frames != 0 && first_accepted == 0) first_accepted = w;
+            if (w == 6) verdict("a 6-cycle glitch is not a start bit", said.ran && d.frames == 0);
+            if (w == 625) verdict("a quarter-bit glitch is not a start bit", said.ran && d.frames == 0);
             if (w == 2500) verdict("a full-bit low IS taken as a start bit", d.frames != 0);
             (void)link_command_mode();
         }
         print(serial, "  narrowest accepted low pulse: ", first_accepted,
               " CPU cycles of a 2500-cycle bit", crlf);
+        leg_refused = refused;          // a refused width takes the sweep's verdict with it
         verdict("the start-bit threshold sits between a half and a whole bit",
-                first_accepted >= 1250 && first_accepted <= 2500);
+                all_ran && first_accepted >= 1250 && first_accepted <= 2500);
     }
 
     // 2. A UNIFORM rate error, generated by counting cycles instead of by
@@ -2508,12 +2678,14 @@ void tn_waveforms() {
     {
         const int8_t errs[] = {0, 2, 3, 4, 5, 6, -2, -3, -4, -5, -6};
         int16_t pos = 0, neg = 0;
+        bool refused = false;
         for (int8_t e : errs) {
             const uint32_t rate = static_cast<uint32_t>(9600L + (9600L * e) / 100L);
             const Drain d = bitbang_run(rate, 0x00, 6, -1, 0, 0, base);
+            refused = refused || leg_refused;
             print(serial, "  ", e >= 0 ? "+" : "-", e >= 0 ? e : -e, " %: frames=",
                   d.frames, " ferr=", d.ferr, crlf);
-            if (d.ferr != 0) {
+            if (!leg_refused && d.ferr != 0) {
                 if (e > 0 && pos == 0) pos = e;
                 if (e < 0 && neg == 0) neg = e;
             }
@@ -2522,6 +2694,7 @@ void tn_waveforms() {
             (void)link_command_mode();
         }
         print(serial, "  bit-banged FERR onset: +", pos, " %, ", neg, " %", crlf);
+        leg_refused = refused;          // a refused rate takes the sweep's verdict with it
         verdict("the measured operational range brackets the data sheet's +-4 %",
                 (pos == 0 || pos >= 4) && (neg == 0 || neg <= -4));
     }
@@ -2532,19 +2705,28 @@ void tn_waveforms() {
     {
         const int8_t pcts[] = {10, 20, 30, 40, 50, 60, 70};
         int16_t onset = 0;
+        bool refused = false;
         for (int8_t p : pcts) {
             const Drain d = bitbang_run(9600, 0x00, 4, 5, p, 0, base);
-            if (d.ferr != 0 && onset == 0) onset = p;
+            refused = refused || leg_refused;
+            if (!leg_refused && d.ferr != 0 && onset == 0) onset = p;
             print(serial, "  cell 5 +", p, " %: frames=", d.frames, " ferr=", d.ferr, crlf);
             (void)link_command_mode();
         }
         print(serial, "  one stretched cell breaks the frame at +", onset, " %", crlf);
+        leg_refused = refused;          // a refused cell takes the sweep's verdict with it
         verdict("a single stretched cell survives far past the rate tolerance",
                 onset == 0 || onset >= 30);
     }
 
     // 4. The LIN auto-baud window: the sync field's bit pair is what ABW
     //    measures, so distorting one of its cells is the only honest probe.
+    //    Where each window's edge falls is printed (WDW0's was measured
+    //    marginal, refused at one step and taken at the next:
+    //    docs/avrxt/usart.md); what is judged is that each window takes
+    //    the mildest distortion, +12 % of a cell - 6 % of the pair, inside
+    //    the narrowest window's 15 % - from a peer whose report says it
+    //    sent it.
     {
         const UsartAbWindow windows[4] = {UsartAbWindow::wdw1, UsartAbWindow::wdw0,
                                           UsartAbWindow::wdw2, UsartAbWindow::wdw3};
@@ -2553,6 +2735,7 @@ void tn_waveforms() {
         const int8_t pcts[] = {12, 16, 20, 24, 28, 32, 36, 40, 44};
         for (uint8_t wi = 0; wi < 4; ++wi) {
             int16_t last_ok = 0, first_bad = 0;
+            bool refused = false, mildest = false;
             for (int8_t p : pcts) {
                 link::Params a{};
                 a.cfg.rate = 9600;
@@ -2562,21 +2745,26 @@ void tn_waveforms() {
                 a.cell = 2;
                 a.pct = p;
                 a.aux16 = 20;                            // a real LIN break
-                if (!peer_act(link::Op::bitbang, a)) { (void)link_command_mode(); continue; }
+                if (!act(link::Op::bitbang, a, names[wi])) continue;
                 (void)dut_autobaud(9600u, true, windows[wi]);
                 quiet(120);
                 const bool bdf = Ab::break_detected();
                 const bool isf = Ab::sync_error();
-                if (bdf && !isf) last_ok = p;
-                else if (first_bad == 0) first_bad = p;
                 Ab::recover();
                 (void)link_command_mode();
+                const PeerSaid said = peer_said();
+                refused = refused || leg_refused;
+                if (!said.ran) continue;                 // nothing sent, nothing learned
+                if (bdf && !isf) last_ok = p;
+                else if (first_bad == 0) first_bad = p;
+                if (p == pcts[0]) mildest = bdf && !isf;
             }
             print(serial, "  ", names[wi], ": accepted up to +", last_ok,
                   " %, refused from +", first_bad, " %", crlf);
-            verdict(names[wi], " has a measurable acceptance edge",
-                    last_ok != 0 || first_bad != 0);
+            leg_refused = refused;      // a refused step takes the window's verdict with it
+            verdict(names[wi], " takes a sync field with one cell 12 % long", mildest);
         }
+        leg_refused = false;
     }
     quiesce();
     (void)link_command_mode();
@@ -2598,7 +2786,7 @@ void to_autobaud_foreign() {
             a.value = 0x55;                              // the sync character
             a.aux16 = 20;                                // break, in bit times
             a.aux8 = 4;                                  // payload frames
-            if (!peer_act(link::Op::autobaud_tx, a)) { (void)link_command_mode(); continue; }
+            if (!act(link::Op::autobaud_tx, a, num(rate))) continue;
             // LINAUTO is CONSTRAINED: ABW compares the sync field against the
             // BAUD already in force, so its fallback has to start near the
             // incoming rate (10 % away here, inside WDW0). GENAUTO has no
@@ -2625,6 +2813,8 @@ void to_autobaud_foreign() {
                 d.last = f.data;
             }
             if (measured == 0) measured = Ab::measured_baud_reg();
+            Ab::recover();
+            (void)peer_said();          // a refusal makes the two verdicts below skips
             const uint16_t own = usart_baud_reg(SysClock::hz, rate);
             const int32_t delta = own ? ((static_cast<int32_t>(measured) -
                                           static_cast<int32_t>(own)) * 10000L) / own
@@ -2641,7 +2831,6 @@ void to_autobaud_foreign() {
             verdict(num(rate), kind ? " LINAUTO then reads the payload"
                                     : " GENAUTO then reads the payload",
                     d.frames >= 3 && d.ferr == 0);
-            Ab::recover();
             (void)link_command_mode();
         }
     }
@@ -2662,12 +2851,15 @@ void to_autobaud_foreign() {
         while (Ticker::millis() - t0 < static_cast<uint32_t>(a.ms) + 60u) {
             if (Ab::break_detected()) bdf = true;
         }
-        print(serial, "  LINAUTO at BAUD 19200 against a 9600 sync field: BDF=",
-              bdf ? 1 : 0, " BAUD=", Ab::measured_baud_reg(), " ISFIF=",
-              Ab::sync_error() ? 1 : 0, crlf);
-        verdict("LINAUTO refuses a sync field outside the window of the BAUD in force",
-                sent && !bdf);
+        const uint16_t reg = Ab::measured_baud_reg();
+        const bool isf = Ab::sync_error();
         Ab::recover();
+        // No BDF proves nothing unless the peer sent the field.
+        const PeerSaid said = peer_said();
+        print(serial, "  LINAUTO at BAUD 19200 against a 9600 sync field: BDF=",
+              bdf ? 1 : 0, " BAUD=", reg, " ISFIF=", isf ? 1 : 0, crlf);
+        verdict("LINAUTO refuses a sync field outside the window of the BAUD in force",
+                sent && said.ran && !bdf);
         (void)link_command_mode();
     }
 
@@ -2688,10 +2880,12 @@ void to_autobaud_foreign() {
             if (Ab::break_detected()) bdf1 = true;
         }
         const bool isf = Ab::sync_error();
-        print(serial, "  LINAUTO with sync character 0x53: ISFIF=", isf ? 1 : 0, " BDF=",
-              bdf1 ? 1 : 0, " BAUD=", Ab::measured_baud_reg(), crlf);
-        verdict("a sync character that is not 0x55 is refused", sent && isf && !bdf1);
+        const uint16_t reg = Ab::measured_baud_reg();
         Ab::recover();
+        (void)peer_said();                         // a refusal makes the verdict below a skip
+        print(serial, "  LINAUTO with sync character 0x53: ISFIF=", isf ? 1 : 0, " BDF=",
+              bdf1 ? 1 : 0, " BAUD=", reg, crlf);
+        verdict("a sync character that is not 0x55 is refused", sent && isf && !bdf1);
         (void)link_command_mode();
 
         a.value = 0x55;
@@ -2703,8 +2897,9 @@ void to_autobaud_foreign() {
             if (Ab::break_detected()) bdf2 = true;
             if (Ab::sync_error()) isf2 = true;
         }
-        verdict("after recover() the next sync field is learned", again && bdf2 && !isf2);
         Ab::recover();
+        (void)peer_said();                         // a refusal makes the verdict below a skip
+        verdict("after recover() the next sync field is learned", again && bdf2 && !isf2);
         (void)link_command_mode();
     }
 
@@ -2727,12 +2922,16 @@ void to_autobaud_foreign() {
             if (!bdf3 && Ab::break_detected()) { bdf3 = true; reg3 = Ab::measured_baud_reg(); }
         }
         if (reg3 == 0) reg3 = Ab::measured_baud_reg();
-        print(serial, "  sync at 1.2 Mbaud (BAUD 80, below the documented 0x0064 floor): "
-              "BAUD=", reg3, " BDF=", bdf3 ? 1 : 0,
-              " ISFIF=", Ab::sync_error() ? 1 : 0, crlf);
-        verdict("a sync field below the documented BAUD floor is answered either way",
-                sent);
+        const bool isf3 = Ab::sync_error();
         Ab::recover();
+        const PeerSaid said = peer_said();
+        // What the receiver makes of it is behaviour 27.3.3.2.5 rules out
+        // and brio does not rest on: printed, the one verdict the premise -
+        // the peer sent the field.
+        print(serial, "  sync at 1.2 Mbaud (BAUD 80, below the documented 0x0064 floor): "
+              "BAUD=", reg3, " BDF=", bdf3 ? 1 : 0, " ISFIF=", isf3 ? 1 : 0,
+              bdf3 && !isf3 ? " - ACCEPTED below the floor" : " - refused", crlf);
+        verdict("the peer sent a sync field below the documented BAUD floor", sent && said.ran);
         (void)link_command_mode();
     }
     quiesce();
@@ -2764,6 +2963,7 @@ void tp_mpcm_cross() {
         quiet(bound_ms(115'200, 24));
         // Filtering: only the two address frames may have got through.
         const Drain first = drain();
+        (void)peer_said();              // a refusal makes the verdict below a skip
         print(serial, "  filtered: frames=", first.frames, " last=", hex(first.last), crlf);
         verdict("with MPCM on, only the address frames arrive",
                 up && first.frames == 2 && first.last == 0x142);
@@ -2801,6 +3001,7 @@ void tp_mpcm_cross() {
                 second = f.data;
             }
         }
+        (void)peer_said();              // a refusal makes the verdicts below skips
         print(serial, "  addressed: addr=", hex(addr), " data frames=", data,
               " next address=", hex(second), crlf);
         verdict("the addressed client sees its own data frames",
@@ -2832,6 +3033,7 @@ void tp_mpcm_cross() {
         const bool up = sent && dut_link(dc);
         quiet(bound_ms(115'200, 24));
         const Drain d = drain();
+        (void)peer_said();              // a refusal makes the verdict below a skip
         print(serial, "  8-bit + 2 stop, MPCM: frames=", d.frames, " last=", hex(d.last),
               " ferr=", d.ferr, crlf);
         verdict("the first stop bit filters exactly like the ninth data bit",
@@ -2850,8 +3052,8 @@ void tq_sync() {
     quiesce();
     if (!ensure_link()) { verdict("the peer is reachable", false); return; }
     if (shared_line()) {
-        print(serial, "  SKIPPED: a synchronous link needs XCK wired across (PE2 to PE2) "
-                      "AND data on the crossed pair; this desk has one shared wire", crlf);
+        bench.skip("a synchronous link needs XCK wired across (PE2 to PE2) and data on the "
+                   "crossed pair; this desk has one shared wire");
         return;
     }
     const uint32_t xcks[] = {100'000, 1'000'000};
@@ -2867,7 +3069,7 @@ void tq_sync() {
             a.cfg = pc;
             a.count = 8;
             a.ms = bound_ms(xck, 40);
-            if (!peer_act(link::Op::sink, a)) { (void)link_command_mode(); continue; }
+            if (!act(link::Op::sink, a, num(xck))) continue;
             const bool up = SyncH::init(clock, xck);
             SyncH::invert_xck(inv != 0);
             wait_for_peer_window();
@@ -2891,6 +3093,18 @@ void tq_sync() {
     }
 
     // Roles reversed: the peer drives XCK, the DUT is the client.
+    //
+    // The client has to be listening - and QUIET - before the host's first
+    // edge. Its command travels on this very USART, so it cannot be armed
+    // before the command; it is armed the moment the rendezvous window
+    // opens, and the peer is asked for client_lead_ms of extra lead-in
+    // (`send` reads aux16 as such: usart_link.hpp) - so the peer's own
+    // switch to a host, made after its ack, and this end's switch
+    // to a client are both over by the time the receiver is flushed,
+    // client_lead_ms / 2 in, and the first edge is the host's first
+    // frame's. Whatever the two switches clocked in is thrown away there,
+    // never counted.
+    constexpr uint16_t client_lead_ms = 20;
     for (uint32_t xck : xcks) {
         link::Cfg pc{};
         pc.mode = link::Mode::sync_host;
@@ -2900,13 +3114,16 @@ void tq_sync() {
         a.count = 8;
         a.ms = bound_ms(xck, 60);
         a.value = 0x60;
-        if (!peer_act(link::Op::send, a)) { (void)link_command_mode(); continue; }
-        // The client has to be listening before the host's first edge,
-        // and it has to READ AS IT GOES: eight frames do not fit in a
+        a.aux16 = client_lead_ms;
+        if (!act(link::Op::send, a, num(xck))) continue;
+        // And it has to READ AS IT GOES: eight frames do not fit in a
         // three-deep FIFO, so draining after the fact loses five of them
         // whatever the wire did.
         const bool up = SyncC::init();
-        const Drain d = collect(static_cast<uint16_t>(a.ms + 40));
+        quiet(client_lead_ms / 2u);
+        Ul::flush_rx();
+        const Drain d = collect(static_cast<uint16_t>(a.ms + client_lead_ms + 40u));
+        (void)peer_said();              // a refusal makes the verdict below a skip
         uint16_t want = 0;
         for (uint8_t i = 0; i < 8; ++i) want = static_cast<uint16_t>(want + 0x60 + i);
         print(serial, "  client at ", xck, " Hz: frames=", d.frames, " sum=", hex(d.sum),
@@ -2927,18 +3144,27 @@ void tq_sync() {
         a.count = 8;
         a.ms = 200;
         a.value = 0x60;
+        a.aux16 = client_lead_ms;
         const bool sent = peer_act(link::Op::send, a);
         (void)SyncC::init();
-        const Drain d = collect(240);
+        quiet(client_lead_ms / 2u);
+        Ul::flush_rx();
+        const Drain d = collect(240u + client_lead_ms);
+        // A frame that did not come through proves the ceiling only if the
+        // host clocked all eight: the peer's report says so.
+        link::Report r{};
+        const bool have = peer_report(r, 10);
+        const bool clocked = have && (r.flags & link::report_ran) != 0 && r.count == 8;
         uint16_t want = 0;
         for (uint8_t i = 0; i < 8; ++i) want = static_cast<uint16_t>(want + 0x60 + i);
         const bool clean = d.frames == 8 && d.sum == want && d.ferr == 0;
         print(serial, at24 ? "  client at 12 MHz (ceiling is CLK_PER/4 = 6 MHz): frames="
                            : "  client at 10 MHz (ceiling is CLK_PER/4 = 5 MHz): frames=",
               d.frames, " sum=", hex(d.sum), " want=", hex(want), " ferr=", d.ferr,
+              "; the peer clocked ", have ? r.count : 0,
               clean ? "  <-- CLEAN: the data sheet's ceiling did not bite" : "", crlf);
         verdict("XCK at twice the client's ceiling does not come through cleanly",
-                sent && !clean);
+                sent && clocked && !clean);
         (void)link_command_mode();
     }
     quiesce();
@@ -2959,7 +3185,7 @@ void tr_rs485() {
         a.cfg = pc;
         a.count = 4;
         a.ms = bound_ms(rate, 24);
-        if (!peer_act(link::Op::sink, a)) { (void)link_command_mode(); continue; }
+        if (!act(link::Op::sink, a, num(rate))) continue;
         const bool up = Bus::init(clock, rate);
         wait_for_peer_window();
         Ch2::source(EvPin<XdirPin>{});
@@ -3032,9 +3258,9 @@ void ts_irda() {
         // avrxt peer's pins pulse the way this board's do.
         if (ic.inverted != inv && !sam) continue;
         if (ic.txpl != 0u && sam) {
-            print(serial, "  SKIPPED, no verdict claimed: ", ic.name, " - the samc21 peer's IrDA "
-                          "coder transmits 3/16 of a bit only (DS60001479M 31.6.3.3); a fixed "
-                          "TXPLCTRL pulse is a capability its silicon has not got", crlf);
+            bench.skip(ic.name, ": the samc21 peer's IrDA coder transmits 3/16 of a bit only "
+                                "(DS60001479M 31.6.3.3); a fixed TXPLCTRL pulse is a capability "
+                                "its silicon has not got");
             continue;
         }
         link::Cfg pc{};
@@ -3045,11 +3271,7 @@ void ts_irda() {
         a.cfg = pc;
         a.count = 6;
         a.ms = bound_ms(115'200, 24);
-        if (!peer_act(link::Op::echo, a)) {
-            verdict(ic.name, "", false);
-            (void)link_command_mode();
-            continue;
-        }
+        if (!act(link::Op::echo, a, ic.name)) continue;
         const bool up = dut_ircom(ic.txpl, ic.rxpl, 115'200, ic.inverted);
         const uint16_t bad = up ? echo_mismatches(8, 6) : 6;
         link::Report r{};
@@ -3060,8 +3282,11 @@ void ts_irda() {
             print(serial, "    first mismatch: sent ", hex(echo_first_sent), " got ",
                   hex(echo_first_got), " flags ", hex(echo_first_flags), crlf);
         }
+        // Nothing read back blocks reception only where the peer echoed
+        // all six: it hears this end's pulses either way
+        // (samc21_irda_inverted above).
         verdict(ic.name, ic.expect ? " works" : " blocks reception",
-                up && (ic.expect ? bad == 0 : bad == 6));
+                up && (ic.expect ? bad == 0 : have && r.count == 6 && bad == 6));
         (void)link_command_mode();
     }
 
@@ -3071,6 +3296,7 @@ void ts_irda() {
     {
         const uint8_t rxpls[] = {0, 6, 20, 40, 60, 100, 127};
         uint16_t first_block = 0;
+        bool refused = false;
         for (uint8_t rx : rxpls) {
             link::Cfg pc{};
             pc.mode = link::Mode::ircom;
@@ -3079,20 +3305,27 @@ void ts_irda() {
             a.cfg = pc;
             a.count = 6;
             a.ms = bound_ms(115'200, 24);
-            if (!peer_act(link::Op::echo, a)) { (void)link_command_mode(); continue; }
+            if (!act(link::Op::echo, a, "the RXPL sweep")) continue;
             const bool up = dut_ircom(0x00, rx, 115'200, inv);
             const uint16_t bad = up ? echo_mismatches(8, 6) : 6;
+            // Six echoes not read are the filter's only where the peer
+            // echoed six.
+            link::Report r{};
+            const bool echoed = peer_report(r, 10) && r.count == 6;
+            refused = refused || leg_refused;
             print(serial, "  RXPL ", rx, " (", rx + 1, " samples needed): wrong=", bad,
-                  crlf);
-            if (bad == 6 && first_block == 0) first_block = rx;
+                  echoed ? "" : " (the peer did not echo six)", crlf);
+            if (up && echoed && bad == 6 && first_block == 0) first_block = rx;
             (void)link_command_mode();
         }
+        leg_refused = refused;          // a refused step takes the sweep's verdict with it
         print(serial, at24 ? "  the 3/16 pulse (39 CLK_PER of a 208-clock bit) is rejected from "
                              "RXPL "
                            : "  the 3/16 pulse (33 CLK_PER of a 174-clock bit) is rejected from "
                              "RXPL ", first_block, crlf);
         verdict("the RXPL filter does reject the 3/16 pulse somewhere in 0..127",
                 first_block != 0);
+        leg_refused = false;
     }
 
     // TXPL = 0xFF turns the coder off. Is the line then plain async? Ask a
@@ -3117,8 +3350,10 @@ void ts_irda() {
         // RECEIVER is a different matter and the next verdict measures it.
         verdict("with the coder off the IRCOM TRANSMITTER is plain asynchronous",
                 up && have && r.count == 6 && r.ferr == 0);
+        // The peer echoed what it read, so an echo not read back is this
+        // receiver's only where the peer read all six.
         verdict("but its RECEIVER still expects pulses, so plain async is not readable",
-                bad != 0);
+                up && have && r.count == 6 && bad != 0);
         (void)link_command_mode();
     }
 
@@ -3134,11 +3369,12 @@ void ts_irda() {
         const bool sent = peer_act(link::Op::sink, a);
         const bool up = sent && dut_ircom(0x00, 0x00);
         uint16_t sum = 0;
+        bool sent_all = up;
         wait_for_peer_window();
         line_talk();
         for (uint8_t i = 0; i < 6; ++i) {
             const uint16_t v = static_cast<uint16_t>(0x41 + i);
-            (void)Ul::send(v, 400'000u);
+            sent_all = Ul::send(v, 400'000u) && sent_all;
             sum = static_cast<uint16_t>(sum + v);
         }
         line_listen();
@@ -3147,8 +3383,11 @@ void ts_irda() {
         print(serial, "  3/16 pulses into a plain async receiver: peer count=",
               have ? r.count : 0, " sum=", hex(have ? r.sum : 0), " want=", hex(sum),
               " ferr=", have ? r.ferr : 0, crlf);
+        // Not read is a fact of the coding only where this end sent all
+        // six and the peer's sink ran through them.
         verdict("a pulse-coded transmitter is not readable as plain async",
-                up && have && !(r.count == 6 && r.sum == sum && r.ferr == 0));
+                sent_all && have && (r.flags & link::report_ran) != 0 &&
+                    !(r.count == 6 && r.sum == sum && r.ferr == 0));
         (void)link_command_mode();
     }
 
@@ -3163,7 +3402,7 @@ void ts_irda() {
     // are on PE1, the peer echoes all six, and the receiver hears none of
     // them - the pin is disconnected.
     {
-        bool via_event = false, pin_cut = false;
+        bool via_event = false, pin_cut = false, refused = false;
         for (uint8_t leg = 0; leg < 2; ++leg) {
             link::Cfg pc{};
             pc.mode = link::Mode::ircom;
@@ -3176,7 +3415,7 @@ void ts_irda() {
             // was still echoing at the fifth and not at the sixth), so the
             // peer is given 3 s to be echoing at the sixth.
             a.ms = leg == 0 ? bound_ms(115'200, 24) : 3000;
-            if (!peer_act(link::Op::echo, a)) { (void)link_command_mode(); continue; }
+            if (!act(link::Op::echo, a, leg == 0 ? "IREI" : "IREI's control")) continue;
             bool up = dut_ircom(0x00, 0x00, 115'200, inv);
             if (leg == 0) {
                 Ch2::source(EvPin<RxPin>{});
@@ -3190,6 +3429,7 @@ void ts_irda() {
             const uint16_t bad = up ? echo_mismatches(8, 6) : 6;
             link::Report r{};
             const bool have = peer_report(r, 10);
+            refused = refused || leg_refused;
             print(serial, "  IREI, the receiver on channel 5 ", leg == 0 ? "(PE1's pin event)"
                                                                       : "(PE3, idle high)",
                   ": wrong=", bad, " peer count=", have ? r.count : 0, crlf);
@@ -3199,6 +3439,7 @@ void ts_irda() {
             XdirPin::input(PinPull::none);
             (void)link_command_mode();
         }
+        leg_refused = refused;          // a refused leg takes both verdicts with it
         verdict("the IRCOM receiver reads the peer's pulses through an EVENT CHANNEL (IREI, "
                 "PE1's pin event)",
                 via_event);
@@ -3229,11 +3470,13 @@ void tt_rebase_traffic() {
     UlTx::init(DynClock{}, 115'200u);
 
     uint16_t sum = 0;
+    // Each byte into the ring within 20 ms on the tick, whatever the CPU
+    // clock; one the ring never took is missing from the peer's count,
+    // which the verdicts judge against the sum of all 96.
     auto stream = [&sum](uint8_t from, uint8_t to) {
         for (uint16_t v = from; v < to; ++v) {
-            for (uint32_t s = 0; s < 400'000u; ++s) {
-                if (UlTx::write_byte(static_cast<uint8_t>(v))) break;
-            }
+            (void)brio::wait_ticks<P>([v] { return UlTx::write_byte(static_cast<uint8_t>(v)); },
+                                      brio::ticks_from_ms<P>(20));
             sum = static_cast<uint16_t>(sum + v);
         }
     };
@@ -3244,8 +3487,9 @@ void tt_rebase_traffic() {
     verdict(at24 ? "back to 24 MHz under traffic" : "back to 20 MHz under traffic",
             DynClock::set(SysClock::hz));
     stream(64, 96);
-    for (uint32_t s = 0; s < 800'000u && !UlTx::tx_idle(); ++s) {
-    }
+    // The ring's last bytes onto the wire (32 at 115200: 3 ms); a stall
+    // shows in the peer's count, judged below.
+    (void)brio::wait_ticks<P>([] { return UlTx::tx_idle(); }, brio::ticks_from_ms<P>(50));
     delay_us(clock, 20'000);
     Ul::enable_rxc_interrupt(false);
 
@@ -3298,16 +3542,23 @@ void tu_lbme_pad() {
     verdict("errata 2.16.1: TXD is left an INPUT, not driven high", !TxPin::is_output());
     quiet(500);
     const Drain d = drain();
+    // The peer's report: a refusal skips the verdict below, and nothing
+    // heard is an answer only where the peer drove its frames.
+    const PeerSaid said = peer_said(0);
     print(serial, "  external driver on the TXD pad: frames=", d.frames, " last=",
-          hex(d.last), " ferr=", d.ferr, crlf);
+          hex(d.last), " ferr=", d.ferr, said.ran ? "" : " (the peer did not report it drove)",
+          crlf);
     const bool heard = d.frames >= 3 && d.last == 0x5A && d.ferr == 0;
     print(serial, heard ? "  FINDING: the loop-back receiver DOES hear the pad - one-wire "
                           "collision detection is electrically real"
                         : "  FINDING: the loop-back receiver does NOT hear an external "
                           "driver on the pad",
           crlf);
-    verdict("the probe produced a definite answer", d.frames == 0 || heard);
+    verdict("the probe produced a definite answer: the peer drove its frames, heard whole or "
+            "not at all",
+            said.ran && (d.frames == 0 || heard));
     (void)link_command_mode();
+    leg_refused = false;                // what follows is this board's alone
 
     // The complementary half: the DUT's own transmission always comes
     // back through the same path (this one is purely internal - on the
@@ -3344,9 +3595,10 @@ void tw_onewire() {
     if (!shared_line()) {
         const uint8_t kind = ask_peer_kind();
         if (kind != link::peer_samc21) {
-            print(serial, "  SKIPPED: this desk carries the crossed full-duplex pair and the peer "
-                          "(kind ", hex(kind), ") cannot put its transmitter on this board's "
-                          "TXD wire - an avrxt peer needs the PE0-PE0 jumper", crlf);
+            print(serial, "  the peer is kind ", hex(kind), crlf);
+            bench.skip("this desk carries the crossed full-duplex pair and the peer cannot put "
+                       "its transmitter on this board's TXD wire - an avrxt peer needs the "
+                       "PE0-PE0 jumper");
             return;
         }
         print(serial, "  (the crossed pair and a samc21 peer: it joins PE0's wire through its "
@@ -3385,6 +3637,7 @@ void tw_onewire() {
               " (0xffff/0x8000: none came)", crlf);
     }
     verdict("every frame comes back through the DUT's own echo path", echoed);
+    (void)peer_said(0);                 // a refusal makes the verdict below a skip
     verdict("the peer answers half duplex on the same wire", answered);
 
     // The collision: the peer transmits into the DUT's frame, and the
@@ -3407,6 +3660,7 @@ void tw_onewire() {
     (void)Line::send(0xFF, 400'000u);                    // collided with
     const bool mismatch = !Line::echo_matches(0xFF, 400'000u);
     (void)Line::listen(400'000u);
+    (void)peer_said(0);                 // a refusal makes the verdicts below skips
     verdict("the trigger frame itself is echoed clean", armed && trigger_clean);
     verdict("a simultaneous transmitter shows up as an echo mismatch", armed && mismatch);
     quiesce();
@@ -3463,9 +3717,16 @@ bool task_command(link::Op op, const link::Params& a) {
         UlTx::consume(old.size());
     }
     uint8_t queued = 0;
-    for (uint32_t k = 0; k < 400'000u && queued < n; ++k) {
-        queued = static_cast<uint8_t>(
-            queued + UlTx::write_bulk({frame + queued, static_cast<size_t>(n - queued)}));
+    // The frame into the ring (it fits the 32 bytes whole), bounded on the
+    // tick: a ring that never took it is a command not sent.
+    if (!brio::wait_ticks<P>(
+            [&] {
+                queued = static_cast<uint8_t>(
+                    queued + UlTx::write_bulk({frame + queued, static_cast<size_t>(n - queued)}));
+                return queued >= n;
+            },
+            brio::ticks_from_ms<P>(20))) {
+        return false;
     }
     link::Decoder d;
     const uint32_t t0 = Ticker::millis();
@@ -3579,8 +3840,7 @@ void tB_blast() {
                 // by (measured: a jump of 120 for a delay_us of 10 ms).
                 stalled = true;
                 ruler_up();
-                while (Ruler::read() < SysClock::hz / 100u) {
-                }
+                brio::spin_us<Cycles>(10'000u);
                 ruler_down();
             }
             const std::span<const uint8_t> run = UlTx::read_span();
@@ -3760,7 +4020,9 @@ int main() {
         // close it with the "ALL:" line so bench.py run can judge it.
         else if (c == 'w' || c == 'W') {
             if (const auto t = bench.handle('w')) {
-                print(serial, "ALL: ", t->pass, " pass, ", t->fail, " fail", crlf);
+                print(serial, "ALL: ", t->pass, " pass, ", t->fail, " fail");
+                if (bench.skipped() != 0u) print(serial, ", ", bench.skipped(), " skipped");
+                print(serial, crlf);
             } else {
                 print(serial, "? for help", crlf);
             }

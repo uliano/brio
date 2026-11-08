@@ -154,8 +154,9 @@ restart, blank, qualify, filter and timestamp. Non-recoverable faults are
 the counter event inputs TCE0 and TCE1 with EVACT = FAULT: they stop the
 counter and force **every** enabled output to a level DRVCTRL names. Both
 must be carried on asynchronous event channels - 36.6.3.5 says so for the
-fault use and erratum 1.21.9 for every use, and the bench measured both
-halves of that.
+fault use and erratum 1.21.9 for every use. The bench measured the
+fault half; the erratum's half is printed on a clocked synchronous
+channel (finding 15).
 
 **Dithering shares the low bits of COUNT, PER and CCx.** With
 CTRLA.RESOLUTION = DITH4/5/6 the low 4, 5 or 6 bits stop being part of
@@ -184,7 +185,7 @@ are live**.
 | 1.21.6 SYNCBUSY | clearing STATUS.xxBUFV releases SYNCBUSY early | **live** |
 | 1.21.7 Dithering Mode | dithering plus external retrigger events distorts pulses | **live** |
 | 1.21.8 PERBUF | LUPD said not to protect PER while counting down | **live**, did not reproduce |
-| 1.21.9 EVSYS SYNC/RESYNC | the TCC is not compatible with a synchronous channel | **live**, measured |
+| 1.21.9 EVSYS SYNC/RESYNC | the TCC is not compatible with a synchronous channel | **live**, printed (finding 15) |
 | 1.21.10 ALOCK | the auto-lock feature is not functional | **live**, measured |
 | 1.21.11 Overflow DMA trigger | OVF in DMAOS mode broken for RAMP2C/RAMP2CS | **live**, unreachable |
 
@@ -349,7 +350,7 @@ Tcc<0>::clear_non_recoverable(0);
 
 ## Bench findings
 
-From `test_samc_tcc` (15 letters, 179 verdicts). Nothing to wire. Four of
+From `test_samc_tcc` (15 letters, 178 verdicts). Nothing to wire. Four of
 TCC0's eight outputs are read back off their pads - PA08 (WO0,
 function E), PA09 (WO1, E), PA22 (WO4, F) and PA12 (WO6, F) - and PA16
 carries EXTINT0, which is the fault stimulus. PA22 is the bench's I2C
@@ -365,12 +366,15 @@ running at 3 MHz, is the stopwatch; a third counts events.
 1. **A buffered write's SYNCBUSY bit stands until the UPDATE consumes
    the buffer** - not merely for the clock-domain crossing. Waiting
    SYNCBUSY.CC0 out after writing CCBUF0 took **256 us and 480 us and
-   1299 us** on three runs of a **1333 us** period - that is, a random
-   fraction of a whole waveform period - and with CTRLB.LUPD set it never
-   returned at all (the bounded wait spun out its 65535 turns, 21 ms).
-   **A second buffered write inside that window is DISCARDED**: with the
-   update locked, the first write returns and lands, the second finds
-   SYNCBUSY.CC0 standing and CCBUF0 still holds the first value. So every
+   1299 us** on three runs of a **1333 us** period - a fraction of a
+   whole waveform period set by where in the period the write lands -
+   and with CTRLB.LUPD set it never returned at all (the bounded wait
+   spun out its 65535 turns, 21 ms). The suite anchors the write just
+   past an update (the overflow flag seen rising) and judges a wait of
+   more than half a period. **A second buffered write inside that window would
+   land on a buffer the update has not taken**: with the update locked,
+   the first write returns and lands, the second finds SYNCBUSY.CC0
+   standing and is refused, and CCBUF0 still holds the first value. So every
    buffered setter in this driver - `set_cc_buffer()`,
    `set_period_buffer()`, `pattern_buffer()` - **refuses instead of
    waiting** and returns at once; false means "the last value has not
@@ -454,10 +458,14 @@ running at 3 MHz, is the stopwatch; a third counts events.
     36.6.3.5 never says it in those words. With MCEI0 clear the same pad,
     the same generator and the same FCTRLA give FAULTA = 0 and an
     untouched waveform.
-15. **Erratum 1.21.9 measured, not taken on trust.** The same generator
-    on a SYNCHRONOUS channel connects without complaint and does
-    nothing - FAULTA = 0, duty 496. The asynchronous path is the only one
-    a TCC hears.
+15. **Erratum 1.21.9 on a clocked channel, printed.** The same
+    generator on a SYNCHRONOUS channel connects without complaint. A
+    synchronous path carries nothing to any user without the channel's
+    own generic clock (29.5.3), so letter h clocks the channel and proves
+    it delivers - a TC counting events on the same channel must count the
+    pad's two edges - and then prints what the TCC does with it: the
+    erratum's claim, printed rather than judged, as an erratum's presence
+    on one die is not a contract.
 16. **The restart action is a retrigger**: INTFLAG.TRG rises on a fault
     exactly when FCTRLA.RESTART is set, and not otherwise.
 17. **The hardware halt freezes the counter while the fault is present
@@ -530,7 +538,9 @@ o, every run of twelve)
     counter gave ten events and ten INTFLAG.TRG; ten STOP-then-RETRIGGER
     pairs resumed the counter ten times with no TRG flag and no event.
 31. **A RETRIGGER COMMAND THAT LANDS ON THE WRAP IS LOST, and
-    `command()` cannot tell.** On a 200 kHz count clock with TOP 199,
+    `command()` cannot tell** - printed by letter n, not judged: no
+    chapter says what a command crossing the wrap does, so this is one
+    die's timing. On a 200 kHz count clock with TOP 199,
     the command issued as the CC0 match flag rises was taken 10 of 10
     times at CC0 = 179 and 0 of 10 at CC0 = 195; with TOP = MAX, or
     TOP 1999 and the command at 1959, every one was taken. On this clock
@@ -594,7 +604,7 @@ backstop ends the sleep.
 
 ## Bench findings, the advanced modes
 
-From `test_samc_timer_modes` (6 letters, 73 verdicts a run). Wireless:
+From `test_samc_timer_modes` (6 letters, 73 verdicts and one skip a run). Wireless:
 TCC0's WO[0] reaches a TC capture channel through a combinational CCL
 LUT and an asynchronous EVSYS channel, with no pad in the path at all,
 and `tc.md` carries the capture side's own findings.
@@ -628,12 +638,23 @@ and `tc.md` carries the capture side's own findings.
   three).
 - **FCTRLn.FILTERVAL COUNTS GCLK_TCC CYCLES, NOT PRESCALED ONES** - the
   dead-time unit's story again, and not what 36.8.5's wording suggests.
-  On one 93 kHz generic clock, the shortest pulse that still made a valid
-  fault was **20 us with FILTERVAL 0 and 160 us with FILTERVAL 15**, and
-  **a sixty-fourfold prescaler change left it at 160** - where fifteen
-  cycles of that clock are 160.9 us.
-  The stimulus was calibrated against a 750 kHz stopwatch before it was
-  used, and the generator's rate measured rather than computed.
+  On one 93 kHz generic clock, a pulse on the bare input as short as
+  20 us made a valid fault; with FILTERVAL 15, fifteen cycles of that
+  clock are 160.9 us, and a 120 us pulse (three quarters of them) is
+  rejected while a 240 us one (one half again) is accepted, **at /1 and
+  at /64 alike**. A sweep in steps of 20, 40, 80, 160, 320 us puts one
+  step on that boundary, so its first passing step reads 160 or 320
+  from run to run and is printed, not judged.
+  The stimulus is timed on the SysTick ruler and checked against a
+  750 kHz stopwatch (a 2000 us pulse measures 2009 to 2012 us), and the
+  generator's rate is measured rather than computed.
+- **At /64 the first fault pulse after ENABLE is lost** unless the
+  counter has counted: it was rejected at every width from 178 to 336 us
+  and every later pulse accepted. With the prescaler at /64 the first
+  count comes up to 64 GCLK_TCC cycles after ENABLE (683 us on this
+  clock); the suite waits for COUNT to leave zero before it pulses, and
+  the first pulse is then taken. Why the fault input waits on the count
+  is not established.
 - **A blanking window gates the input, not its edge.** With the pad held
   high for 150 ms, a fault valid with no window was still valid with a
   5.4 ms one, because the window closes long before the period does.
@@ -645,7 +666,7 @@ and `tc.md` carries the capture side's own findings.
 - **EVACT0 = INCREMENT counts events and nothing else** (letter f, with
   the erratum below): twenty pin
   pulses gave **COUNT = 20** exactly, with the counter's own clock
-  slowed to 45.8 Hz so it could not contribute. **EVACT0 = COUNT** turns
+  slowed to about 92 Hz (93 kHz over 1024), one count every 11 ms. **EVACT0 = COUNT** turns
   the counter into a gate: 20 ms with the line low advanced it **0**
   counts and 20 ms with it high advanced it **1863** against 1864 at the
   measured generator rate.
@@ -692,6 +713,9 @@ Not judged, and deliberately so:
 
 Implemented but not bench-verified:
 
+- **The TCC on a clocked synchronous channel** (erratum 1.21.9): letter
+  h prints FAULTA and the duty with the channel's delivery proven by a
+  TC on the same channel; its runs on the bench are what measure it.
 - **The fault inputs in a standby.** The TCC as a wake source is
   measured (its overflow, letter m); a fault arriving while the core
   sleeps is untouched - a fault event from a pad the sleepwalking pad

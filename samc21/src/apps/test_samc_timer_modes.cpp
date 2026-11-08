@@ -57,6 +57,7 @@
 #include "samc21/tcc.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -141,11 +142,15 @@ constexpr uint32_t wave_period = wave_top + 1u;              // 4800 ticks
 // Small helpers
 // ---------------------------------------------------------------------------
 
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's
+/// waits and fixed pauses (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// A fixed pause of `ms` milliseconds on the ruler.
+void pause_ms(uint32_t ms) { brio::spin_us<Ruler>(ms * 1000u); }
 
 bool near(uint32_t v, uint32_t target, uint32_t band) {
     return v > target ? (v - target) <= band : (target - v) <= band;
@@ -245,6 +250,14 @@ void drain_meter() {
     Meter::clear_flags(0xFFu);
 }
 
+/// Wait, bounded, for one of the meter's flags: 50 ms by default, where
+/// the slowest waveform it waits on (65536 ticks at /1, 1.4 ms) captures
+/// many times over.
+bool wait_flag(uint8_t mask, uint32_t ms = 50) {
+    return brio::wait_until<Ruler>([mask] { return (Meter::flags() & mask) != 0u; },
+                                   ms * 1000u);
+}
+
 void chain_down() {
     (void)Wave::enable(false);
     Evsys::disconnect(Meter::event_user);
@@ -278,17 +291,21 @@ void ta_circular() {
                       Wave::wave(TccWaveConfig{
                           .waveform = TccWaveform::normal_pwm,
                           .circular_cc = 0x1}));
-    wait_ms(2);
+    pause_ms(2);
 
     // Read a run of widths straight out of the capture register: they
     // must alternate between the two, period by period.
-    uint16_t seq[16];
+    uint16_t seq[16] = {};
+    bool captured = true;
     for (uint8_t i = 0; i < 16u; ++i) {
         drain_meter();
-        while ((Meter::flags() & Meter::match_flag(1)) == 0u) {
+        if (!wait_flag(Meter::match_flag(1))) {
+            captured = false;
+            break;
         }
         seq[i] = Meter::cc16(1);
     }
+    bench.verdict("the meter captured sixteen widths", captured);
     uint8_t lo_seen = 0;
     uint8_t hi_seen = 0;
     uint8_t other = 0;
@@ -311,12 +328,9 @@ void ta_circular() {
 
     // The cost: nothing. And the limit: TWO values, which is the whole
     // of it - a register pair is a two-entry table and there is no third
-    // place to put a third value.
-    bench.verdict("and it is exactly TWO values deep, because a register "
-                  "and its buffer are two places and the chapter offers no "
-                  "third - so a table of three or more needs a write at every "
-                  "update",
-                  Wave::cc_count == 4u);
+    // place to put a third value (36.6.3.2), so a table of three or more
+    // needs a write at every update. Stated, not judged: no register
+    // reading could show a third place that is not there.
 
     // ---- CIPEREN, the same for the period.
     bench.verdict("the same bit exists for PER, so the FREQUENCY can "
@@ -327,14 +341,18 @@ void ta_circular() {
                           .waveform = TccWaveform::normal_pwm,
                           .circular_cc = 0x1,
                           .circular_period = true}));
-    wait_ms(2);
-    uint16_t pseq[16];
+    pause_ms(2);
+    uint16_t pseq[16] = {};
+    bool pcaptured = true;
     for (uint8_t i = 0; i < 16u; ++i) {
         drain_meter();
-        while ((Meter::flags() & Meter::match_flag(0)) == 0u) {
+        if (!wait_flag(Meter::match_flag(0))) {
+            pcaptured = false;
+            break;
         }
         pseq[i] = Meter::cc16(0);
     }
+    bench.verdict("the meter captured sixteen periods", pcaptured);
     uint8_t long_seen = 0;
     uint8_t short_seen = 0;
     uint8_t pother = 0;
@@ -380,17 +398,6 @@ bool tc0_up(TcWaveform w, uint16_t cc0, uint16_t cc1,
     }
     return Timer0::set_cc16(0, cc0) && Timer0::set_cc16(1, cc1) &&
            Timer0::enable(true);
-}
-
-/// Wait, bounded, for one of the meter's flags.
-bool wait_flag(uint8_t mask, uint32_t ms = 50) {
-    const uint32_t t0 = Ticker::millis();
-    while ((Meter::flags() & mask) == 0u) {
-        if (Ticker::millis() - t0 > ms) {
-            return false;
-        }
-    }
-    return true;
 }
 
 /**
@@ -477,7 +484,7 @@ void tb_tc_waveforms() {
     const bool pad23_free = pad23_high && !Wo1Pin::read();
     if (pad23_free) {
         Wo1::claim();
-        wait_ms(2);
+        pause_ms(2);
         const uint32_t pad_wo1 = duty_permille<Wo1Pin>();
         const uint32_t wo1_expect = (mpwm_duty * 1000u) / (mpwm_top + 1u);
         print(serial, "  MPWM WO[1] on PA23: high ", pad_wo1,
@@ -489,11 +496,13 @@ void tb_tc_waveforms() {
         Wo1::release();
     } else {
         print(serial, "  PA23 does not follow PORT on this board", crlf);
-        bench.verdict("MPWM's WO[1] duty on PA23: DECLINED, the pad is not "
-                      "electrically free on this board and no other pad of "
-                      "this package carries TC0/WO1", true);
+        bench.skip("MPWM's WO[1] duty on PA23: the pad is not electrically free "
+                   "on this board and no other pad of this package carries TC0/WO1");
     }
+    // Back to PORT as an input held by its pull: the probe above left the
+    // pad an output, and configure() alone keeps DIR.
     Wo1Pin::configure({});
+    Wo1Pin::input(PinPull::down);
     Timer0::release();
 
     // ---- the 16-bit TcPwm task.
@@ -502,7 +511,7 @@ void tb_tc_waveforms() {
     bench.verdict("the 16-bit TcPwm task brings TC0 up as an NPWM channel",
                   Timer0::init(gen) && TcPwm<Timer0, 0>::setup());
     TcPwm<Timer0, 0>::duty(0x4000);
-    wait_ms(5);
+    pause_ms(5);
     // TEN TIMES THE DEFAULT WINDOW: the pad is sampled for a fixed count,
     // not a whole number of periods, and a period of 65536 ticks fits
     // only some seven times into the default one - the part period left
@@ -526,8 +535,14 @@ void tb_tc_waveforms() {
     bench.verdict("the same 25 % waveform is brought up with DRVCTRL.INVEN0 "
                   "set", tc0_up(TcWaveform::normal_pwm, 0x4000, 0, 
                                 TcPrescaler::div1, 0x1));
-    wait_ms(5);
-    const uint32_t pad_inv = duty_permille<Wo0Pin>();
+    pause_ms(5);
+    // The window letter b's TcPwm reading uses, for the same reason: the
+    // waveform's period is 65536 ticks and the default window holds only
+    // some seven of them, whose part period left over biases the reading
+    // by up to a few per cent. Ten times the reads hold about seventy
+    // periods, and a part period then moves the reading by at most one
+    // period over seventy - under 15 per mille - inside the band of 20.
+    const uint32_t pad_inv = duty_permille<Wo0Pin>(400'000UL);
     const bool inv_read = meter_read(period, width);
     print(serial, "  with INVEN0: PA22 high ", pad_inv, " per mille, captured "
           "width ", width, crlf);
@@ -604,12 +619,11 @@ void tc_tc_capture_and_locks() {
                                                 .input_enable = true}) &&
                       Meter::enable(true));
     drain_meter();
-    while ((Meter::flags() & Meter::match_flag(0)) == 0u) {
-    }
+    const bool pw_captured = wait_flag(Meter::match_flag(0));
     const uint16_t pw = Meter::cc16(0);
     print(serial, "  PW: CC0=", pw, " against the PPW width ", ppw_width, crlf);
     bench.verdict("PW puts the pulse width in CC0 and needs one channel "
-                  "where PPW needs two", near(pw, ppw_width, 4));
+                  "where PPW needs two", pw_captured && near(pw, ppw_width, 4));
 
     // ---- STAMP: COUNT copied into CCx on EVERY event, which for a
     // level-copying event source means every rising edge. The chapter
@@ -735,15 +749,15 @@ void tc_tc_capture_and_locks() {
                   "retrigger phases that is worth about one tick of mean",
                   mean_gclk > mean_presc + 70u && mean_gclk > mean_resync + 70u &&
                       mean_gclk < mean_presc + 130u);
-    bench.verdict("PRESC AND RESYNC ARE NOT DISTINGUISHABLE FROM THE CPU: "
-                  "DECLINED. RESYNC's extra act is resetting the prescaler, "
-                  "and a RETRIGGER issued through CTRLBSET is itself taken "
-                  "on the next prescaled clock - so the reset has nothing "
-                  "left to move. The two means sit under a fifth of a tick "
-                  "apart where the effect looked for is a whole one; a "
-                  "hardware retrigger event, which this suite has no free "
-                  "channel for, is what would settle it",
-                  true);
+    // PRESC AND RESYNC ARE NOT DISTINGUISHABLE FROM THE CPU. RESYNC's
+    // extra act is resetting the prescaler, and a RETRIGGER issued through
+    // CTRLBSET is itself taken on the next prescaled clock - so the reset
+    // has nothing left to move. The two means sit under a fifth of a tick
+    // apart where the effect looked for is a whole one; a hardware
+    // retrigger event, which this suite has no free channel for, is what
+    // would settle it.
+    bench.skip("PRESCSYNC PRESC against RESYNC: not distinguishable from the CPU; "
+               "a hardware retrigger event would settle it");
     print(serial, "  means x100: GCLK ", mean_gclk, ", PRESC ", mean_presc,
           ", RESYNC ", mean_resync, " - GCLK leads by ",
           mean_gclk - mean_presc, "/100 of a tick, PRESC and RESYNC differ "
@@ -770,21 +784,21 @@ void tc_tc_capture_and_locks() {
 
     bench.verdict("TC3 drives the LED pad at a quarter duty, ALOCK CLEAR",
                   led_pwm_up(false));
-    wait_ms(5);
+    pause_ms(5);
     const uint32_t free_before = duty_permille<Led>();
     (void)Timer3::set_cc_buffer8(1, 150);
-    wait_ms(5);
+    pause_ms(5);
     const uint32_t free_after = duty_permille<Led>();
     Timer3::release();
 
     bench.verdict("and again with ALOCK SET", led_pwm_up(true));
-    wait_ms(5);
+    pause_ms(5);
     const uint32_t lock_before = duty_permille<Led>();
     (void)Timer3::set_cc_buffer8(1, 150);
-    wait_ms(5);
+    pause_ms(5);
     const uint32_t lock_held = duty_permille<Led>();
     (void)Timer3::command(TcCommand::update);
-    wait_ms(5);
+    pause_ms(5);
     const uint32_t lock_after = duty_permille<Led>();
     print(serial, "  ALOCK clear: ", free_before, " -> ", free_after,
           " per mille on the buffered write; ALOCK set: ", lock_before,
@@ -798,9 +812,10 @@ void tc_tc_capture_and_locks() {
                   "the one the TCC's LUPD is, spelled in CTRLA",
                   near(lock_held, 250, 30) && near(lock_after, 750, 30));
 
+    Timer3::debug_run(true);
     bench.verdict("DBGCTRL.DBGRUN is writable and reads back; a halted "
                   "debugger is out of a console suite's reach and stays so",
-                  (Timer3::debug_run(true), true));
+                  (TC3_REGS->COUNT16.TC_DBGCTRL & TC_DBGCTRL_DBGRUN_Msk) != 0u);
     Timer3::release();
     LedWave::release();   // PMUXEN off, DIR never set: the pad undriven
 }
@@ -1000,13 +1015,13 @@ void fault_pin_down() {
 /// FILTERVAL and BLANKVAL in a range the CPU can straddle by hand.
 constexpr uint32_t slow_per = 4687;          // ~100 ms at /1024
 
-/// A generic clock of 46875 Hz - OSC48M divided by 2^(9+1) - so that one
-/// GCLK_TCC CYCLE is 21.3 us. Letter e needs it to ask whether
-/// FCTRLn.FILTERVAL counts generic clocks or PRESCALED ones, which is a
-/// question only two different prescalers on ONE generic clock can
-/// answer.
+/// A slow generic clock - OSC48M with DIVSEL and DIV = 9 on generator 7,
+/// whose eight-bit DIV field saturates the divisor at 2^9 = 512 (letter e
+/// measures it), so about 93750 Hz and one GCLK_TCC CYCLE of 10.7 us.
+/// Letter e needs it to ask whether FCTRLn.FILTERVAL counts generic
+/// clocks or PRESCALED ones, which is a question only two different
+/// prescalers on ONE generic clock can answer.
 constexpr uint8_t slow_gen = 7;
-constexpr uint32_t slow_gclk_hz = 46875;
 using SlowGclk = Gclk<slow_gen>;
 
 bool fault_b_up(const TccFaultConfig& fb, uint32_t duty = 2343,
@@ -1042,10 +1057,6 @@ bool fault_b_up(const TccFaultConfig& fb, uint32_t duty = 2343,
     return Wave::enable(true);
 }
 
-/// Loop turns per microsecond, MEASURED rather than counted off the
-/// instruction set - see calibrate_pulse().
-uint32_t turns_per_us = 16;
-
 /// A 750 kHz stopwatch on TC4 (generator 0, /64): one tick is 1.333 us,
 /// and 65536 of them are 87 ms, which covers every pulse this suite
 /// makes.
@@ -1057,38 +1068,41 @@ bool watch_up() {
            Counter::enable(true);
 }
 
-/// How long a busy loop of `turns` really takes, in microseconds.
-uint32_t time_turns(uint32_t turns) {
-    const uint16_t t0 = Counter::count16();
-    for (uint32_t i = 0; i < turns; ++i) {
-        asm volatile("nop");
-    }
-    const uint16_t t1 = Counter::count16();
-    return (static_cast<uint32_t>(static_cast<uint16_t>(t1 - t0)) * 1000000UL) /
-           watch_hz;
-}
-
-/// THE STIMULUS IS MEASURED BEFORE IT IS USED. A pulse this letter calls
-/// "120 us" has to be 120 us, or a threshold measured with it says
-/// nothing about the silicon; a nop loop on this core costs four or five
-/// cycles a turn and guessing which is not a measurement.
-void calibrate_pulse() {
-    const uint32_t us = time_turns(20000);
-    if (us > 0u) {
-        turns_per_us = 20000u / us;
-    }
-    if (turns_per_us == 0u) {
-        turns_per_us = 1;
-    }
-}
-
-/// Hold the pad high for `us` REAL microseconds.
+/// Hold the pad high for `us` REAL microseconds, timed on the SysTick
+/// ruler (util/test_wait.hpp's spin_us). THE STIMULUS IS A TIME, NOT A
+/// LOOP COUNT: a nop loop calibrated on one loop and run in another is
+/// off by the second loop's own instructions - measured here, a loop
+/// that reloaded and multiplied its bound every turn held a "90 us"
+/// pulse for 178 us. The pulse is late by at most one turn of the
+/// ruler's read (under a microsecond) and by a tick interrupt if one
+/// falls inside it (a few microseconds); measure_pulse() checks it.
 void pulse_pad(uint32_t us) {
     EicPad::set();
-    for (uint32_t i = 0; i < us * turns_per_us; ++i) {
-        asm volatile("nop");
-    }
+    brio::spin_us<Ruler>(us);
     EicPad::clear();
+}
+
+/// A 2 ms pulse timed on the TC4 stopwatch, in microseconds: the check
+/// that pulse_pad() holds the pad as long as it is asked to, against a
+/// counter that is not the ruler it is timed on. Each stopwatch read is
+/// a synchronized COUNT read of a few microseconds, so the figure is a
+/// little over 2000.
+uint32_t pulse_2ms_measured = 0;
+void measure_pulse() {
+    const uint16_t t0 = Counter::count16();
+    pulse_pad(2000);
+    const uint16_t t1 = Counter::count16();
+    pulse_2ms_measured =
+        (static_cast<uint32_t>(static_cast<uint16_t>(t1 - t0)) * 1000000UL) / watch_hz;
+}
+
+/// pulse_pad(2000) measured within 30 us: the stopwatch's 1.333 us tick
+/// at each end, its two synchronized reads (some 6 us each), a tick
+/// interrupt inside the pulse (a few us) and the ruler's turn (under one)
+/// sum to under 20 us. The stopwatch and the ruler both run on OSC48M, so
+/// no rate error enters.
+bool pulse_ok() {
+    return near(pulse_2ms_measured, 2000u, 30u);
 }
 
 /// THE SLOW GENERATOR'S RATE IS MEASURED TOO, by counting it against the
@@ -1103,18 +1117,25 @@ uint32_t measure_slow_gclk(uint8_t generator) {
         return 0;
     }
     (void)Counter::set_count16(0);
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < 250u) {
-    }
+    Counter::clear_flags(Counter::overflow_flag);
+    const uint32_t t0 = Ruler::now();
+    brio::spin_us<Ruler>(250'000u);
     const uint32_t n = Counter::count16();
-    const uint32_t ms = Ticker::millis() - t0;
+    const uint32_t cycles = Ruler::now() - t0;
+    const bool wrapped = (Counter::flags() & Counter::overflow_flag) != 0u;
     Counter::release();
-    return ms != 0u ? (n * 1000u) / ms : 0u;
+    // A 16-bit count over 250 ms holds a clock up to 262 kHz. Past that
+    // the count wraps inside the window: OVF says so, and the rate reads
+    // zero rather than a wrapped value.
+    if (wrapped || cycles == 0u) {
+        return 0u;
+    }
+    return static_cast<uint32_t>((static_cast<uint64_t>(n) * SysClock::hz) / cycles);
 }
 
 /// Did fault B become valid? INTFLAG.FAULTB is the latch that says so.
 bool fault_b_seen(uint32_t settle_ms = 5) {
-    wait_ms(settle_ms);
+    pause_ms(settle_ms);
     const bool seen = (Wave::flags() & Wave::fault_b_flag) != 0u;
     Wave::clear_flags(Wave::fault_b_flag);
     (void)Wave::clear_fault_state(TccFault::b);
@@ -1122,12 +1143,13 @@ bool fault_b_seen(uint32_t settle_ms = 5) {
 }
 
 void te_fault_b() {
-    bench.verdict("the 750 kHz stopwatch comes up and the pulse generator is "
-                  "calibrated against it", watch_up() &&
-                      (calibrate_pulse(), turns_per_us > 2u));
+    const bool watch = watch_up();
+    measure_pulse();
     Counter::release();
-    print(serial, "  the busy loop measures ", turns_per_us,
-          " turns per microsecond", crlf);
+    print(serial, "  a 2000 us pulse measures ", pulse_2ms_measured,
+          " us on the stopwatch", crlf);
+    bench.verdict("the 750 kHz stopwatch comes up and the pulse generator holds "
+                  "the pad as long as it is asked to", watch && pulse_ok());
     bench.verdict("the EIC turns PA16's level into an event",
                   fault_pin_up());
 
@@ -1159,7 +1181,7 @@ void te_fault_b() {
     // the answer to a different question.
     //
     // So: ONE generic clock slow enough that fifteen of its cycles are
-    // 320 us, and TWO prescalers on it. If FILTERVAL counts generic
+    // some 160 us, and TWO prescalers on it. If FILTERVAL counts generic
     // clocks the threshold does not move; if it counts prescaled ones it
     // moves by the prescaler's ratio.
     static const uint16_t widths[] = {20, 40, 80, 160, 320, 640, 1280, 5000};
@@ -1226,26 +1248,77 @@ void te_fault_b() {
     const uint16_t thr_bare = threshold(0, slow_gen, TccPrescaler::div1, 4687);
     const uint16_t thr_f1 = threshold(15, slow_gen, TccPrescaler::div1, 4687);
     const uint16_t thr_f64 = threshold(15, slow_gen, TccPrescaler::div64, 73);
-    print(serial, "  shortest pulse that makes a VALID fault, all on the "
-          "46875 Hz clock: ", thr_bare, " us with FILTERVAL 0, ", thr_f1,
+    print(serial, "  shortest pulse that makes a VALID fault, all on generator 7 (",
+          slow_gclk_measured, " Hz): ", thr_bare, " us with FILTERVAL 0, ", thr_f1,
           " us with FILTERVAL 15 at /1, ", thr_f64,
           " us with FILTERVAL 15 at /64", crlf);
     const uint32_t fifteen_us =
         slow_gclk_measured != 0u ? 15000000UL / slow_gclk_measured : 0u;
     print(serial, "  fifteen GCLK_TCC cycles are ", fifteen_us,
           " us at the measured rate", crlf);
+
+    // The verdicts are taken AWAY from the threshold, where the sweep's
+    // first passing step is a coin toss (fifteen cycles land on a step of
+    // the sweep): a pulse three quarters of fifteen cycles long must be
+    // rejected and one half again as long accepted. The margins, derived:
+    // the pulse is long by under 5 us (pulse_pad(), checked by
+    // pulse_ok() to 30 us in 2000); the filter's start falls anywhere
+    // inside one GCLK_TCC cycle (a fifteenth of the window); the event
+    // path's latency is the same at both edges. A quarter under and a
+    // half over clear all of it.
+    //
+    // Each pulse waits for the counter's first count after ENABLE. With
+    // the prescaler at /64 that count comes up to 64 GCLK_TCC cycles
+    // (683 us) after it, and a fault pulse before it is not taken -
+    // measured: at /64 the first pulse after ENABLE was rejected at every
+    // width from 178 to 336 us, every later one accepted. The threshold
+    // sweep above never saw it: its first pulse is 20 us, rejected anyway.
+    const uint32_t short_us = fifteen_us * 3u / 4u;
+    const uint32_t long_us = fifteen_us * 3u / 2u;
+    const auto valid_at = [](uint8_t filt, TccPrescaler pre, uint32_t per,
+                             uint32_t width) {
+        if (!fault_b_up(TccFaultConfig{.source = TccFaultSource::event,
+                                       .halt = TccFaultHalt::hardware,
+                                       .filter_value = filt},
+                        per / 2u, slow_gen, pre, per)) {
+            return false;
+        }
+        // 5 ms: seven times the /64 prescaler's 683 us.
+        if (!brio::wait_until<Ruler>([] { return Wave::count() != 0u; }, 5'000u)) {
+            Evsys::disconnect(Wave::fault_user(TccFault::b));
+            Wave::release();
+            return false;
+        }
+        Wave::clear_flags(0xFFFFFFFFu);
+        (void)Wave::clear_fault_state(TccFault::b);
+        pulse_pad(width);
+        const bool seen = fault_b_seen(3);
+        Evsys::disconnect(Wave::fault_user(TccFault::b));
+        Wave::release();
+        return seen;
+    };
+    const bool clock_known = fifteen_us >= 40u;   // a rate the sweep could resolve
+    const bool bare_short = clock_known && valid_at(0, TccPrescaler::div1, 4687, short_us);
+    const bool f1_short = clock_known && valid_at(15, TccPrescaler::div1, 4687, short_us);
+    const bool f1_long = clock_known && valid_at(15, TccPrescaler::div1, 4687, long_us);
+    const bool f64_short = clock_known && valid_at(15, TccPrescaler::div64, 73, short_us);
+    const bool f64_long = clock_known && valid_at(15, TccPrescaler::div64, 73, long_us);
+    print(serial, "  a ", short_us, " us pulse: bare ", bare_short ? "valid" : "rejected",
+          ", FILTERVAL 15 at /1 ", f1_short ? "valid" : "rejected", ", at /64 ",
+          f64_short ? "valid" : "rejected", "; a ", long_us, " us pulse: at /1 ",
+          f1_long ? "valid" : "rejected", ", at /64 ", f64_long ? "valid" : "rejected",
+          crlf);
     bench.verdict("FCTRLn.FILTERVAL IS A REAL MINIMUM WIDTH, AND IT IS "
-                  "FIFTEEN GENERIC CLOCK CYCLES OF IT: the filtered path "
-                  "rejects every pulse the bare one accepts up to the "
-                  "sweep step that brackets those fifteen cycles",
-                  thr_bare != 0u && thr_f1 != 0u && thr_f1 >= 2u * thr_bare &&
-                      thr_f1 * 2u >= fifteen_us && thr_f1 <= 2u * fifteen_us);
+                  "FIFTEEN GENERIC CLOCK CYCLES OF IT: a pulse three quarters "
+                  "that long, which the bare path accepts, is rejected, and one "
+                  "half again as long passes",
+                  clock_known && bare_short && !f1_short && f1_long);
     bench.verdict("AND IT COUNTS GCLK_TCC CYCLES, NOT PRESCALED ONES - a "
                   "sixty-fourfold prescaler change on the same generic clock "
-                  "leaves the threshold where it was, which is the dead-time "
+                  "gives the same two answers, which is the dead-time "
                   "unit's story again and NOT what 36.8.5's 'prescaled "
                   "clocks' says",
-                  thr_f64 == thr_f1);
+                  clock_known && !f64_short && f64_long);
 
     // ---- BLANKING. The input is held HIGH for the whole measurement,
     // so the only thing that can keep the fault from being valid is the
@@ -1368,20 +1441,22 @@ void tf_event_actions() {
     const bool slow_ok = SlowGclk::configure(
         GclkConfig{.source = GclkSource::osc48m, .div = 9, .div_pow2 = true});
     slow_gclk_measured = measure_slow_gclk(slow_gen);
-    (void)watch_up();
-    calibrate_pulse();
+    const bool watch = watch_up();
+    measure_pulse();
     Counter::release();
     print(serial, "  the slow generic clock measures ", slow_gclk_measured,
-          " Hz; the busy loop ", turns_per_us, " turns per microsecond", crlf);
+          " Hz; a 2000 us pulse measures ", pulse_2ms_measured, " us", crlf);
     bench.verdict("the slow generic clock and the EIC line are up",
-                  slow_ok && slow_gclk_measured > 10000u && fault_pin_up());
+                  slow_ok && slow_gclk_measured > 10000u && fault_pin_up() &&
+                      watch && pulse_ok());
 
     // ---- INCREMENT. 36.8.10: increment the counter on every event,
-    // irrespective of CTRLB.DIR. The counter's OWN clock is put where it
-    // cannot interfere: 46875 Hz divided by 1024 is 45.8 Hz, so over the
-    // few milliseconds the pulses take it contributes nothing.
+    // irrespective of CTRLB.DIR. The counter's OWN clock is slowed as far
+    // as it goes: generator 7's 93750 Hz divided by 1024 is about 92 Hz,
+    // one count every 11 ms - the order of the whole pulse train, so an
+    // INCREMENT that also counted the clock could show a count too many.
     bench.verdict("TCC0 takes the EIC line as a counter event with EVACT0 = "
-                  "INCREMENT, its own clock slowed to 45.8 Hz so it cannot "
+                  "INCREMENT, its own clock slowed to 92 Hz so it cannot "
                   "contribute",
                   counter_event_up(TccEvent0Action::increment, slow_gen,
                                    TccPrescaler::div1024, 0xFFFFFu, 0));
@@ -1389,9 +1464,7 @@ void tf_event_actions() {
     constexpr uint8_t pulses = 20;
     for (uint8_t i = 0; i < pulses; ++i) {
         pulse_pad(200);
-        for (uint32_t k = 0; k < 4000u; ++k) {
-            asm volatile("nop");
-        }
+        brio::spin_us<Ruler>(400u);   // the gap: twice the pulse
     }
     const uint32_t inc_count = Wave::count();
     print(serial, "  ", pulses, " pin pulses with EVACT0 = INCREMENT: COUNT = ",
@@ -1407,15 +1480,15 @@ void tf_event_actions() {
     // counter becomes a stopwatch for the pad's HIGH TIME, and the
     // reading is that time in prescaled clocks.
     bench.verdict("TCC0 takes the same line with EVACT0 = COUNT (while "
-                  "active), its clock at 46875 Hz undivided",
+                  "active), on generator 7's clock undivided",
                   counter_event_up(TccEvent0Action::count_while_active,
                                    slow_gen, TccPrescaler::div1, 0xFFFFFu, 0));
     (void)Wave::set_count(0);
-    wait_ms(20);
+    pause_ms(20);
     const uint32_t idle_count = Wave::count();
     (void)Wave::set_count(0);
     EicPad::set();
-    wait_ms(20);
+    pause_ms(20);
     EicPad::clear();
     const uint32_t active_count = Wave::count();
     const uint32_t expect = (slow_gclk_measured * 20u) / 1000u;
@@ -1523,7 +1596,7 @@ void tf_event_actions() {
                              EventChannelConfig{
                                  .generator = Timer0::overflow_generator,
                                  .path = EventPath::asynchronous});
-        wait_ms(2);
+        pause_ms(2);
         uint8_t worst = 0;
         for (uint8_t round = 0; round < 3u; ++round) {
             if (!dither_widths(out, dn)) {

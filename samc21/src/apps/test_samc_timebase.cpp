@@ -60,6 +60,7 @@
 #include "kernel/time_event.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -85,7 +86,7 @@ TestBench<Serial> bench;
 // The crystal ruler
 // ---------------------------------------------------------------------------
 
-using Ruler = Tc<2>;                    ///< TC2+TC3 pair, 32-bit
+using Wall = Tc<2>;                     ///< TC2+TC3 pair, 32-bit
 constexpr uint8_t gen_xtal = 2;
 constexpr uint32_t crystal_hz = 24'000'000UL;
 
@@ -99,21 +100,21 @@ bool ruler_up() {
     if (!Gclk<gen_xtal>::configure(GclkConfig{.source = GclkSource::xosc})) {
         return false;
     }
-    (void)Ruler::enable(false);
-    if (!Ruler::init(gen_xtal)) {
+    (void)Wall::enable(false);
+    if (!Wall::init(gen_xtal)) {
         return false;
     }
-    if (!Ruler::configure(TcConfig{.mode = TcMode::count32,
+    if (!Wall::configure(TcConfig{.mode = TcMode::count32,
                                    .prescaler = TcPrescaler::div1,
                                    .run_standby = true})) {
         return false;
     }
-    return Ruler::enable(true);
+    return Wall::enable(true);
 }
 
 /// Crystal ticks now. The driver's double-READSYNC makes one call
 /// current (samc21/tc.hpp).
-uint32_t wall() { return Ruler::count32(); }
+uint32_t wall() { return Wall::count32(); }
 
 uint32_t wall_ms(uint32_t ticks) { return ticks / (crystal_hz / 1000u); }
 
@@ -219,15 +220,27 @@ void pump_until_blips(uint16_t want, uint32_t guard_ms) {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's
+/// console waits (util/test_wait.hpp). SysTick stops in standby, so it
+/// never times a span across a sleep: the crystal wall above does.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// Every queued console byte off the wire, bounded (util/test_wait.hpp):
+/// false on a wedged console.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
+
 /// Nothing may print between arming a sleep and the wake: the console's
-/// SERCOM stops in standby mid-character.
-void console_drain() {
-    uint32_t spins = 4'000'000UL;
-    while (!Serial::tx_idle() && spins-- != 0u) {
+/// SERCOM stops in standby mid-character. True when the console drained;
+/// otherwise a failed verdict says so and the letter returns.
+bool drained_before_sleep() {
+    if (console_drain()) {
+        return true;
     }
-    spins = 4'000'000UL;
-    while (!Serial::Resource::txc_flag() && spins-- != 0u) {
-    }
+    bench.verdict("the console drained before the standby", false);
+    return false;
 }
 
 bool within(uint32_t v, uint32_t lo, uint32_t hi) { return v >= lo && v <= hi; }
@@ -270,11 +283,24 @@ void ta_site() {
                   TimedSite::last_advance() == 0u);
 
     // A deadline: the COMP lands where ceil(ticks x rtc_hz / 1000) says.
-    Probe::deadline.arm(500u);
-    const uint32_t before = Rtc::count32();
-    const bool armed = TimedSite::arm(SleepDepth::standby);
-    const bool alarm = TimedSite::alarm_armed();
-    const uint32_t placed = Rtc::comp32() - before;   // counts ahead
+    // The deadline is armed and the site placed with interrupts masked: a
+    // SysTick between the two would leave 499 ticks to the deadline and
+    // move the placement a tick's worth (34 counts) below the arithmetic.
+    // The masked stretch is two RTC synchronized reads and one COMP
+    // write, a few RTC periods (about 30 us each), far under the 1 ms
+    // tick: at most one tick goes pending, and Ticker serves it after.
+    uint32_t before = 0;
+    bool armed = false;
+    bool alarm = false;
+    uint32_t placed = 0;
+    {
+        P::CriticalSection cs;
+        Probe::deadline.arm(500u);
+        before = Rtc::count32();
+        armed = TimedSite::arm(SleepDepth::standby);
+        alarm = TimedSite::alarm_armed();
+        placed = Rtc::comp32() - before;   // counts ahead
+    }
     TimedSite::disarm();
     Probe::deadline.disarm();
     const uint32_t expect = (500u * rtc_hz_assumed + 999u) / 1000u;
@@ -300,7 +326,10 @@ void tb_round_trip() {
 
     Probe::deadline.arm(500u);
     request_standby();
-    console_drain();
+    if (!drained_before_sleep()) {
+        Probe::deadline.disarm();
+        return;
+    }
     watchdog_backstop(true);
     pump_until_blips(1, 900u);
     watchdog_backstop(false);
@@ -352,7 +381,12 @@ void tc_foreign() {
     const uint32_t wall0 = wall();
     Probe::deadline.arm(500u);
     request_standby();
-    console_drain();
+    if (!drained_before_sleep()) {
+        Probe::deadline.disarm();
+        Nvic::disable(Watchdog::irq());
+        (void)Watchdog::disable();
+        return;
+    }
     pump_until_blips(1, 900u);
 
     Nvic::disable(Watchdog::irq());
@@ -384,6 +418,7 @@ void td_never_early() {
     constexpr uint16_t rounds = 6;
     constexpr uint32_t nominal = 150;
     uint16_t on_time = 0;
+    uint16_t matured = 0;
     uint32_t worst_lo = UINT32_MAX;
     uint32_t worst_hi = 0;
 
@@ -393,11 +428,15 @@ void td_never_early() {
         const uint32_t wall0 = wall();
         Probe::deadline.arm(nominal);
         request_standby();
-        console_drain();
+        if (!drained_before_sleep()) {
+            Probe::deadline.disarm();
+            break;
+        }
         pump_until_blips(1, 400u);
         if (Probe::blips != 1u) {
             continue;
         }
+        ++matured;
         const uint32_t ms = wall_ms(Probe::blip_wall - wall0);
         if (ms < worst_lo) {
             worst_lo = ms;
@@ -417,8 +456,8 @@ void td_never_early() {
     bench.verdict("EVERY round matured inside the band",
                   on_time == rounds);
     bench.verdict("and not one was early - the lower bound is the kernel's "
-                  "own promise",
-                  worst_lo >= nominal);
+                  "own promise (every round matured, the earliest judged)",
+                  matured == rounds && worst_lo >= nominal);
 }
 
 // ---------------------------------------------------------------------------

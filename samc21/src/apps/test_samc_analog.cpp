@@ -64,6 +64,8 @@
 
 #include <stdint.h>
 
+#include <optional>
+
 #include "samc21/ac.hpp"
 #include "samc21/adc.hpp"
 #include "samc21/clock.hpp"
@@ -78,6 +80,7 @@
 #include "samc21/ticker.hpp"
 #include "samc21/tsens.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -97,6 +100,17 @@ using Serial = Uart<5, console_pads>;
 constexpr Serial serial;
 
 TestBench<Serial> bench;
+
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's
+/// waits (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// Every queued console byte off the wire, bounded (util/test_wait.hpp):
+/// false on a wedged console - a timed window opens only after it.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 
 using brio::crlf;
 using brio::print;
@@ -121,10 +135,11 @@ using Window1 = AcWindow<1>;
 constexpr uint8_t main_gen = 0;
 constexpr uint32_t main_gen_hz = SysClock::hz;
 
-/// Where this board's supply sits. A STARTING POINT, refined by
-/// whichever letter measures it, never a verdict's authority.
-constexpr uint16_t supply_hint_mv = 5150;
-uint16_t vdd_mv = supply_hint_mv;
+/// Where this board's supply sits, in millivolts: 0 until locate_supply()
+/// has read it (at boot, and again by a letter that needs it). The board
+/// takes 3.3 V or 5 V on a jumper (docs/boards/samc21j.md), so no figure
+/// is assumed.
+uint16_t vdd_mv = 0;
 
 // ---------------------------------------------------------------------------
 // The stopwatch: TC0 + TC1 as one 32-bit counter on the BOARD'S CRYSTAL.
@@ -195,24 +210,30 @@ volatile uint16_t dac_feed_value = 0;
 // Helpers
 // ---------------------------------------------------------------------------
 
-void spin(uint32_t turns) {
-    volatile uint32_t sink = 0;
-    for (uint32_t i = 0; i < turns; ++i) {
-        sink = sink + 1u;
-    }
+/// Long enough for the DAC's own conversion (2.9 us at the 350 ksps
+/// ceiling) and for a converter's input to see the new level: 400 us.
+void settle() { brio::spin_us<Ruler>(400); }
+/// The sweep version: still an order of magnitude over the conversion
+/// time, and short enough that a 200-code sweep is milliseconds: 60 us.
+void settle_fast() { brio::spin_us<Ruler>(60); }
+/// After a block comes up or a reference changes: 4 ms.
+void settle_long() { brio::spin_us<Ruler>(4'000); }
+
+/// The bound on one SAR conversion or pair of them here: 10 ms, hundreds
+/// of times the 12 us pad_cfg takes at 1.5 MHz.
+constexpr uint32_t adc_budget_us = 10'000;
+
+/// ADC0's RESRDY within that bound.
+bool adc0_lands() {
+    return brio::wait_until<Ruler>([] { return Adc0::ready(); }, adc_budget_us);
 }
 
-/// Long enough for the DAC's own conversion (2.9 us at the 350 ksps
-/// ceiling) and for a converter's input to see the new level.
-void settle() { spin(2'000UL); }
-/// The sweep version: still an order of magnitude over the conversion
-/// time, and short enough that a 200-code sweep is milliseconds.
-void settle_fast() { spin(300UL); }
-
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
+/// Hand a pad back as reset leaves it: an input, its buffer off, no pull
+/// (release() alone leaves PORT's output driver on).
+template <class P>
+void hand_back() {
+    P::input();
+    P::configure({});
 }
 
 bool near(uint32_t a, uint32_t b, uint32_t tol) {
@@ -327,17 +348,24 @@ void dac_set(uint16_t code) {
  *
  * THE BANDGAP INPUT CHANNEL NEEDS SUPC.VREF.VREFOE (measured: the
  * channel reads a flat zero without it) and table 45-22's 10 us of
- * sampling; SAMPLEN 20 at 1.5 MHz is 14 us.
+ * sampling; SAMPLEN 20 at 1.5 MHz is 14 us. The level sits under every
+ * supply the device runs on (2.7..5.5 V, DS60001479M table 45-2), so the
+ * reading never saturates (and reads at least 747 counts); its accuracy
+ * is the level's own, +-2.05 % (table 45-36). Once a boot: true when the
+ * supply is located, now or before.
  */
-void locate_supply() {
+bool locate_supply() {
+    if (vdd_mv != 0u) {
+        return true;
+    }
     if (!adc0_up(AdcConfig{.reference = Ref::vddana,
                            .prescaler = AdcPresc::div32,
                            .sample_length = 20})) {
-        return;
+        return false;
     }
     (void)Vref::configure(VrefConfig{.level = VrefLevel::v1_024,
                                      .output_enable = true});
-    spin(20'000UL);
+    settle_long();
     Adc0::select(AdcInput::intref);
     (void)Adc0::sync_wait(ADC_SYNCBUSY_INPUTCTRL_Msk);
     settle();
@@ -346,6 +374,26 @@ void locate_supply() {
         vdd_mv = static_cast<uint16_t>((1024UL * 4096UL + counts / 2u) / counts);
     }
     Adc0::release();
+    return vdd_mv != 0u;
+}
+
+/// locate_supply() for a letter whose verdicts rest on the supply: a
+/// failure is the letter's verdict.
+bool need_vdd() {
+    const bool ok = locate_supply();
+    if (!ok) {
+        bench.verdict("VDDANA located through the 1.024 V bandgap level", false);
+    }
+    return ok;
+}
+
+/// Whether a bandgap level of `level_mv` can be reached under a supply
+/// located at `supply_mv`: the level at most 95 % of the supply. The 5 %
+/// is the level's own +-2.05 % at its top (table 45-36), the located
+/// supply's +-2.05 % at its bottom and the levels' 0.3 %/V supply
+/// coefficient.
+constexpr bool level_below_supply(uint32_t level_mv, uint32_t supply_mv) {
+    return level_mv * 20u < supply_mv * 19u;
 }
 
 // =============================================================================
@@ -424,10 +472,12 @@ void ta_pair() {
                   "watching that bit would think the converter was off",
                   !Adc1::enabled() &&
                       (Adc1::regs().ADC_CTRLA & ADC_CTRLA_SLAVEEN_Msk) != 0u);
-    bench.verdict("SLAVEEN stands in the client's CTRLA and DUALSEL in the "
-                  "host's CTRLC",
-                  (Adc1::regs().ADC_CTRLA & ADC_CTRLA_SLAVEEN_Msk) != 0u &&
-                      (Adc0::regs().ADC_CTRLC & ADC_CTRLC_DUALSEL_Msk) == 0u);
+    // Printed, not judged: SLAVEEN is the verdict above's, and DUALSEL =
+    // BOTH is 0, the field's reset value, so reading it back proves nothing.
+    print(serial, "  the host's CTRLC.DUALSEL reads ",
+          static_cast<uint16_t>((Adc0::regs().ADC_CTRLC & ADC_CTRLC_DUALSEL_Msk) >>
+                                ADC_CTRLC_DUALSEL_Pos),
+          " (BOTH)", crlf);
 
     // Both converters on the SAME pad.
     Adc0::select(AnalogIn<PadShared>{});
@@ -448,11 +498,9 @@ void ta_pair() {
         Adc0::clear_flags(Adc0::flag_resrdy | Adc0::flag_overrun);
         Adc1::clear_flags(Adc1::flag_resrdy | Adc1::flag_overrun);
         Adc0::start();                     // the HOST's trigger
-        uint32_t spins = 200'000UL;
-        while (spins-- != 0u && !(Adc0::ready() && Adc1::ready())) {
-        }
-        if (!Adc0::ready() || !Adc1::ready()) {
-            continue;
+        if (!brio::wait_until<Ruler>([] { return Adc0::ready() && Adc1::ready(); },
+                                     adc_budget_us)) {
+            continue;   // a trigger with no pair is not counted
         }
         last0 = Adc0::result();
         last1 = Adc1::result();
@@ -479,13 +527,13 @@ void ta_pair() {
     Adc0::clear_flags(Adc0::flag_resrdy);
     Adc1::clear_flags(Adc1::flag_resrdy);
     Adc0::start();
-    uint32_t spins = 200'000UL;
-    while (spins-- != 0u && !(Adc0::ready() && Adc1::ready())) {
-    }
+    const bool low_pair = brio::wait_until<Ruler>(
+        [] { return Adc0::ready() && Adc1::ready(); }, adc_budget_us);
     const uint32_t low0 = Adc0::result();
     const uint32_t low1 = Adc1::result();
     print(serial, "  the same pair with PA08 at GND: ", low0, " / ", low1, crlf);
-    bench.verdict("the pair agrees at the other rail too", low0 < 40u && low1 < 40u);
+    bench.verdict("the pair agrees at the other rail too",
+                  low_pair && low0 < 40u && low1 < 40u);
 
     // ---- the rate question, at a trigger period shorter than one conversion --
     //
@@ -621,43 +669,61 @@ void ta_pair() {
         Adc0::clear_flags(Adc0::flag_resrdy | Adc0::flag_overrun);
         Adc1::clear_flags(Adc1::flag_resrdy | Adc1::flag_overrun);
         Adc0::start();
-        uint32_t s = 200'000UL;
-        while (s-- != 0u) {
-            if (Adc0::ready()) {
-                (void)Adc0::result();
-                (void)Adc1::result();
-                return 0;
-            }
-            if (Adc1::ready()) {
-                (void)Adc1::result();
-                (void)Adc0::result();
-                return 1;
-            }
-        }
-        return -1;
+        int who = -1;
+        (void)brio::wait_until<Ruler>(   // the answer is `who`, -1 for none
+            [&who] {
+                if (Adc0::ready()) {
+                    (void)Adc0::result();
+                    (void)Adc1::result();
+                    who = 0;
+                    return true;
+                }
+                if (Adc1::ready()) {
+                    (void)Adc1::result();
+                    (void)Adc0::result();
+                    who = 1;
+                    return true;
+                }
+                return false;
+            },
+            adc_budget_us);
+        return who;
     };
 
     (void)Adc0::stop_events();
 
     /// Eight consecutive software triggers as a pattern of bits: bit k
-    /// is which converter answered trigger k.
-    auto pattern_of = [&]() -> uint8_t {
+    /// is which converter answered trigger k; nothing when a trigger went
+    /// unanswered.
+    auto pattern_of = [&]() -> std::optional<uint8_t> {
         uint8_t bits = 0;
+        bool all = true;
         for (uint8_t i = 0; i < 8u; ++i) {
             const int who = next_answering();
             if (who == 1) {
                 bits = static_cast<uint8_t>(bits | (1u << i));
+            } else if (who < 0) {
+                all = false;
             }
         }
-        return bits;
+        return all ? std::optional<uint8_t>{bits} : std::nullopt;
     };
-    auto print_pattern = [](const char* what, uint8_t bits) {
+    auto print_pattern = [](const char* what, std::optional<uint8_t> p) {
         print(serial, "  ", what);
+        if (!p) {
+            print(serial, " (a trigger went unanswered)", crlf);
+            return;
+        }
         for (uint8_t i = 0; i < 8u; ++i) {
             print(serial, ' ', static_cast<char>(
-                                   ((bits >> i) & 1u) != 0u ? '1' : '0'));
+                                   ((*p >> i) & 1u) != 0u ? '1' : '0'));
         }
         print(serial, crlf);
+    };
+    /// An interleaved pattern: every trigger answered, the converters
+    /// strictly alternating.
+    auto alternates = [](std::optional<uint8_t> p) {
+        return p && (*p == 0x55u || *p == 0xAAu);
     };
 
     // WHICH converter a restart puts first is not the question. The
@@ -666,6 +732,8 @@ void ta_pair() {
     // means - so each option is applied from two DIFFERENT parities and
     // the two patterns that follow are compared. A restart that works
     // makes them identical; one that does not lets the parity through.
+    // Both patterns must be whole and alternating for the comparison to
+    // mean anything: two converters that never answered would match too.
     auto probe_restart = [&](uint8_t option, const char* name) -> bool {
         auto apply = [&]() {
             if (option == 0) {
@@ -680,25 +748,25 @@ void ta_pair() {
             }
         };
         apply();
-        const uint8_t a = pattern_of();
+        const std::optional<uint8_t> a = pattern_of();
         (void)next_answering();          // leave the parity the other way
         apply();
-        const uint8_t b = pattern_of();
+        const std::optional<uint8_t> b = pattern_of();
         print(serial, "  ", name, ":", crlf);
         print_pattern("    from one parity ", a);
         print_pattern("    from the other  ", b);
-        return a == b;
+        return alternates(a) && alternates(b) && *a == *b;
     };
 
     interleave_up();
     (void)pattern_of();          // drain whatever the paced run left in flight
-    const uint8_t plain = pattern_of();
+    const std::optional<uint8_t> plain = pattern_of();
     print_pattern("eight interleaved software triggers, answered by ADC", plain);
     bench.verdict("SOFTWARE TRIGGERS ALTERNATE STRICTLY - 38.8.10's 'start "
                   "event or software trigger' covers the software one, and "
                   "eight of them are answered alternately by the two "
                   "converters with no trigger going to the same one twice",
-                  plain == 0x55u || plain == 0xAAu);
+                  alternates(plain));
 
     const bool flush_ok = probe_restart(0, "SWTRIG.FLUSH on the host");
     const bool cycle_ok = probe_restart(1, "a disable/enable cycle of the host");
@@ -708,19 +776,14 @@ void ta_pair() {
                   "same eight triggers answer the same way whichever parity "
                   "the sequence was left in",
                   reset_ok);
-    if (flush_ok && cycle_ok) {
-        bench.verdict("...and so do the other two the chapter lists, the flush "
-                      "and the enable cycle", true);
-    } else {
-        bench.verdict("BUT THE OTHER TWO OPTIONS 38.6.3.1 LISTS DO NOT: the "
-                      "parity carries straight through a SWTRIG.FLUSH and "
-                      "through a disable/enable cycle of the host, so of the "
-                      "chapter's own three ways to restart an interleaved "
-                      "sequence only the software reset restarts anything - "
-                      "which matters because the flush is the one it lists "
-                      "first and the only one that costs no configuration",
-                      !flush_ok && !cycle_ok);
-    }
+    // The other two options are printed, not judged: whether the flush
+    // and the enable cycle restart the sequence on a die is that die's
+    // fact (38.6.3.1 lists them; measured, the parity has carried through
+    // both), and brio restarts an interleaved pair with the reset.
+    print(serial, "  the other two options 38.6.3.1 lists: SWTRIG.FLUSH ",
+          flush_ok ? "restarts" : "does NOT restart", " the sequence, a "
+          "disable/enable cycle of the host ",
+          cycle_ok ? "restarts" : "does NOT restart", " it", crlf);
 
     (void)Pacer::enable(false);
     (void)Adc0::enable(false);
@@ -730,7 +793,7 @@ void ta_pair() {
     Pacer::release();
     Counter::release();
     event_clock_down();
-    PadShared::release();
+    hand_back<PadShared>();
 }
 
 // =============================================================================
@@ -818,10 +881,7 @@ void tb_sequence() {
     Adc0::start();
     bool complete = true;
     for (uint8_t i = 0; i < 6u; ++i) {
-        uint32_t s = 400'000UL;
-        while (s-- != 0u && !Adc0::ready()) {
-        }
-        if (!Adc0::ready()) {
+        if (!adc0_lands()) {
             complete = false;
             break;
         }
@@ -881,6 +941,9 @@ void tb_sequence() {
     Adc0::select(static_cast<AdcInput>(seq_supply));
     (void)Adc0::sync_wait(ADC_SYNCBUSY_INPUTCTRL_Msk);
     Adc0::discard(2);
+    // Both spans run back to back on a quiet console and print after: a
+    // line going out puts its interrupts inside one of them.
+    const bool quiet = console_drain();
     uint32_t t0 = ticks_now();
     for (uint16_t r = 0; r < rounds; ++r) {
         for (uint8_t i = 0; i < 6u; ++i) {
@@ -891,13 +954,15 @@ void tb_sequence() {
 
     Adc0::sequence(mask);
     Adc0::clear_flags(Adc0::flag_resrdy | Adc0::flag_overrun);
+    // The sequencer paces its own six conversions, so the poll's ruler
+    // read (about 1.5 us a result, util/test_wait.hpp) is inside the
+    // 12 us each takes and does not stretch the sequence.
+    bool seq_landed = true;
     t0 = ticks_now();
-    for (uint16_t r = 0; r < rounds; ++r) {
+    for (uint16_t r = 0; r < rounds && seq_landed; ++r) {
         Adc0::start();
         for (uint8_t i = 0; i < 6u; ++i) {
-            uint32_t s = 400'000UL;
-            while (s-- != 0u && !Adc0::ready()) {
-            }
+            seq_landed = adc0_lands() && seq_landed;
             (void)Adc0::result();
         }
     }
@@ -912,13 +977,13 @@ void tb_sequence() {
     bench.verdict("THE SEQUENCE IS CHEAPER PER CONVERSION than the same "
                   "conversions triggered one at a time - the saving is the "
                   "trigger and the input change the sequencer does itself",
-                  seq_ticks < singles_ticks);
+                  quiet && seq_landed && seq_ticks < singles_ticks);
 
     Adc0::sequence(0);
     Adc0::release();
     Dac::release();
-    PadA3::release();
-    PadA4::release();
+    hand_back<PadA3>();
+    hand_back<PadA4>();
 }
 
 // =============================================================================
@@ -978,13 +1043,12 @@ void tc_differential() {
     PadA3::clear();
     dac_set(700);
     Adc0::discard(2);
+    bool landed = true;   // every conversion below, folded into the verdicts
     int32_t sum = 0;
     for (uint8_t i = 0; i < 16u; ++i) {
         sum += Adc0::result_signed();
         Adc0::start();
-        uint32_t s = 200'000UL;
-        while (s-- != 0u && !Adc0::ready()) {
-        }
+        landed = adc0_lands() && landed;
     }
     const int32_t d_positive = (sum + 8) / 16;
 
@@ -995,9 +1059,7 @@ void tc_differential() {
     for (uint8_t i = 0; i < 16u; ++i) {
         sum += Adc0::result_signed();
         Adc0::start();
-        uint32_t s = 200'000UL;
-        while (s-- != 0u && !Adc0::ready()) {
-        }
+        landed = adc0_lands() && landed;
     }
     const int32_t d_negative = (sum + 8) / 16;
 
@@ -1011,7 +1073,7 @@ void tc_differential() {
     bench.verdict("THE SIGN IS THE DIFFERENCE'S SIGN - the same pair reads "
                   "positive with the negative input at ground and negative "
                   "with it at the supply",
-                  d_positive > 0 && d_negative < 0);
+                  landed && d_positive > 0 && d_negative < 0);
     bench.verdict("AND THE MAGNITUDE IS HALF THE SINGLE-ENDED DIFFERENCE, "
                   "which is what a signed full scale of +/-VREF means",
                   near_signed(d_positive, predict_pos, 60) &&
@@ -1036,9 +1098,7 @@ void tc_differential() {
         for (uint8_t k = 0; k < 8u; ++k) {
             s2 += Adc0::result_signed();
             Adc0::start();
-            uint32_t s = 200'000UL;
-            while (s-- != 0u && !Adc0::ready()) {
-            }
+            landed = adc0_lands() && landed;
         }
         swept[i] = (s2 + 4) / 8;
     }
@@ -1054,7 +1114,7 @@ void tc_differential() {
     bench.verdict("A SWEPT DIFFERENCE FALLS MONOTONICALLY THROUGH ZERO as the "
                   "DAC passes the fixed node - neither end is a rail and the "
                   "middle is neither zero nor full scale",
-                  monotone && swept[0] > 400 && swept[6] < -300);
+                  landed && monotone && swept[0] > 400 && swept[6] < -300);
     // VDDANA/4 is code 256 of 1024 by construction, so that is where the
     // difference has to vanish.
     bench.verdict("...and it vanishes at the DAC code that IS a quarter of "
@@ -1093,7 +1153,7 @@ void tc_differential() {
 
     Adc0::release();
     Dac::release();
-    PadA3::release();
+    hand_back<PadA3>();
 }
 
 // =============================================================================
@@ -1170,8 +1230,8 @@ void td_rail_to_rail() {
                 hi = v;
             }
             Adc0::start();
-            uint32_t s = 200'000UL;
-            while (s-- != 0u && !Adc0::ready()) {
+            if (!adc0_lands()) {
+                return Reading{0x7FFFFFFF, 0};   // as a converter that never came up
             }
         }
         return Reading{(s2 + 16) / 32, hi - lo};
@@ -1219,18 +1279,12 @@ void td_rail_to_rail() {
           "knob produced is ", worst_shift,
           " counts of 4096, against a per-reading spread of up to ",
           worst_span, crlf);
-    bench.verdict("NEITHER KNOB CHANGES THE READING ON THIS DIE - not at mid "
-                  "supply, where 38.6.3.2 says the plain converter is already "
-                  "at its best, and NOT AT EITHER RAIL EITHER, where it says "
-                  "the accuracy falls off: the largest shift is of the order "
-                  "of one count of 4096, which is what a 5.15 V supply and "
-                  "VREF = VDDANA leave for a rail-to-rail input stage to fix",
-                  worst_shift <= 4);
-    bench.verdict("...and the letter states its own floor rather than claiming "
-                  "an absence: one count is 1.3 mV here and the per-reading "
-                  "spread is of the same order, so what is measured is that "
-                  "the effect is BELOW that and not that it is zero",
-                  worst_span >= 1 && worst_span < 40);
+    // Printed above, not judged: what either knob does to a reading on a
+    // die is that die's fact - 38.6.3.2 promises better accuracy near the
+    // rails, not a size - and the shifts sit at the reading's own scatter
+    // (one count of 4096 with VREF = VDDANA), where a bound would judge
+    // noise. A converter that does not convert fails the timing verdicts
+    // below, which need conversions to time.
 
     // ---- what each one costs -----------------------------------------------
     //
@@ -1250,6 +1304,11 @@ void td_rail_to_rail() {
         (void)Adc0::select_negative(AdcNegative::ain1);
         (void)Adc0::sync_wait(ADC_SYNCBUSY_INPUTCTRL_Msk);
         Adc0::discard(4);
+        // A quiet console, or no figure: a line going out would add its
+        // interrupts to one configuration's span and not another's.
+        if (!console_drain()) {
+            return 0;
+        }
         const uint32_t t0 = ticks_now();
         for (uint16_t k = 0; k < 256u; ++k) {
             (void)Adc0::read();
@@ -1286,7 +1345,7 @@ void td_rail_to_rail() {
 
     Adc0::release();
     Dac::release();
-    PadA3::release();
+    hand_back<PadA3>();
 }
 
 // =============================================================================
@@ -1440,7 +1499,7 @@ void te_dither() {
     dither_feed_start(base_code * 16u);
     (void)Pacer::set_count8(0);
     (void)Pacer::enable(true);
-    wait_ms(2);
+    brio::spin_us<Ruler>(2'000);
     bench.verdict("THE DAC'S OWN EMPTY INTERRUPT FEEDS DATABUF the same 14-bit "
                   "value every time the buffer empties - the starter wrote the "
                   "first one, the vector every one after it, and no start "
@@ -1636,7 +1695,7 @@ void tf_dac_interrupts() {
     Nvic::enable(Dac::irq());
     (void)Pacer::set_count8(0);
     (void)Pacer::enable(true);
-    wait_ms(40);
+    brio::spin_us<Ruler>(40'000);
     const uint32_t empties = dac_empty_irqs;
     const uint32_t entries = dac_irq_entries;
     print(serial, "  40 ms of start events with the handler refilling DATABUF: ",
@@ -1654,7 +1713,7 @@ void tf_dac_interrupts() {
     // 41.8.6: only writing DATABUF or writing a one clears it, and
     // isr() deliberately does NEITHER for EMPTY.
     Dac::disarm(Dac::flag_empty);
-    wait_ms(20);
+    brio::spin_us<Ruler>(20'000);
     const uint32_t unders = dac_underrun_irqs;
     print(serial, "  with the handler no longer feeding it: ", unders,
           " UNDERRUN interrupts", crlf);
@@ -1715,7 +1774,7 @@ void tg_comp23_window1() {
     Comp3::scaler(high_step);
     bench.verdict("both comparators come up", Comp2::enable(true) &&
                                                   Comp3::enable(true));
-    spin(2'000UL);
+    settle();
     bench.verdict("both report READY", Comp2::ready() && Comp3::ready());
     bench.verdict("40.6.4'S TWO UNENFORCED REQUIREMENTS HOLD, asked of the "
                   "silicon rather than of a struct",
@@ -1824,7 +1883,7 @@ void th_bandgap() {
         if (!Comp2::configure(cfg) || !Comp2::enable(true)) {
             return 0xFFFFu;
         }
-        spin(4'000UL);
+        brio::spin_us<Ruler>(800);
         Comp2::clear_flag();
         uint16_t found = 0xFFFFu;
         for (uint16_t c = from; c <= to; ++c) {
@@ -1842,20 +1901,22 @@ void th_bandgap() {
     // ---- does it need VREFOE? -----------------------------------------------
     (void)Vref::configure(VrefConfig{.level = VrefLevel::v1_024,
                                      .output_enable = false});
-    spin(20'000UL);
+    settle_long();
     const bool oe_off = Vref::output_enabled();
     const uint16_t off_cross = crossing(AcNegative::bandgap, 0, 1023);
     (void)Vref::configure(VrefConfig{.level = VrefLevel::v1_024,
                                      .output_enable = true});
-    spin(20'000UL);
+    settle_long();
     const uint16_t on_cross = crossing(AcNegative::bandgap, 0, 1023);
     print(serial, "  MUXNEG = bandgap at 1.024 V: with VREFOE CLEAR (read back ",
           yes_no(oe_off), ") the comparator flips at DAC code ", off_cross,
           ", with it SET at ", on_cross, crlf);
+    // 1.024 V is code 1024 x 1024 / VDDANA: 191..388 over the device's
+    // 2.7..5.5 V (table 45-2), inside the band judged.
     bench.verdict("THE BANDGAP REACHES A COMPARATOR'S NEGATIVE INPUT AT ALL - "
-                  "the "
-                  "output really does flip at a code a fifth of the way up the "
-                  "supply and not somewhere a floating input would put it",
+                  "the output really does flip at the code where the DAC "
+                  "makes about a volt, and not somewhere a floating input "
+                  "would put it",
                   on_cross != 0xFFFFu && on_cross > 100u && on_cross < 400u);
     bench.verdict("...AND IT DOES NOT NEED SUPC.VREF.VREFOE, WHICH CORRECTS "
                   "ac.hpp's OWN COMMENT: the crossing is the same code with "
@@ -1873,12 +1934,22 @@ void th_bandgap() {
     // A THIRD independent route to the same bandgap: the AC's own scaler
     // measured it, the ADC measured it, and this is the DAC measuring it
     // through a comparator.
+    // The DAC cannot rise above VDDANA, so a level the supply does not
+    // hold is never crossed: at 3.3 V the 4.096 V level is skipped.
+    const bool located = need_vdd();
+    const bool top_held = located && level_below_supply(4096u, vdd_mv);
     uint16_t levels[3] = {};
     const VrefLevel sel[3] = {VrefLevel::v1_024, VrefLevel::v2_048,
                               VrefLevel::v4_096};
     for (uint8_t i = 0; i < 3u; ++i) {
+        if (i == 2u && !top_held) {
+            print(serial, "  the 4.096 V level is not crossed: the supply, at ",
+                  vdd_mv, " mV, does not hold it", crlf);
+            bench.skip("a bandgap level the supply does not hold");
+            continue;
+        }
         (void)Vref::configure(VrefConfig{.level = sel[i], .output_enable = true});
-        spin(20'000UL);
+        settle_long();
         levels[i] = crossing(AcNegative::bandgap, 0, 1023);
     }
     const uint32_t mv0 = static_cast<uint32_t>(levels[0]) * vdd_mv / 1024u;
@@ -1892,8 +1963,10 @@ void th_bandgap() {
                   "and a DAC weigh the same bandgap the ADC and the AC's own "
                   "scaler weighed, and the 1:2:4 of 22.8.7 comes out of the "
                   "crossings",
-                  levels[0] < levels[1] && levels[1] < levels[2] &&
-                      near(mv1, 2u * mv0, 250u) && near(mv2, 2u * mv1, 400u));
+                  located && levels[0] < levels[1] &&
+                      near(mv1, 2u * mv0, 250u) &&
+                      (!top_held ||
+                       (levels[1] < levels[2] && near(mv2, 2u * mv1, 400u))));
 
     // ---- erratum 1.5.6, staged with a control -------------------------------
     //
@@ -1905,7 +1978,7 @@ void th_bandgap() {
     // is zero before and after.
     (void)Vref::configure(VrefConfig{.level = VrefLevel::v1_024,
                                      .output_enable = true});
-    spin(20'000UL);
+    settle_long();
     dac_set(20);                   // far below both thresholds
 
     // "Upon AC enabling" is taken at both levels it can mean, since the
@@ -1926,7 +1999,7 @@ void th_bandgap() {
             }
             (void)Ac::enable(true);
             (void)Comp2::enable(true);
-            spin(4'000UL);
+            brio::spin_us<Ruler>(800);
             if (Comp2::flag_set() && !Comp2::state()) {
                 ++seen;
             }
@@ -1934,28 +2007,26 @@ void th_bandgap() {
         (void)Comp2::enable(false);
         return seen;
     };
-    // 1.024 V of a ~5.15 V supply is about 12/64 of it.
+    // The scaler step at the bandgap's level: 1.024 V is (step + 1)/64 of
+    // the supply located above (12/64 of 5.15 V, 20/64 of 3.3 V).
+    const uint8_t at_level =
+        vdd_mv != 0u ? static_cast<uint8_t>((1024UL * 64UL + vdd_mv / 2u) / vdd_mv - 1u) : 11u;
     const uint8_t with_bandgap = count_spurious(AcNegative::bandgap, 0);
-    const uint8_t with_scaler = count_spurious(AcNegative::vscale, 11);
+    const uint8_t with_scaler = count_spurious(AcNegative::vscale, at_level);
     print(serial, "  sixty-four enables with the output held low throughout: "
           "MUXNEG = bandgap raised ", with_bandgap,
           " flags with STATE still clear, MUXNEG = the scaler at the same "
           "level raised ", with_scaler, crlf);
-    if (with_bandgap > with_scaler) {
-        bench.verdict("ERRATUM 1.5.6 REPRODUCES WITH ITS OWN WORKAROUND AS THE "
-                      "CONTROL: enabling on the bandgap raises a COMP flag "
-                      "with nothing having changed, and enabling on the VDD "
-                      "scaler at the same level does not - so the obligation "
-                      "the driver states (clear the flag after enabling, "
-                      "before arming) is a real one",
-                      true);
-    } else {
-        bench.verdict("erratum 1.5.6 did NOT reproduce in this arrangement on "
-                      "this die - recorded as an observation with its control, "
-                      "not as a claim that the item is wrong; the driver's "
-                      "stated obligation stands either way",
-                      true);
-    }
+    // Printed, not judged: whether the item reproduces is the die's fact,
+    // and the driver's stated obligation (clear the flag after enabling,
+    // before arming) stands either way.
+    print(serial, with_bandgap > with_scaler
+                      ? "  erratum 1.5.6 reproduces with its own workaround as "
+                        "the control: enabling on the bandgap raises a COMP "
+                        "flag, enabling on the scaler at the same level does not"
+                      : "  erratum 1.5.6 did not reproduce in this arrangement on "
+                        "this die",
+          crlf);
 
     // ---- Ac::take_flags() from a real bound handler -------------------------
     //
@@ -1970,7 +2041,7 @@ void th_bandgap() {
     bench.verdict("COMP2 watches the bandgap again, interrupting on every "
                   "toggle", Comp2::configure(watch) && Comp2::enable(true));
     dac_set(500);                  // start ABOVE, so all eight moves are edges
-    spin(4'000UL);
+    brio::spin_us<Ruler>(800);
     Comp2::clear_flag();
     Comp2::arm(true);
     Nvic::enable(Ac::irq());
@@ -2005,6 +2076,9 @@ void th_bandgap() {
 //     the swapped flip codes, whose half is the comparator's own input
 //     offset and whose MIDPOINT is the crossing with the offset removed.
 void ti_hysteresis() {
+    if (!need_vdd()) {   // the millivolt bands below are the supply's
+        return;
+    }
     bench.verdict("hysteresis in single-shot mode is refused - 40.6.6 makes it "
                   "continuous-mode only",
                   !Comp2::config_valid(AcConfig{.single_shot = true,
@@ -2040,7 +2114,7 @@ void ti_hysteresis() {
         // Start well outside the band so the comparator is settled in
         // the state the sweep has to leave.
         (void)Dac::set(upward ? centre - half_span : centre + half_span);
-        spin(20'000UL);
+        settle_long();
         // SWAP swaps the terminals AND inverts the output (40.6.10), so
         // the two cancel and the sense of the output is UNCHANGED -
         // which is the whole reason the procedure works: only the
@@ -2161,10 +2235,10 @@ void ti_hysteresis() {
     // unswapped and the other way swapped: the two straddle the true
     // crossing and their MEAN is it. Hysteresis is off throughout -
     // otherwise the gap being measured would be the wrong one.
-    bench.verdict("SWAP is a configuration bit like any other, so it can only "
-                  "be changed with the comparator disabled - which is what "
-                  "configure() does",
-                  Comp2::config_valid(AcConfig{.swap = true}));
+    static_assert(Comp2::config_valid(AcConfig{.swap = true}),
+                  "SWAP is a configuration bit like any other, so it can only be "
+                  "changed with the comparator disabled - which is what "
+                  "configure() does");
 
     int32_t plain_sum = 0;
     int32_t swap_sum = 0;
@@ -2269,14 +2343,14 @@ void tj_intsel_invei() {
         // The output is one while the DAC is BELOW the scaler, so a low
         // code is a rising output and a high code a falling one.
         (void)Dac::set(900);
-        spin(20'000UL);
+        settle_long();
         Comp2::clear_flag();
         (void)Dac::set(100);           // output 0 -> 1
-        spin(20'000UL);
+        settle_long();
         const bool rise = Comp2::flag_set();
         Comp2::clear_flag();
         (void)Dac::set(900);           // output 1 -> 0
-        spin(20'000UL);
+        settle_long();
         const bool fall = Comp2::flag_set();
         Comp2::clear_flag();
         (void)on;
@@ -2357,16 +2431,16 @@ void tj_intsel_invei() {
         } else {
             PadA4::set();
         }
-        spin(20'000UL);
+        settle_long();
         (void)Comp2::enable(true);
-        spin(20'000UL);
+        settle_long();
         Comp2::clear_flag();
         if (rise) {
             PadA4::set();
         } else {
             PadA4::clear();
         }
-        spin(20'000UL);
+        settle_long();
         return Comp2::flag_set();
     };
 
@@ -2398,7 +2472,7 @@ void tj_intsel_invei() {
     (void)Comp2::enable(false);
     Ac::release();
     Dac::release();
-    PadA4::release();
+    hand_back<PadA4>();
     event_clock_down();
 }
 
@@ -2440,17 +2514,17 @@ void tk_sdadc() {
                   Sdadc::pair_exists(0) &&
                       Sdadc::init(main_gen, sd_free, main_gen_hz) &&
                       Sdadc::select(0));
-    spin(40'000UL);
+    brio::spin_us<Ruler>(8'000);
     Sdadc::clear_flags(Sdadc::flag_resrdy | Sdadc::flag_overrun |
                        Sdadc::flag_winmon);
-    uint32_t s = 2'000'000UL;
-    while (s-- != 0u && !Sdadc::ready()) {
-    }
+    // A free-running result every 43 us; 10 ms is hundreds of them.
+    const bool steady_landed =
+        brio::wait_until<Ruler>([] { return Sdadc::ready(); }, 10'000);
     const int32_t steady = Sdadc::result();
     print(serial, "  with AINN0 at GND and AINP0 at VDD the converter reads ",
           steady, crlf);
     bench.verdict("a full-scale differential is what the pads make",
-                  steady > 20000);
+                  steady_landed && steady > 20000);
 
     // ---- the flush: what it costs, timed, and what it discards -------------
     //
@@ -2463,11 +2537,12 @@ void tk_sdadc() {
     bench.verdict("the crystal stopwatch is running", stopwatch_start());
 
     /// Wait for the next result and read it; returns the crystal tick at
-    /// which it was seen.
-    auto next_result_at = []() -> uint32_t {
-        uint32_t sp = 2'000'000UL;
-        while (sp-- != 0u && !Sdadc::ready()) {
-        }
+    /// which it was seen, and clears `k_landed` when none came within
+    /// 10 ms (a result is due every 43 us).
+    bool k_landed = true;
+    auto next_result_at = [&k_landed]() -> uint32_t {
+        k_landed = brio::wait_until<Ruler>([] { return Sdadc::ready(); }, 10'000) &&
+                   k_landed;
         const uint32_t t = ticks_now();
         (void)Sdadc::result();
         return t;
@@ -2503,25 +2578,19 @@ void tk_sdadc() {
     bench.verdict("A FREE-RUNNING RESULT ARRIVES EVERY DECIMATION WINDOW, "
                   "which is 4 x OSR CLK_SDADC cycles and nothing else - the "
                   "period everything below is judged against",
-                  near(period, window_ticks, window_ticks / 8u));
+                  k_landed && near(period, window_ticks, window_ticks / 8u));
+    // What one flush costs is printed, not judged: no part of brio depends
+    // on what a flush discards, and 39.8.17's "flush the pipeline and
+    // restart" names no time (the flush events below are counted, not
+    // judged, for the same reason).
     const uint32_t first_gap = marks[0] - t0;
-    if (first_gap > period + period / 2u) {
-        bench.verdict("AND A FLUSH COSTS WHOLE DECIMATION WINDOWS: the first "
-                      "result after one is late by more than a period, which "
-                      "is what throwing a third-order SINC away mid-stream "
-                      "costs - 39.6.2.3's 'the first valid sample starts from "
-                      "the third', seen from the other side",
-                      true);
-    } else {
-        bench.verdict("AND A SINGLE SWTRIG.FLUSH DOES NOT COST A WHOLE WINDOW "
-                      "HERE - the next result arrives sooner than one period "
-                      "after it and the stream carries on at its own rate, "
-                      "which is NOT what 39.8.17's 'flush the pipeline and "
-                      "restart' would suggest (the flush events below are "
-                      "counted, not judged, for the same reason)",
-                      first_gap < period + period / 2u &&
-                          near(marks[1] - marks[0], period, period / 4u));
-    }
+    print(serial, "  a single SWTRIG.FLUSH ",
+          first_gap > period + period / 2u
+              ? "costs whole decimation windows: the first result after it is "
+                "late by more than a period"
+              : "does not cost a whole window: the next result arrives sooner "
+                "than one period after it",
+          crlf);
     print(serial, "  [what a flush DISCARDS cannot be read off the VALUE on "
           "this bench: the pair's two pads make a differential at the "
           "converter's own rail, where a filter still filling and a filter "
@@ -2568,7 +2637,7 @@ void tk_sdadc() {
                                           .generator = Pacer::overflow_generator,
                                           .path = EventPath::asynchronous}));
     (void)Sdadc::enable(true);
-    spin(40'000UL);
+    brio::spin_us<Ruler>(8'000);
     constexpr uint32_t count_span = 240'000UL;     // ten milliseconds of crystal ticks
     /// Results read over `count_span` ticks; `first` the tick, from the
     /// window's opening, of the first one (0 when none came).
@@ -2576,9 +2645,13 @@ void tk_sdadc() {
         Sdadc::clear_flags(Sdadc::flag_resrdy | Sdadc::flag_overrun);
         uint16_t n = 0;
         first = 0;
+        // Bounded on the ruler too, at twice the span, so a stopwatch that
+        // stops ends the count instead of hanging it.
+        const uint32_t r0 = Ruler::now();
         const uint32_t c0 = ticks_now();
         uint32_t now = c0;
-        while (now - c0 < count_span) {
+        while (now - c0 < count_span &&
+               Ruler::now() - r0 < brio::us_cycles<Ruler>(20'000)) {
             if (Sdadc::ready()) {
                 (void)Sdadc::result();
                 if (n == 0u) first = now - c0;
@@ -2590,13 +2663,11 @@ void tk_sdadc() {
     };
     (void)Pacer::set_count8(0);
     (void)Pacer::enable(true);
-    const uint32_t lead0 = ticks_now();
-    while (ticks_now() - lead0 < 2u * window_ticks) {
-    }
+    brio::spin_us<Ruler>(2u * window_ticks / 24u + 1u);   // two windows, crystal ticks at 24 MHz
     uint32_t first_flushing = 0;
     const uint16_t while_flushing = count_results(first_flushing);
     (void)Pacer::enable(false);
-    spin(40'000UL);
+    brio::spin_us<Ruler>(8'000);
     uint32_t first_free = 0;
     const uint16_t free_count = count_results(first_free);
     const uint32_t due = period != 0u ? count_span / period : 0u;
@@ -2639,7 +2710,7 @@ void tk_sdadc() {
                                      .path = EventPath::asynchronous}));
     (void)Counter::enable(true);
     (void)Counter::set_count16(0);
-    wait_ms(20);
+    brio::spin_us<Ruler>(20'000);
     const uint16_t hits = Counter::count16();
 
     // THE CONTROL HAS TO BE A CONDITION THIS READING CANNOT MEET, and no
@@ -2649,9 +2720,9 @@ void tk_sdadc() {
     // enable - only the condition changes.
     (void)Sdadc::window(SdadcWindow::below_upper, static_cast<int16_t>(-32768),
                         static_cast<int16_t>(-32000));
-    spin(40'000UL);
+    brio::spin_us<Ruler>(8'000);
     (void)Counter::set_count16(0);
-    wait_ms(20);
+    brio::spin_us<Ruler>(20'000);
     const uint16_t misses = Counter::count16();
     print(serial, "  WINMONEO: 20 ms with the condition matching gave ", hits,
           " events, and the same 20 ms with a condition this reading cannot "
@@ -2664,14 +2735,14 @@ void tk_sdadc() {
 
     // ---- the three interrupts through the NVIC -----------------------------
     (void)Sdadc::window_off();
-    spin(40'000UL);
+    brio::spin_us<Ruler>(8'000);
     sdadc_irqs = 0;
     sdadc_last_mask = 0;
     Sdadc::clear_flags(Sdadc::flag_resrdy | Sdadc::flag_overrun |
                        Sdadc::flag_winmon);
     Sdadc::arm(Sdadc::flag_resrdy);
     Nvic::enable(Sdadc::irq());
-    wait_ms(10);
+    brio::spin_us<Ruler>(10'000);
     Nvic::disable(Sdadc::irq());
     Sdadc::disarm(Sdadc::flag_resrdy | Sdadc::flag_overrun |
                   Sdadc::flag_winmon);
@@ -2691,7 +2762,7 @@ void tk_sdadc() {
     Sdadc::clear_flags(Sdadc::flag_resrdy | Sdadc::flag_overrun);
     Sdadc::arm(Sdadc::flag_overrun);
     Nvic::enable(Sdadc::irq());
-    wait_ms(5);
+    brio::spin_us<Ruler>(5'000);
     Nvic::disable(Sdadc::irq());
     const uint32_t over_irqs = sdadc_irqs;
     const uint8_t over_mask = sdadc_last_mask;
@@ -2709,8 +2780,8 @@ void tk_sdadc() {
     Counter::release();
     Pacer::release();
     event_clock_down();
-    PadSdN::release();
-    PadSdP::release();
+    hand_back<PadSdN>();
+    hand_back<PadSdP>();
 }
 
 // =============================================================================
@@ -2799,7 +2870,7 @@ void tl_tsens_startinv() {
         } else {
             PadA4::set();
         }
-        spin(20'000UL);
+        settle_long();
         Tsens::clear_flags();
         if (rise) {
             PadA4::set();
@@ -2808,13 +2879,7 @@ void tl_tsens_startinv() {
         }
         // A measurement is 2 x GAIN + about 2020 GCLK_TSENS periods -
         // some milliseconds at 48 MHz - so this waits generously.
-        const uint32_t t0 = Ticker::millis();
-        while (Ticker::millis() - t0 < 20u) {
-            if (Tsens::result_ready()) {
-                return true;
-            }
-        }
-        return false;
+        return brio::wait_until<Ruler>([] { return Tsens::result_ready(); }, 20'000);
     };
 
     // TSENS's own EVCTRL is enable-protected too, which start_on()
@@ -2864,7 +2929,7 @@ void tl_tsens_startinv() {
     (void)Comp0::enable(false);
     Ac::release();
     Dac::release();
-    PadA4::release();
+    hand_back<PadA4>();
     event_clock_down();
 }
 
@@ -2939,7 +3004,7 @@ int main() {
 
     brio::enable_interrupts();
 
-    locate_supply();
+    (void)locate_supply();   // the banner prints it; a letter that needs it asks again
 
     bench.letter('a', "the ADC host/client pair: both dual modes and the three "
                       "restart options", ta_pair);

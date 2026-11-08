@@ -689,7 +689,7 @@ subtracted and interrupts masked.
 - **A UPDI flash shows as `RSTFR` 0x20**, which is how a fresh boot
   after `brio flash` is told apart from every other start.
 - **On the AVR128DA48** (REVID 0x17, rev A7, the board's 24 MHz
-  external clock, 5 V; 109 verdicts) every figure above repeats: the
+  external clock, 5 V) every figure above repeats: the
   folded delay exact, the runtime path 122 cycles, the dispatch's fixed
   cost 157, the watchdog through STANDBY and POWER-DOWN 66 and 67 ticks,
   the reset flags the same. The idle contract, letters `w` and `k`,
@@ -726,9 +726,12 @@ tick being 30.18 us.
   write and vice versa (they share one CCP-protected byte).
 - **`Sleep::enter(idle)` is the platform's `idle()` under application
   control.** Sixteen sleeps on a 2 ms TCB alarm return only after the
-  interrupt, leave `SEN` clear and interrupts enabled; a counter that
-  only turns while the CPU runs turns 16 times across those sixteen
-  periods and 23937 times over the same span awake.
+  interrupt, leave `SEN` clear and interrupts enabled, and span at least
+  sixteen alarms by the alarm's own count: a loop that only turns while
+  the CPU runs turns once per alarm asleep, and more than a hundred
+  times per alarm over the same span awake (the letter prints both
+  counts). The platform's own `idle()`, entered with interrupts masked
+  as the kernel enters it, returns on the alarm's interrupt.
 - **Standby really stops CLK_PER.** Over one 125 ms PIT period the
   stopwatch counts 2972823 ticks awake and **178 asleep** - the 7 us of
   code between the wake-up and the read. The PIT interrupt is what
@@ -1090,14 +1093,14 @@ dispatch, and only the loop is the suite's.
   fast, the same +8000-to-+11000 ppm this desk measures everywhere else.
 
 **On the AVR64EA48** (rev B1, the board's 20 MHz quartz; the suites
-from the console): `test_avr_platform` 109 verdicts, 109
-green, every letter in ten runs of ten - the delays derived from the
+from the console): `test_avr_platform` green, every letter in ten
+runs of ten - the delays derived from the
 20 MHz rate (1 us = 20 cycles = 5 loops, the dynamic regime 20 -> 10 ->
 20 MHz and 1.25 MHz with its exact Q4.12 factor 1280), the critical
 section, idle, the ring and queue, the timebase, the idle promise (w:
 no lost wake on any of the three paths; k: one turn per wake), and the
 breadcrumb across the six resets of letter i, SWRE's software reset
-among them; `test_avr_power` 53 of 53 (a to f: the ladder, a real
+among them; `test_avr_power` green (a to f: the ladder, a real
 standby round, the deadline guard, the voters, the standing
 restrictions, a power-down round) - the power model over the EA's
 three modes with no regulator verb - in twelve runs of twelve. Letter
@@ -1112,10 +1115,6 @@ of eight). The DA/DB path keeps its `slept >= spun`, a bound their
 larger wake cost meets but nothing derives (below). In every EA release image each
 SLPCTRL.CTRLA store follows a non-store instruction (the NOP of
 DS80001048D 2.2.3's workaround, or a load between it and the store).
-Letter g fills the kernel queue it then judges and does not drain it,
-so it is green once per boot (ten boots of ten here) and two of its
-verdicts fail when it is run again in the same boot - a suite defect on
-every die.
 
 ## Not covered yet
 

@@ -63,7 +63,6 @@
 #include <stdint.h>
 
 #include "samc21/clock.hpp"
-#include "samc21/delay.hpp"
 #include "samc21/eic.hpp"
 #include "samc21/evsys.hpp"
 #include "samc21/i2c.hpp"
@@ -73,6 +72,7 @@
 #include "samc21/tc.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
 // register, and every architecture on this link compiles the same file.
@@ -238,29 +238,21 @@ void settle() {
     }
 }
 
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
-
-/// Microseconds of any length: delay_us() serves less than a SysTick
-/// period, so a longer wait is chunked.
-void wait_us(uint32_t us) {
-    while (us >= 900u) {
-        (void)delay_us(clock, 900u);
-        us -= 900u;
-    }
-    if (us != 0u) {
-        (void)delay_us(clock, us);
-    }
-}
+/// The SysTick ticker read as CPU cycles: the ruler of this instrument's
+/// pauses and time-outs (util/test_wait.hpp). The measurements ride the
+/// crystal's stopwatch below, never this.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
 // ---------------------------------------------------------------------------
 // The link
 // ---------------------------------------------------------------------------
 
-constexpr uint32_t dre_spins = 400'000u;
+/// A frame's time-out on the link: 50 ms, a ten-bit frame down to 200
+/// baud (the DUT's suite asks 9600 and up).
+constexpr uint32_t frame_budget_us = 50'000u;
 
 bool link_apply(const SercomUartConfig& c) {
     (void)Link::enable(false);
@@ -287,29 +279,32 @@ bool line_talk(const SercomBaud& b) {
 }
 
 [[gnu::always_inline]] inline bool put_byte(uint8_t v) {
-    for (uint32_t n = dre_spins; !Link::dre_flag(); --n) {
-        if (n == 0u) return false;
+    if (!brio::wait_until<Ruler>([] { return Link::dre_flag(); }, frame_budget_us)) {
+        return false;
     }
     Link::data(v);
     return true;
 }
 
-/// The last stop bit gone: TXC up, bounded.
-void wait_tx_done() {
-    for (uint32_t n = dre_spins; !Link::txc_flag() && n != 0u; --n) {
-    }
+/// The last stop bit gone: TXC up, bounded. False on the time-out.
+bool wait_tx_done() {
+    return brio::wait_until<Ruler>([] { return Link::txc_flag(); }, frame_budget_us);
 }
 
+/// A byte of an answer frame: one refused is the frame's checksum failing
+/// at the DUT, which retries.
 void put_link(uint8_t b) { (void)put_byte(b); }
 
 /// Four bit times at the command baud before an answer: RXC rises at the
 /// middle of the stop bit, half a bit before the sender's own TXC, and
 /// the DUT listens again only after its line_listen(). 35 us.
 void answer(Op op, const uint8_t* p, uint8_t len) {
-    wait_us(35u);
+    brio::spin_us<Ruler>(35u);
     if (line_talk(command_baud)) {
         slink::write_frame(put_link, op, p, len);
-        wait_tx_done();
+        // A frame whose last stop bit never leaves is the DUT's to miss and
+        // retry: command mode comes back either way.
+        (void)wait_tx_done();
     }
     (void)command_mode();
 }
@@ -338,7 +333,7 @@ slink::Report run_pulse(const slink::Params& a) {
                                                        .enable = true});
     const uint32_t t0 = Ticker::millis();
     if (a.delay_ms) {
-        wait_ms(a.delay_ms);
+        brio::spin_us<Ruler>(a.delay_ms * 1000u);
     }
     for (uint16_t i = 0; i < n; ++i) {
         if (i) {
@@ -347,10 +342,10 @@ slink::Report run_pulse(const slink::Params& a) {
             }
         }
         // The echo must be back down, or there is no rising edge to
-        // capture. Give the DUT a bounded moment to lower it.
-        const uint32_t tl = Ticker::millis();
-        while (EchoPin::read() && Ticker::millis() - tl < 5u) {
-        }
+        // capture. Give the DUT a bounded moment to lower it: an echo still
+        // high then leaves the shot no edge, and the capture below counts it
+        // a miss.
+        (void)brio::wait_until<Ruler>([] { return !EchoPin::read(); }, 5'000u);
         echo_arm();
         Watch::clear_flags(Watch::match_flag(0));
         const uint32_t at = Watch::count32() + lead_ticks;
@@ -370,7 +365,7 @@ slink::Report run_pulse(const slink::Params& a) {
         // hold_us is a FLOOR on the pulse width, not its length: an idle
         // DUT answers in a microsecond, and a missed shot must never be
         // blamed on a pulse too short to latch.
-        if (a.hold_us) wait_us(a.hold_us);
+        if (a.hold_us) brio::spin_us<Ruler>(a.hold_us);
         StimPin::clear();
         if (gap_n < slink::max_shots) gaps[gap_n++] = ticks;
         if (ticks != slink::no_capture) {
@@ -392,17 +387,10 @@ slink::Report run_capture(const slink::Params& a) {
     slink::Report r{};
     settle();
     gap_n = 0;
-    if (a.delay_ms) wait_ms(a.delay_ms);
+    if (a.delay_ms) brio::spin_us<Ruler>(a.delay_ms * 1000u);
     echo_arm();
     const uint32_t zero = Watch::count32();
-    const uint32_t ts = Ticker::millis();
-    bool got = false;
-    while (Ticker::millis() - ts < a.deadline_ms) {
-        if (echo_captured()) {
-            got = true;
-            break;
-        }
-    }
+    const bool got = brio::wait_until<Ruler>([] { return echo_captured(); }, a.deadline_ms * 1000u);
     r.count = 1;
     if (got) {
         r.ticks = Watch::cc32(1) - zero;
@@ -426,13 +414,14 @@ slink::Report run_sfd_byte(const slink::Params& a) {
         r.flags |= slink::report_failed;
         return r;
     }
-    if (a.delay_ms) wait_ms(a.delay_ms);
+    if (a.delay_ms) brio::spin_us<Ruler>(a.delay_ms * 1000u);
     if (!line_talk(*b)) {
         r.flags |= slink::report_failed;
         return r;
     }
-    (void)put_byte(a.value);
-    wait_tx_done();
+    if (!put_byte(a.value) || !wait_tx_done()) {
+        r.flags |= slink::report_timed_out;
+    }
     r.count = 1;
     r.aux = static_cast<uint8_t>(b->reg >> 8);
     r.status = static_cast<uint8_t>(b->reg);
@@ -446,7 +435,7 @@ slink::Report run_sfd_byte(const slink::Params& a) {
 slink::Report run_twi_write(const slink::Params& a) {
     slink::Report r{};
     settle();
-    if (a.delay_ms) wait_ms(a.delay_ms);
+    if (a.delay_ms) brio::spin_us<Ruler>(a.delay_ms * 1000u);
     const I2cSpeed speed = a.rate >= 1'000'000u ? I2cSpeed::fast_plus_1m
                            : a.rate >= 400'000u ? I2cSpeed::fast_400k
                                                 : I2cSpeed::standard_100k;
@@ -472,10 +461,7 @@ slink::Report run_twi_write(const slink::Params& a) {
     } else {
         // The engine runs from its own vector (init() enables the NVIC
         // line; SERCOM3_Handler below), the completion a flag spun on here.
-        const uint32_t ts = Ticker::millis();
-        while (!xfer_done && Ticker::millis() - ts < a.deadline_ms) {
-        }
-        if (xfer_done) {
+        if (brio::wait_until<Ruler>([] { return xfer_done; }, a.deadline_ms * 1000u)) {
             status = xfer_status;
         }
     }

@@ -519,10 +519,13 @@ decline whole, and letters 3, 5 and 6 run what needs no ruler).**
   USART2 at BAUD 174 for 460800 (64 x 20 MHz / (16 x 460800) = 173.6).
 - `Clock<internal, 20 MHz, div4>` (family_probe): CLKSEL OSCHF,
   MCLKCTRLB 0x03 (DIV4, PEN), MCLKTIMEBASE 5 - 5 MHz, PA7 toggling.
-- Letter r (ten runs of ten, 9 verdicts each): the reset state as above,
-  read by the program itself before its init - OSCHFCTRLA 0x00 at every
-  reset - the fuse's 20 MHz matching the type's claim, TIMEBASE 20 and
-  the prescaler off after the init, OSCHFCTRLA's bits 3:2 left as found.
+- Letter r (ten runs of ten): the reset state as above, read by the
+  program itself before its init - OSCHFCTRLA 0x00 at every reset - the
+  fuse's 20 MHz matching the type's claim, TIMEBASE 20 and the prescaler
+  off after the init. Whether the init's read-modify-write keeps
+  OSCHFCTRLA's bits 3:2 is not judged on this part: they read 0 at reset,
+  where keeping them and clearing them look alike, and the letter skips
+  that check with the reason.
 - **TIMEBASE follows every rate** (letter 1, ten runs of ten): across the
   twelve prescalers from the 20 MHz crystal MCLKTIMEBASE reads
   ceil(CLK_PER / 1 MHz) after every switch - through `DynamicClock::set()`
@@ -547,9 +550,10 @@ decline whole, and letters 3, 5 and 6 run what needs no ruler).**
   without the test bit or with it (ten runs of ten) - 12.3.5.1's
   "the selected source is active" read as running; so the test bit's
   verdict needs a running crystal and declines here.
-- Letter 7 (ten of ten, 6 verdicts): MCLKSTATUS with the crystal as the
-  main clock has EXTS set and no switch pending; RUNSTDBY toggles through
-  CCP without touching bits 3:2.
+- Letter 7 (ten of ten): MCLKSTATUS with the crystal as the main clock
+  has EXTS set and no switch pending; RUNSTDBY toggles through CCP. That
+  the two writes keep bits 3:2 is skipped here for letter r's reason:
+  they read 0.
 - **XOSCHF's start-up per CSUTHF** (letter 8, twelve runs of twelve):
   from the protected write to EXTS, with OSCHF (untuned) as the ruler,
   15 / 52 / 203..208 us for 256 / 1k / 4k cycles - the counted cycles at

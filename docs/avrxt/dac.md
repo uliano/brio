@@ -198,7 +198,8 @@ reference within two conversions. The board's net carries 10 kOhm to
 ground, the AVR EA's assembly's: a falling step is then that resistor's
 RC (10 kOhm x 100 nF = 1 ms), the half's waits (2 to 5 ms after a
 falling step) hold, and the whole DA/DB half reads 80 of 80, ten runs
-of ten - the wire within -39..+25 LSB12 of 4 x code on the ramp, the
+of ten, with letter v's VDD/10 against VREFA skipped (no VDDDIV10
+input) - the wire within -39..+25 LSB12 of 4 x code on the ramp, the
 buffered pin 9..14 counts over the internal node (wire - DAC0,
 differential).
 

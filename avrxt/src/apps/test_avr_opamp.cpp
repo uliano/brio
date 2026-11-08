@@ -55,6 +55,7 @@
 #include "avrxt/userrow.hpp"
 #include "avrxt/vref.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 namespace {
@@ -103,7 +104,7 @@ using Op2 = Opamp<2>;
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
 
 // ---- the test harness -------------------------------------------------------------
-// The letter registry, the verdict lines and the two tallies bench.py
+// The letter registry, the verdict lines and the two tallies bin/brio
 // reads all live in util/testbench.hpp; these two are the shorthand the
 // tests below call.
 TestBench<Serial> bench;
@@ -674,18 +675,27 @@ void tf_instrumentation() {
 
 // ---- g: the internal timer, the READY event, and a clock rebase -----------------------
 
+/// The longest a settle measurement waits, in counts of the stopwatch
+/// (CLK_PER from zero): SETTLE at most 127 us plus the warm-up of a dozen
+/// or so is some 140 us, 3400 counts at 24 MHz; 30000 (1.25 ms) is nine
+/// of them and stays within half the 16-bit counter's wrap, so a late
+/// poll cannot read a wrapped count as an early one.
+constexpr uint16_t settle_budget = 30'000;
+static_assert(brio::span_fits<16>(settle_budget));
+
 /// Start OP0's settle timer with the stopwatch zeroed on the same
 /// instruction stream and report the ticks the CPU counted to SETTLED.
 /// Interrupts are off: at 460800 baud the console's own DRE interrupt
 /// fires every 22 us, and a hundred-microsecond measurement made
-/// through it wanders by whole microseconds.
+/// through it wanders by whole microseconds. The wait is bounded on the
+/// stopwatch itself, the one clock that runs with interrupts masked; a
+/// SETTLED that never comes reads as the budget.
 uint16_t poll_settling() {
     P::CriticalSection cs;
     Ready::clear_capt();
     Ready::count(0);
     Op0::restart();                        // the settle timer starts here
-    uint32_t guard = 0;
-    while (!Op0::settled() && ++guard < 400000u) {
+    while (!Op0::settled() && Ready::count() < settle_budget) {
     }
     return Ready::count();
 }
@@ -699,10 +709,12 @@ uint16_t event_settling() {
     Ready::clear_capt();
     Ready::count(0);
     ChEnable::pulse();
-    uint32_t guard = 0;
-    while (!Ready::capt_flag() && ++guard < 400000u) {
+    // Bounded on the stopwatch, counting from the strobe (settle_budget).
+    while (!Ready::capt_flag()) {
+        if (Ready::count() >= settle_budget) {
+            return Ready::capt_flag() ? Ready::capture() : 0;
+        }
     }
-    if (guard >= 400000u) return 0;
     return Ready::capture();
 }
 

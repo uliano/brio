@@ -142,12 +142,18 @@ void verdict(const char* name, bool ok) {
     print(serial, "  ", ok ? "PASS" : "FAIL", "  ", name, crlf);
 }
 
-/// Everything printed so far is really out of the shifter - the last
-/// thing to do before a reset takes the console with it.
-void console_drain() {
-    while (!Serial::tx_idle()) {
+/// Everything printed so far is really off the wire (tx_idle() covers
+/// the shifter) - the last thing to do before a reset takes the console
+/// with it. Bounded at 200 ms as a time on the delay verb, a millisecond
+/// a turn on the crystal: this suite runs no tick and owns no timer (the
+/// file header), so neither the kernel tick nor a counter of its own is
+/// there to time it. False on a wedged console.
+bool console_drain() {
+    for (uint16_t ms = 0; ms < 200u; ++ms) {
+        if (Serial::tx_idle()) return true;
+        delay_us(clock, 1000);
     }
-    delay_us(clock, 2000);
+    return Serial::tx_idle();
 }
 
 const char* status_name(NvHeapStatus s) {
@@ -461,7 +467,7 @@ void td_reset() {
 
     print(serial, "  block at ", hex(b->address), ", map seq ", token.seq,
           " - resetting the board now", crlf);
-    console_drain();
+    (void)console_drain();          // a line cut by the reset costs only its text
     Reset::software();
 }
 
@@ -537,12 +543,12 @@ void tv_verify() {
             "writes", wrong == 0);
 
     if (present == 0 && r.status == NvHeapStatus::empty && heap.count() == 0) {
+        // The branch's own condition is the clean slate's coherence:
+        // printed, and the write below is what is judged.
         print(serial, "  STATE: clean slate - no map at all, the heap is "
                       "empty and mountable (a chip erase went through here)",
               crlf);
-        verdict("a clean slate is a coherent state: empty, mountable, ready",
-                true);
-        verdict("and the flash takes a block straight away",
+        verdict("a clean slate takes a block straight away",
                 write_block(id_small, 100) && block_holds(id_small, 100));
     } else {
         print(serial, "  STATE: tables present - ", present, " of ",

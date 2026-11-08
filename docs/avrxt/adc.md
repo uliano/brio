@@ -387,7 +387,8 @@ AO (request/reply), it does not touch the registers.
 
 On the **AVR128DA48** (rev A7, 5 V; the board's net with its 10 kOhm
 to ground, which the DAC's weak sink needs - [dac.md](dac.md) - the
-whole half 80 of 80 in ten runs of ten) the wire reads within the
+whole half 80 of 80 in ten runs of ten, letter v's VDD/10 against VREFA
+skipped: the part has no VDDDIV10 input) the wire reads within the
 buffer's offset of the internal path, and the internal paths measure as
 on the DB: the
 reference cross-check through DAC0 within a few counts of every

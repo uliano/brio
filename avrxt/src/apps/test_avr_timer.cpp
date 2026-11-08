@@ -19,6 +19,11 @@
 // R/G and LED2 R flicker), PD6 = DAC0 -> AC AINP3 (internal to the
 // pin). Nothing to wire. Event channels: 0 PB5, 1 software / LUT4,
 // 2 PD0, 3 PC1 or PC0, 4/5 internal generators - re-sourced per test.
+// PC4..PC7 (USART1's ALT1 pads, TCA1's PORTC route, the ALT1 outputs of
+// LUT1 and the comparators, EVOUTC ALT1) are, on the AVR EA board, one
+// net each with PE0..PE3 and the partner board: a letter checks that a
+// pad is not held low before it drives it, skips the leg when it is, and
+// every letter hands the four back as inputs (net_free(), quiesce()).
 //
 // Commands: ? | 1 frequency | 2 PWM16 duty | 3 heartbeat | 4 one-shot
 // | 5 Pwm8 | 6 pulse counter | 7 32-bit cascade | 8 tick + timeout
@@ -225,14 +230,67 @@ bool near(int32_t a, int32_t b, int32_t tol) {
 void hold_ms(uint32_t ms) {
     while (ms--) delay_us(clock, 1000);
 }
-// Wait for at least n captures, at most ms milliseconds.
-bool wait_captures(uint16_t n, uint32_t ms) {
+// THE WAITS. This suite runs with the kernel tick paused (its holds are
+// counted in crystal time, above) and every TCB is a letter's instrument,
+// so neither util/test_wait.hpp's wait on the tick nor a ruler over a
+// counter of its own is free here: its time-outs are counted on the
+// delay verb, each turn at least the delay it names on the crystal.
+
+/// Wait for at least n captures, at most ms milliseconds: false on the
+/// time-out (each turn at least 1 ms of crystal time).
+[[nodiscard]] bool wait_captures(uint16_t n, uint32_t ms) {
     while (ms--) {
         if (captures >= n) return true;
         delay_us(clock, 1000);
     }
-    return false;
+    return captures >= n;
 }
+/// The same wait where the letter judges the capture itself: a time-out
+/// leaves cap_a and cap_b at the 0 clear_captures() wrote, which every
+/// verdict after an await_captures() refuses (each expects a period or
+/// a width of many ticks). A verdict a zero would pass judges
+/// wait_captures()'s answer instead.
+void await_captures(uint16_t n, uint32_t ms) { (void)wait_captures(n, ms); }
+
+/// Every queued console byte off the wire, bounded on the delay verb (at
+/// least 10 us a turn, 20000 turns: 200 ms): false on a wedged console.
+bool console_drain() {
+    for (uint16_t turn = 0; turn < 20000u; ++turn) {
+        if (Serial::tx_idle()) return true;
+        delay_us(clock, 10);
+    }
+    return Serial::tx_idle();
+}
+// ---- the partner's nets ----------------------------------------------------------
+// PC4..PC7 are USART1's ALT1 pads, and on a board with the PC-PE jumpers
+// (board.hpp's board::pc_pe_jumpers, the AVR EA's) each is one net with
+// PE0..PE3, which run on to the partner board's wires. A letter that
+// drives one of them (l and w drive PC6, t PC4..PC6, e PC4, PC6 and PC7,
+// k PC4) asks net_free() first and skips that leg when it says no, and
+// quiesce() hands all four back around every letter: inputs with no
+// pull, as a reset leaves them.
+using NetPads = PinSet<Pin<'C', 4>, Pin<'C', 5>, Pin<'C', 6>, Pin<'C', 7>>;
+using NetPc4 = PinSet<Pin<'C', 4>>;
+using NetPc6 = PinSet<Pin<'C', 6>>;
+using NetPc7 = PinSet<Pin<'C', 7>>;
+using NetPc46 = PinSet<Pin<'C', 4>, Pin<'C', 6>>;
+using NetPc456 = PinSet<Pin<'C', 4>, Pin<'C', 5>, Pin<'C', 6>>;
+
+/// Whether nothing else holds the pads of `Pads` low: each read with its
+/// pull-up on after 100 us (a pull-up of tens of kilohms charges the tens
+/// of picofarads of a pad, a jumper and a wire within microseconds), then
+/// back to no pull. A pad read low is driven by the partner, and a high
+/// driven from here would fight it; a partner driving high reads as the
+/// pull-up does, which this check cannot tell apart.
+template <typename Pads>
+bool net_free() {
+    Pads::input(PinPull::up);
+    delay_us(clock, 100);
+    const bool high = Pads::read() == Pads::mask;
+    Pads::input();
+    return high;
+}
+
 // Stop everything a previous test may have left running.
 void quiesce() {
     tcb0_hook = nullptr;
@@ -241,6 +299,7 @@ void quiesce() {
     T0::enable_capt_interrupt(false); T1::enable_capt_interrupt(false);
     Tca<0>::disable(); Tca<1>::disable();
     ChShot::off(); ChSoft::off(); ChGen::off(); ChC::off(); ChCarry::off(); ChSnap::off();
+    NetPads::input();
     clear_captures();
 }
 
@@ -266,20 +325,19 @@ void t1_frequency() {
         verdict("period within 1 tick", near(t, static_cast<int32_t>(expect), 1));
         verdict("hz() rounds back", near(static_cast<int32_t>(FrequencyMeter<T0>::hz(t)), static_cast<int32_t>(hz), static_cast<int32_t>(hz / 200 + 1)));
     }
-    // set_hz under a running output (buffered CMP0)
-    clear_captures();
+    // set_hz under a running output (buffered CMP0). The captures of the
+    // 100 kHz before the change lands would count too: the meter's
+    // interrupt every 10 us slows the main context enough that five of
+    // them can arrive before set_hz() returns (measured at 20 MHz: the
+    // old period read), at any board rate. So the buffered CMP0 is let
+    // land first - at the end of the running 10 us period - and the one
+    // capture that straddles the change (half a 2 kHz period at most)
+    // pass: 2 ms is that 0.5 ms and three whole new periods; then the
+    // captures are counted afresh.
     Gen::set_hz(2000);
-    if constexpr (!at24) {
-        // The captures of the 100 kHz before the change lands count too:
-        // at 20 MHz the meter's interrupt every 10 us slows the main
-        // context enough that five of them arrive before set_hz() returns
-        // (measured: the old period read). Let the buffered CMP0 land,
-        // then count. The 24 MHz images keep their text; the race is
-        // theirs too, and the fix waits for a run on those boards.
-        hold_ms(2);
-        clear_captures();
-    }
-    wait_captures(5, 100);
+    hold_ms(2);
+    clear_captures();
+    await_captures(5, 100);
     if constexpr (at24) {
         print(serial, "  set_hz(2000) under run: period ticks=", cap_a, " expect 12000, actual_hz=", Gen::actual_hz(), crlf);
     } else {
@@ -294,7 +352,7 @@ void t1_frequency() {
     tcb0_hook = tcb0_frequency;
     FrequencyMeter<T0>::init(clock, ChGen{}, TcbClock::tca0);
     clear_captures();
-    wait_captures(3, 100);
+    await_captures(3, 100);
     print(serial, "  CLK_TCA (div64) clocked TCB: period ticks=", cap_a, " expect 750", crlf);
     verdict("TCB on CLK_TCA: 500 Hz = 750 ticks of CLK_PER/64", near(cap_a, 750, 1));
     // ... and restarting with the TCA (SYNCUPD): the TCB restarts at
@@ -304,9 +362,10 @@ void t1_frequency() {
     T0::capture_on(ChGen{});
     T0::enable_capt_interrupt(true);
     clear_captures();
-    wait_captures(3, 100);
+    // A time-out would leave cap_a at the 0 the verdict accepts: judged.
+    const bool synced = wait_captures(3, 100);
     print(serial, "  with SYNCUPD (restart at the TCA's TOP = the captured edge): ", cap_a, " (finding: 1 = counter just restarted)", crlf);
-    verdict("SYNCUPD aligned capture reads the restart", cap_a <= 1);
+    verdict("SYNCUPD aligned capture reads the restart", synced && cap_a <= 1);
     quiesce();
 }
 
@@ -346,7 +405,7 @@ void t2_pwm16() {
         Pwm16::duty<0>(d);
         hold_ms(3);
         clear_captures();
-        wait_captures(2, 50);
+        await_captures(2, 50);
         print(serial, "  duty ", d, ": PulseWidthMeter width=", cap_a, crlf);
         verdict("PulseWidthMeter agrees +-1", near(cap_a, d, 1));
     }
@@ -381,7 +440,7 @@ void t3_heartbeat() {
     tcb0_hook = tcb0_width;
     PulseWidthMeter<T0>::init(clock, ChGen{});
     clear_captures();
-    wait_captures(3, 100);
+    await_captures(3, 100);
     print(serial, "  pulse width: ", cap_a, " ticks = ", PulseWidthMeter<T0>::us(cap_a), " us", crlf);
     verdict("pulse 500 us +-1 us", near(PulseWidthMeter<T0>::us(cap_a), 500, 1));
     quiesce();
@@ -403,7 +462,7 @@ void t4_one_shot() {
         Shot::fire();
         delay_us(clock, 2);                      // the counter starts two CLK_PER after the event
         const bool busy = Shot::busy();
-        wait_captures(1, 20);
+        await_captures(1, 20);
         print(serial, "  ", w, " us: width=", cap_a, " ticks = ", PulseWidthMeter<T1>::us(cap_a), " us, captures=", captures, crlf);
         verdict("one pulse captured", captures == 1);
         verdict("width within 2 ticks", near(cap_a, static_cast<int32_t>(w * mhz), 2));
@@ -421,7 +480,7 @@ void t4_one_shot() {
     Shot::init(clock, 100, ChSoft{}, {.async = true});
     clear_captures();
     Shot::fire();
-    wait_captures(1, 20);
+    await_captures(1, 20);
     print(serial, "  async 100 us: width=", cap_a, " ticks", crlf);
     verdict("async pulse 100 us within 4 ticks", near(cap_a, tpms / 10u, 4));
     quiesce();
@@ -441,7 +500,7 @@ void t5_pwm8() {
     for (uint16_t d : duties) {
         Pwm::duty(d);
         clear_captures();
-        wait_captures(3, 20);
+        await_captures(3, 20);
         const uint16_t pm = DutyMeter<T0>::duty_permille({cap_a, cap_b});
         print(serial, "  duty ", d, ": period=", cap_a, " width=", cap_b, " = ", pm, " permille", crlf);
         verdict("period 256 ticks", cap_a == 256);
@@ -500,15 +559,28 @@ void t7_cascade() {
     verdict("1 s within 0.2 % (RTC millis vs crystal)", near(static_cast<int32_t>(b - a), SysClock::hz, SysClock::hz / 500u));
     verdict("monotonic", c >= b && b >= a);
     // the Ticker (RTC from the internal OSC32K) against the crystal: a finding
+    // The Ticker's 1000 ms are waited on the Ticker itself, bounded by the
+    // cascade's crystal count: 1.5 s, the OSC32K's 10 % with room. A
+    // Ticker that stops fails the verdict below instead of hanging.
     Ticker::resume();
     hold_ms(5);
     Wide::reset();
     const uint32_t m0 = Ticker::millis();
-    while (Ticker::millis() - m0 < 1000) {}
-    const uint32_t ticker_s = Wide::read();
+    uint32_t ticker_s = 0;
+    bool ticker_ran = false;
+    for (;;) {
+        ticker_s = Wide::read();
+        if (Ticker::millis() - m0 >= 1000u) {
+            ticker_s = Wide::read();
+            ticker_ran = true;
+            break;
+        }
+        if (ticker_s > SysClock::hz / 2u * 3u) break;
+    }
     Ticker::pause();
     const int32_t ppm = static_cast<int32_t>((static_cast<int64_t>(SysClock::hz) - ticker_s) * 1'000'000 / static_cast<int32_t>(SysClock::hz));
     print(serial, "  Ticker 1000 ms = ", ticker_s, " crystal ticks: Ticker runs ", ppm >= 0 ? "+" : "", ppm, " ppm (OSC32K; finding, informative)", crlf);
+    if (!ticker_ran) verdict("the Ticker counted 1000 ms within 1.5 s of the crystal", false);
     verdict("crossed 65536: the MSB counted", b > 65535);
     Wide::reset();
     verdict("reset", Wide::read() < 1000);
@@ -525,7 +597,7 @@ void t8_tick_timeout() {
     tcb1_hook = tcb1_frequency;
     FrequencyMeter<T1>::init(clock, ChCarry{});      // ... measured by TCB1 against the same crystal
     clear_captures();
-    wait_captures(3, 100);
+    await_captures(3, 100);
     const uint16_t period = cap_a;
     irq_count = 0;
     hold_ms(200);
@@ -771,11 +843,23 @@ void tcb0_stamp() {
     else { stamp_end = v; stamp_phase = 2; T0::capture_on_events(false); }
 }
 
+/// PD0 low within 20 ms - twice the slowest period a stamp is taken on
+/// (100 Hz) - each turn at least 1 us of crystal time, so the stamps arm
+/// within a microsecond of the fall: false when it stayed high.
+bool gen_low() {
+    for (uint16_t turn = 0; turn < 20000u; ++turn) {
+        if (!GenPin::read()) return true;
+        delay_us(clock, 1);
+    }
+    return !GenPin::read();
+}
+
 uint16_t measure_duration() {                    // 0xFFFF = stamps missed
     // Arm only while PD0 is LOW: a sync CAPT-in enabled on a channel
     // already high sees a spurious rising edge (its edge detector
-    // starts from 0) and the stamps pair with the wrong events.
-    for (uint16_t i = 0; i < 30000 && GenPin::read(); ++i) {}
+    // starts from 0) and the stamps pair with the wrong events. A PD0
+    // that never falls takes no stamp.
+    if (!gen_low()) return 0xFFFF;
     T1::clear_capt(); T3::clear_capt();
     stamp_phase = 0;
     // The CAPT user still listens where the LAST measurement left it (the
@@ -872,7 +956,7 @@ void to_meter_variants() {
 
     tcb0_hook = tcb0_width;
     PulseWidthMeter<T0>::init(clock, ChGen{}, TcbClock::div1, /*low=*/true);
-    clear_captures(); wait_captures(3, 20);
+    clear_captures(); await_captures(3, 20);
     if constexpr (at24) {
         print(serial, "  low time: ", cap_a, " ticks (expect 16800)", crlf);
     } else {
@@ -883,14 +967,14 @@ void to_meter_variants() {
 
     tcb0_hook = tcb0_frequency;
     FrequencyMeter<T0>::init(clock, ChGen{}, TcbClock::div1, /*falling=*/true);
-    clear_captures(); wait_captures(3, 20);
+    clear_captures(); await_captures(3, 20);
     print(serial, "  period between falling edges: ", cap_a, " ticks", crlf);
     verdict(at24 ? "FRQ falling = 24000 +-1" : "FRQ falling = 1 ms +-1", near(cap_a, tpms, 1));
     T0::disable();
 
     tcb0_hook = tcb0_duty;
     DutyMeter<T0>::init(clock, ChGen{}, TcbClock::div1, /*inverted=*/true);
-    clear_captures(); wait_captures(3, 20);
+    clear_captures(); await_captures(3, 20);
     print(serial, "  inverted: period ", cap_a, ", width (low) ", cap_b, crlf);
     verdict(at24 ? "inverted period 24000 +-1" : "inverted period 1 ms +-1", near(cap_a, tpms, 1));
     verdict(at24 ? "inverted width = low time (16800 +-2)" : "inverted width = low time (+-2)",
@@ -900,7 +984,7 @@ void to_meter_variants() {
     // div2 and CLK_TCA1 as counter clocks, same 1 kHz signal
     tcb0_hook = tcb0_frequency;
     FrequencyMeter<T0>::init(clock, ChGen{}, TcbClock::div2);
-    clear_captures(); wait_captures(3, 20);
+    clear_captures(); await_captures(3, 20);
     if constexpr (at24) {
         print(serial, "  div2 period: ", cap_a, " ticks (expect 12000)", crlf);
     } else {
@@ -910,7 +994,7 @@ void to_meter_variants() {
     T0::disable();
     Tca<1>::init({.mode = TcaMode::normal, .clock = TcaClock::div8, .period = 0xFFFF});
     FrequencyMeter<T0>::init(clock, ChGen{}, TcbClock::tca1);
-    clear_captures(); wait_captures(3, 20);
+    clear_captures(); await_captures(3, 20);
     if constexpr (at24) {
         print(serial, "  CLK_TCA1 (div8, 3 MHz) period: ", cap_a, " ticks (expect 3000)", crlf);
     } else {
@@ -940,17 +1024,24 @@ void to_meter_variants() {
     FrequencyMeter<T0>::init(clock, ChShot{});
     verdict("Pwm8 on the ALT1 pin accepted", Pwm8<T2>::init(TcbClock::div1, /*alt_pin=*/true));
     Pwm8<T2>::duty(128);
-    clear_captures(); wait_captures(3, 20);
+    clear_captures(); await_captures(3, 20);
     print(serial, "  ALT1 (PB4) period: ", cap_a, " ticks (expect 256)", crlf);
     verdict("ALT1 route outputs (period 256 +-1)", near(cap_a, 256, 1));
     Pwm8<T2>::duty(0); T2::disable(); T0::disable(); ChShot::off(); tcb0_hook = nullptr;
 
     // OVF safety net: TOP lowered below a running CNT (polled flags)
+    // CNT past 40000 within 5 ms (it gets there in 2 ms at 20 MHz), each
+    // turn at least 1 us of crystal time: a 20000-count window above it
+    // before TOP, some 830 us, so a turn cannot step over it.
     T1::init({.mode = TcbMode::periodic, .clock = TcbClock::div1, .compare = 60000});
-    while (T1::count() < 40000) {}
+    bool past = false;
+    for (uint16_t turn = 0; turn < 5000u && !past; ++turn) {
+        past = T1::count() >= 40000u;
+        if (!past) delay_us(clock, 1);
+    }
     T1::compare(1000);                           // TOP below CNT: to MAX first, OVF, then restart
     hold_ms(3);
-    verdict("OVF fired (counter ran to MAX)", T1::ovf_flag());
+    verdict("OVF fired (counter ran to MAX)", past && T1::ovf_flag());
     T1::clear_ovf(); T1::clear_capt();
     hold_ms(1);
     verdict("periodic resumed at the new TOP", T1::capt_flag());
@@ -999,12 +1090,12 @@ void tr_rebase_live() {
     Beat::init(DynClock{}, 1000, 0x01, false);
     Beat::pulse_us<0>(300);
     FrequencyMeter<T0>::init(DynClock{}, ChGen{});
-    clear_captures(); wait_captures(3, 20);
+    clear_captures(); await_captures(3, 20);
     const uint16_t t24 = cap_a;
     const uint32_t us24 = FrequencyMeter<T0>::us(cap_a);
     verdict(at24 ? "at 24 MHz: 24000 ticks" : "at the board rate: 1 ms of ticks", near(t24, tpms, 1));
     verdict(at24 ? "switch to 12 MHz" : "switch to half the rate", DynClock::set(SysClock::hz / 2u));
-    clear_captures(); wait_captures(3, 40);
+    clear_captures(); await_captures(3, 40);
     const uint16_t t12 = cap_a;
     const uint32_t us12 = FrequencyMeter<T0>::us(cap_a);
     if constexpr (at24) {
@@ -1016,7 +1107,7 @@ void tr_rebase_live() {
     verdict(at24 ? "ticks follow CLK_PER (12000 +-2)" : "ticks follow CLK_PER (half, +-2)", near(t12, tpms / 2u, 2));
     verdict("microseconds stand still (1000 +-1)", near(us12, 1000, 1));
     verdict(at24 ? "back to 24 MHz" : "back to the board rate", DynClock::set(SysClock::hz));
-    clear_captures(); wait_captures(3, 20);
+    clear_captures(); await_captures(3, 20);
     verdict(at24 ? "restored (24000 +-1)" : "restored (1 ms +-1)", near(cap_a, tpms, 1));
     quiesce();
 }
@@ -1034,7 +1125,7 @@ void ts_tca_split() {
     ChC::source(EvPin<Pwm8Pin>{});
     tcb0_hook = tcb0_frequency;
     FrequencyMeter<T0>::init(clock, ChC{});
-    clear_captures(); wait_captures(3, 20);
+    clear_captures(); await_captures(3, 20);
     print(serial, "  split PWM period: ", cap_a, " ticks (expect 4096)", crlf);
     verdict("split mode runs (256 x div16)", near(cap_a, 4096, 1));
     T0::disable();
@@ -1062,7 +1153,7 @@ void ts_tca_split() {
     verdict("FrequencyGenerator init after split", Gen::init(clock, 1000));
     ChGen::source(EvPin<GenPin>{});
     FrequencyMeter<T0>::init(clock, ChGen{});
-    clear_captures(); wait_captures(3, 20);
+    clear_captures(); await_captures(3, 20);
     if constexpr (at24) {
         print(serial, "  after the escape: period ", cap_a, " ticks (expect 24000)", crlf);
     } else {
@@ -1094,7 +1185,7 @@ void td_pwm_centered() {
     DutyMeter<T0>::init(clock, ChGen{});
     verdict("init (event at bottom)", C::init(TcaClock::div1, 0x01, C::EventAt::bottom));
     C::duty<0>(3000);
-    clear_captures(); wait_captures(3, 20);
+    clear_captures(); await_captures(3, 20);
     if constexpr (at24) {
         print(serial, "  duty 3000/12000: period ", cap_a, ", width ", cap_b, crlf);
     } else {
@@ -1103,7 +1194,7 @@ void td_pwm_centered() {
     verdict(at24 ? "period = 2 x steps (24000 +-1)" : "period = 2 x steps (+-1)", near(cap_a, tpms, 1));
     verdict("width = 2 x CMP (6000 +-2)", near(cap_b, 6000, 2));
     C::duty<0>(6000);
-    hold_ms(3); clear_captures(); wait_captures(3, 20);
+    hold_ms(3); clear_captures(); await_captures(3, 20);
     verdict("buffered duty lands at BOTTOM (width 12000 +-2)", near(cap_b, 12000, 2));
     T0::disable();
 
@@ -1191,7 +1282,7 @@ void tl_ccl_logic() {
     ChCarry::source(Lut<2>::OutEvent{});                       // the pair's output
     tcb0_hook = tcb0_frequency;
     FrequencyMeter<T0>::init(clock, ChCarry{});
-    clear_captures(); wait_captures(3, 20);
+    clear_captures(); await_captures(3, 20);
     if constexpr (at24) {
         print(serial, "  DFF output period: ", cap_a, " ticks (expect 24000)", crlf);
     } else {
@@ -1219,6 +1310,11 @@ void tl_ccl_logic() {
     Ccl::disable();
     Ccl::sequencer<1>(Sequencer::none);
     Lut<2>::disable(); Lut<3>::disable();
+    if (!net_free<NetPc6>()) {
+        bench.skip("PC6 is held low from the partner's side: the LUT1 ALT1 leg");
+        ccl_quiesce(); quiesce();
+        return;
+    }
     Lut<1>::init({.in0 = LutInput::mask, .truth = 0x01, .output_pin = true, .alt_pin = true});
     Ccl::enable();
     delay_us(clock, 5);
@@ -1244,7 +1340,7 @@ void ti_ccl_inputs() {
     ChCarry::source(Lut<2>::OutEvent{});
     tcb0_hook = tcb0_frequency;
     FrequencyMeter<T0>::init(clock, ChCarry{});
-    clear_captures(); wait_captures(3, 20);
+    clear_captures(); await_captures(3, 20);
     print(serial, "  WO0 through the LUT: ", cap_a, " ticks", crlf);
     verdict(at24 ? "TCA0 WO0 as LUT input (24000 +-1)" : "TCA0 WO0 as LUT input (1 ms +-1)", near(cap_a, tpms, 1));
     T0::disable(); tcb0_hook = nullptr; Gen::stop();
@@ -1381,15 +1477,20 @@ void tw_ac_extras() {
     D::set_mv(1500, ac_ref_mv); hold_ms(2);
     verdict("PA7 follows the comparison", pa7_low && Pin<'A', 7>::read());
     Ac<0>::disable();
-    verdict(ac_count == 3 ? "AC2 out on PC6 (ALT1) init" : "AC1 out on PC6 (ALT1) init",
-            AcUp::init({.positive = AcPos::ainp3, .negative = AcNeg::dacref,
-                                                       .reference = Ref::v2048, .dacref = ac_dacref_code(1000, ac_ref_mv),
-                                                       .output_pin = true, .alt_pin = true}));
-    D::set_mv(500, ac_ref_mv); hold_ms(2);
-    const bool pc6_low = !Pin<'C', 6>::read();
-    D::set_mv(1500, ac_ref_mv); hold_ms(2);
-    verdict("PC6 (ALT1) follows the comparison", pc6_low && Pin<'C', 6>::read());
-    AcUp::disable();
+    if (net_free<NetPc6>()) {
+        verdict(ac_count == 3 ? "AC2 out on PC6 (ALT1) init" : "AC1 out on PC6 (ALT1) init",
+                AcUp::init({.positive = AcPos::ainp3, .negative = AcNeg::dacref,
+                            .reference = Ref::v2048, .dacref = ac_dacref_code(1000, ac_ref_mv),
+                            .output_pin = true, .alt_pin = true}));
+        D::set_mv(500, ac_ref_mv); hold_ms(2);
+        const bool pc6_low = !Pin<'C', 6>::read();
+        D::set_mv(1500, ac_ref_mv); hold_ms(2);
+        verdict("PC6 (ALT1) follows the comparison", pc6_low && Pin<'C', 6>::read());
+        AcUp::disable();
+        NetPc6::input();
+    } else {
+        bench.skip("PC6 is held low from the partner's side: the comparator's ALT1 output leg");
+    }
 
     // the window senses: an interrupt on entering each chosen state
     for (uint8_t k = 0; k < 3; ++k) {
@@ -1436,7 +1537,7 @@ void tk_ccl_extras() {
     ChCarry::source(Lut<2>::OutEvent{});
     tcb0_hook = tcb0_frequency;
     FrequencyMeter<T0>::init(clock, ChCarry{});
-    clear_captures(); wait_captures(3, 20);
+    clear_captures(); await_captures(3, 20);
     const uint16_t tcb_period = cap_a;
     T0::disable(); tcb0_hook = nullptr; T2::disable();
     print(serial, "  TCB2 WO through LUT2's input 2: period ", tcb_period, " ticks (expect 256)",
@@ -1447,23 +1548,28 @@ void tk_ccl_extras() {
     // 2. USART1's TXD (asynchronous, ALT1 pins PC4/PC5) on LUT2's input 1:
     //    four frames of 0x55 (8N1, LSB first: start 0, then 1 0 1 0 1 0 1
     //    0, stop 1) rise five times each - 20 rising edges counted by TCB1.
-    Lut<2>::init({.in1 = LutInput::usart_txd, .truth = 0xCC});
-    Ccl::enable();
-    ChCarry::source(Lut<2>::OutEvent{});
-    PulseCounter<T1>::init(ChCarry{});
-    const uint16_t u1_baud = usart_baud_reg(SysClock::hz, 115200);
-    const bool u1 = u1_baud != 0 && Usart<1>::init({.route = UsartRoute::alt1, .baud = u1_baud});
-    hold_ms(1);
-    PulseCounter<T1>::reset();
-    bool sent = u1;
-    for (uint8_t i = 0; i < 4; ++i) sent = sent && Usart<1>::send(0x55);
-    hold_ms(2);
-    const uint16_t txd_rises = PulseCounter<T1>::count();
-    Usart<1>::release();
-    T1::disable();
-    print(serial, "  USART1 TXD through LUT2's input 1: ", txd_rises,
-          " rising edges over four 0x55 frames (expect 20)", crlf);
-    verdict("USART1's TXD as a LUT input (five rises a 0x55 frame)", sent && txd_rises == 20);
+    if (net_free<NetPc4>()) {
+        Lut<2>::init({.in1 = LutInput::usart_txd, .truth = 0xCC});
+        Ccl::enable();
+        ChCarry::source(Lut<2>::OutEvent{});
+        PulseCounter<T1>::init(ChCarry{});
+        const uint16_t u1_baud = usart_baud_reg(SysClock::hz, 115200);
+        const bool u1 = u1_baud != 0 && Usart<1>::init({.route = UsartRoute::alt1, .baud = u1_baud});
+        hold_ms(1);
+        PulseCounter<T1>::reset();
+        bool sent = u1;
+        for (uint8_t i = 0; i < 4; ++i) sent = sent && Usart<1>::send(0x55);
+        hold_ms(2);
+        const uint16_t txd_rises = PulseCounter<T1>::count();
+        Usart<1>::release();
+        NetPc4::input();
+        T1::disable();
+        print(serial, "  USART1 TXD through LUT2's input 1: ", txd_rises,
+              " rising edges over four 0x55 frames (expect 20)", crlf);
+        verdict("USART1's TXD as a LUT input (five rises a 0x55 frame)", sent && txd_rises == 20);
+    } else {
+        bench.skip("PC4 is held low from the partner's side: the USART1 TXD leg");
+    }
     ccl_quiesce();
 
     // 3. SPI0's SCK (a pinless host, mode 0) on LUT2's input 2: four
@@ -1551,12 +1657,12 @@ void tk_ccl_extras() {
         // start) telescopes the jitter to the two ends: +-1 tick of the
         // capture each, divided by 32.
         clear_captures();
-        wait_captures(1, 200);
+        await_captures(1, 200);
         // The hook and the tally change together: a capture between the
         // two, through the old hook, counts without adding (measured once:
         // a mean of 32 periods over 33).
         cli(); tcb0_hook = tcb0_frequency_mean; captures = 0; mean_sum = 0; sei();
-        wait_captures(32, 200);
+        await_captures(32, 200);
         cli();
         const uint16_t n = captures;
         const uint32_t sum = mean_sum;
@@ -1564,7 +1670,7 @@ void tk_ccl_extras() {
         const uint16_t p = n >= 32 ? static_cast<uint16_t>((sum + n / 2) / n) : 0;
 #else
         clear_captures();
-        wait_captures(3, 200);
+        await_captures(3, 200);
         const uint16_t p = captures >= 3 ? static_cast<uint16_t>(cap_a) : 0;
 #endif
         T0::disable(); tcb0_hook = nullptr;
@@ -1631,33 +1737,38 @@ void te_evsys() {
     //    period, +-1 for the capture's synchronizer - first with no frame
     //    sent at all, then under four frames.
     using Xh = SyncHost<1, UsartRoute::alt1>;
-    ChCarry::source(EvUsartXck<1>{});
-    const bool xck_up = Xh::init(clock, 100'000u);
-    tcb0_hook = tcb0_frequency;
-    FrequencyMeter<T0>::init(clock, ChCarry{});
-    clear_captures();
-    const bool idle_got = wait_captures(3, 20);
-    const uint16_t xck_idle = cap_a;
-    bool sent = xck_up;
-    clear_captures();
-    for (uint8_t i = 0; i < 4; ++i) sent = sent && Usart<1>::send(0x5A);
-    const bool busy_got = wait_captures(3, 20);
-    const uint16_t xck_busy = cap_a;
-    T0::disable();
-    tcb0_hook = nullptr;
-    Usart<1>::release();
-    if constexpr (at24) {
-        print(serial, "  USART1 XCK event: period ", xck_idle, " ticks with no frame sent, ",
-              xck_busy, " under four 8N1 frames (expect 240)", crlf);
+    if (net_free<NetPc46>()) {
+        ChCarry::source(EvUsartXck<1>{});
+        const bool xck_up = Xh::init(clock, 100'000u);
+        tcb0_hook = tcb0_frequency;
+        FrequencyMeter<T0>::init(clock, ChCarry{});
+        clear_captures();
+        const bool idle_got = wait_captures(3, 20);
+        const uint16_t xck_idle = cap_a;
+        bool sent = xck_up;
+        clear_captures();
+        for (uint8_t i = 0; i < 4; ++i) sent = sent && Usart<1>::send(0x5A);
+        const bool busy_got = wait_captures(3, 20);
+        const uint16_t xck_busy = cap_a;
+        T0::disable();
+        tcb0_hook = nullptr;
+        Usart<1>::release();
+        if constexpr (at24) {
+            print(serial, "  USART1 XCK event: period ", xck_idle, " ticks with no frame sent, ",
+                  xck_busy, " under four 8N1 frames (expect 240)", crlf);
+        } else {
+            print(serial, "  USART1 XCK event: period ", xck_idle, " ticks with no frame sent, ",
+                  xck_busy, " under four 8N1 frames (expect ", SysClock::hz / 100'000u, ")", crlf);
+        }
+        verdict(at24 ? "the USART XCK generator: 100 kHz, 240 +-1 ticks"
+                     : "the USART XCK generator: 100 kHz, 10 us of ticks +-1", sent && busy_got &&
+                near(xck_busy, SysClock::hz / 100'000u, 1));
+        verdict("and a synchronous host's XCK runs with no frame in flight", idle_got &&
+                near(xck_idle, SysClock::hz / 100'000u, 1));
+        NetPc46::input();
     } else {
-        print(serial, "  USART1 XCK event: period ", xck_idle, " ticks with no frame sent, ",
-              xck_busy, " under four 8N1 frames (expect ", SysClock::hz / 100'000u, ")", crlf);
+        bench.skip("PC4 or PC6 is held low from the partner's side: the USART XCK leg");
     }
-    verdict(at24 ? "the USART XCK generator: 100 kHz, 240 +-1 ticks"
-                 : "the USART XCK generator: 100 kHz, 10 us of ticks +-1", sent && busy_got &&
-            near(xck_busy, SysClock::hz / 100'000u, 1));
-    verdict("and a synchronous host's XCK runs with no frame in flight", idle_got &&
-            near(xck_idle, SysClock::hz / 100'000u, 1));
 
     // 3. The software event on a channel PC1 holds HIGH: each pulse is a
     //    one-CLK_PER LOW, ended by a rising edge TCB1 counts. The control:
@@ -1687,7 +1798,9 @@ void te_evsys() {
     //    analog net (board.hpp's board::analog_net: VREFA's 100 nF and
     //    the DAC's resistor) no digital output drives it, and EVOUTD ALT1
     //    has no other position, so PA7 and PC7 alone are read there.
-    if constexpr (board::analog_net) {
+    if (!net_free<NetPc7>()) {
+        bench.skip("PC7 is held low from the partner's side: the EVOUT ALT1 leg");
+    } else if constexpr (board::analog_net) {
         static_assert(board::pa7_free, "letter e reads EVOUTA ALT1 on PA7");
         EvOut<Pin<'A', 7>>::listen(ChC{});
         EvOut<Pin<'C', 7>>::listen(ChC{});
@@ -1738,7 +1851,7 @@ void tcb0_stamp_wo2() {
 
 /// PD0 rising -> the next PD2 rising, in CLK_PER ticks (0xFFFF = missed).
 uint16_t measure_wo0_to_wo2() {
-    for (uint16_t i = 0; i < 30000 && GenPin::read(); ++i) {}
+    if (!gen_low()) return 0xFFFF;                 // as measure_duration(): arm on a low PD0
     stamp2_phase = 0;
     tcb0_hook = tcb0_stamp_wo2;
     T0::capture_on(ChGen{});                       // as measure_duration(): the user first
@@ -1917,7 +2030,11 @@ void tt_tca_modes() {
     };
     const uint16_t any = count_leg(TcaEventA::count_anyedge);
     const uint16_t pos = count_leg(TcaEventA::count_posedge);
-    while (!Serial::tx_idle()) {
+    if (!console_drain()) {
+        verdict("the console drained before the timed window", false);
+        LevelPin::input();
+        quiesce();
+        return;
     }
     (void)Tca<0>::init({.mode = TcaMode::normal, .clock = TcaClock::div1024,
                         .period = 0xFFFF, .event_a = TcaEventA::count_while_high});
@@ -2003,20 +2120,24 @@ void tt_tca_modes() {
     // 7. TCA1's three-channel PORTC route: WO0..2 on PC4..PC6, each
     //    parked high and then low through CTRLC with the timer disabled
     //    and read back on its own pad (test s's method).
-    (void)Tca<1>::init({.mode = TcaMode::single_slope, .clock = TcaClock::div1,
-                        .period = tpms - 1u, .outputs = 0x07, .route = 'C'});
-    Tca<1>::disable();
-    Tca<1>::output_value<0>(true); Tca<1>::output_value<1>(true); Tca<1>::output_value<2>(true);
-    delay_us(clock, 2);
-    const bool hi = Pin<'C', 4>::read() && Pin<'C', 5>::read() && Pin<'C', 6>::read();
-    Tca<1>::output_value<0>(false); Tca<1>::output_value<1>(false); Tca<1>::output_value<2>(false);
-    delay_us(clock, 2);
-    const bool lo = !Pin<'C', 4>::read() && !Pin<'C', 5>::read() && !Pin<'C', 6>::read();
-    print(serial, "  TCA1 -> PORTC: WO0..2 parked high read ", hi ? "high" : "NOT high",
-          " on PC4..PC6, parked low read ", lo ? "low" : "NOT low", crlf);
-    verdict("TCA1's PORTC route drives WO0..2 on PC4..PC6", hi && lo);
-    Tca<1>::reset();
-    Pin<'C', 4>::input(); Pin<'C', 5>::input(); Pin<'C', 6>::input();
+    if (net_free<NetPc456>()) {
+        (void)Tca<1>::init({.mode = TcaMode::single_slope, .clock = TcaClock::div1,
+                            .period = tpms - 1u, .outputs = 0x07, .route = 'C'});
+        Tca<1>::disable();
+        Tca<1>::output_value<0>(true); Tca<1>::output_value<1>(true); Tca<1>::output_value<2>(true);
+        delay_us(clock, 2);
+        const bool hi = Pin<'C', 4>::read() && Pin<'C', 5>::read() && Pin<'C', 6>::read();
+        Tca<1>::output_value<0>(false); Tca<1>::output_value<1>(false); Tca<1>::output_value<2>(false);
+        delay_us(clock, 2);
+        const bool lo = !Pin<'C', 4>::read() && !Pin<'C', 5>::read() && !Pin<'C', 6>::read();
+        print(serial, "  TCA1 -> PORTC: WO0..2 parked high read ", hi ? "high" : "NOT high",
+              " on PC4..PC6, parked low read ", lo ? "low" : "NOT low", crlf);
+        verdict("TCA1's PORTC route drives WO0..2 on PC4..PC6", hi && lo);
+        Tca<1>::reset();
+        NetPc456::input();
+    } else {
+        bench.skip("PC4..PC6 are held low from the partner's side: TCA1's PORTC route");
+    }
     // TCA0 merely disabled keeps CMP2EN, and a disabled TCA with a compare
     // output enabled still overrides its pin with CTRLC's value: PD2 would
     // stay the TCA's (measured: letter k's latch, read on EVOUT PD2, read
@@ -2112,12 +2233,12 @@ void tx_ea() {
     DutyMeter<T0>::init(clock, ChC{});
     Pwm::init();
     Pwm::duty(64);
-    clear_captures(); wait_captures(3, 20);
+    clear_captures(); await_captures(3, 20);
     const uint16_t w_word = cap_b;
     (void)T2::count();
     T2::regs().CCMPH = 192;
     hold_ms(1);
-    clear_captures(); wait_captures(3, 20);
+    clear_captures(); await_captures(3, 20);
     const uint16_t w_byte = cap_b, p_byte = cap_a;
     T2::disable(); T0::disable(); tcb0_hook = nullptr; ChC::off();
     print(serial, "  PWM8: width ", w_word, " after the word write of 64, ", w_byte,
@@ -2258,7 +2379,7 @@ void tx_ea() {
     ChCarry::source(Lut<2>::OutEvent{});
     tcb0_hook = tcb0_frequency;
     FrequencyMeter<T0>::init(clock, ChCarry{});
-    clear_captures(); wait_captures(3, 20);
+    clear_captures(); await_captures(3, 20);
     const uint16_t tca1_period = cap_a;
     T0::disable(); tcb0_hook = nullptr;
     Tca<1>::reset();

@@ -84,6 +84,7 @@
 #include "avrxt/usart.hpp"
 #include "avrxt/userrow.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 
 #include "board.hpp"
 
@@ -138,18 +139,33 @@ volatile uint16_t cap_min = 0xFFFF, cap_max = 0;
 #endif
 
 // ---- tiny test harness --------------------------------------------------------
-uint8_t passed = 0, failed = 0;
+uint8_t passed = 0, failed = 0, skipped = 0;
 
 void verdict(const char* name, bool ok) {
     if (ok) ++passed; else ++failed;
     print(serial, "  ", ok ? "PASS" : "FAIL", "  ", name, crlf);
+}
+/// A check this board cannot run, counted apart from passes and failures
+/// in TestBench's grammar (util/testbench.hpp, "SKIP  <reason>").
+void skip(const char* reason) {
+    if (skipped != 0xFFu) ++skipped;
+    print(serial, "  SKIP  ", reason, crlf);
+}
+/// A tally line: "N pass, M fail", then ", K skipped" when K is not zero.
+void tally(const char* head, uint16_t p, uint16_t f, uint16_t s) {
+    print(serial, head, p, " pass, ", f, " fail");
+    if (s != 0u) print(serial, ", ", s, " skipped");
+    print(serial, crlf);
 }
 bool near(int32_t a, int32_t b, int32_t tol) {
     const int32_t d = a > b ? a - b : b - a;
     return d <= tol;
 }
 // Holds are counted in CRYSTAL time (delay_us, a cycle loop), never by
-// the Ticker: the RTC is the device under test.
+// the Ticker: the RTC is the device under test, and quiesce() leaves the
+// tick paused. For the same reason no wait here is on the kernel tick:
+// the ones the cascade can time go on Ruler below, the ones it cannot
+// (its snapshot channel carrying an RTC event) on this delay verb.
 void hold_ms(uint32_t ms) {
     while (ms--) delay_us(clock, 1000);
 }
@@ -168,6 +184,22 @@ uint32_t now() {
     ChSnap::off();
     return Wide::read();
 }
+/// The cascade as a CycleRuler (util/test_wait.hpp): now()'s software
+/// stamp at the board rate. It takes the snapshot channel off whatever
+/// RTC event it carried, so it times only the waits of letters that do
+/// not stamp through the channel (5, 6 and 9's oscillator waits).
+struct Ruler {
+    static uint32_t now() {
+        ChSnap::off();
+        return Wide::read();
+    }
+    static constexpr uint32_t hz() { return crystal_hz; }
+};
+/// A stamp latched by the RTC event the channel carries, waited for at
+/// most `timeout_ms` milliseconds. The bound is the delay verb's, a
+/// millisecond a turn on the crystal: the cascade cannot time a wait for
+/// its own event stamp (a software snapshot would be taken for one) and
+/// the tick is paused (the file's hold_ms()).
 bool stamp(uint32_t& out, uint32_t timeout_ms) {
     T1::clear_capt();
     T2::clear_capt();
@@ -364,7 +396,16 @@ void t3_compare() {
         print(serial, "  CMP=", cmp, ": period=", period, " phase=", phase,
               " = ", in_rtc_ticks, " RTC ticks (expect ", cmp + 1u, ")", crlf);
         verdict("stamps arrive", ok_a && ok_b && ok_c);
-        verdict("phase = CMP + 1 ticks", near(static_cast<int32_t>(in_rtc_ticks), static_cast<int32_t>(cmp) + 1, 2));
+        // The bound: one tick of rounding plus the wander over CMP ticks -
+        // a tick at 100 ppm on the AVR128DB48 (2 in all), and on the
+        // AVR64EA48 the 800 ppm allowed there (wander_ea, crystal_hz /
+        // 1250): CMP / 1250 ticks rounded up, 8 in all at CMP = 8191
+        // (measured: 8195 once in ten runs, 366 ppm), 2 at CMP = 99.
+        const int32_t tol =
+            ea_osc32k ? 1 + static_cast<int32_t>((static_cast<uint32_t>(cmp) + 1249u) / 1250u)
+                      : 2;
+        verdict("phase = CMP + 1 ticks",
+                near(static_cast<int32_t>(in_rtc_ticks), static_cast<int32_t>(cmp) + 1, tol));
     }
     quiesce();
 }
@@ -469,35 +510,38 @@ void t5_busy() {
 
     const uint32_t one_rtc = ticks_per_rtc_x100 / 100;
 
+    // Each flag waited for on the cascade, at most 1 ms - sixteen times
+    // the two CLK_RTC periods (61 us) it should take; a flag still set
+    // then reads as the budget, which every verdict below refuses. The
+    // reading is late by one turn of the poll: a flag load and a stamp.
+    constexpr uint32_t busy_budget_us = 1000u;
+    const auto busy_ticks = [](const std::optional<uint32_t>& c) {
+        return c ? *c : us_cycles<Ruler>(busy_budget_us);
+    };
     Rtc::count(0);
     const bool cnt_set = Rtc::count_busy();
-    uint32_t t0 = now();
-    while (Rtc::count_busy()) {}
-    uint32_t cnt_ticks = now() - t0;
+    const uint32_t cnt_ticks =
+        busy_ticks(cycles_until<Ruler>([] { return !Rtc::count_busy(); }, busy_budget_us));
 
     Rtc::period(32767);
     const bool per_set = Rtc::period_busy();
-    t0 = now();
-    while (Rtc::period_busy()) {}
-    const uint32_t per_ticks = now() - t0;
+    const uint32_t per_ticks =
+        busy_ticks(cycles_until<Ruler>([] { return !Rtc::period_busy(); }, busy_budget_us));
 
     Rtc::compare(1000);
     const bool cmp_set = Rtc::compare_busy();
-    t0 = now();
-    while (Rtc::compare_busy()) {}
-    const uint32_t cmp_ticks = now() - t0;
+    const uint32_t cmp_ticks =
+        busy_ticks(cycles_until<Ruler>([] { return !Rtc::compare_busy(); }, busy_budget_us));
 
     Rtc::prescaler(RtcPrescaler::div1);
     const bool ctrla_set = Rtc::ctrla_busy();
-    t0 = now();
-    while (Rtc::ctrla_busy()) {}
-    const uint32_t ctrla_ticks = now() - t0;
+    const uint32_t ctrla_ticks =
+        busy_ticks(cycles_until<Ruler>([] { return !Rtc::ctrla_busy(); }, busy_budget_us));
 
     Pit::period(PitPeriod::cyc32);
     const bool pit_set = Pit::ctrl_busy();
-    t0 = now();
-    while (Pit::ctrl_busy()) {}
-    const uint32_t pit_ticks = now() - t0;
+    const uint32_t pit_ticks =
+        busy_ticks(cycles_until<Ruler>([] { return !Pit::ctrl_busy(); }, busy_budget_us));
 
     print(serial, "  one CLK_RTC period = ", one_rtc, " crystal ticks", crlf);
     print(serial, "  CNTBUSY=", cnt_ticks, " PERBUSY=", per_ticks, " CMPBUSY=", cmp_ticks,
@@ -526,6 +570,9 @@ void t5_busy() {
 // observable, so the first PIT interrupt lands anywhere inside one full
 // period (26.5.2.2). Both cases are timed: with the prescaler stopped
 // (RTC counter off too) and with it free-running (counter on).
+/// The first PI flag waited for at most 10 ms on the cascade, ten times
+/// the 977 us period (CYC32 at 32768 Hz); a flag that never came reads as
+/// that budget, which the period verdicts refuse.
 void first_tick_stats(bool counter_running, uint32_t& lo, uint32_t& hi, uint32_t& mean) {
     constexpr uint8_t n = 32;
     uint32_t sum = 0;
@@ -537,8 +584,8 @@ void first_tick_stats(bool counter_running, uint32_t& lo, uint32_t& hi, uint32_t
         Pit::clear_flag();
         const uint32_t t0 = now();
         Pit::init(PitPeriod::cyc32, false);
-        while (!Pit::flag()) {}
-        const uint32_t d = now() - t0;
+        const bool came = wait_until<Ruler>([] { return Pit::flag(); }, 10'000u);
+        const uint32_t d = came ? now() - t0 : us_cycles<Ruler>(10'000u);
         sum += d;
         if (d < lo) lo = d;
         if (d > hi) hi = d;
@@ -675,17 +722,13 @@ void t9_xosc32k() {
     if constexpr (!board::xosc32k_runs) {
         // The crystal is fitted but the board says it does not oscillate:
         // every verdict below is about the crystal running.
-        print(serial, "  SKIPPED, no verdict claimed: the board's 32.768 kHz crystal is fitted "
-                      "but does not run (board.hpp's board::xosc32k_runs)", crlf);
+        skip("the 32.768 kHz crystal as CLK_RTC: the board's crystal is fitted but does not "
+             "run (board.hpp's board::xosc32k_runs)");
         return;
     }
     quiesce();
     Xosc32k::start_crystal(Xosc32kStartup::cycles1k, false, true);   // forced on: nothing requests it yet
-    bool up = false;
-    for (uint16_t ms = 0; ms < 1500 && !up; ++ms) {
-        up = Xosc32k::stable();
-        delay_us(clock, 1000);
-    }
+    const bool up = wait_until<Ruler>([] { return Xosc32k::stable(); }, 1'500'000u);
     verdict("XOSC32K runs (started forced on, stable within 1.5 s)", up);
     verdict("RtcClock::preferred() names the crystal once it runs",
             RtcClock::preferred() == RtcSource::xosc32k);
@@ -745,11 +788,9 @@ void t9_xosc32k() {
     Xosc32k::stop();
     const bool status_after_stop = Xosc32k::stable();
     const RtcSource preferred_after_stop = RtcClock::preferred();
-    uint16_t lingered = 0;
-    while (Xosc32k::stable() && lingered < 2000) {
-        delay_us(clock, 1000);
-        ++lingered;
-    }
+    const std::optional<uint32_t> linger =
+        cycles_until<Ruler>([] { return !Xosc32k::stable(); }, 2'000'000u);
+    const uint32_t lingered = linger ? *linger / (crystal_hz / 1000u) : 2000u;
     print(serial, "  XOSC32KS read ", status_after_stop ? 1 : 0, " when preferred() was asked, 1 for ",
           lingered, " ms after the stop", crlf);
     verdict("right after the stop preferred() names OSC32K",
@@ -933,8 +974,10 @@ constexpr Test tests[] = {
 
 void run(TestFn fn) {
     passed = failed = 0;
+    skipped = 0;
     fn();
-    print(serial, "  -> ", passed, " pass, ", failed, " fail", crlf, crlf);
+    tally("  -> ", passed, failed, skipped);
+    print(serial, crlf);
 }
 
 void help() {
@@ -1009,15 +1052,15 @@ int main() {
         print(serial, static_cast<char>(c), crlf);
         if (c == '?') { help(); }
         else if (c == 'a' || c == 'A') {
-            uint8_t tp = 0, tf = 0;
-            for (const Test& t : tests) { run(t.fn); tp += passed; tf += failed; }
+            uint16_t tp = 0, tf = 0, ts = 0;
+            for (const Test& t : tests) { run(t.fn); tp += passed; tf += failed; ts += skipped; }
             if constexpr (board::xosc32k) {
-                run(t9_xosc32k); tp += passed; tf += failed;
+                run(t9_xosc32k); tp += passed; tf += failed; ts += skipped;
             }
 #if defined(RTC_EVGEN0SEL_gm)
-            run(tp_pit_slots); tp += passed; tf += failed;
+            run(tp_pit_slots); tp += passed; tf += failed; ts += skipped;
 #endif
-            print(serial, "ALL: ", tp, " pass, ", tf, " fail", crlf);
+            tally("ALL: ", tp, tf, ts);
         } else {
             bool found = false;
             for (const Test& t : tests) if (t.key == c) { run(t.fn); found = true; }

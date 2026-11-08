@@ -107,7 +107,6 @@
 #include <stdint.h>
 
 #include "samc21/clock.hpp"
-#include "samc21/delay.hpp"
 #include "samc21/evsys.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/nvm.hpp"
@@ -116,6 +115,7 @@
 #include "samc21/tc.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
 // register, and every architecture on this link compiles the same file.
@@ -391,23 +391,13 @@ bool play(Drive drive, uint32_t lead = lead_floor_ticks) {
 // Waits and small conversions
 // ---------------------------------------------------------------------------
 
-/// Microseconds of any length: delay_us() serves less than a SysTick
-/// period, so a longer wait is chunked.
-void wait_us(uint32_t us) {
-    while (us >= 900u) {
-        (void)delay_us(clock, 900u);
-        us -= 900u;
-    }
-    if (us != 0u) {
-        (void)delay_us(clock, us);
-    }
-}
-
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
+/// The SysTick ticker read as CPU cycles: the ruler of the peer's pauses
+/// and bounded waits (util/test_wait.hpp). Nothing here masks interrupts,
+/// so it advances throughout.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
 /// 24 MHz ticks of one bit, in sixteenths: the unit every precomputed
 /// edge is built from (sixteenths keep a 115200 bit's 208.33 from
@@ -606,31 +596,39 @@ bool apply_cfg(const link::Cfg& c) {
 // Talking
 // ---------------------------------------------------------------------------
 
-constexpr uint32_t dre_spins = 400'000u;
+/// The bound on one frame's wait, DRE or TXC: such a wait lasts a frame at
+/// most, and twelve bits at 1200 baud - the slowest rate a link suite
+/// commands - are 10 ms, so 20 ms is two of them; a synchronous client's
+/// frame waits on the far XCK too, at 100 kHz and up.
+constexpr uint32_t frame_wait_us = 20'000u;
 
-/// One frame out: wait for room in DATA (bounded), then write it.
+/// One frame out: room in DATA, then the write. DATA's room tested first
+/// and the ruler read only when there is none, so the echo's hot path
+/// (run_echo()) stays a flag test and a store; false, nothing written,
+/// when DRE stayed down for frame_wait_us.
 [[gnu::always_inline]] inline bool put_frame(uint16_t v) {
-    for (uint32_t n = dre_spins; !Link::dre_flag(); --n) {
-        if (n == 0u) return false;
+    if (!Link::dre_flag() &&
+        !brio::wait_until<Ruler>([] { return Link::dre_flag(); }, frame_wait_us)) {
+        return false;
     }
     Link::data(v);
     return true;
 }
 
-/// The wire falls idle: TXC up (the last stop bit gone), bounded. Only
-/// after a frame was written: TXC is clear out of configure() and rises
-/// only at a frame's departure (31.8.8), so with nothing sent it would
-/// spin its whole bound.
+/// The wire falls idle: TXC up (the last stop bit gone), bounded
+/// (frame_wait_us). Only after a frame was written: TXC is clear out of
+/// configure() and rises only at a frame's departure (31.8.8), so with
+/// nothing sent it would wait its whole bound. Dropped by every caller:
+/// a frame that never left is the DUT's to see in what it receives.
 void wait_tx_done() {
-    for (uint32_t n = dre_spins; !Link::txc_flag() && n != 0u; --n) {
-    }
+    (void)brio::wait_until<Ruler>([] { return Link::txc_flag(); }, frame_wait_us);
 }
 
 /// Four bit times at the BAUD in force before an answer: RXC rises at the
 /// middle of the stop bit, half a bit before the sender's own TXC (the
 /// AVR peer's measured turnaround), and the DUT listens again only after
 /// it. 35 us at command rate.
-void turnaround_guard() { wait_us(35u); }
+void turnaround_guard() { brio::spin_us<Ruler>(35u); }
 
 /// The pad to the SERCOM for an answer: the transmitter is enabled and
 /// idling high already, so the hand-over is no edge.
@@ -724,7 +722,7 @@ void ack(Op op, uint8_t sum, bool good) {
         }
     }
     if (r.count >= 2u) {
-        wait_us(2u);
+        brio::spin_us<Ruler>(2u);
         r.span = Span::cc32(0) - first;
     }
     if (!sink && r.count != 0u) {
@@ -765,7 +763,7 @@ link::Report run_send(const link::Params& a, bool blast) {
     settle();
     // `send` reads aux16 as EXTRA lead-in milliseconds (usart_link.hpp).
     if (!blast && a.aux16 != 0u) {
-        wait_ms(a.aux16);
+        brio::spin_us<Ruler>(static_cast<uint32_t>(a.aux16) * 1000u);
     }
     const uint16_t mask = data_mask(a.cfg.bits);
     // A send leaves two bit times after each write; a blast none.
@@ -780,7 +778,7 @@ link::Report run_send(const link::Params& a, bool blast) {
                 r.flags |= link::report_timed_out;
                 break;
             }
-            if (repeat_gap_us != 0u) wait_us(repeat_gap_us);
+            if (repeat_gap_us != 0u) brio::spin_us<Ruler>(repeat_gap_us);
         }
         bool sent = true;
         for (uint16_t i = 0; i < a.count; ++i) {
@@ -791,7 +789,7 @@ link::Report run_send(const link::Params& a, bool blast) {
             }
             r.sum = static_cast<uint16_t>(r.sum + v);
             ++r.count;
-            if (gap != 0u) wait_us(gap);
+            if (gap != 0u) brio::spin_us<Ruler>(gap);
         }
         if (!sent) break;
     }
@@ -852,7 +850,7 @@ link::Report run_break(const link::Params& a) {
     edge_level(q4_ticks(q * a.count), true);
     txd_to_port();
     const bool ok = play<TxdPin>(Drive::out, q4_ticks(2u * q));
-    wait_us(q4_ticks(2u * q) / 24u + 1u);
+    brio::spin_us<Ruler>(q4_ticks(2u * q) / 24u + 1u);
     txd_to_sercom();
     if (!ok) r.flags |= link::report_mismatch;
     r.count = a.count;
@@ -878,7 +876,7 @@ link::Report run_autobaud_tx(const link::Params& a) {
     edge_level(q4_ticks(q * n), true);
     txd_to_port();
     const bool ok = play<TxdPin>(Drive::out, q4_ticks(4u * q));
-    wait_us(q4_ticks(2u * q) / 24u + 1u);
+    brio::spin_us<Ruler>(q4_ticks(2u * q) / 24u + 1u);
     txd_to_sercom();
     (void)put_frame(a.value);                 // the sync field
     r.sum = a.value;
@@ -1233,7 +1231,7 @@ void probe_drive() {
             if (((t / probe_half_ms[i]) & 1u) != 0u) LinkPort::out_set(probe_mask[i]);
             else LinkPort::out_clear(probe_mask[i]);
         }
-        wait_us(1000u);
+        brio::spin_us<Ruler>(1000u);
     }
     LinkPort::dir_clear(all);
 }
@@ -1244,7 +1242,7 @@ void probe_listen(uint16_t* edges4) {
     LinkPort::configure_mask(all, {.input_enable = true, .pull = PinPull::up});
     uint32_t prev = LinkPort::in() & all;
     for (uint16_t t = 0; t < probe_ms; ++t) {
-        wait_us(1000u);
+        brio::spin_us<Ruler>(1000u);
         const uint32_t now = LinkPort::in() & all;
         const uint32_t ch = now ^ prev;
         for (uint8_t i = 0; i < 4; ++i) {

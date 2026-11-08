@@ -66,7 +66,7 @@
 //      once per leg and resumes from a .noinit token, so it is NOT in
 //      `z`: `z` has to be one console session that a tool can judge
 //      from a single capture. Run it with
-//          brio run C i --expect="->"
+//          brio run <board> i --expect="->"
 //      Legs: a wrong CLEAR key with the watchdog stopped and then
 //      running, a panic through ResetReporter, a deliberate HardFault
 //      through hard_fault_reset(), a watchdog time-out, and a window
@@ -102,6 +102,7 @@
 #include "samc21/sleep.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 #include "rt/selftest.hpp"
 
@@ -166,28 +167,33 @@ volatile uint32_t ew_cycles = 0;
 volatile bool ew_seen = false;
 
 // ---------------------------------------------------------------------------
-// A cycle-resolution stopwatch (the same one the other SAM suites use): the kernel ticker's own cycles(), the tick count
-// and the counter's position composed right across the reload
-// (util/cycle_count.hpp).
+// The ruler: the kernel ticker's own cycles(), the tick count and the
+// counter's position composed right across the reload
+// (util/cycle_count.hpp) - the ruler of this suite's waits and of letter
+// c's spans (util/test_wait.hpp).
 // ---------------------------------------------------------------------------
-uint32_t cycles_now() {
-    return Ticker::cycles();
-}
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
 uint32_t cycles_to_ms(uint32_t cycles) { return cycles / (SysClock::hz / 1000UL); }
 
-/// Wait for the console to be physically empty. Called before anything
-/// that reboots the board: a ring that still holds bytes loses them, and
-/// a suite that loses its own last line is unreadable.
-void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
+/// Every queued console byte off the wire, bounded (util/test_wait.hpp):
+/// false on a wedged console. Called before anything that reboots the
+/// board - a ring that still holds bytes loses them - and before a timed
+/// window.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
+
+/// The console idle before a timed window opens: a line still going out
+/// puts the transmit interrupt inside the window. False, with a failed
+/// verdict, on a wedged console; the letter then returns.
+bool console_quiet() {
+    if (console_drain()) {
+        return true;
     }
-    // The ring being empty only means the last byte reached the shifter.
-    // One character at 115200 is 87 us; two milliseconds is comfortably
-    // more, and measuring it beats a spin count nobody can check.
-    const uint32_t t0 = cycles_now();
-    while (cycles_now() - t0 < SysClock::hz / 500u) {
-    }
+    bench.verdict("the console drained before the timed window", false);
+    return false;
 }
 
 const char* cause_name(ResetCause c) {
@@ -261,12 +267,13 @@ void ta_boot() {
                   static_cast<uint8_t>(Watchdog::ew_offset()) ==
                       fuses.wdt_ew_offset());
 
-    // If either of these were true the reset legs could not run at all,
-    // so they are worth naming rather than discovering in letter i.
-    bench.verdict("the watchdog is not armed by the fuses on this board",
-                  !Watchdog::enabled());
-    bench.verdict("and not in always-on mode (which only a POR could undo)",
-                  !Watchdog::always_on());
+    // The board's fuse setting, a premise of letter i and not a property
+    // of either driver: printed, and letter i declines its reset legs when
+    // the fuses leave the watchdog in always-on mode (which only a POR
+    // could undo).
+    print(serial, "  this board's fuses leave the watchdog ",
+          Watchdog::enabled() ? "ARMED" : "off",
+          Watchdog::always_on() ? ", ALWAYS-ON: letter i cannot run its legs" : "", crlf);
 }
 
 // =============================================================================
@@ -385,20 +392,18 @@ void tc_oscillator() {
         if (!Watchdog::arm(cfg)) {
             return 0;
         }
-        const uint32_t t0 = cycles_now();
+        const uint32_t t0 = Ruler::now();
         Watchdog::clear();
         (void)Watchdog::sync();
-        uint32_t waited = 0;
-        while (!ew_seen && waited < 5u * SysClock::hz) {
-            waited = cycles_now() - t0;
-        }
-        const uint32_t took = ew_seen ? (ew_cycles - t0) : 0u;
+        // Five seconds: five times the longest offset asked for (1024
+        // cycles of a nominal 1.024 kHz is one second), wide of the RC's
+        // tolerance; a warning that never comes reads 0.
+        const bool seen = brio::wait_until<Ruler>([] { return ew_seen; }, 5'000'000u);
+        const uint32_t took = seen ? (ew_cycles - t0) : 0u;
         (void)Watchdog::disable();
         return took;
     };
 
-    const uint32_t short_cycles = cycles_now();
-    (void)short_cycles;
     const uint32_t t512 = measure_normal(WdtCycles::cyc512);
     const uint32_t t1024 = measure_normal(WdtCycles::cyc1024);
 
@@ -409,15 +414,18 @@ void tc_oscillator() {
 
     bench.verdict("the early warning fires at the short offset", t512 != 0u);
     bench.verdict("and at the long one", t1024 != 0u);
-
-    if (t512 != 0u && t1024 != 0u && t1024 > t512) {
+    // The differential needs the longer offset to take longer: when it
+    // does not, the two verdicts below FAIL rather than vanish.
+    const bool ordered = t512 != 0u && t1024 != 0u && t1024 > t512;
+    bench.verdict("the longer offset takes longer", ordered);
+    uint32_t hz_x1000 = 0;
+    if (ordered) {
         // THE DIFFERENTIAL. 512 cycles, with the arming cost subtracted
         // out because it is the same in both.
         const uint32_t d = t1024 - t512;
         // Hz x 1000, so the result reads in millihertz without floats:
         // 512 cycles in d CPU cycles at SysClock::hz.
-        const uint32_t hz_x1000 =
-            static_cast<uint32_t>(512ULL * 1000ULL * SysClock::hz / d);
+        hz_x1000 = static_cast<uint32_t>(512ULL * 1000ULL * SysClock::hz / d);
         const uint32_t ms_512 = cycles_to_ms(d);
         print(serial, "  differential: 512 cycles = ", ms_512,
               " ms -> CLK_WDT_OSC ", hz_x1000 / 1000u, ".", hz_x1000 % 1000u,
@@ -432,18 +440,16 @@ void tc_oscillator() {
         print(serial, "  the arming cost that every single measurement carries: ",
               offset_ms != 0u ? offset_ms : shortfall_ms, " ms ",
               offset_ms != 0u ? "late" : "early", crlf);
-
-        // A generous band on the RATE itself: this is a check that the
-        // right clock counts the right number of cycles, not a
-        // calibration - OSCULP32K's tolerance is wide and the chapter
-        // says so.
-        bench.verdict("CLK_WDT_OSC is within 10% of its nominal 1.024 kHz",
-                      hz_x1000 > 921'600u && hz_x1000 < 1'126'400u);
-        bench.verdict("the two offsets differ by exactly 512 cycles' worth "
-                      "of time (the ratio is not 2:1, and that is the "
-                      "arming cost showing)",
-                      t1024 > t512 && t1024 < 2u * t512);
     }
+
+    // A generous band on the RATE itself: this is a check that the right
+    // clock counts the right number of cycles, not a calibration -
+    // OSCULP32K's tolerance is wide and the chapter says so.
+    bench.verdict("CLK_WDT_OSC is within 10% of its nominal 1.024 kHz",
+                  ordered && hz_x1000 > 921'600u && hz_x1000 < 1'126'400u);
+    bench.verdict("the two offsets differ by exactly 512 cycles' worth of time "
+                  "(the ratio is not 2:1, and that is the arming cost showing)",
+                  ordered && t1024 < 2u * t512);
 
     // WINDOW MODE reads a DIFFERENT register (CONFIG.WINDOW) with the
     // same encoding and the same clock: the warning marks the moment the
@@ -457,18 +463,16 @@ void tc_oscillator() {
     ew_seen = false;
     Watchdog::clear_flags();
     const bool armed_window = Watchdog::arm(windowed);
-    const uint32_t t1 = cycles_now();
-    uint32_t waited = 0;
-    while (!ew_seen && waited < 5u * SysClock::hz) {
-        waited = cycles_now() - t1;
-    }
-    const uint32_t window_cycles = ew_seen ? (ew_cycles - t1) : 0u;
+    const uint32_t t1 = Ruler::now();
+    // Five seconds, as above: ten times the 512-cycle window.
+    const bool window_seen = brio::wait_until<Ruler>([] { return ew_seen; }, 5'000'000u);
+    const uint32_t window_cycles = window_seen ? (ew_cycles - t1) : 0u;
     (void)Watchdog::disable();
 
     print(serial, "  window mode : a 512-cycle closed window opened after ",
           cycles_to_ms(window_cycles), " ms", crlf);
     bench.verdict("arming window mode succeeded", armed_window);
-    bench.verdict("the warning marks the window opening", ew_seen);
+    bench.verdict("the warning marks the window opening", window_seen);
     bench.verdict("CONFIG.WINDOW counts the same clock as EWCTRL.EWOFFSET",
                   window_cycles != 0u && t512 != 0u &&
                       window_cycles > t512 - t512 / 10u &&
@@ -483,10 +487,12 @@ void tc_oscillator() {
 // =============================================================================
 //
 // Each leg banks its number in the .noinit token, triggers a reset, and
-// then SPINS - because not every trigger here is instantaneous. A wrong
+// then WAITS - because not every trigger here is instantaneous. A wrong
 // key written to CLEAR is synchronized into the 1.024 kHz domain and
-// arrives a few milliseconds later, so a leg that does not spin runs on
-// past its own trigger and into the next one.
+// arrives a few milliseconds later, so a leg that does not wait runs on
+// past its own trigger and into the next one. The wait is bounded: a
+// reset that never comes fails a verdict and ends the letter, the token
+// withdrawn, instead of leaving the board spinning mute.
 
 void bank(uint8_t leg) {
     token.magic = token_magic;
@@ -496,18 +502,33 @@ void bank(uint8_t leg) {
     token.fail = bench.failed();
 }
 
-/// Announce a leg, get the words out, and never come back.
-[[noreturn]] void await_reset(const char* what) {
+/// How long a leg waits for its reset: a hundred milliseconds. The
+/// slowest trigger is a write synchronized into the watchdog's 1.024 kHz
+/// domain, or its 8-cycle period running out - under 8 ms at the nominal
+/// rate, and OSCULP32K is a per-cent-class RC - so the budget is over
+/// ten times the longest.
+constexpr uint32_t reset_budget_us = 100'000u;
+
+/// Announce a leg's wait, get the words out, and wait for the reset. It
+/// returns only when the reset never came: the verdict says so, the
+/// watchdog is stopped and the token withdrawn, and the caller ends the
+/// letter.
+void await_reset(const char* what) {
     print(serial, "  ", what, crlf);
-    console_drain();
-    for (;;) {
-    }
+    // A wedged console loses this line; the wait runs regardless.
+    (void)console_drain();
+    brio::spin_us<Ruler>(reset_budget_us);
+    (void)Watchdog::disable();
+    restore_wdt_boot_regs();
+    token.leg = 0;
+    token.magic = 0;
+    bench.verdict("the reset came within 100 ms of its trigger", false);
 }
 
 /// Legs 1 and 2: a deliberately wrong key in CLEAR, with the watchdog
 /// stopped and then running. The chapter's sentence lives in the
 /// Normal-mode section (23.6.2.4), which leaves the stopped case open.
-[[noreturn]] void leg_bad_key(uint8_t leg, bool watchdog_running) {
+void leg_bad_key(uint8_t leg, bool watchdog_running) {
     bank(leg);
     if (watchdog_running) {
         (void)Watchdog::arm(WdtConfig{.period = WdtCycles::cyc16384});
@@ -516,7 +537,8 @@ void bank(uint8_t leg) {
     }
     print(serial, "  leg ", leg, ": a wrong key written to CLEAR, watchdog ",
           watchdog_running ? "RUNNING" : "STOPPED", " ...", crlf);
-    console_drain();
+    // A wedged console loses the line; the leg runs regardless.
+    (void)console_drain();
     Watchdog::force_reset();
     await_reset("(waiting for it to land - the write is synchronized)");
 }
@@ -528,7 +550,8 @@ void bank(uint8_t leg) {
     token.context = 0x5A;
     bank(3);
     print(serial, "  leg 3: panic() through ResetReporter ...", crlf);
-    console_drain();
+    // A wedged console loses the line; the leg runs regardless.
+    (void)console_drain();
     panic<SamPlatform, ResetReporter>(PanicCode::assert_failed, 0x5A);
 }
 
@@ -540,31 +563,34 @@ void bank(uint8_t leg) {
 /// shifts instead, so the "fault" reads valid SRAM and returns. The
 /// permanently-undefined instruction is the one thing no compiler can
 /// turn into something legal.
-[[noreturn]] void leg_fault() {
+void leg_fault() {
     token.code = static_cast<uint8_t>(PanicCode::kernel_fault);
     token.context = 0x77;
     bank(4);
     print(serial, "  leg 4: UDF -> HardFault -> hard_fault_reset() ...", crlf);
-    console_drain();
+    // A wedged console loses the line; the leg runs regardless.
+    (void)console_drain();
     __asm__ volatile("udf #0");
     await_reset("(the undefined instruction did not fault)");
 }
 
 /// Leg 5: let the watchdog time out.
-[[noreturn]] void leg_timeout() {
+void leg_timeout() {
     bank(5);
     print(serial, "  leg 5: watchdog at ~8 ms with nothing to feed it ...", crlf);
-    console_drain();
+    // A wedged console loses the line; the leg runs regardless.
+    (void)console_drain();
     (void)Watchdog::arm(WdtConfig{.period = WdtCycles::cyc8});
     await_reset("(waiting for the time-out)");
 }
 
 /// Leg 6: violate the closed window by feeding the dog too early.
-[[noreturn]] void leg_window() {
+void leg_window() {
     bank(6);
     print(serial, "  leg 6: window mode, cleared INSIDE the closed window ...",
           crlf);
-    console_drain();
+    // A wedged console loses the line; the leg runs regardless.
+    (void)console_drain();
     (void)Watchdog::arm(WdtConfig{
         .period = WdtCycles::cyc16384,
         .window_mode = true,
@@ -579,11 +605,11 @@ void ti_resets() {
     bench.verdict("this boot names a reset source",
                   boot_cause != ResetCause::unknown);
     bench.verdict("no panic record is pending on a clean start", !boot_record);
-    bench.verdict("the watchdog is ours to drive",
-                  !Watchdog::enabled() && !Watchdog::always_on());
+    // A watchdog the fuses merely arm is stopped by leg 1; one they put in
+    // always-on mode only a POR undoes.
     if (Watchdog::always_on()) {
-        print(serial, "  the watchdog is always-on: the reset legs are SKIPPED",
-              crlf);
+        bench.skip("the fuses put the watchdog in always-on mode: the reset legs "
+                   "need it ours to drive");
         return;
     }
     leg_bad_key(1, false);
@@ -603,13 +629,14 @@ void ti_resume() {
         // THE UNDOCUMENTED CASE, and the answer is that the key bites
         // regardless of CTRLA.ENABLE.
         bench.verdict("a wrong CLEAR key resets even with the watchdog STOPPED "
-                      "(23.6.2.4 is not limited to a running watchdog)",
-                      boot_cause == ResetCause::watchdog);
-        bench.verdict("and the reset controller calls it a WATCHDOG reset",
+                      "(23.6.2.4 is not limited to a running watchdog), and the "
+                      "reset controller calls it a WATCHDOG reset",
                       boot_cause == ResetCause::watchdog);
         bench.verdict("with no panic record, since nothing wrote one",
                       !boot_record);
         leg_bad_key(2, true);
+        bench.end_letter();   // only when the reset never came
+        return;
     }
 
     if (leg == 2) {
@@ -635,10 +662,9 @@ void ti_resume() {
                       boot_record && boot_record->code == token.code);
         bench.verdict("its context byte came through untouched",
                       boot_record && boot_record->context == token.context);
-        bench.verdict("a system reset request and a watchdog reset are "
-                      "DISTINGUISHABLE at the next boot",
-                      boot_cause == ResetCause::system_request);
         leg_fault();
+        bench.end_letter();   // only when the fault never came
+        return;
     }
 
     if (leg == 4) {
@@ -649,6 +675,8 @@ void ti_resume() {
         bench.verdict("with the context byte the body was given",
                       boot_record && boot_record->context == token.context);
         leg_timeout();
+        bench.end_letter();   // only when the reset never came
+        return;
     }
 
     if (leg == 5) {
@@ -659,6 +687,8 @@ void ti_resume() {
                       "that bit us",
                       !Watchdog::enabled());
         leg_window();
+        bench.end_letter();   // only when the reset never came
+        return;
     }
 
     // leg 6: the last boot.
@@ -691,12 +721,12 @@ void banner() {
 /// the ARITHMETIC and the wrap handling (an error there is cycles or
 /// whole periods, visible on any shared scale), not the oscillator.
 void td_delay() {
-    using Ruler = Tc<0>;
-    (void)Ruler::enable(false);
-    bool ruler_ok = Ruler::init(0) &&
-                    Ruler::configure(TcConfig{.mode = TcMode::count32,
-                                              .prescaler = TcPrescaler::div1}) &&
-                    Ruler::enable(true);
+    using TcRuler = Tc<0>;
+    (void)TcRuler::enable(false);
+    bool ruler_ok = TcRuler::init(0) &&
+                    TcRuler::configure(TcConfig{.mode = TcMode::count32,
+                                                .prescaler = TcPrescaler::div1}) &&
+                    TcRuler::enable(true);
     bench.verdict("the TC ruler comes up on generator 0", ruler_ok);
     if (!ruler_ok) {
         return;
@@ -714,8 +744,8 @@ void td_delay() {
     uint32_t zero_min = 0xFFFFFFFFu;
     uint32_t zero_max = 0;
     for (uint8_t k = 0; k < 8; ++k) {
-        const uint32_t t0 = Ruler::count32();
-        const uint32_t b = (Ruler::count32() - t0) / per_us;
+        const uint32_t t0 = TcRuler::count32();
+        const uint32_t b = (TcRuler::count32() - t0) / per_us;
         if (b < zero_min) zero_min = b;
         if (b > zero_max) zero_max = b;
     }
@@ -729,9 +759,9 @@ void td_delay() {
     static const uint32_t spans[] = {5, 30, 100, 500, 900};
     bool all_exact = true;
     for (uint8_t i = 0; i < sizeof(spans) / sizeof(spans[0]); ++i) {
-        const uint32_t t0 = Ruler::count32();
+        const uint32_t t0 = TcRuler::count32();
         const bool ok = delay_us(clock, spans[i]);
-        const uint32_t took = (Ruler::count32() - t0) / per_us;
+        const uint32_t took = (TcRuler::count32() - t0) / per_us;
         print(serial, "  delay_us(", spans[i], ") -> ", took, " us measured", crlf);
         if (!ok || took < spans[i] || took > spans[i] + zero_max + 10u) all_exact = false;
     }
@@ -745,9 +775,9 @@ void td_delay() {
     uint32_t min_took = 0xFFFFFFFFu;
     uint32_t max_took = 0;
     for (uint16_t k = 0; k < 200; ++k) {
-        const uint32_t t0 = Ruler::count32();
+        const uint32_t t0 = TcRuler::count32();
         (void)delay_us(clock, 50u);
-        const uint32_t took = (Ruler::count32() - t0) / per_us;
+        const uint32_t took = (TcRuler::count32() - t0) / per_us;
         if (took < min_took) min_took = took;
         if (took > max_took) max_took = took;
     }
@@ -764,9 +794,9 @@ void td_delay() {
     uint32_t refusal_us = 0xFFFFFFFFu;
     bool refused = true;
     for (uint8_t k = 0; k < 4; ++k) {
-        const uint32_t t0 = Ruler::count32();
+        const uint32_t t0 = TcRuler::count32();
         refused = refused && !delay_us(clock, 1000u);
-        const uint32_t r = (Ruler::count32() - t0) / per_us;
+        const uint32_t r = (TcRuler::count32() - t0) / per_us;
         if (r < refusal_us) refusal_us = r;
     }
     const bool served_999 = delay_us(clock, 999u);
@@ -784,9 +814,9 @@ void td_delay() {
     uint32_t stopped_us = 0xFFFFFFFFu;
     bool refused_stopped = true;
     for (uint8_t k = 0; k < 4; ++k) {
-        const uint32_t t1 = Ruler::count32();
+        const uint32_t t1 = TcRuler::count32();
         refused_stopped = refused_stopped && !delay_us(clock, 100u);
-        const uint32_t r = (Ruler::count32() - t1) / per_us;
+        const uint32_t r = (TcRuler::count32() - t1) / per_us;
         if (r < stopped_us) stopped_us = r;
     }
     SysTick->CTRL = SysTick->CTRL | SysTick_CTRL_ENABLE_Msk;
@@ -797,7 +827,7 @@ void td_delay() {
                   "clock to count on)",
                   refused_stopped && stopped_us <= zero_min + 3u);
 
-    Ruler::release();
+    TcRuler::release();
 }
 
 // ===========================================================================
@@ -931,6 +961,10 @@ Try edge_try(EdgeSource src, uint32_t d, uint32_t edges) {
         r.read = r.took - first;
         r.to_loop = first - d;
     } else {
+        // Bounded by the counter itself: SysTick runs (letter d restores
+        // it) and spends at most 4096 of its 48000 cycles below 4096.
+        // The ruler cannot bound it - it is built on this counter, and
+        // interrupts are masked here.
         while (SysTick->VAL < 4096u) {
         }
         SCB->ICSR = SCB_ICSR_PENDSTCLR_Msk;
@@ -1127,7 +1161,9 @@ Unheld unheld_sleep(SleepMode mode) {
 }
 
 void tw_edge() {
-    console_drain();
+    if (!console_quiet()) {
+        return;
+    }
     const bool up = watch_up();
     bench.verdict("the watch (TC0+TC1, CLK_MAIN undivided, RUNSTDBY) comes up", up);
     if (!up) {
@@ -1367,7 +1403,9 @@ using QuietKernel = Tenuto<P, Quiet<1>, Quiet<2>, Quiet<0>>;
 }
 
 void tk_turns() {
-    console_drain();
+    if (!console_quiet()) {
+        return;
+    }
     QuietKernel::init_all();
 
     // Turns over 100 quiet ticks: the tick is the only interrupt. The
@@ -1454,7 +1492,7 @@ extern "C" void DAC_Handler() { nest_note(3); }
 
 extern "C" void WDT_Handler() {
     if (brio::Watchdog::isr() != 0u) {
-        ew_cycles = cycles_now();
+        ew_cycles = Ruler::now();
         ew_seen = true;
     }
 }
@@ -1473,23 +1511,36 @@ namespace {
 /// it LESS urgent or EQUAL it waits for the first to return (1, 2, 3).
 /// The DSB/ISB pair after the pend is what makes "at once" one
 /// instruction late at most, so the order is a contract and not a race.
+/// The order the bodies wrote down, one decimal digit per entry - so a run
+/// that wrote two entries, or four, reads as a number of another length
+/// and can never pass for 132 or 123. The record is cleared first: no run
+/// inherits the previous one's entries.
 uint32_t nest_run(uint8_t low_level, uint8_t high_level) {
     (void)Nvic::priority(spare_line, low_level);
     (void)Nvic::priority(nest_line, high_level);
     Nvic::clear_pending(nest_line);
     Nvic::enable(nest_line);
     nest_n = 0;
+    for (uint8_t i = 0; i < 4u; ++i) {
+        nest_order[i] = 0;
+    }
     nest_test = true;
     Nvic::enable(spare_line);
     Nvic::set_pending(spare_line);
     __DSB();
     __ISB();
-    for (uint32_t i = 0; i < 1000u && nest_n < 3u; ++i) {
-    }
+    // Both bodies run within cycles of the pend, interrupts enabled; a
+    // millisecond is tens of thousands of cycles. A run that falls short
+    // reads as fewer digits, which the verdicts refuse.
+    (void)brio::wait_until<Ruler>([] { return nest_n >= 3u; }, 1'000u);
     nest_test = false;
     Nvic::disable(nest_line);
     Nvic::disable(spare_line);
-    return static_cast<uint32_t>(nest_order[0]) * 100u + nest_order[1] * 10u + nest_order[2];
+    uint32_t order = 0;
+    for (uint8_t i = 0; i < nest_n; ++i) {
+        order = order * 10u + nest_order[i];
+    }
+    return order;
 }
 
 void tp_priorities() {

@@ -28,10 +28,11 @@
 //   time to respond" (33.10.6); smart mode always on, so a pumped read byte
 //   is one DATA load, and a read's last byte closed by the STOP with its
 //   NACK first, then the DATA read (33.10.10); a write's repeated START into
-//   its read phase at the write's last MB. NO ENGINE SLOT: both DMA requests
-//   are declined over erratum 1.10.4 (docs/samc21/dmac.md) and the automatic
-//   length with them, so letter o's table is the pump's alone and says so
-//   shape by shape. start() copies the Request's fields, applies the speed
+//   its read phase at the write's last MB. NO ENGINE NAMED: the host's one
+//   engine slot, a transmit engine for the write (samc21/i2c.hpp,
+//   test_samc_i2c's letter p), is left at NoDmaEngine here, so letter o's
+//   table is the pump's alone and says so shape by shape. start() copies
+//   the Request's fields, applies the speed
 //   (a cached disable / enable pair and a forced IDLE when it moves) and
 //   ends on the ADDR store behind a SYSOP wait counted in spins: nothing is
 //   on the wire before that last store, so a preemption inside start() is a
@@ -227,9 +228,11 @@ using P = SamRubatoPlatform;
 constexpr uint32_t core_hz = SysClock::hz;
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
 
-/// The kernel ticker read as CPU cycles (the file header).
+/// The kernel ticker read as CPU cycles (the file header), at the CPU's
+/// rate: a CycleRuler of util/bench.hpp.
 struct Ruler {
     [[gnu::always_inline, gnu::flatten]] static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
 
 [[gnu::always_inline]] inline void spin(uint32_t cycles) {
@@ -286,8 +289,9 @@ struct Shape {
 };
 struct I2cTraits {
     /// Letter o's table: the body's default shapes, every one on the pump -
-    /// this host has no engine (erratum 1.10.4) - each with what the pump
-    /// does for it. Ends on a plain write (the shared body's counted serve).
+    /// this suite's host names no engine (the file header) - each with what
+    /// the pump does for it. Ends on a plain write (the shared body's
+    /// counted serve).
     static constexpr Shape shapes[] = {
         {0, 0, "pump: the probe, the address with W, one MB and the STOP"},
         {0, 1, "pump: one SB, the STOP with its NACK first, then the DATA read (33.10.10)"},
@@ -617,7 +621,8 @@ extern "C" void TC4_Handler() {
 
 /// Every byte of a tenure and its end: the pump's one vector, posting the
 /// arbiter's TransferDone at the completion edge (the STOP sent, a NACK, a
-/// loss or an error). There is no DMA vector: the host has no engine.
+/// loss or an error). There is no DMA vector: this suite's host names no
+/// engine.
 extern "C" void SERCOM3_Handler() {
     if (Host::isr()) {
         done_from_dma = false;

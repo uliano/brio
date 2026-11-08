@@ -44,9 +44,11 @@
 #include "samc21/ac.hpp"
 #include "samc21/clock.hpp"
 #include "samc21/pin.hpp"
+#include "samc21/platform.hpp"
 #include "samc21/sercom.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -85,32 +87,61 @@ constexpr uint32_t ulp_period = 1465;     // ~48e6 / 32768, nominal
 // ---------------------------------------------------------------------------
 // The cycle stopwatch: the kernel ticker's own cycles(), the tick count
 // and the counter's position composed right across the reload
-// (util/cycle_count.hpp).
+// (util/cycle_count.hpp), read as the ruler of util/test_wait.hpp.
 // ---------------------------------------------------------------------------
-uint32_t cycles_now() {
-    return brio::Ticker::cycles();
-}
+struct Ruler {
+    static uint32_t now() { return brio::Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
+using Plat = brio::SamPlatform;
+
+/// Every queued console byte off the wire, bounded (util/test_wait.hpp):
+/// false on a wedged console. Each timed shot opens after it, so no
+/// transmit interrupt lands inside a measured span.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
+
+/// Spin until the ruler reaches `target`: a fixed span at CPU-cycle
+/// resolution. The spans here are counted in GCLK_AC periods of 4096
+/// cycles (85.3 us) and the phase sweeps step by fractions of one,
+/// which brio::spin_us's whole microseconds cannot express, so this one
+/// verb stays.
 void spin_until(uint32_t target) {
-    while (static_cast<int32_t>(cycles_now() - target) < 0) {
+    while (static_cast<int32_t>(Ruler::now() - target) < 0) {
     }
 }
 
-void settle(uint32_t cycles) { spin_until(cycles_now() + cycles); }
+void settle(uint32_t cycles) { spin_until(Ruler::now() + cycles); }
 
 constexpr uint32_t no_flip = 0xFFFFFFFFu;
 
-/// Poll `cond` and timestamp the flip. The poll loop reads one register
-/// per turn (a handful of cycles); the cycles_now() at detection adds a
-/// CONSTANT offset that letter b measures for the whole chain.
+/**
+ * Poll `cond` and timestamp the flip, or no_flip once `periods` GCLK_AC
+ * periods (of 4096 cycles) have passed. The budget runs on the kernel
+ * tick (brio::wait_ticks), whose read is one load, so each turn is one
+ * register read in cond() and that load - a handful of cycles; the
+ * ruler's read at detection adds a CONSTANT offset that letter b
+ * measures for the whole chain. A ruler read in every turn
+ * (brio::cycles_until, about 70 cycles) would blur the staircase. The
+ * budget is rounded up to whole ticks of 1 ms, and the time-out comes one
+ * tick later at most.
+ */
 template <typename F>
-uint32_t time_until(F cond, uint32_t spins) {
-    while (spins-- != 0u) {
-        if (cond()) {
-            return cycles_now();
-        }
-    }
-    return no_flip;
+uint32_t time_until(F cond, uint32_t periods) {
+    constexpr uint32_t cycles_per_tick = SysClock::hz / Plat::ticks_per_second;
+    const uint32_t ticks = (periods * period + cycles_per_tick - 1u) / cycles_per_tick;
+    uint32_t at = no_flip;
+    // The answer is `at`: no_flip on the time-out, so the bool adds nothing.
+    (void)brio::wait_ticks<Plat>(
+        [&] [[gnu::always_inline]] {
+            if (cond()) {
+                at = Ruler::now();
+                return true;
+            }
+            return false;
+        },
+        ticks);
+    return at;
 }
 
 uint32_t lcg_state = 0x2F1E4B95u;
@@ -148,11 +179,9 @@ bool comp_up(brio::AcOut out, brio::AcFilter filter, bool single = false,
     }
     // READY is hardware state in the GCLK_AC domain: at 11.7 kHz give it
     // whole periods, not just the electrical t_STARTUP.
-    const uint32_t deadline = cycles_now() + 32u * period;
-    while (!Comp::ready()) {
-        if (static_cast<int32_t>(cycles_now() - deadline) >= 0) {
-            return false;
-        }
+    // 3 ms: 32 periods at 11.7 kHz.
+    if (!brio::wait_until<Ruler>([] { return Comp::ready(); }, 3'000u)) {
+        return false;
     }
     settle(4u * period);
     return true;
@@ -165,15 +194,18 @@ bool comp_up(brio::AcOut out, brio::AcFilter filter, bool single = false,
 /// drive high and time the flip. Returns cycles from drive to flip.
 template <typename F>
 uint32_t timed_edge(F cond, uint32_t phase_delay, uint32_t budget_periods) {
+    if (!console_drain()) {
+        return no_flip;
+    }
     Stim::clear();
-    const uint32_t low = time_until([&] { return !cond(); }, 40u * period);
+    const uint32_t low = time_until([&] { return !cond(); }, 40u);
     if (low == no_flip) {
         return no_flip;
     }
     spin_until(low + 4u * period + phase_delay);
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     Stim::set();
-    const uint32_t t1 = time_until(cond, budget_periods * period);
+    const uint32_t t1 = time_until(cond, budget_periods);
     return (t1 == no_flip) ? no_flip : (t1 - t0);
 }
 
@@ -200,9 +232,11 @@ void ta_up() {
     Comp::scaler(31);
     Stim::output();
     Stim::set();
-    const uint32_t t0 = cycles_now();
+    // Dropped deliberately: the enable is timed once and printed, not judged.
+    (void)console_drain();
+    const uint32_t t0 = Ruler::now();
     (void)Comp::enable(true);
-    const uint32_t rdy = time_until([] { return Comp::ready(); }, 64u * period);
+    const uint32_t rdy = time_until([] { return Comp::ready(); }, 64u);
     bench.verdict("READY0 arrived", rdy != no_flip);
     if (rdy != no_flip) {
         print(serial, "  enable to READY0: ", rdy - t0, " cycles = ",
@@ -356,16 +390,17 @@ void tc_sync() {
     Stim::set();
     settle(8u * period);
     uint32_t flo = no_flip, fhi = 0;
-    for (uint8_t i = 0; i < 32; ++i) {
+    // A wedged console leaves flo unmeasured, which the verdict fails.
+    for (uint8_t i = 0; i < 32 && console_drain(); ++i) {
         Stim::set();
-        const uint32_t up = time_until(pad_high, 40u * period);
+        const uint32_t up = time_until(pad_high, 40u);
         if (up == no_flip) {
             continue;
         }
         spin_until(up + 4u * period + lcg(period));
-        const uint32_t t0 = cycles_now();
+        const uint32_t t0 = Ruler::now();
         Stim::clear();
-        const uint32_t t1 = time_until([] { return !CmpPad::read(); }, 8u * period);
+        const uint32_t t1 = time_until([] { return !CmpPad::read(); }, 8u);
         if (t1 == no_flip) {
             continue;
         }
@@ -478,11 +513,12 @@ void tf_single() {
 
     uint32_t lo = no_flip, hi = 0;
     bool state_ok = true;
-    for (uint8_t i = 0; i < 32; ++i) {
+    // A wedged console leaves lo unmeasured, which the verdict fails.
+    for (uint8_t i = 0; i < 32 && console_drain(); ++i) {
         settle(lcg(period));
-        const uint32_t t0 = cycles_now();
+        const uint32_t t0 = Ruler::now();
         Comp::start();
-        const uint32_t t1 = time_until([] { return Comp::ready(); }, 16u * period);
+        const uint32_t t1 = time_until([] { return Comp::ready(); }, 16u);
         if (t1 == no_flip) {
             continue;
         }

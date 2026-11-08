@@ -289,8 +289,8 @@ extern "C" void TSENS_Handler() {
 
 ## Bench findings
 
-From `test_samc_tsens` (11 letters in `z` plus letter `p` by name, 171
-verdicts in `z`, about two minutes). **Nothing to wire**, and this chapter
+From `test_samc_tsens` (11 letters in `z` plus letter `p` by name,
+about two minutes). **Nothing to wire**, and this chapter
 could not need wires in principle: 43.5.1 is "Not applicable".
 
 **No absolute accuracy is claimed anywhere in that suite**, and that is a
@@ -482,14 +482,14 @@ the SDADC's are in their own suites.
 ### Drift under load - printed and declined
 
 - Baseline 2184 centi-C (spread 45 over 64 readings); then a minute of the
-  CPU alone spinning and copying memory (156238 copy rounds) while the
-  TSENS measures without pause, sampled every ten seconds: **2186, 2172,
-  2172, 2171, 2171, 2178 centi-C**; then 2171 (spread 48).
+  CPU alone spinning and copying memory (156238 copy rounds), the
+  temperature sampled every ten seconds: **2186, 2172, 2172, 2171, 2171,
+  2178 centi-C**; then 2171 (spread 48).
 - First-to-last -8 centi-C, whole-minute range 15, against the baseline
   batch's own spread of 45. **DECLINED**: the trend is inside the
   reading's own spread, so this bench cannot tell self-heating from noise
-  and claims nothing. What is claimed is only that a minute of continuous
-  conversion under load does not walk the reading away.
+  and claims nothing (the suite skips that check). What is claimed is only
+  that a minute under load does not walk the reading away.
 - 64 single measurements spread **39 centi-C**; averaging ten narrows that
   to **12**, which is why 43.6.2.3 asks for it.
 

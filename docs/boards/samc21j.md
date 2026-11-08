@@ -20,9 +20,9 @@ SWD header for an Atmel-ICE and a factory die serial as its identity.
   there.
 - **Supply**: jumper-selectable, 3.3 V or 5 V. At 5 V the rail reads
   about 5.1 V (located by the supply suite through the comparator's VDD
-  scaler against the bandgap). The analog suites locate the supply and
-  lose those verdicts at 3.3 V, where the 4.096 V bandgap level
-  saturates the converters: a supply fact, not a regression.
+  scaler against the bandgap). The analog suites read the supply first
+  and skip the legs it cannot hold - at 3.3 V the 4.096 V bandgap level,
+  which would saturate the converters: a supply fact, not a regression.
 - **LED and button**: the LED on PB23; the button on PB22 (EXTINT6),
   which does not pull the pad through the internal pull-up.
 - **Console**: a CH340 bridge on PB30/PB31, which are SERCOM5 PAD0/PAD1

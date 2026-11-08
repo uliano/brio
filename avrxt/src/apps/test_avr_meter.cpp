@@ -41,8 +41,10 @@
 #include "avrxt/usart.hpp"
 #include "avrxt/userrow.hpp"
 #include "kernel/tenuto.hpp"
+#include "kernel/time.hpp"
 #include "util/meter_sampler.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #include "board.hpp"
@@ -134,10 +136,13 @@ bool near(int32_t a, int32_t b, int32_t tol) {
     return d <= tol;
 }
 
-void console_drain() {
-    while (!Serial::tx_idle()) {
-    }
-    delay_us(clock, 2000);
+/// Every queued console byte off the wire, bounded on the kernel tick
+/// (the TCBs belong to the letters): false on a wedged console. The
+/// letters drain before each counted window and drop the answer: the
+/// window counts captures and publications per kernel tick, which a
+/// console interrupt left inside it cannot move.
+bool console_drain() {
+    return wait_ticks<P>([] { return Serial::tx_idle(); }, ticks_from_ms<P>(200));
 }
 
 /// The kernel loop for a measured span of kernel ticks: mature the time
@@ -222,7 +227,7 @@ void ta_paced() {
         verdict("generator accepts the rate", Gen::init(clock, hz));
 
         Sampler::init(pace);
-        console_drain();
+        (void)console_drain();
         run_ticks(window);
         Sampler::stop();
 
@@ -256,7 +261,7 @@ void ta_paced() {
     FrequencyMeter<T0>::init(clock, ChGen{});
     Gen::init(clock, 1000);
     Sampler::init(64);
-    console_drain();
+    (void)console_drain();
     run_ticks(window);
     Sampler::stop();
     const uint16_t fast_pubs = Sink::got[0];
@@ -286,7 +291,7 @@ void tb_stale() {
     verdict("the arming edge is the documented one at most", arming <= 1);
 
     Sampler::init(64);
-    console_drain();
+    (void)console_drain();
     run_ticks(512);
     Sampler::stop();
     Tally t = take_tally();
@@ -302,7 +307,7 @@ void tb_stale() {
     delay_us(clock, 3000);            // a few periods on the wire
     Tca<0>::disable();
     Sampler::init(32);
-    console_drain();
+    (void)console_drain();
     run_ticks(256);
     Sampler::stop();
     print(serial, "  one burst then quiet, 8 sampler ticks: ", Sink::total,
@@ -316,7 +321,7 @@ void tb_stale() {
     FrequencyMeter<T0>::init(clock, ChGen{});
     Gen::init(clock, 20000);
     Sampler::init(128);
-    console_drain();
+    (void)console_drain();
     run_ticks(1024);
     Sampler::stop();
     t = take_tally();
@@ -355,7 +360,7 @@ void tc_two_sources() {
         delay_us(clock, 3000);                  // buffered: lands at BOTTOM
 
         Sampler::init(128);
-        console_drain();
+        (void)console_drain();
         run_ticks(512);
         Sampler::stop();
 
@@ -399,7 +404,7 @@ void tc_two_sources() {
     delay_us(clock, 3000);
     settle_after_arming();
     Sampler::init(128);
-    console_drain();
+    (void)console_drain();
     run_ticks(512);
     Sampler::stop();
     print(serial, "  with TCB1's interrupt disabled: index 0 got ", Sink::got[0],

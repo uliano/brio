@@ -91,7 +91,7 @@
 //      loss semantics and the write-collision boundary (its p) and the
 //      self-selected client the USART's Host SPI is served by (the
 //      client half of its r) - drawn with this board as the host, paced
-//      as that suite paces them. Any other peer: SKIPPED, no verdict.
+//      as that suite paces them. Any other peer: the letter is skipped.
 //   i  the AVR client's RUNS back to back (an avrxt peer only): 256
 //      characters as one request, the exchange, the answer run, the
 //      receive run and the exchange without BUFWR, 500 kHz to 4 MHz
@@ -150,6 +150,7 @@
 #include "util/power.hpp"
 #include "util/print.hpp"
 #include "util/spi_bus.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED. spi_link.hpp
@@ -179,6 +180,40 @@ constexpr UartPads console_pads{
 using Serial = Uart<5, console_pads>;
 constexpr Serial serial;
 TestBench<Serial> bench;
+
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's
+/// waits (util/test_wait.hpp). The spans the letters judge ride the
+/// crystal's counter below (CrystalTc), the oscillator the SERCOM does not
+/// run on.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// Every queued console byte off the wire, bounded (util/test_wait.hpp):
+/// false on a wedged console.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
+
+/// The console drained before a timed window opens (its transmit
+/// interrupt would land inside the span), or a failed verdict saying so
+/// and false: the letter then skips the window.
+bool quiet_console() {
+    if (console_drain()) {
+        return true;
+    }
+    bench.verdict("the console drained before the timed window", false);
+    return false;
+}
+
+/// A time-out for one character on the link: ten times a character at the
+/// slowest rate the generator has (eight bits at BAUD 255, 93.75 kHz: 85 us;
+/// a nine-bit one 96 us).
+constexpr uint32_t char_budget_us = 1'000u;
+
+/// A time-out for PCHCTRL.CHEN to read back disconnected: its write is
+/// synchronized to the generator (16.6.3.3), a few cycles of generator 0 at
+/// 48 MHz, far under this.
+constexpr uint32_t gclk_budget_us = 1'000u;
 
 // ---------------------------------------------------------------------------
 // The link's pads, both roles
@@ -244,6 +279,13 @@ using Raw = Spi<link_sercom>;
 using Cs = Pin<'A', 17>;
 using SckPin = Pin<'A', 19>;
 
+/// Whether SERCOM1's core clock channel reads disconnected within its
+/// synchronization's budget.
+bool core_clock_gone() {
+    return brio::wait_until<Ruler>([] { return !GclkChannel::connected(Raw::gclk_core_id()); },
+                                   gclk_budget_us);
+}
+
 /// The command channel's SCK, and the one place it is named. 200 kHz -
 /// a byte is 40 us, which is a whole order of magnitude more than the
 /// peer's polled loop needs to turn one around, and well inside its own
@@ -257,7 +299,7 @@ static_assert(spi_sck_hz(SysClock::hz, command_baud) == command_hz);
 // The crystal ruler
 // ---------------------------------------------------------------------------
 
-using Ruler = Tc<2>;   ///< TC2+TC3 as one 32-bit counter
+using CrystalTc = Tc<2>;   ///< TC2+TC3 as one 32-bit counter
 constexpr uint8_t gen_xtal = 2;
 constexpr uint32_t crystal_hz = 24'000'000UL;
 bool ruler_ok = false;
@@ -269,17 +311,17 @@ bool ruler_up() {
     if (!Gclk<gen_xtal>::configure(GclkConfig{.source = GclkSource::xosc})) {
         return false;
     }
-    (void)Ruler::enable(false);
-    if (!Ruler::init(gen_xtal)) {
+    (void)CrystalTc::enable(false);
+    if (!CrystalTc::init(gen_xtal)) {
         return false;
     }
-    if (!Ruler::configure(TcConfig{.mode = TcMode::count32, .prescaler = TcPrescaler::div1})) {
+    if (!CrystalTc::configure(TcConfig{.mode = TcMode::count32, .prescaler = TcPrescaler::div1})) {
         return false;
     }
-    return Ruler::enable(true);
+    return CrystalTc::enable(true);
 }
 
-uint32_t wall() { return Ruler::count32(); }
+uint32_t wall() { return CrystalTc::count32(); }
 
 // ---------------------------------------------------------------------------
 // The bus, and the protocol over it
@@ -301,12 +343,9 @@ uint8_t dummy_buf[spilink::answer_bytes];
 spilink::Decoder dec;
 bool link_quiet = false;
 
-void settle_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
-void settle() { settle_ms(spilink::settle_ms); }
+/// The protocol's pause after a frame, while the client decodes
+/// (spi_link.hpp's settle_ms).
+void settle() { brio::spin_us<Ruler>(spilink::settle_ms * 1000u); }
 
 /// SERCOM1 as the command channel's host, PA17 as its chip select.
 bool link_command_mode() {
@@ -334,39 +373,13 @@ bool link_command_mode() {
  * So the PROTOCOL owns the chip select here, and the engine's Request
  * carries a null PinRef for these windows. No engine has a per-request
  * chip-select hold: that Request knob is declared future growth with
- * its first device user, and this suite spends its own measured spin.
+ * its first device user, and this suite spends its own 30 us on the
+ * ruler, on either side of each window. (This is an APP waiting, not a
+ * driver.)
  */
-volatile uint32_t hold_spins = 0;
-uint32_t hold_us = 0;
+constexpr uint32_t cs_hold_us = 30;
 
-void link_hold() {
-    // The counter is volatile so -Os cannot delete the loop: gcc will
-    // delete a bare polling loop. Compound ops on volatile are
-    // deprecated in C++20, hence the long spelling.
-    for (volatile uint32_t i = 0; i < hold_spins; i = i + 1) {
-    }
-}
-
-/// A spin is not a time, so it is MEASURED and not assumed: one
-/// thousand turns are timed on the crystal, the count is scaled to about
-/// thirty microseconds, and what that really came out at is printed in
-/// the banner. (This is an APP spinning, not a driver.)
-void calibrate_hold() {
-    if (!ruler_ok) {
-        hold_spins = 300;   // blind but generous
-        return;
-    }
-    hold_spins = 1000;
-    const uint32_t t0 = wall();
-    link_hold();
-    const uint32_t per_1000 = wall() - t0;
-    const uint32_t want = 30u * (crystal_hz / 1000000u);   // 30 us in crystal ticks
-    hold_spins = per_1000 ? (1000u * want) / per_1000 : 300u;
-    if (hold_spins < 10u) hold_spins = 10u;
-    const uint32_t t1 = wall();
-    link_hold();
-    hold_us = (wall() - t1) / (crystal_hz / 1000000u);
-}
+void link_hold() { brio::spin_us<Ruler>(cs_hold_us); }
 
 /// One polled transaction with NO chip select of its own.
 bool link_xfer_bare(const uint8_t* tx, uint8_t* rx, uint16_t len, uint8_t baud,
@@ -470,7 +483,7 @@ bool command(Op op, const uint8_t* p = no_payload, uint8_t len = 0) {
             for (uint8_t i = 0; i < raw_n; ++i) first_seen[i] = raw_seen[i];
         }
         (void)link_command_mode();
-        settle_ms(400);
+        brio::spin_us<Ruler>(400'000u);
     }
     if (link_quiet) return false;
     print(serial, "    LINK FAILURE op ", hex(spilink::byte_of(op)),
@@ -509,7 +522,7 @@ bool peer_report(spilink::Report& r) {
             r = spilink::get_report(f.data);
             return true;
         }
-        settle_ms(60);
+        brio::spin_us<Ruler>(60'000u);
     }
     return false;
 }
@@ -618,6 +631,7 @@ bool do_exchange(const Exchange& e) {
     }
     settle();
     const uint16_t n = e.count < max_exchange ? e.count : max_exchange;
+    bool clocked = true;
     if (raw_leg) {
         // The engine's own apply() would re-state CTRLA without DORD, so
         // this leg drives the transaction with CS by hand and the raw
@@ -628,8 +642,11 @@ bool do_exchange(const Exchange& e) {
         link_hold();
         for (uint16_t i = 0; i < n; ++i) {
             Raw::data(xtx[i]);
-            uint32_t spins = 200000u;
-            while (!Raw::rxc_flag() && spins-- != 0u) {
+            // A character that never completes ends the leg: the exchange
+            // is reported as not run, never judged on a byte not clocked.
+            if (!brio::wait_until<Ruler>([] { return Raw::rxc_flag(); }, char_budget_us)) {
+                clocked = false;
+                break;
             }
             xrx[i] = static_cast<uint8_t>(Raw::data());
             if (e.gapped) link_hold();
@@ -640,7 +657,7 @@ bool do_exchange(const Exchange& e) {
         (void)link_xfer(xtx, xrx, n, e.baud, e.host_mode);
     }
     (void)link_command_mode();
-    return true;
+    return clocked;
 }
 
 struct Verify {
@@ -778,10 +795,7 @@ void ta_block() {
     (void)Raw::configure(host_cfg);
     const uint32_t before3 = Raw::ctrla();
     GclkChannel::disconnect(Raw::gclk_core_id());
-    bool really_clockless = false;
-    for (uint32_t k = 0; k < 100000u && !really_clockless; ++k) {
-        really_clockless = !GclkChannel::connected(Raw::gclk_core_id());
-    }
+    const bool really_clockless = core_clock_gone();
     Raw::regs().SERCOM_CTRLA = SERCOM_SPIM_CTRLA_SWRST_Msk;
     const bool sync3 = Raw::wait_sync(SERCOM_SPIM_SYNCBUSY_SWRST_Msk, 200000u);
     const uint32_t after_clockless = Raw::ctrla();
@@ -960,8 +974,10 @@ void ta_block() {
 // ===========================================================================
 
 void tb_link() {
-    if (!need_peer()) return;
-    bench.verdict("the peer answers a ping over the four wires", true);
+    const bool up = ensure_link();
+    bench.verdict("the peer answers a ping over the four wires (the peer board running spi_peer)",
+                  up);
+    if (!up) return;
 
     spilink::Ident d{};
     const bool got = peer_ident(d);
@@ -1236,13 +1252,11 @@ void te_client() {
     a.cfg.mode = 0;
     a.cfg.dord = 0;
 
-    if (!peer_act(Op::host_burst, a)) {
-        bench.verdict("the peer accepted the host_burst command (its spi_peer must "
-                      "carry op 0x14 - reflash the peer)",
-                      false);
-        return;
-    }
-    bench.verdict("the peer accepted the host_burst command", true);
+    const bool accepted = peer_act(Op::host_burst, a);
+    bench.verdict("the peer accepted the host_burst command (its spi_peer must carry op 0x14 - "
+                  "reflash the peer)",
+                  accepted);
+    if (!accepted) return;
 
     const bool ran = run_as_client(a, SpiMode::mode0, false);
     bench.verdict("this board came up as an SPI CLIENT on the other DOPO row", ran);
@@ -1398,8 +1412,9 @@ void tf_wireless() {
             (void)Loop::start(r);
             return (wall() - t0) / (crystal_hz / 1000000u);
         };
-        const uint32_t bare = timed(0);
-        const uint32_t with_setup = timed(100);
+        const bool quiet = quiet_console();
+        const uint32_t bare = quiet ? timed(0) : 0u;
+        const uint32_t with_setup = quiet ? timed(100) : 0u;
         const uint32_t delta = with_setup > bare ? with_setup - bare : 0u;
         print(serial, "  cs_setup_us: 16 bytes in ", bare, " us bare, ", with_setup,
               " us with 100 us of setup (delta ", delta, ")", crlf);
@@ -1430,19 +1445,29 @@ void tf_wireless() {
                                           2'000'000UL, 3'000'000UL, 4'000'000UL,
                                           6'000'000UL, 8'000'000UL};
         static const uint32_t untimed[] = {12'000'000UL, 24'000'000UL};
-        bool all_in_band = true;
+        constexpr uint8_t n_judged = sizeof(judged) / sizeof(judged[0]);
+        constexpr uint8_t n_untimed = sizeof(untimed) / sizeof(untimed[0]);
+        // Every rung measured with the console quiet, then printed.
+        uint32_t pm_judged[n_judged] = {};
+        uint32_t pm_untimed[n_untimed] = {};
+        uint32_t m3 = 0;
+        const bool quiet = quiet_console();
+        if (quiet) {
+            for (uint8_t i = 0; i < n_judged; ++i) pm_judged[i] = frame_permille(judged[i]);
+            for (uint8_t i = 0; i < n_untimed; ++i) pm_untimed[i] = frame_permille(untimed[i]);
+            m3 = frame_permille(1'000'000UL, SpiMode::mode3);
+        }
+        bool all_in_band = quiet;
         print(serial, "  a frame inside a polled block, in thousandths of its eight SCK periods "
                       "at the rate asked:");
-        for (const uint32_t hz : judged) {
-            const uint32_t pm = frame_permille(hz);
-            print(serial, " ", hz / 1000u, " kHz ", pm);
-            all_in_band = all_in_band && wire_ok(pm);
+        for (uint8_t i = 0; i < n_judged; ++i) {
+            print(serial, " ", judged[i] / 1000u, " kHz ", pm_judged[i]);
+            all_in_band = all_in_band && wire_ok(pm_judged[i]);
         }
         print(serial, crlf, "  not timed (the polled turn outlasts the frame):");
-        for (const uint32_t hz : untimed) {
-            print(serial, " ", hz / 1000u, " kHz ", frame_permille(hz));
+        for (uint8_t i = 0; i < n_untimed; ++i) {
+            print(serial, " ", untimed[i] / 1000u, " kHz ", pm_untimed[i]);
         }
-        const uint32_t m3 = frame_permille(1'000'000UL, SpiMode::mode3);
         print(serial, crlf, "  mode 3 at 1 MHz: ", m3, crlf);
         bench.verdict("THE SCK LADDER RUNS AT THE RATES ASKED: 93.75 kHz to 8 MHz, a frame "
                       "inside a polled block in its eight SCK periods within -1 % and +3 % on "
@@ -1466,8 +1491,9 @@ void tf_wireless() {
         uint16_t back[4] = {};
         for (uint8_t i = 0; i < 4; ++i) {
             Raw::data(words[i]);
-            uint32_t spins = 200000u;
-            while (!Raw::rxc_flag() && spins-- != 0u) {
+            if (!brio::wait_until<Ruler>([] { return Raw::rxc_flag(); }, char_budget_us)) {
+                nine_ok = false;   // a character that never came back fails the verdict
+                break;
             }
             back[i] = Raw::data();
         }
@@ -1491,13 +1517,13 @@ void tf_wireless() {
     Pin<'A', 16>::function(PinFunction::c, {.input_enable = true});
     SckPin::function(PinFunction::c);
     Raw::flush_rx();
+    bool clocked = true;
     for (uint8_t i = 0; i < 5; ++i) {
         Raw::data(static_cast<uint16_t>(0x30u + i));
-        uint32_t spins = 200000u;
-        while (!Raw::dre_flag() && spins-- != 0u) {
-        }
+        clocked = clocked &&
+                  brio::wait_until<Ruler>([] { return Raw::dre_flag(); }, char_budget_us);
     }
-    settle_ms(2);
+    brio::spin_us<Ruler>(2'000u);
     const bool overflowed = Raw::overflow_flag();
     const bool err = Raw::error_flag();
     print(serial, "  five characters clocked with DATA never read: STATUS=",
@@ -1505,7 +1531,7 @@ void tf_wireless() {
     bench.verdict("the receive buffer is TWO deep and the rest is lost - "
                   "STATUS.BUFOVF with CTRLA.IBON, and INTFLAG.ERROR travelling "
                   "with it (32.6.2.7)",
-                  up && overflowed && err);
+                  up && clocked && overflowed && err);
     Raw::clear_status(SpiStatus::overflow);
     Raw::clear_flags(SpiFlag::error);
     bench.verdict("both are write-one-to-clear",
@@ -1533,7 +1559,13 @@ void tf_wireless() {
     // then fails on every second run.
     uint8_t sent = 1;
     Raw::data(0x00);
-    for (uint32_t k = 0; k < 400000u; ++k) {
+    // The window: four characters of 85 us and their SS pulses, some
+    // 0.4 ms, held open five times that. A turn of the sampler is two pad
+    // reads and the ruler's, about a microsecond against the pulse's
+    // baud cycle of 10.7 us.
+    const uint32_t mss_t0 = Ruler::now();
+    const uint32_t mss_window = brio::us_cycles<Ruler>(2'000u);
+    while (Ruler::now() - mss_t0 < mss_window) {
         const bool now = Cs::read();
         if (now && !prev) ++rises;
         prev = now;
@@ -1681,15 +1713,18 @@ private:
 
 using BusKernel = Tenuto<P, Driver, SpiArb>;
 
-/// Every queue drained, then again until `done` or 300 ms.
+/// Every queue drained, then again until `done` or 300 ms. The answer is
+/// dropped: every caller's verdicts count the replies and the votes
+/// themselves.
 template <typename Done>
 void run_until(Done done) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < 300u) {
-        while (BusKernel::step()) {
-        }
-        if (done()) break;
-    }
+    (void)brio::wait_until<Ruler>(
+        [&] {
+            while (BusKernel::step()) {
+            }
+            return done();
+        },
+        300'000u);
 }
 
 }   // namespace kl
@@ -1770,9 +1805,10 @@ void tg_kernel() {
                   behind_votes == 1 && behind_vote && replied_first == 1);
 
     // The rate this letter's requests ask for, and the generator's
-    // slowest, timed on the wire.
-    const uint32_t pm_cmd = frame_permille(command_hz);
-    const uint32_t pm_slow = frame_permille(spi_sck_hz(SysClock::hz, 255));
+    // slowest, timed on the wire with the console quiet.
+    const bool quiet = quiet_console();
+    const uint32_t pm_cmd = quiet ? frame_permille(command_hz) : 0u;
+    const uint32_t pm_slow = quiet ? frame_permille(spi_sck_hz(SysClock::hz, 255)) : 0u;
     print(serial, "  a frame inside a polled block at the letter's rate and the slowest, in "
           "thousandths of its "
           "wire time: ", command_hz / 1000u, " kHz ", pm_cmd, ", ",
@@ -1783,10 +1819,6 @@ void tg_kernel() {
     Loop::release();
     Cs::set();
     Cs::output();
-    bench.verdict("NOT ONE LINE of util/spi_bus.hpp, util/bus_master.hpp or kernel/ "
-                  "was changed for this architecture - the arbiter ran the contract "
-                  "as written on this silicon",
-                  true);
 }
 
 // ===========================================================================
@@ -1826,7 +1858,7 @@ bool h_sink(uint8_t regime, uint8_t seed, uint16_t count, uint8_t flags, spilink
     for (uint16_t i = 0; i < n; ++i) xtx[i] = static_cast<uint8_t>(seed + i);
     settle();
     (void)link_xfer(xtx, nullptr, n, avr_command_baud);
-    settle_ms(350);
+    brio::spin_us<Ruler>(350'000u);
     return peer_report(r);
 }
 
@@ -1862,17 +1894,19 @@ bool h_mspi(uint8_t mode, uint8_t dord, Exchange& shape, Verify& v, spilink::Rep
     c.baud = avr_command_baud;
     const bool up = Raw::configure(c) && Raw::enable(true);
     Cs::set();
-    settle_ms(lead_ms + 10u);
+    brio::spin_us<Ruler>((lead_ms + 10u) * 1000u);
     for (uint8_t i = 0; i < max_exchange; ++i) xrx[i] = 0xEE;
-    for (uint16_t i = 0; up && i < count && i < max_exchange; ++i) {
+    bool clocked = up;
+    for (uint16_t i = 0; clocked && i < count && i < max_exchange; ++i) {
         Raw::data(spilink::pattern_value(a.pattern, seed_a, i));
-        uint32_t spins = 200000u;
-        while (!Raw::rxc_flag() && spins-- != 0u) {
+        if (!brio::wait_until<Ruler>([] { return Raw::rxc_flag(); }, char_budget_us)) {
+            clocked = false;   // the burst reported as not run
+            break;
         }
         xrx[i] = static_cast<uint8_t>(Raw::data());
         link_hold();
     }
-    settle_ms(10);                        // the peer clears its INVEN at the count bound
+    brio::spin_us<Ruler>(10'000u);        // the peer clears its INVEN at the count bound
     (void)link_command_mode();
 
     shape = Exchange{};                   // only to describe the expected stream
@@ -1885,7 +1919,8 @@ bool h_mspi(uint8_t mode, uint8_t dord, Exchange& shape, Verify& v, spilink::Rep
     shape.seed_b = seed_b;
     shape.pattern = a.pattern;
     v = verify_rx(shape);
-    return up && peer_report(r);
+    const bool rep = peer_report(r);
+    return clocked && rep;
 }
 
 void th_avr_client() {
@@ -1895,10 +1930,9 @@ void th_avr_client() {
     bench.verdict("ident comes back", got);
     if (!got) return;
     if (spilink::peer_kind(d.version) != spilink::peer_avrxt) {
-        print(serial, "  SKIPPED, no verdict claimed: the peer (fw ", hex(d.version),
-              ") is not the avrxt spi_peer, and every verdict of this letter is a fact "
-              "about an AVR128DB client",
-              crlf);
+        print(serial, "  the peer's firmware: ", hex(d.version), crlf);
+        bench.skip("the peer is not the avrxt spi_peer, and every verdict of this letter is a "
+                   "fact about an AVR client");
         return;
     }
     print(serial, "  the peer is the avrxt spi_peer (fw ", hex(d.version), ", crystal ",
@@ -2174,8 +2208,8 @@ void ti_avr_runs() {
     bench.verdict("ident comes back", got);
     if (!got) return;
     if (spilink::peer_kind(d.version) != spilink::peer_avrxt || (d.version & 0xFFu) < 0x01u) {
-        print(serial, "  SKIPPED, no verdict claimed: the peer (fw ", hex(d.version),
-              ") is not the avrxt spi_peer with the client's runs (0x0101 and up)", crlf);
+        print(serial, "  the peer's firmware: ", hex(d.version), crlf);
+        bench.skip("the peer is not the avrxt spi_peer with the client's runs (0x0101 and up)");
         return;
     }
     struct Rung {
@@ -2371,7 +2405,7 @@ ClientBurst client_burst(JRun kind, const Peer::Config& cfg, uint16_t n, uint8_t
     client_isr = false;
     ssl_hold_us = 0;
     Peer::release();
-    settle_ms(20);
+    brio::spin_us<Ruler>(20'000u);
     (void)link_command_mode();
     c.reported = peer_report(c.host);
     return c;
@@ -2510,9 +2544,10 @@ void tj_client_edges() {
         a.aux16 = 40'000u;
         const bool took_cmd = peer_act(Op::ss_pulse, a);
         const bool up = Peer::init(clock, plain);
-        uint32_t w = 0;
-        while (!Peer::selected() && w < 4'000'000u) ++w;
-        const bool fell = Peer::selected();
+        // The peer drives the select 20 ms after its ack window (aux8):
+        // ten times that.
+        const bool fell =
+            brio::wait_until<Ruler>([] { return Peer::selected(); }, 200'000u);
         constexpr uint32_t budget = 5'000u;
         const uint32_t t0 = wall();
         const Peer::Run s = Peer::exchange(std::span<const uint8_t>(jout, 8),
@@ -2526,7 +2561,7 @@ void tj_client_edges() {
                       "with nothing, the select still low",
                       took_cmd && up && fell && s.end == Peer::RunEnd::stalled && s.count == 0 &&
                           still);
-        settle_ms(60);
+        brio::spin_us<Ruler>(60'000u);
         Peer::release();
         (void)link_command_mode();
     }
@@ -2562,7 +2597,7 @@ void tj_client_edges() {
         bench.verdict("a transaction whose address does not match is IGNORED WHOLE: nothing "
                       "received, TXC never raised, the run ends on its budget",
                       took_cmd && up && s.end == Peer::RunEnd::stalled && s.count == 0 && !done);
-        settle_ms(20);
+        brio::spin_us<Ruler>(20'000u);
         Peer::release();
         (void)link_command_mode();
         spilink::Report r{};
@@ -2658,10 +2693,7 @@ void tk_host_paths() {
     // with the select raised and the receiver flushed.
     bench.verdict("the protocol's engine comes up", link_command_mode());
     GclkChannel::disconnect(Raw::gclk_core_id());
-    bool clockless = false;
-    for (uint32_t k = 0; k < 100000u && !clockless; ++k) {
-        clockless = !GclkChannel::connected(Raw::gclk_core_id());
-    }
+    const bool clockless = core_clock_gone();
     uint8_t txs[8] = {1, 2, 3, 4, 5, 6, 7, 8};
     uint8_t rxs[8] = {};
     const uint32_t t0 = wall();
@@ -2844,10 +2876,7 @@ uint8_t run(const typename H::Request& r, bool& on_engines, uint32_t timeout_ms 
     if (!on_engines) {
         return H::status();
     }
-    const uint32_t t0 = Ticker::millis();
-    while (!dma_done && Ticker::millis() - t0 < timeout_ms) {
-    }
-    if (!dma_done) {
+    if (!brio::wait_until<Ruler>([] { return dma_done; }, timeout_ms * 1000u)) {
         (void)H::recover();
         return 0xEEu;
     }
@@ -3253,8 +3282,7 @@ void tn_reset() {
     // The stall.
     (void)Loop::init(clock);
     GclkChannel::disconnect(Raw::gclk_core_id());
-    for (uint32_t k = 0; k < 100000u && GclkChannel::connected(Raw::gclk_core_id()); ++k) {
-    }
+    const bool clockless = core_clock_gone();
     auto rs = dm::request<Loop>(sixteen, nullptr, 8, baud, SpiMode::mode0, SpiEngine::polled);
     rs.cs = dm::Fake::ref();
     (void)Loop::start(rs);
@@ -3269,7 +3297,8 @@ void tn_reset() {
     print(serial, "  a polled request on a clockless SERCOM: status ", stall_st,
           "; the next read of sixteen once the clock is back: ", bad_stall, " wrong, status ",
           Loop::status(), ", first ", hex(got[0]), " for ", hex(sixteen[0]), crlf);
-    bench.verdict("a stall ends spi_stalled", stall_st == spi_stalled);
+    bench.verdict("a stall ends spi_stalled (the core clock channel really disconnected)",
+                  clockless && stall_st == spi_stalled);
     bench.verdict("and the next request is exact, with no recover() called",
                   bad_stall == 0u && Loop::status() == spi_ok);
 
@@ -3366,6 +3395,7 @@ bool sampler_up() {
 /// What a request left on the two lines: the D/C's pad, and the select's two
 /// stores in the spy (fallen, then risen: a request's path stores each once).
 struct End {
+    bool clockless;   ///< the core clock channel read disconnected before the request
     uint8_t status;
     bool ended_in_start;
     bool dc_high;
@@ -3380,8 +3410,7 @@ End stalled_on_a_clockless_sercom(const uint8_t* cmd, uint8_t cmd_len, const uin
     H::prime(SpiMode::mode0, baud);
     dm::engage<H>();
     GclkChannel::disconnect(Raw::gclk_core_id());
-    for (uint32_t k = 0; k < 100000u && GclkChannel::connected(Raw::gclk_core_id()); ++k) {
-    }
+    const bool clockless = core_clock_gone();
     auto r = dm::request<H>(tx, nullptr, len, baud, SpiMode::mode0, engine);
     r.cmd = lend<Lease::reply>(cmd);
     r.cmd_len = cmd_len;
@@ -3389,6 +3418,7 @@ End stalled_on_a_clockless_sercom(const uint8_t* cmd, uint8_t cmd_len, const uin
     r.dc = dm::Fake::ref();
     dm::spy_reset();
     End e{};
+    e.clockless = clockless;
     e.ended_in_start = H::start(r);
     e.status = H::status();
     e.dc_high = dm::Fake::read();
@@ -3401,12 +3431,14 @@ End stalled_on_a_clockless_sercom(const uint8_t* cmd, uint8_t cmd_len, const uin
 }
 
 bool end_clean(const End& e, uint8_t status) {
-    return e.ended_in_start && e.status == status && e.dc_high && e.cs_fell && e.cs_rose;
+    return e.clockless && e.ended_in_start && e.status == status && e.dc_high && e.cs_fell &&
+           e.cs_rose;
 }
 
 void print_end(const char* what, const End& e) {
     print(serial, "  ", what, ": status ", e.status, ", D/C ", e.dc_high ? "high" : "LOW", ", the select ",
-          e.cs_fell ? "fell" : "NEVER FELL", " and ", e.cs_rose ? "rose" : "DID NOT RISE", crlf);
+          e.cs_fell ? "fell" : "NEVER FELL", " and ", e.cs_rose ? "rose" : "DID NOT RISE",
+          e.clockless ? "" : " (THE CORE CLOCK CHANNEL STAYED CONNECTED)", crlf);
 }
 
 /// One row of the flip's sampling: `rows` requests on host H, the sampler on.
@@ -3525,10 +3557,8 @@ void ts_request_end() {
         const bool dma_refused = dm::DLoop::start(third) && dm::DLoop::status() == spi_rejected;
         const bool nothing_moved = dm::spy_group.PORT_OUTSET == 0u && dm::spy_group.PORT_OUTCLR == 0u &&
                                    Raw::ctrla() == ctrla;
-        const uint32_t t0 = Ticker::millis();
-        while (!dm::dma_done && Ticker::millis() - t0 < 100u) {
-        }
-        const bool ended = dm::dma_done;
+        // 64 frames at BAUD 255 are 5.5 ms: 100 ms is the budget.
+        const bool ended = brio::wait_until<Ruler>([] { return dm::dma_done; }, 100'000u);
         const uint8_t st = dm::dma_status;
         uint16_t wrong = 0;
         for (uint16_t i = 0; i < 64u; ++i) {
@@ -3628,8 +3658,9 @@ void to_display() {
     const uint8_t peer_baud = *Bus::baud_for(2'000'000UL);
     print(serial, "  the console moves to its transmit engine for ", shape_seconds,
           " s: marked lines follow", crlf);
-    while (!Serial::tx_idle()) {
-    }
+    // A wedged console costs this line's tail alone: the shape is judged on
+    // its counters and the marked lines, which the engined console carries.
+    (void)console_drain();
     Serial::release();
     (void)dm::UDma::init(clock, 115200);
     dm::console_engined = true;
@@ -3679,8 +3710,7 @@ void to_display() {
     print(dm::udma, "#count ", marked, crlf);
     const uint32_t spi_faults = dm::WEngine::faults();
     const uint8_t console_faults = dm::UDma::dma_faults();
-    while (!dm::UDma::tx_idle()) {
-    }
+    const bool console_drained = brio::console_drain<Ruler, dm::UDma>();
     dm::UDma::release();
     dm::console_engined = false;
     (void)Serial::init(clock, 115200);
@@ -3689,11 +3719,13 @@ void to_display() {
     print(serial, "  ", shape_seconds, " s: ", turns, " turns, ", windows, " windows of 256 to the peer, ",
           loops, " blocks of 1024 at 12 MHz; requests not ended spi_ok ", bad_status,
           ", peer counts or mismatches ", bad_peer, ", reports missed ", no_report,
-          ", SPI channel blocks abandoned ", spi_faults, ", console DMA faults ", console_faults, crlf);
+          ", SPI channel blocks abandoned ", spi_faults, ", console DMA faults ", console_faults,
+          ", the engined console drained at the end ", console_drained, crlf);
     bench.verdict("THE DISPLAY'S SHAPE: the SPI transmit engine beside the console's, every request "
-                  "ended spi_ok on the engines, every window exact at the peer, no block abandoned",
+                  "ended spi_ok on the engines, every window exact at the peer, no block abandoned, "
+                  "the engined console drained",
                   windows > 0u && bad_status == 0u && bad_peer == 0u && no_report == 0u &&
-                      spi_faults == 0u && console_faults == 0u);
+                      spi_faults == 0u && console_faults == 0u && console_drained);
 }
 
 /**
@@ -3832,6 +3864,7 @@ void receive() {
 uint32_t q_turns = 20000;
 
 void tq_rule_two() {
+    uint32_t got_least = 0xFFFFFFFFu;
     for (uint8_t variant = 0; variant < 2u; ++variant) {
         rq::next_out = 0;
         rq::expect = 0;
@@ -3886,6 +3919,7 @@ void tq_rule_two() {
             rq::receive();
         }
         rq::live = false;
+        if (rq::got < got_least) got_least = rq::got;
         const uint8_t uart_faults = rq::Loop2::dma_faults();
         const uint8_t overruns = rq::Loop2::hw_overruns();
         rq::Loop2::release();
@@ -3898,7 +3932,10 @@ void tq_rule_two() {
               "own overruns ", overruns, ")", crlf);
     }
     (void)link_command_mode();
-    bench.verdict("ran", true);
+    // The counts above are the measurement, printed and not judged; what is
+    // judged is its premise, that the stream ran beside the recoveries.
+    bench.verdict("the loop's Uart carried its stream in both variants (the receiver read bytes)",
+                  got_least != 0u && got_least != 0xFFFFFFFFu);
 }
 
 // ---- r - the 24 MHz write, timed ------------------------------------------------
@@ -3912,10 +3949,15 @@ void tq_rule_two() {
  */
 alignas(4) const uint8_t flash_run[1024] = {1, 2, 3};
 
+/// A block's time-out: 1024 frames at BAUD 7 are 2.7 ms, about forty times
+/// under it.
+constexpr uint32_t r_budget_us = 100'000u;
+
 void tr_rate() {
     (void)dm::WLoop::init(clock);
     dm::engage<dm::WLoop>();
-    bool on = false;
+    uint16_t off_engines = 0;   ///< blocks start() kept (they never reach the vector)
+    uint16_t unended = 0;       ///< blocks that did not end within r_budget_us
     for (const uint8_t baud : {0, 1, 3, 7}) {
         for (uint8_t src = 0; src < 2u; ++src) {
             for (uint8_t sleep = 0; sleep < 2u; ++sleep) {
@@ -3926,10 +3968,23 @@ void tr_rate() {
                     for (uint8_t run = 0; run < 4u; ++run) {
                         dm::dma_done = false;
                         const uint32_t t0 = wall();
-                        on = !dm::WLoop::start(dm::request<dm::WLoop>(src ? flash_run : dm::big_tx, nullptr, n,
-                                                                     baud, SpiMode::mode0, SpiEngine::dma));
-                        while (!dm::dma_done) {
-                            if (sleep) __WFI();
+                        if (dm::WLoop::start(dm::request<dm::WLoop>(src ? flash_run : dm::big_tx, nullptr, n,
+                                                                   baud, SpiMode::mode0, SpiEngine::dma))) {
+                            ++off_engines;   // no vector will end it: nothing to wait for
+                            continue;
+                        }
+                        // The core spins on the flag (and the ruler), or sleeps
+                        // between the interrupts: the end's stamp is the vector's.
+                        const bool ended = brio::wait_until<Ruler>(
+                            [sleep] {
+                                if (sleep && !dm::dma_done) __WFI();
+                                return dm::dma_done;
+                            },
+                            r_budget_us);
+                        if (!ended) {
+                            ++unended;
+                            (void)dm::WLoop::recover();
+                            continue;
                         }
                         const uint32_t took = dm::dma_end_at - t0;
                         if (took < best) best = took;
@@ -3944,11 +3999,15 @@ void tr_rate() {
             }
         }
     }
-    (void)on;
     dm::disengage();
     dm::WLoop::release();
     (void)link_command_mode();
-    bench.verdict("ran", true);
+    print(serial, "  blocks kept off the engines ", off_engines, ", blocks not ended within ",
+          r_budget_us / 1000u, " ms ", unended, crlf);
+    // The frame's cycles above are the measurement, printed; what is judged
+    // is that every block of it ran on the engines and ended.
+    bench.verdict("every block of the ladder ran on the transmit engine and ended on its vector",
+                  off_engines == 0u && unended == 0u);
 }
 
 #endif  // SPI_SELECT_CONTROL
@@ -3980,6 +4039,9 @@ namespace rt {
 #ifndef SPI_SELECT_CONTROL
 using Load = DmaChannel<0>;
 constexpr uint16_t load_beats = 24000;  // a block of some 4 ms (printed)
+/// A wait on the load or on the write's answer: 100 ms, some twenty-five
+/// times the load's block and far over a write of 256 at 12 MHz (0.7 ms).
+constexpr uint32_t load_budget_us = 100'000u;
 alignas(4) volatile uint32_t load_cell[2];
 
 bool load_arm() {
@@ -4010,6 +4072,7 @@ struct Row {
     uint16_t ok = 0;        ///< spi_ok, answered once
     uint16_t faulted = 0;   ///< spi_dma_fault
     uint16_t early = 0;     ///< answered while the load still ran
+    uint16_t stuck = 0;     ///< the load, or the load and the answer, past load_budget_us
     uint32_t entries_max = 0;
     uint32_t entries_sum = 0;
 };
@@ -4034,17 +4097,20 @@ void starved_write(uint16_t n, uint8_t baud, uint8_t after_frames, Row& row, uin
         load_start(beats);
     }
     bool early = false;
+    bool stuck = false;
     if (load) {
-        while (Load::enabled() && !dm::dma_done) {
-        }
+        stuck = !brio::wait_until<Ruler>([] { return !Load::enabled() || dm::dma_done; },
+                                         load_budget_us);
         early = dm::dma_done;
     }
-    const uint32_t t1 = Ticker::millis();
-    while (!dm::dma_done && Ticker::millis() - t1 < 100u) {
-    }
-    while (load && Load::enabled()) {
+    // A write that never answers is counted below (ok stays short) and
+    // recover() takes it back: the answer is not needed here.
+    (void)brio::wait_until<Ruler>([] { return dm::dma_done; }, load_budget_us);
+    if (load && !brio::wait_until<Ruler>([] { return !Load::enabled(); }, load_budget_us)) {
+        stuck = true;
     }
     row.rows = static_cast<uint16_t>(row.rows + 1u);
+    row.stuck = static_cast<uint16_t>(row.stuck + (stuck ? 1u : 0u));
     row.early = static_cast<uint16_t>(row.early + (early ? 1u : 0u));
     row.faulted = static_cast<uint16_t>(row.faulted + (dm::dma_status == spi_dma_fault ? 1u : 0u));
     row.ok = static_cast<uint16_t>(row.ok + (dm::dma_done && dm::dma_status == spi_ok ? 1u : 0u));
@@ -4058,7 +4124,7 @@ void starved_write(uint16_t n, uint8_t baud, uint8_t after_frames, Row& row, uin
 
 void print_row(const char* what, uint16_t n, const Row& r) {
     print(serial, "  ", what, " of ", n, ", ", r.rows, " rows: spi_ok ", r.ok, ", spi_dma_fault ", r.faulted,
-          ", answered with the load up ", r.early, ", SERCOM entries a row ",
+          ", answered with the load up ", r.early, ", stuck ", r.stuck, ", SERCOM entries a row ",
           r.entries_sum / (r.rows != 0u ? r.rows : 1u), ", at most ", r.entries_max, crlf);
 }
 #endif
@@ -4072,8 +4138,8 @@ void tt_starved() {
     // The load alone: how long it holds the bus.
     const uint32_t t0 = wall();
     rt::load_start();
-    while (rt::Load::enabled()) {
-    }
+    const bool load_ended =
+        brio::wait_until<Ruler>([] { return !rt::Load::enabled(); }, rt::load_budget_us);
     const uint32_t load_ticks = wall() - t0;
     print(serial, "  the load: ", rt::load_beats, " words in one block, ", load_ticks / 24u, " us, ",
           load_ticks * 2u * 10u / rt::load_beats, " tenths of a core cycle a beat", crlf);
@@ -4101,15 +4167,16 @@ void tt_starved() {
     rt::print_row("the load from the third frame, a write at 12 MHz", 256, third_12m);
     print(serial, "  a load of 4 to 64 beats swept across the end of a write of 48 at 12 MHz, ", sweep.rows, " rows: spi_ok ",
           sweep.ok, ", spi_dma_fault ", sweep.faulted, ", no answer ", sweep.rows - sweep.ok - sweep.faulted,
-          ", SERCOM entries a row ", sweep.entries_sum / sweep.rows, ", at most ", sweep.entries_max, crlf);
+          ", stuck ", sweep.stuck, ", SERCOM entries a row ", sweep.entries_sum / sweep.rows, ", at most ", sweep.entries_max, crlf);
     dm::disengage();
     dm::WLoop::release();
     rt::load_release();
     (void)link_command_mode();
-    bench.verdict("the host and the load come up", up);
+    bench.verdict("the host and the load come up, the load ending by itself", up && load_ended);
     bench.verdict("with no load a write takes one entry, spi_ok", plain.ok == plain.rows && plain.entries_max <= 1u);
     const auto judged = [](const rt::Row& r, uint32_t most) {
-        return r.rows != 0u && r.ok == r.rows && r.faulted == 0u && r.early == 0u && r.entries_max <= most;
+        return r.rows != 0u && r.ok == r.rows && r.faulted == 0u && r.early == 0u && r.stuck == 0u &&
+               r.entries_max <= most;
     };
     bench.verdict("A WRITE STARVED FROM ITS START stands: spi_ok, after the load, at most 2 entries",
                   judged(from_start, 2));
@@ -4118,7 +4185,7 @@ void tt_starved() {
     bench.verdict("STARVED FROM ITS THIRD FRAME at 12 MHz: spi_ok, after the load, at most 4 entries",
                   judged(third_12m, 4));
     bench.verdict("A SHORT LOAD SWEPT ACROSS THE BLOCK'S END at 12 MHz: every row answered spi_ok",
-                  sweep.rows != 0u && sweep.ok == sweep.rows);
+                  sweep.rows != 0u && sweep.ok == sweep.rows && sweep.stuck == 0u);
 #endif
 }
 
@@ -4203,7 +4270,6 @@ int main() {
     brio::enable_interrupts();
 
     ruler_ok = ruler_up();
-    calibrate_hold();
 
     print(serial, crlf, crlf,
           "test_samc_spi - SERCOM SPI (ch. 32) and util's bus vocabulary on its "
@@ -4215,8 +4281,8 @@ int main() {
     print(serial, "  peer: the other board running spi_peer, "
                   "commanded in band over the same four wires; the crystal ruler is ",
           ruler_ok ? "up" : "DOWN", crlf);
-    print(serial, "  the protocol holds its own chip select ", hold_spins,
-          " spins = ", hold_us, " us around each window - see link_hold()'s comment "
+    print(serial, "  the protocol holds its own chip select ", cs_hold_us,
+          " us around each window - see link_hold()'s comment "
           "for the finding that made that necessary", crlf);
 
     bench.letter('a', "the block, its registers and its two live errata", ta_block);

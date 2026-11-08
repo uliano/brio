@@ -96,6 +96,7 @@
 #include "samc21/spi.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
 // register, and every architecture on this link compiles the same
@@ -178,47 +179,16 @@ uint32_t engaged_until = 0;
 
 bool engaged() { return engaged_until != 0 && Ticker::millis() < engaged_until; }
 
-// ---- microsecond waits ----------------------------------------------------------
+// ---- waits ----------------------------------------------------------------------
 //
-// An APP-LOCAL spin, calibrated once against the SysTick millisecond
-// at boot (the test_samc_spi link_hold precedent). samc21/delay.hpp was
-// born AFTER this app and could replace it; the calibrated spin stays
-// because it is proven at the bench and the swap would re-verify the
-// whole suite for cosmetics.
+// Every pause and time-out here is a time on the ruler, the SysTick
+// ticker read as CPU cycles (util/test_wait.hpp): the gaps between
+// characters, the select's pulse, the lead-ins.
 
-volatile uint32_t spins_per_ms = 4000;   ///< blind default, overwritten at boot
-
-void spin(uint32_t n) {
-    for (volatile uint32_t i = 0; i < n; i = i + 1) {
-    }
-}
-
-void calibrate_spin() {
-    // Wait for a tick edge, then count how many 1000-spin blocks fit
-    // in 32 ms. The result is only used for gap-scale waits (tens of
-    // microseconds), where a few per cent of error is nothing.
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() == t0) {
-    }
-    const uint32_t t1 = Ticker::millis();
-    uint32_t blocks = 0;
-    while (Ticker::millis() - t1 < 32u) {
-        spin(1000);
-        ++blocks;
-    }
-    spins_per_ms = (blocks * 1000u) / 32u;
-    if (spins_per_ms < 100u) spins_per_ms = 100u;
-}
-
-void delay_us(uint32_t us) {
-    spin((us * spins_per_ms) / 1000u + 1u);
-}
-
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
 // ---- the client's standing configurations ---------------------------------------
 
@@ -275,10 +245,12 @@ bool apply_cfg(const spilink::Cfg& c, bool drive_output = true) {
 
 // ---- answering ------------------------------------------------------------------
 
+/// The command window closed, or `ms` gone: a select still low then is
+/// the host's to raise, and the answer run that follows ends on the
+/// client's TXC whatever the pin reads (serve()), so the answer is not
+/// needed.
 void wait_ss_high(uint16_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Client::selected() && Ticker::millis() - t0 < ms) {
-    }
+    (void)brio::wait_until<Ruler>([] { return !Client::selected(); }, ms * 1000u);
 }
 
 // ---- the runs, in SRAM -----------------------------------------------------------
@@ -483,10 +455,10 @@ spilink::Report run_sink_slow(const spilink::Params& a) {
 spilink::Report run_ss_pulse(const spilink::Params& a) {
     spilink::Report r{};
     Client::release();
-    if (a.aux8) wait_ms(a.aux8);
+    if (a.aux8) brio::spin_us<Ruler>(a.aux8 * 1000u);
     SsPin::clear();
     SsPin::output();
-    delay_us(a.aux16 ? a.aux16 : 1000u);
+    brio::spin_us<Ruler>(a.aux16 ? a.aux16 : 1000u);
     SsPin::input(PinPull::up);
     r.aux0 = 1;
     r.count = 1;
@@ -527,8 +499,7 @@ spilink::Report run_host_burst(const spilink::Params& a) {
 
     const uint32_t lead = a.aux8 ? a.aux8 : 20u;
     const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < lead) {
-    }
+    brio::spin_us<Ruler>(lead * 1000u);
 
     uint16_t div = a.aux16 ? a.aux16 : spilink::command_division;
     if (div < 2u) div = 2u;
@@ -551,21 +522,21 @@ spilink::Report run_host_burst(const spilink::Params& a) {
     SsPin::set();
     SsPin::output();
     Raw::flush_rx();
-    delay_us(200);
+    brio::spin_us<Ruler>(200u);
 
     spilink::Stream out(a.pattern, a.seed_a);      // what THIS end sends
     spilink::Stream want(a.pattern, a.seed_b);     // what the client owes
 
     SsPin::clear();                                 // select, for the whole burst
-    delay_us(spilink::gap_us);
+    brio::spin_us<Ruler>(spilink::gap_us);
+    // A character's time-out: ten times one at the slowest division this
+    // action takes, 512 (93.75 kHz, 85 us).
+    constexpr uint32_t char_budget_us = 1'000u;
     while (r.count < a.count && Ticker::millis() - t0 < lead + a.ms) {
         Raw::data(out.next());
-        uint32_t spins_left = 200000u;
-        while (!Raw::rxc_flag() && spins_left-- != 0u) {
-        }
-        if (!Raw::rxc_flag()) break;
+        if (!brio::wait_until<Ruler>([] { return Raw::rxc_flag(); }, char_budget_us)) break;
         account(r, static_cast<uint8_t>(Raw::data()), want.next());
-        delay_us(spilink::gap_us);
+        brio::spin_us<Ruler>(spilink::gap_us);
     }
     SsPin::set();
     r.aux0 = Raw::flags();
@@ -692,7 +663,6 @@ int main() {
     Console::init(clock, 115200);
     Ticker::init(clock);
     brio::enable_interrupts();
-    calibrate_spin();
 
     // The board's name: the factory die serial's first word, in hex.
     const uint32_t w0 = brio::DeviceSerial::read().word[0];

@@ -67,6 +67,7 @@
 #include "util/analog.hpp"
 #include "util/analog_sampler.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #include "bench_sleep.hpp"
@@ -89,6 +90,17 @@ constexpr Serial serial;
 
 TestBench<Serial> bench;
 
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's
+/// waits (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// Every queued console byte off the wire, bounded (util/test_wait.hpp):
+/// false on a wedged console.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
+
 using brio::crlf;
 using brio::print;
 
@@ -110,12 +122,11 @@ using Adc1 = Adc<1>;
 constexpr uint8_t adc_gen = 0;
 constexpr uint32_t adc_gen_hz = SysClock::hz;
 
-/// Where this board's supply sits, located through the comparator's own
-/// scaler against the bandgap (docs/samc21/supc.md). Letter c re-derives
-/// it from the ADC's side, so it is a STARTING POINT here and never a
-/// verdict's authority.
-constexpr uint16_t supc_vdd_mv = 5141;
-uint16_t vdd_mv = supc_vdd_mv;   ///< refined by letter c, used by the rest
+/// Where this board's supply sits, in millivolts: 0 until locate_vdd()
+/// has read it (once a boot, before the first verdict that rests on it),
+/// refined by letter c. The board takes 3.3 V or 5 V on a jumper
+/// (docs/boards/samc21j.md), so no figure is assumed.
+uint16_t vdd_mv = 0;
 
 // ---------------------------------------------------------------------------
 // The stopwatch, for letter f only: TC0 + TC1 as one 32-bit counter, and
@@ -166,20 +177,10 @@ volatile uint16_t chain_seen = 0;    ///< RESRDY interrupts taken
 // Helpers
 // ---------------------------------------------------------------------------
 
-void spin(uint32_t turns) {
-    volatile uint32_t sink = 0;
-    for (uint32_t i = 0; i < turns; ++i) {
-        sink = sink + 1u;
-    }
-}
-
-void settle() { spin(20'000UL); }
-
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
+/// The pause after a pad, a channel or a reference changes: 4 ms, over
+/// three hundred conversions at 1.5 MHz (12 us each) and long enough for
+/// the bandgap's output to settle behind a VREF change.
+void settle() { brio::spin_us<Ruler>(4'000); }
 
 bool near(uint32_t a, uint32_t b, uint32_t tol) {
     return (a > b ? a - b : b - a) <= tol;
@@ -213,10 +214,45 @@ bool pad_follows_port() {
     return high && !low;
 }
 
-/// One converter up on the main clock with a given configuration.
+/// Hand a pad back as reset leaves it: an input, its buffer off, no pull
+/// (configure({}) alone would leave the output driver on).
+template <class P>
+void hand_back() {
+    P::input();
+    P::configure({});
+}
+
+/**
+ * One converter up with a given configuration, on the main clock or the
+ * crystal. ADC0 through ERRATUM 1.4.10'S RECOVERY when it is needed:
+ * once ADC1 has been enabled with ADC0 down, ADC0.SYNCBUSY.ENABLE may
+ * stand and Adc<0>::init() answer false (samc21/adc.hpp); bringing ADC1
+ * up first and ADC0 second is the way out docs/samc21/adc.md records.
+ * It says so when it acts, so no letter depends on what letter d (the
+ * erratum's own trigger) left behind.
+ */
 template <class A>
 bool adc_up(const AdcConfig& cfg, uint8_t generator = adc_gen) {
-    return A::init(generator, cfg, generator == adc_gen ? adc_gen_hz : crystal_hz);
+    const uint32_t hz = generator == adc_gen ? adc_gen_hz : crystal_hz;
+    if (A::init(generator, cfg, hz)) {
+        return true;
+    }
+    if constexpr (A::is_host) {
+        if ((A::sync_busy() & ADC_SYNCBUSY_ENABLE_Msk) == 0u) {
+            return false;
+        }
+        print(serial, "  [erratum 1.4.10: ADC0.SYNCBUSY.ENABLE stands - bringing "
+              "ADC1 up first]", crlf);
+        A::release();
+        Adc1::release();
+        if (!Adc1::init(generator, AdcConfig{.prescaler = cfg.prescaler}, hz)) {
+            return false;
+        }
+        const bool ok = A::init(generator, cfg, hz);
+        Adc1::release();
+        return ok;
+    }
+    return false;
 }
 
 /// The mean of `count` readings, in counts. The converter must be
@@ -265,6 +301,57 @@ uint16_t counts_mv(uint32_t counts, uint16_t known_mv,
 }
 
 const char* yes_no(bool v) { return v ? "yes" : "no"; }
+
+/**
+ * VDDANA located, once a boot: the 1.024 V bandgap level (MUXPOS INTREF,
+ * VREFOE set - letter c shows the channel dead without it) against VDDANA
+ * as the reference, at SAMPLEN 14 (the 10 us table 45-22 asks of the
+ * channel). The level sits under every supply the device runs on
+ * (2.7..5.5 V, DS60001479M table 45-2), so the reading never saturates;
+ * its accuracy is the level's own, +-2.05 % (table 45-36). Leaves ADC0
+ * released and SUPC.VREF at reset; false when the converter does not
+ * come up or the channel reads nothing.
+ */
+bool locate_vdd() {
+    if (vdd_mv != 0u) {
+        return true;
+    }
+    if (!adc_up<Adc0>(AdcConfig{.reference = Ref::vddana,
+                                .prescaler = AdcPresc::div32,
+                                .sample_length = 14})) {
+        return false;
+    }
+    (void)Vref::configure(VrefConfig{.level = VrefLevel::v1_024, .output_enable = true});
+    Adc0::select(AdcInput::intref);
+    settle();
+    const uint32_t counts = mean_of<Adc0>(32);
+    (void)Vref::configure(VrefConfig{});
+    Adc0::release();
+    if (counts == 0u) {
+        return false;
+    }
+    vdd_mv = static_cast<uint16_t>((1024UL * 4096UL + counts / 2u) / counts);
+    return true;
+}
+
+/// locate_vdd() for a letter whose verdicts rest on the supply: a failure
+/// is the letter's verdict.
+bool need_vdd() {
+    const bool ok = locate_vdd();
+    if (!ok) {
+        bench.verdict("VDDANA located through the 1.024 V bandgap level", false);
+    }
+    return ok;
+}
+
+/// Whether a bandgap level of `level_mv` can be read against a supply
+/// located at `supply_mv` without saturating: the level at most 95 % of
+/// the supply. The 5 % is the level's own +-2.05 % at its top (table
+/// 45-36), the located supply's +-2.05 % at its bottom (the 1.024 V level
+/// it was read with) and the levels' 0.3 %/V supply coefficient.
+constexpr bool level_below_supply(uint32_t level_mv, uint32_t supply_mv) {
+    return level_mv * 20u < supply_mv * 19u;
+}
 
 // =============================================================================
 // a - the block, the vocabularies it publishes, the calibration, the refusals
@@ -385,6 +472,10 @@ void ta_block() {
 // b - the rails, and the internal supply channels against them
 // =============================================================================
 void tb_rails() {
+    if (!need_vdd()) {
+        return;
+    }
+    print(serial, "  VDDANA located at ", vdd_mv, " mV", crlf);
     bench.verdict("PA08 reaches both rails under PORT - the precondition every\n"
                   "                analog measurement in this suite rests on",
                   pad_follows_port<PadShared>());
@@ -464,7 +555,10 @@ void tb_rails() {
                   "scale, both divisions",
                   half_ref >= 4090u && small_ref >= 4090u);
 
-    drive<PadShared>(false);
+    hand_back<PadShared>();
+    hand_back<PadShared2>();
+    hand_back<PadA4>();
+    hand_back<PadA5>();
     Adc0::release();
 }
 
@@ -475,8 +569,10 @@ void tb_rails() {
 // The bandgap read against the supply is a RATIO whose numerator is
 // known: 1.024, 2.048 or 4.096 V. So VDD = level * full_scale / counts,
 // and this is the same supply the COMPARATOR locates from its own side
-// (5251 / 5141 / 5090 mV at the three levels) with no mechanism in
-// common - the AC compares, this one converts.
+// through its VDD scaler (docs/samc21/supc.md) with no mechanism in
+// common - the AC compares, this one converts. A level is read only
+// where the supply holds it (level_below_supply()): at 3.3 V the 4.096 V
+// level would saturate the converter, and that leg is skipped.
 void tc_bandgap() {
     constexpr AdcConfig cfg{
         .reference = Ref::vddana,
@@ -510,25 +606,39 @@ void tc_bandgap() {
                   "input channel' and ch. 38 never mentions it, but MUXPOS "
                   "INTREF reads a flat zero until it is set",
                   without_oe == 0u);
+    // The level's 1.003..1.045 V (table 45-36) against any VDDANA in
+    // 2.7..5.5 V (table 45-2) reads 747..1585 counts of 4096.
     bench.verdict("and a real voltage once it is",
-                  with_oe > 400u && with_oe < 1200u);
+                  with_oe >= 747u && with_oe <= 1585u);
 
-    // Now the supply, three ways, from the three bandgap levels.
+    // Now the supply, from every bandgap level it holds. The 1.024 V
+    // level comes first and is always read: it sits under every supply
+    // the device runs on, so it locates the supply the higher levels are
+    // weighed against.
     struct Level {
         VrefLevel level;
         uint16_t nominal;
         const char* name;
-        uint16_t supc;
     };
     const Level levels[] = {
-        {VrefLevel::v1_024, 1024, "1.024", 5251},
-        {VrefLevel::v2_048, 2048, "2.048", 5141},
-        {VrefLevel::v4_096, 4096, "4.096", 5090},
+        {VrefLevel::v1_024, 1024, "1.024"},
+        {VrefLevel::v2_048, 2048, "2.048"},
+        {VrefLevel::v4_096, 4096, "4.096"},
     };
     uint32_t sum_mv = 0;
+    uint32_t lo_mv = UINT32_MAX;
+    uint32_t hi_mv = 0;
+    uint32_t located = 0;
+    uint8_t asked = 0;
     uint8_t counted = 0;
-    bool all_plausible = true;
     for (const Level& l : levels) {
+        if (located != 0u && !level_below_supply(l.nominal, located)) {
+            print(serial, "  INTREF ", l.name, " V not read: the supply, at ",
+                  located, " mV, does not hold it", crlf);
+            bench.skip("a bandgap level the supply does not hold");
+            continue;
+        }
+        ++asked;
         (void)Vref::configure(VrefConfig{.level = l.level, .output_enable = true});
         settle();
         Adc0::select(AdcInput::intref);
@@ -538,24 +648,33 @@ void tc_bandgap() {
                          : (static_cast<uint32_t>(l.nominal) * Adc0::result_steps() +
                             counts / 2u) / counts;
         print(serial, "  INTREF ", l.name, " V reads ", counts,
-              " counts -> VDDANA ", supply, " mV (the AC said ", l.supc, ")", crlf);
-        if (supply < 4500u || supply > 5800u) {
-            all_plausible = false;
-        } else {
+              " counts -> VDDANA ", supply, " mV", crlf);
+        if (located == 0u) {
+            located = supply;
+        }
+        // 2.7..5.5 V (table 45-2), widened by the level's own 5 %
+        // (level_below_supply()'s arithmetic).
+        if (supply >= 2565u && supply <= 5775u) {
             sum_mv += supply;
             ++counted;
+            lo_mv = supply < lo_mv ? supply : lo_mv;
+            hi_mv = supply > hi_mv ? supply : hi_mv;
         }
     }
-    bench.verdict("ALL THREE BANDGAP LEVELS PUT VDD IN THE SAME PLACE, and it "
-                  "is a 5 V board: 4500..5800 mV each",
-                  all_plausible && counted == 3u);
-    const uint32_t mean_vdd = counted == 0u ? supc_vdd_mv : (sum_mv + counted / 2u) / counted;
-    print(serial, "  ADC-side mean VDDANA: ", mean_vdd,
-          " mV against the AC's 5141 mV at the same level", crlf);
-    bench.verdict("and it agrees with the comparator's own answer within 5 % -\n"
-                  "                two peripherals, no shared mechanism, one supply",
-                  near(mean_vdd, supc_vdd_mv, supc_vdd_mv / 20u));
-    vdd_mv = static_cast<uint16_t>(mean_vdd);
+    bench.verdict("EVERY BANDGAP LEVEL THE SUPPLY HOLDS PUTS VDDANA INSIDE THE "
+                  "DEVICE'S 2.7..5.5 V (table 45-2, widened by the level's 5 %)",
+                  counted >= 2u && counted == asked);
+    const uint32_t mean_vdd = counted == 0u ? 0u : (sum_mv + counted / 2u) / counted;
+    print(serial, "  ADC-side mean VDDANA: ", mean_vdd, " mV over ", counted,
+          " levels, ", lo_mv == UINT32_MAX ? 0u : lo_mv, "..", hi_mv, crlf);
+    // Two levels, each within +-2.05 % of its nominal (table 45-36), put
+    // the supply up to 4.1 % apart; the converter's few counts of gain
+    // and offset error at 750..1600 counts are under 1 % more: 5 %.
+    bench.verdict("and they put it in the same place: within 5 % of each other",
+                  counted >= 2u && (hi_mv - lo_mv) * 20u <= mean_vdd);
+    if (mean_vdd != 0u) {
+        vdd_mv = static_cast<uint16_t>(mean_vdd);
+    }
 
     // THE SAMPLING RULE, measured rather than trusted: the same channel
     // with the sampling time the table forbids.
@@ -584,8 +703,8 @@ void tc_bandgap() {
     // measurement, printed and carried into docs/samc21/adc.md. What IS
     // asserted is that the long sample is the one that lands where the
     // other two mechanisms say the bandgap is.
-    bench.verdict("the 10 us sample is the one that agrees with the other two "
-                  "witnesses (within 2 %)",
+    bench.verdict("the 10 us sample is the one that agrees with the other "
+                  "levels (within 2 %)",
                   near((1024u * Adc0::result_steps()) /
                            (long_sample == 0u ? 1u : long_sample),
                        vdd_mv, vdd_mv / 50u));
@@ -603,6 +722,7 @@ void td_two_converters() {
         .prescaler = AdcPresc::div32,
         .sample_length = 5,
     };
+    (void)locate_vdd();   // the millivolts below are printed, never judged
     bench.verdict("both converters come up on the same configuration",
                   adc_up<Adc0>(cfg) && adc_up<Adc1>(cfg));
     bench.verdict("and both report the same full scale",
@@ -649,26 +769,31 @@ void td_two_converters() {
     print(serial, "  worst disagreement ", worst, " counts of 4096 = ",
           (worst * 1000u) / 4096u, " per mille of full scale", crlf);
 
-    // ERRATUM 1.4.10, tested rather than assumed: enabling ADC1 while
-    // ADC0 is disabled may leave ADC0.SYNCBUSY.ENABLE stuck at one.
+    // ERRATUM 1.4.10, measured and printed: enabling ADC1 while ADC0 is
+    // disabled may leave ADC0.SYNCBUSY.ENABLE stuck at one. Whether it
+    // does on a die is a fact about that die (the errata's matrix says
+    // "may"), so nothing here is a verdict on it. ADC0's release() turned
+    // its bus clock off, and a register behind a stopped bus clock reads
+    // zero, so the probe turns the clock on for the read alone. Then
+    // Adc<0>::init() is asked straight, with no recovery - what
+    // samc21/adc.hpp says it answers once the bit stands.
     Adc0::release();
     Adc1::release();
     bench.verdict("ADC1 alone comes up with ADC0 down", adc_up<Adc1>(cfg));
+    Adc0::bus_clock(true);
     const uint16_t adc0_sync = Adc0::sync_busy();
+    Adc0::bus_clock(false);
+    const bool direct = Adc0::init(adc_gen, cfg, adc_gen_hz);
+    const uint16_t after_init = Adc0::sync_busy();
     print(serial, "  erratum 1.4.10: with ADC1 enabled and ADC0 not, "
           "ADC0.SYNCBUSY reads ", Hex{adc0_sync}, " (the item's ENABLE bit ",
-          yes_no((adc0_sync & ADC_SYNCBUSY_ENABLE_Msk) != 0u), ")", crlf);
-    bench.verdict("ERRATUM 1.4.10 DID NOT REPRODUCE on this silicon: ADC0's "
-                  "ENABLE synchronization bit is CLEAR after ADC1 came up "
-                  "alone, where the item says it may stick at one",
-                  (adc0_sync & ADC_SYNCBUSY_ENABLE_Msk) == 0u);
-    bench.verdict("and ADC1's own is clear too - which is the bit this "
-                  "driver's enable() waits on, so the item can never hang it "
-                  "whatever the other instance does",
-                  (Adc1::sync_busy() & ADC_SYNCBUSY_ENABLE_Msk) == 0u);
+          yes_no((adc0_sync & ADC_SYNCBUSY_ENABLE_Msk) != 0u),
+          "); Adc<0>::init() then answers ", yes_no(direct),
+          ", SYNCBUSY ", Hex{after_init}, crlf);
 
+    Adc0::release();
     Adc1::release();
-    drive<PadShared>(false);
+    hand_back<PadShared>();
 }
 
 // =============================================================================
@@ -686,6 +811,9 @@ void te_averaging() {
         .prescaler = AdcPresc::div32,
         .sample_length = 5,
     };
+    if (!need_vdd()) {
+        return;
+    }
     bench.verdict("ADC0 up, single 12-bit samples", adc_up<Adc0>(single));
     (void)Vref::configure(VrefConfig{.level = VrefLevel::v1_024,
                                      .output_enable = true});
@@ -716,11 +844,15 @@ void te_averaging() {
     const Spread raw = survey[noisiest];
     print(serial, "  the noisiest of the three is ", sources[noisiest].name,
           " at ", raw.span(), " counts of 4096 - that is the measurand", crlf);
+    // Against VDDANA anywhere in 2.7..5.5 V (table 45-2): a quarter of
+    // the supply is a quarter of full scale wherever it sits; a quarter
+    // of a 0.9..1.5 V core (letter b's band) reads 167..569 counts; the
+    // 1.024 V level's 1.003..1.045 V (table 45-36) reads 747..1585.
     bench.verdict("every internal source reads somewhere sane and none of them "
                   "is stuck",
                   survey[0].mean > 900u && survey[0].mean < 1150u &&
-                      survey[1].mean > 150u && survey[1].mean < 400u &&
-                      survey[2].mean > 400u && survey[2].mean < 1200u);
+                      survey[1].mean >= 167u && survey[1].mean <= 569u &&
+                      survey[2].mean >= 747u && survey[2].mean <= 1585u);
 
     // A TRUE AVERAGE: 64 samples, ADJRES from table 38-2, and the result
     // comes back at 12-bit precision so the two numbers are comparable
@@ -762,15 +894,13 @@ void te_averaging() {
         // deliberately NOT taken: with a single-sample spread of one or
         // two counts, "the average is tighter" is a coin toss dressed as
         // a measurement. What CAN be asserted is that averaging did not
-        // move the value, which the verdict above already says.
-        print(serial, "  NO VERDICT ON THE NOISE REDUCTION: the noisiest source "
-              "this board can offer spans only ", raw.span(),
+        // move the value, which the verdict above already says. A source
+        // that actually wanders needs a DAC or a wire, and this suite uses
+        // neither.
+        print(serial, "  the noisiest source spans only ", raw.span(),
               " counts of 4096 unaveraged (the averaged run spans ",
-              avg.span(),
-              "), which is at or below the quantization - too small a "
-              "signal for a comparison to mean anything. A source that "
-              "actually wanders needs a DAC or a wire, and this suite "
-              "uses neither.", crlf);
+              avg.span(), ")", crlf);
+        bench.skip("the noise reduction: the spread is at the quantization");
     }
 
     // OVERSAMPLING AND DECIMATION is the OTHER column of the chapter: the
@@ -811,6 +941,26 @@ void te_averaging() {
 // =============================================================================
 // f - conversion time against the formula, on the crystal
 // =============================================================================
+
+/// Letter f's bound on one conversion: 10 ms, over ten times its slowest
+/// case (sixteen accumulated at 375 kHz, about 0.6 ms).
+constexpr uint32_t f_conversion_budget_us = 10'000;
+
+/// RESRDY within letter f's bound.
+bool conversion_landed() {
+    return brio::wait_until<Ruler>([] { return Adc0::ready(); }, f_conversion_budget_us);
+}
+
+/// Before a timed window: the console drained, or a failed verdict and
+/// false - a line still going out puts its interrupt inside the window.
+bool window_ready() {
+    const bool drained = console_drain();
+    if (!drained) {
+        bench.verdict("the console drained before the timed window", false);
+    }
+    return drained;
+}
+
 void tf_timing() {
     bench.verdict("the 24 MHz crystal starts and generator 2 carries it",
                   stopwatch_start());
@@ -869,7 +1019,7 @@ void tf_timing() {
     bool all_ok = true;
     uint32_t worst_ppm = 0;
     for (const Case& c : cases) {
-        if (!Adc0::init(gen_crystal, c.cfg, crystal_hz)) {
+        if (!adc_up<Adc0>(c.cfg, gen_crystal)) {
             bench.verdict("a timing configuration failed to come up", false);
             all_ok = false;
             continue;
@@ -878,16 +1028,25 @@ void tf_timing() {
         Adc0::start();
         Adc0::discard(4);
         Adc0::clear_flags(Adc0::flag_resrdy | Adc0::flag_overrun);
-        while (!Adc0::ready()) {
-        }
+        // Each wait opens with one ruler read, a microsecond and a half, in
+        // a free-running stream whose results are 27 us and more apart:
+        // the stream does not wait for the poll, so the per-result figure
+        // is the converter's.
+        bool landed = conversion_landed();
         (void)Adc0::result();
         const uint32_t t0 = ticks_now();
-        for (uint16_t i = 0; i < c.rounds; ++i) {
-            while (!Adc0::ready()) {
-            }
+        for (uint16_t i = 0; landed && i < c.rounds; ++i) {
+            landed = conversion_landed();
             (void)Adc0::result();
         }
         const uint32_t elapsed = ticks_now() - t0;
+        if (!landed) {
+            print(serial, "  ", c.name, ": a conversion did not land within ",
+                  f_conversion_budget_us, " us", crlf);
+            all_ok = false;
+            Adc0::release();
+            continue;
+        }
         const uint32_t measured = (elapsed + c.rounds / 2u) / c.rounds;
         const uint32_t predicted = adc_conversion_cycles(c.cfg) * ticks_per_adc_cycle;
         const uint32_t err = measured > predicted ? measured - predicted
@@ -931,18 +1090,22 @@ void tf_timing() {
         const AdcConfig cfg{.reference = Ref::vddana, .prescaler = presc,
                             .correction = corrected,
                             .offset_correction = offset};
-        if (!Adc0::init(gen_crystal, cfg, crystal_hz)) {
+        if (!adc_up<Adc0>(cfg, gen_crystal)) {
             return Corrected{0, 0};
         }
         Adc0::select(AdcInput::scaled_supply);
         Adc0::discard(4);
         const uint16_t rounds = 200;
         uint32_t sum = 0;
+        // The same poll in every run, so its cost cancels in the
+        // differences below, which are all this letter reads.
         const uint32_t t0 = ticks_now();
         for (uint16_t i = 0; i < rounds; ++i) {
             Adc0::clear_flags(Adc0::flag_resrdy);
             Adc0::start();
-            while (!Adc0::ready()) {
+            if (!conversion_landed()) {
+                Adc0::release();
+                return Corrected{0, 0};
             }
             sum += Adc0::result();
         }
@@ -951,6 +1114,12 @@ void tf_timing() {
         return Corrected{(elapsed + rounds / 2u) / rounds,
                          (sum + rounds / 2u) / rounds};
     };
+    // The three runs are compared by their differences, so they run
+    // back to back on a quiet console, and print after.
+    if (!window_ready()) {
+        Stopwatch::release();
+        return;
+    }
     const Corrected plain = single_shot(false, 0);
     const Corrected zero_offset = single_shot(true, 0);
     const Corrected with_offset = single_shot(true, 100);
@@ -1089,7 +1258,7 @@ void tg_window() {
                   "here and the mid-point is 128",
                   Adc0::result_steps() == 256u && b8_high && !b8_low);
 
-    drive<PadShared>(false);
+    hand_back<PadShared>();
     Adc0::release();
 }
 
@@ -1192,7 +1361,7 @@ void th_event_chain() {
         (void)Counter::set_count16(0);
         (void)Adc0::enable(true);
         (void)Pacer::enable(true);
-        wait_ms(60);
+        brio::spin_us<Ruler>(60'000);
         (void)Pacer::enable(false);
         (void)Adc0::enable(false);
         // COUNT IS READ WHILE THE TIMER STILL RUNS: the read needs a
@@ -1256,7 +1425,7 @@ void th_event_chain() {
     // A control: with the pacer stopped, nothing moves at all.
     capture_on();
     (void)Adc0::enable(true);
-    wait_ms(30);
+    brio::spin_us<Ruler>(30'000);
     (void)Adc0::enable(false);
     capture_off();
     bool untouched = chain_seen == 0u;
@@ -1276,7 +1445,7 @@ void th_event_chain() {
     Counter::release();
     GclkChannel::disconnect(Evsys::gclk_id(ev_start_channel));
     GclkChannel::disconnect(Evsys::gclk_id(ev_result_channel));
-    drive<PadShared>(false);
+    hand_back<PadShared>();
 }
 
 // =============================================================================
@@ -1340,6 +1509,7 @@ void ti_sampler_ao() {
         .prescaler = AdcPresc::div32,
         .sample_length = 5,
     };
+    (void)locate_vdd();   // the millivolts below are printed, never judged
     bench.verdict("the converter is configured by the OWNER, before the "
                   "sampler starts - the sampler never reconfigures",
                   adc_up<Adc0>(cfg));
@@ -1392,7 +1562,7 @@ void ti_sampler_ao() {
                   "its rail, the scaled supply at a quarter",
                   Collector::last[1] >= 4055u && near(Collector::last[0], 1024u, 41u));
 
-    drive<PadShared>(false);
+    hand_back<PadShared>();
     Adc0::release();
 }
 
@@ -1469,7 +1639,7 @@ void tj_more() {
     Adc0::clear_flags(Adc0::flag_resrdy | Adc0::flag_winmon | Adc0::flag_overrun);
     Adc0::arm(Adc0::flag_winmon);
     Adc0::start();
-    wait_ms(5);
+    brio::spin_us<Ruler>(5'000);
     Adc0::disarm(Adc0::flag_winmon);
     const uint16_t winmons = j_winmon;
     (void)Adc0::window_off();
@@ -1477,7 +1647,7 @@ void tj_more() {
     Adc0::arm(Adc0::flag_overrun);
     (void)Adc0::free_running(true);
     Adc0::start();
-    wait_ms(5);
+    brio::spin_us<Ruler>(5'000);
     (void)Adc0::free_running(false);
     Adc0::disarm(Adc0::flag_overrun);
     const uint16_t overruns = j_overrun;
@@ -1519,7 +1689,10 @@ void tj_more() {
         }
         Nvic::enable(Adc0::irq());
         Adc0::arm(Adc0::flag_resrdy);
-        while (!Serial::tx_idle()) {
+        if (!console_drain()) {   // the leg reports no WFI: its verdicts fail
+            Adc0::disarm(Adc0::flag_resrdy);
+            Nvic::disable(Adc0::irq());
+            return;
         }
         const uint16_t r0 = j_resrdy;
         Adc0::start();
@@ -1527,7 +1700,7 @@ void tj_more() {
                                                 [r0] { return j_resrdy != r0; });
         pend = benchsleep::first_pending;
         backstop = benchsleep::rtc_fired;
-        wait_ms(20);                               // the result, whichever ended it
+        brio::spin_us<Ruler>(20'000);              // the result, whichever ended it
         Adc0::disarm(Adc0::flag_resrdy);
         Nvic::disable(Adc0::irq());
         results_seen = static_cast<uint16_t>(j_resrdy - r0);
@@ -1573,8 +1746,12 @@ void tj_more() {
 // THE BOUND on "a new conversion of the full length T": the flush
 // restarts CLK_ADC on the next peripheral clock edge, so the restart
 // lands within one CLK_ADC period (256 CPU cycles, 5.3 us, 4 ticks) of
-// the flush; each stopwatch read is a double READSYNC (~6 us, 5 ticks)
-// and the RESRDY poll one such read: 4 + 5 + 5 = 14 ticks, judged at 20.
+// the flush; the flush is issued at most one poll turn late and the
+// RESRDY seen at most one turn late, a turn being a stopwatch read (a
+// double READSYNC, ~6 us) and a ruler read (util/test_wait.hpp, ~1.5 us),
+// 6 ticks: 4 + 6 + 6 = 16 ticks, judged at 20. Every poll is bounded on
+// the ruler too, at twice its stopwatch limit, so a stopwatch that stops
+// ends the leg instead of hanging it.
 // An event flush adds the one-shot TC2's own start: enable() crosses
 // into its clock and its first prescaled tick is up to one /1024 period
 // late (21.3 us, 16 ticks), so that leg is judged at 40.
@@ -1588,23 +1765,32 @@ bool k_stopwatch_up() {
            Stopwatch3::enable(true);
 }
 
+/// The longest a leg polls: 30000 ticks (40 ms), inside the 16-bit
+/// stopwatch's half wrap, and twice that on the ruler.
+constexpr uint16_t k_limit = 30000;
+static_assert(brio::span_fits<16>(k_limit), "the stopwatch times the leg under its wrap");
+constexpr uint32_t k_ruler_budget_us = 80'000;
+
 /// Stopwatch ticks until RESRDY, from a stopwatch zeroed by the caller;
-/// k_none when it does not come within `limit` ticks.
-uint16_t k_until_result(uint16_t limit) {
-    for (;;) {
-        const uint16_t t = Stopwatch3::count16();
-        if ((Adc0::flags() & Adc0::flag_resrdy) != 0u) {
-            return t;
-        }
-        if (t > limit) {
-            return k_none;
-        }
-    }
+/// k_none when it does not come within k_limit ticks.
+uint16_t k_until_result() {
+    uint16_t t = 0;
+    bool got = false;
+    (void)brio::wait_until<Ruler>(   // the answer is `got`, read below
+        [&] {
+            t = Stopwatch3::count16();
+            got = (Adc0::flags() & Adc0::flag_resrdy) != 0u;
+            return got || t > k_limit;
+        },
+        k_ruler_budget_us);
+    return got ? t : k_none;
 }
 
-void k_wait_ticks(uint16_t until) {
-    while (Stopwatch3::count16() < until) {
-    }
+/// Spin until the stopwatch reaches `until`; false when it does not
+/// within the ruler's bound.
+bool k_wait_ticks(uint16_t until) {
+    return brio::wait_until<Ruler>([until] { return Stopwatch3::count16() >= until; },
+                                   k_ruler_budget_us);
 }
 
 /// One leg: a software START at stopwatch zero, then at `flush_at` a
@@ -1615,7 +1801,6 @@ struct KLeg {
     uint8_t swtrig;
 };
 KLeg k_leg(bool start, uint16_t flush_at) {
-    constexpr uint16_t limit = 30000;   // 40 ms
     (void)Adc0::result();
     Adc0::clear_flags(Adc0::flag_resrdy | Adc0::flag_overrun);
     (void)Stopwatch3::set_count16(0);
@@ -1624,11 +1809,13 @@ KLeg k_leg(bool start, uint16_t flush_at) {
     }
     uint8_t sw = 0;
     if (flush_at != k_none) {
-        k_wait_ticks(flush_at);
+        if (!k_wait_ticks(flush_at)) {
+            return KLeg{k_none, 0};   // a stopwatch that stopped: no result
+        }
         Adc0::flush();
         sw = Adc0::regs().ADC_SWTRIG;
     }
-    return KLeg{k_until_result(limit), sw};
+    return KLeg{k_until_result(), sw};
 }
 
 void tk_flush() {
@@ -1642,7 +1829,22 @@ void tk_flush() {
     Adc0::discard(2);
 
     // EVCTRL.FLUSHEI clear: T, then a flush 3 ms into a conversion, then a
-    // flush with nothing in flight.
+    // flush with nothing in flight. Every leg runs on a quiet console: a
+    // line going out would put its interrupt inside the poll turns the
+    // bound counts.
+    auto k_down = [] {
+        (void)Pacer::enable(false);
+        (void)Adc0::enable(false);
+        (void)Adc0::stop_events();
+        Evsys::release_channel(ev_start_channel);
+        Pacer::release();
+        Stopwatch3::release();
+        Adc0::release();
+    };
+    if (!window_ready()) {
+        k_down();
+        return;
+    }
     const KLeg plain = k_leg(true, k_none);
     const KLeg sw_busy = k_leg(true, 2250);
     const KLeg sw_idle = k_leg(false, 0);
@@ -1672,21 +1874,19 @@ void tk_flush() {
             Adc0::start();
         }
         (void)Pacer::enable(true);
-        return k_until_result(30000);
+        return k_until_result();
     };
+    if (!window_ready()) {   // the verdict above went out
+        k_down();
+        return;
+    }
     const KLeg ei_sw_busy = k_leg(true, 2250);
     const KLeg ei_sw_idle = k_leg(false, 0);
     const uint16_t ev_idle = fire(false);
     const uint16_t ev_busy = fire(true);
     const uint16_t ev_idle_again = fire(false);
     const KLeg after = k_leg(true, k_none);
-    (void)Pacer::enable(false);
-    (void)Adc0::enable(false);
-    (void)Adc0::stop_events();
-    Evsys::release_channel(ev_start_channel);
-    Pacer::release();
-    Stopwatch3::release();
-    Adc0::release();
+    k_down();
 
     auto t = [](uint16_t v) { return v == k_none ? 0u : static_cast<uint32_t>(v); };
     print(serial, "  stopwatch ticks of 1.33 us, 0 = no result in 40 ms. FLUSHEI clear: "

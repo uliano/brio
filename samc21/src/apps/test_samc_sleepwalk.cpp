@@ -106,6 +106,7 @@
 #include "samc21/ticker.hpp"
 #include "samc21/tsens.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -197,21 +198,53 @@ volatile uint32_t tsens_irqs = 0;
 volatile uint32_t ac_irqs = 0;
 volatile uint32_t supc_irqs = 0;
 
-/// A hard cap on every "wait for the wake" spin: a wake that never
-/// arrives must fail a verdict, not hang the bench. (The watchdog is
-/// the backstop for the case where the CPU never comes back at all.)
-constexpr uint32_t spin_cap = 40'000'000UL;
-
 bool near(uint32_t a, uint32_t b, uint32_t tol) {
     return (a > b ? a - b : b - a) <= tol;
 }
 
-/// A short busy wait, a handful of CPU cycles per turn at 48 MHz.
-void spin(uint32_t turns) {
-    volatile uint32_t sink = 0;
-    for (uint32_t i = 0; i < turns; ++i) {
-        sink = sink + 1u;
+// ---------------------------------------------------------------------------
+// The waits (util/test_wait.hpp), on two rulers
+// ---------------------------------------------------------------------------
+
+/// The SysTick ticker read as CPU cycles: the ruler of the AWAKE waits.
+/// SysTick stops in standby, so no wait on it spans a sleep.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// The crystal stopwatch (Watch, below) as a ruler: the one that runs
+/// through a standby, so it bounds the loops that sleep. Its reads are
+/// synchronized commands (samc21/tc.hpp), microseconds each, which only
+/// such loops - one read per wake - can afford.
+struct CrystalRuler {
+    static uint32_t now();
+    static constexpr uint32_t hz() { return crystal_hz; }
+};
+
+/// The bound on every window a letter spends, asleep or awake: one
+/// second, eight times the longest window here (4000 ticks of OSCULP32K,
+/// 122 ms) and inside the watchdog backstop's four seconds, which is the
+/// net under a CPU that never comes back at all.
+constexpr uint32_t window_budget_us = 1'000'000u;
+
+/// Every queued console byte off the wire, bounded (util/test_wait.hpp):
+/// false on a wedged console.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
+
+/// The console idle before a section that sleeps: its SERCOM has no
+/// RUNSTDBY, so a standby stops a line mid-character. Called after a
+/// section's last print and before its setup - never between a wake
+/// source's arming and the sleep, where a console line would eat the
+/// margin the arming leaves. On a wedged console it fails a verdict and
+/// returns false; the letter goes on to its own clean-up, its tally
+/// already failed.
+bool console_quiet() {
+    if (console_drain()) {
+        return true;
     }
+    bench.verdict("the console drained before the standby", false);
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +252,7 @@ void spin(uint32_t turns) {
 // ---------------------------------------------------------------------------
 
 /// 4096 cycles of the WDT's ~1 kHz clock is about four seconds - longer
-/// than any leg here and shorter than bench.py's timeout, so a lost
+/// than any leg here and shorter than bin/brio's time-out, so a lost
 /// wake reboots the board into its banner instead of leaving it mute.
 void watchdog_backstop(bool on) {
     if (on) {
@@ -234,6 +267,8 @@ void watchdog_backstop(bool on) {
 // ---------------------------------------------------------------------------
 
 uint32_t watch_now() { return Watch::count32(); }
+
+uint32_t CrystalRuler::now() { return Watch::count32(); }
 
 uint32_t watch_us(uint32_t ticks) {
     return static_cast<uint32_t>((static_cast<uint64_t>(ticks) * 1'000'000ULL) /
@@ -340,21 +375,40 @@ bool arm_wake(uint32_t p) {
 // Sleeping
 // ---------------------------------------------------------------------------
 
-/// One standby, race-free: PRIMASK is set, the wake condition re-tested,
-/// WFI still wakes on a pending interrupt, and unmasking afterwards is
-/// what lets the handler run. Pm::sleep() holds erratum 1.8.13's
-/// SysTick guard for us.
-void sleep_standby_once() {
-    __disable_irq();
-    if (!wake_flag) {
-        Pm::sleep();
-    }
-    __enable_irq();
-}
-
 /// Arm STANDBY once, for a letter that then sleeps repeatedly.
 bool arm_standby() { return Pm::set_sleep_mode(SleepMode::standby); }
 void disarm_standby() { (void)Pm::set_sleep_mode(SleepMode::idle0); }
+
+/// Sleep in STANDBY, again after every wake, until `woken()` holds or
+/// window_budget_us passes on the crystal. Each sleep is race-free:
+/// PRIMASK is set, `woken()` re-tested, WFI still wakes on a pending
+/// interrupt, and unmasking afterwards is what lets the handler run -
+/// Pm::sleep() holds erratum 1.8.13's SysTick guard for us. A wake that
+/// leaves `woken()` false sleeps again. Each turn lasts until the next
+/// wake, so the budget is seen at the first wake after it runs out (and
+/// the condition, asked once more then, sleeps once more); a wake that
+/// never comes is the watchdog backstop's.
+template <typename F>
+bool sleep_until(F woken) {
+    return brio::wait_until<CrystalRuler>(
+        [&woken] {
+            __disable_irq();
+            if (!woken()) {
+                Pm::sleep();
+            }
+            __enable_irq();
+            return woken();
+        },
+        window_budget_us);
+}
+
+/// Sleep in STANDBY until the RTC compare armed by arm_wake() fires,
+/// going back to sleep after any other wake: the test under the mask is
+/// rtc_fired itself, so a wake from another source (letter a's armed
+/// line) leaves the next turn asleep again.
+bool sleep_until_rtc() {
+    return sleep_until([] { return rtc_fired; });
+}
 
 /// Stay in STANDBY until the RTC compare `ticks` ahead fires, going
 /// back to sleep after any other wake. This is the "spend a known
@@ -363,12 +417,9 @@ bool standby_for(uint32_t ticks) {
     if (!arm_wake(ticks) || !arm_standby()) {
         return false;
     }
-    uint32_t spins = spin_cap;
-    while (!rtc_fired && spins-- != 0u) {
-        sleep_standby_once();
-    }
+    const bool fired = sleep_until_rtc();
     disarm_standby();
-    return rtc_fired;
+    return fired;
 }
 
 /// The same window spent AWAKE, so a witness has a control.
@@ -376,10 +427,7 @@ bool poll_for(uint32_t ticks) {
     if (!arm_wake(ticks)) {
         return false;
     }
-    uint32_t spins = spin_cap;
-    while (!rtc_fired && spins-- != 0u) {
-    }
-    return rtc_fired;
+    return brio::wait_until<Ruler>([] { return rtc_fired; }, window_budget_us);
 }
 
 /// Sleep in STANDBY until ANY armed interrupt wakes the CPU, with NO
@@ -392,13 +440,10 @@ uint32_t standby_bare() {
         return 0;
     }
     const uint32_t t0 = watch_now();
-    uint32_t spins = spin_cap;
-    while (!wake_flag && spins-- != 0u) {
-        sleep_standby_once();
-    }
+    const bool woke = sleep_until([] { return wake_flag; });
     const uint32_t t1 = watch_now();
     disarm_standby();
-    return wake_flag ? (t1 - t0) : 0u;
+    return woke ? (t1 - t0) : 0u;
 }
 
 /// Sleep in STANDBY until ANY armed interrupt wakes the CPU, with the
@@ -412,13 +457,10 @@ uint32_t standby_until_wake(uint32_t backstop) {
         return 0;
     }
     const uint32_t t0 = watch_now();
-    uint32_t spins = spin_cap;
-    while (!wake_flag && spins-- != 0u) {
-        sleep_standby_once();
-    }
+    const bool woke = sleep_until([] { return wake_flag; });
     const uint32_t t1 = watch_now();
     disarm_standby();
-    return wake_flag ? (t1 - t0) : 0u;
+    return woke ? (t1 - t0) : 0u;
 }
 
 // ---------------------------------------------------------------------------
@@ -608,20 +650,22 @@ void walker_down() {
     StimPad::configure({});
 }
 
-/// Does the pad actually move? Sample it for `turns` and report whether
-/// both levels were seen. The precondition of every letter that uses
-/// the walker, and never assumed.
-bool pad_walks(uint32_t turns) {
+/// Does the pad actually move? Sample it for up to `us` microseconds and
+/// report whether both levels were seen. The precondition of every
+/// letter that uses the walker, and never assumed.
+bool pad_walks(uint32_t us) {
     bool saw_low = false;
     bool saw_high = false;
-    for (uint32_t i = 0; i < turns; ++i) {
-        if (StimPad::read()) {
-            saw_high = true;
-        } else {
-            saw_low = true;
-        }
-    }
-    return saw_low && saw_high;
+    return brio::wait_until<Ruler>(
+        [&] {
+            if (StimPad::read()) {
+                saw_high = true;
+            } else {
+                saw_low = true;
+            }
+            return saw_low && saw_high;
+        },
+        us);
 }
 
 // ---------------------------------------------------------------------------
@@ -704,7 +748,7 @@ Leg measure_leg(PortEventAction action, bool under_mux, uint32_t window) {
     if (!walker_arrange(action, under_mux)) {
         return l;
     }
-    l.moves = pad_walks(200'000);
+    l.moves = pad_walks(40'000);   // forty of the wave's ~970 us periods
     Eic::clear_flags(StimLine::mask);
     l.awake = eic_edges(false, window);
     Eic::clear_flags(StimLine::mask);
@@ -735,6 +779,7 @@ void ta_eic() {
         walker_down();
         return;
     }
+    (void)console_quiet();
 
     // -- the three arrangements ------------------------------------------
     //
@@ -794,6 +839,7 @@ void ta_eic() {
 
     // -- the wake, and erratum 1.11.6 ------------------------------------
     if (out_survives) {
+        (void)console_quiet();
         (void)walker_arrange(PortEventAction::out, true);
 
         // The wake. The line's interrupt is armed and the RTC compare is
@@ -880,6 +926,7 @@ void ta_eic() {
                       near(async_wakes, offered, 5) && near(sync_wakes, offered, 5));
 
         // -- which clock a sampled line needs -----------------------------
+        (void)console_quiet();
         watchdog_backstop(true);
         uint16_t gclk_std = 0xFFFFu;
         uint16_t gclk_no_std = 0xFFFFu;
@@ -914,28 +961,23 @@ void ta_eic() {
                       "anywhere in the chain",
                       near(gclk_no_std, offered, 4));
     } else {
-        // Kept as five printed, counted, DECLINED verdicts so the
-        // letter's tally does not depend on which branch the silicon
-        // takes; each claims nothing.
-        for (uint8_t i = 0; i < 5; ++i) {
-            bench.verdict("the EIC in standby: DECLINED, no wireless stimulus "
-                          "on this board can move an EXTINT pad while the CPU "
-                          "is stopped",
-                          true);
-        }
+        // The OUT action failed to survive the standby (a verdict above
+        // says so), so no pad moves while the CPU is stopped and the
+        // EIC-in-standby legs have no stimulus: they are skipped, not
+        // counted.
+        bench.skip("the EIC in standby: no wireless stimulus on this board moved "
+                   "an EXTINT pad while the CPU was stopped");
     }
 
     // The EIC's own half of the question, which needs no stimulus at
     // all: 26.8.1 is SWRST, ENABLE and CKSEL and nothing else, so the
-    // block cannot ask a generator to keep running for it.
-    const bool no_runstdby =
-        (EIC_CTRLA_Msk & ~static_cast<uint32_t>(EIC_CTRLA_SWRST_Msk |
-                                                EIC_CTRLA_ENABLE_Msk |
-                                                EIC_CTRLA_CKSEL_Msk)) == 0u;
-    bench.verdict("the EIC has no RUNSTDBY of its own - CLK_ULP32K or a "
-                  "generator that runs in standby is the only way to sample a "
-                  "line there",
-                  no_runstdby);
+    // block cannot ask a generator to keep running for it - the device
+    // header's register mask says so at compile time.
+    static_assert((EIC_CTRLA_Msk & ~static_cast<uint32_t>(EIC_CTRLA_SWRST_Msk |
+                                                          EIC_CTRLA_ENABLE_Msk |
+                                                          EIC_CTRLA_CKSEL_Msk)) == 0u,
+                  "the EIC has no RUNSTDBY of its own - CLK_ULP32K or a generator "
+                  "that runs in standby is the only way to sample a line there");
 
     (void)Eic::enable(false);
     Eic::release();
@@ -956,6 +998,7 @@ namespace {
 
 void tb_rtc() {
     quiesce();
+    (void)console_quiet();
     watchdog_backstop(true);
 
     // -- b1: COMP0 ---------------------------------------------------------
@@ -969,13 +1012,10 @@ void tb_rtc() {
             break;
         }
         const uint32_t t0 = watch_now();
-        uint32_t spins = spin_cap;
-        while (!rtc_fired && spins-- != 0u) {
-            sleep_standby_once();
-        }
+        const bool fired = sleep_until_rtc();
         const uint32_t t1 = watch_now();
         disarm_standby();
-        if (!rtc_fired) {
+        if (!fired) {
             all = false;
             break;
         }
@@ -989,29 +1029,35 @@ void tb_rtc() {
 
     // -- b2: a periodic interrupt ------------------------------------------
     //
-    // PER5 is 2^6 = 64 source ticks, about 1.9 ms. The interrupt is the
-    // wake; the compare is disarmed so nothing else can end the sleep.
+    // PER5 taps the prescaler at f / 2^(5+3) = 256 source ticks, about
+    // 7.8 ms (docs/samc21/rtc.md). The interrupt is the wake; the compare
+    // is disarmed so nothing else can end the sleep.
     // ITS OWN PERIOD IS MEASURED FIRST, awake, and the standby wake is
     // then judged against that rather than against arithmetic: 24.6.8.1's
     // periodic outputs come off the prescaler and what one of them is
     // worth at PRESCALER = div1 is exactly the sort of thing this suite
     // does not assume.
+    (void)console_quiet();
     Rtc::disarm(RtcFlag::all);
     Rtc::clear_flags(RtcFlag::all);
     Rtc::arm(RtcFlag::periodic(5));
     Nvic::enable(Rtc::irq());
     uint32_t per_awake = 0;
     {
+        // Two interrupts, awake: the first to start on an edge, the second
+        // to end one period later. A hundred milliseconds each is about
+        // thirteen periods; a missing interrupt leaves per_awake at 0,
+        // which the second verdict below refuses.
+        constexpr uint32_t per_budget_us = 100'000u;
         wake_flag = false;
         Rtc::clear_flags(RtcFlag::periodic(5));
-        while (!wake_flag) {
+        if (brio::wait_until<Ruler>([] { return wake_flag; }, per_budget_us)) {
+            const uint32_t t0 = watch_now();
+            wake_flag = false;
+            if (brio::wait_until<Ruler>([] { return wake_flag; }, per_budget_us)) {
+                per_awake = watch_us(watch_now() - t0);
+            }
         }
-        const uint32_t t0 = watch_now();
-        uint32_t spins = spin_cap;
-        wake_flag = false;
-        while (!wake_flag && spins-- != 0u) {
-        }
-        per_awake = watch_us(watch_now() - t0);
     }
     wake_flag = false;
     Rtc::clear_flags(RtcFlag::periodic(5));
@@ -1037,6 +1083,10 @@ void tb_rtc() {
     // within a minute. And 24.6.2.5's sentence that cost the RTC suite a
     // letter applies here too - the alarm arrives a whole counter period
     // after its match.
+    // Drained FIRST: what is still due is read from the clock just before
+    // the sleep, and a console line drained after that reading would let
+    // the fast-seconds run past the alarm.
+    (void)console_quiet();
     bool mode2 = Rtc::enable(false);
     const RtcConfig cal{.mode = RtcMode::clock, .prescaler = RtcPrescaler::div1};
     mode2 = mode2 && Rtc::configure(cal) && Rtc::enable(true);
@@ -1124,6 +1174,7 @@ void tc_freqm() {
 
     // Now asleep. DONE is armed, the RTC is not, so the only thing that
     // can end this standby is the meter finishing.
+    (void)console_quiet();
     watchdog_backstop(true);
     Freqm::clear_flags();
     Freqm::arm(FreqmFlag::done);
@@ -1172,6 +1223,7 @@ uint16_t clock_ticks(bool asleep, uint32_t ticks) {
 
 void td_clocks() {
     quiesce();
+    (void)console_quiet();
     watchdog_backstop(true);
     constexpr uint32_t window = 1000;   // ~30 ms
 
@@ -1204,13 +1256,20 @@ void td_clocks() {
     bench.verdict("OSC48M keeps running through a standby for a peripheral "
                   "that asks - the counter's own RUNSTDBY is the whole request",
                   near(osc_std, osc_awake, osc_awake / 20u + 4u));
-    bench.verdict("and stops for one that does not, generator RUNSTDBY clear",
+    // What this leg can judge is the CONTROL: a counter with its RUNSTDBY
+    // clear is halted in standby whatever its clock does (35.7.2.1), so
+    // its count says the request above was the counter's, and nothing
+    // about whether OSC48M itself stopped.
+    bench.verdict("and a counter WITHOUT its RUNSTDBY counts nothing there - "
+                  "the control: the advance above is the request's doing",
                   osc_no_std <= 10u);
     bench.verdict("ONDEMAND does not change that: a request is a request",
                   near(osc_ondemand, osc_awake, osc_awake / 20u + 4u));
     bench.verdict("OSC48MCTRL.ONDEMAND is back where Clock::init() leaves it "
                   "(erratum 1.2.3)",
                   !Osc48m::on_demand());
+
+    (void)console_quiet();
 
     // -- the FDPLL, and platform.md's open question -------------------------
     //
@@ -1292,11 +1351,10 @@ void td_clocks() {
     // about the unrequested case. Both halves put it out of this bench's
     // reach: the only witness of a running loop is a peripheral clocked
     // from it, which is itself a request, and sleep current has no meter
-    // here. Printed, counted, and claiming nothing.
-    bench.verdict("ERRATUM 1.3.1 (the FDPLL running in standby UNREQUESTED): "
-                  "DECLINED - it is revision B, it is about consumption, and "
-                  "the only witness of a running loop is a request",
-                  true);
+    // here. Skipped, and claiming nothing.
+    bench.skip("ERRATUM 1.3.1 (the FDPLL running in standby UNREQUESTED): it is "
+               "revision B, it is about consumption, and the only witness of a "
+               "running loop is a request");
 
     (void)Gclk<gen_probe>::configure(GclkConfig{.source = GclkSource::osc48m});
     (void)Fdpll::stop();
@@ -1307,6 +1365,7 @@ void td_clocks() {
     // OSCULP32K has no RUNSTDBY bit at all - it is simply always on -
     // while OSC32K has both bits. The trim is the factory one, which
     // docs/samc21/osc32kctrl.md measured to be worth 44 % of the rate.
+    (void)console_quiet();
     const uint8_t trim = Osc32k::factory_calib();
     uint16_t o32_std = 0xFFFFu;
     uint16_t o32_no_std = 0xFFFFu;
@@ -1444,6 +1503,7 @@ void te_adc() {
         return;
     }
 
+    (void)console_quiet();
     watchdog_backstop(true);
     const uint16_t awake = events_over(false, window);
 
@@ -1535,6 +1595,7 @@ void tf_sdadc_tsens() {
     uint16_t sd_no_std = 0xFFFFu;
     uint16_t sd_std = 0xFFFFu;
     if (ok) {
+        (void)console_quiet();
         watchdog_backstop(true);
         sd_awake = events_over(false, window);
         sd_no_std = events_over(true, window);
@@ -1581,6 +1642,7 @@ void tf_sdadc_tsens() {
     uint16_t ts_no_std = 0xFFFFu;
     uint16_t ts_std = 0xFFFFu;
     if (t_ok) {
+        (void)console_quiet();
         watchdog_backstop(true);
         ts_awake = events_over(false, window);
         ts_no_std = events_over(true, window);
@@ -1635,6 +1697,7 @@ void tg_dac() {
     uint16_t after[2] = {0, 0};
     bool empty_after[2] = {false, false};
     bool dac_ok = true;
+    (void)console_quiet();
     for (uint8_t i = 0; i < 2; ++i) {
         const bool std = i == 1u;
         dac_ok = dac_ok && Dac::init(gen_xtal,
@@ -1772,6 +1835,7 @@ void th_ac() {
         {true, gen_ulp, true, 0, 0, 0},    // RUNSTDBY 1, clock force-fed
         {false, gen_eic, false, 0, 0, 0},  // RUNSTDBY 0, clock stops too
     };
+    (void)console_quiet();
     for (Leg3& l : leg) {
         if (!Gclk<gen_eic>::configure(GclkConfig{.source = GclkSource::osculp32k,
                                                  .run_standby = l.gen_std}) ||
@@ -1787,7 +1851,14 @@ void th_ac() {
         Comparator::scaler(31);
         (void)Ac::enable(true);
         (void)Comparator::enable(true);
-        for (uint32_t k = 0; k < 200'000u && !Comparator::ready(); ++k) {
+        // Fifty milliseconds, about what the loop count this replaces took
+        // and far beyond a comparator's start-up; a comparator that never
+        // reports ready ends its leg with no rounds, which the verdicts
+        // below refuse.
+        if (!brio::wait_until<Ruler>([] { return Comparator::ready(); }, 50'000u)) {
+            (void)Comparator::enable(false);
+            (void)Ac::enable(false);
+            continue;
         }
         for (uint8_t r = 0; r < rounds; ++r) {
             // The wave restarted from zero, so the next pad edge is half
@@ -1858,6 +1929,7 @@ void th_ac() {
     // all table 29-3 grants the AC's SOC users. The interrupt is NOT
     // armed: the whole point is that the comparison happens while the
     // CPU stays asleep and the flag is read at the wake.
+    (void)console_quiet();
     bool single = Comparator::configure(
         AcConfig{.positive = AcPositive::pin0,
                  .negative = AcNegative::vscale,
@@ -1937,6 +2009,7 @@ void tk_ac_window() {
     Leg legs[3] = {{true, true, 0, 0, false},
                    {false, false, 0, 0, false},
                    {true, false, 0, 0, false}};
+    (void)console_quiet();
     for (Leg& l : legs) {
         if (!Ac::init(gen_ulp) ||
             !Lower::configure(AcConfig{.positive = AcPositive::pin0,
@@ -1953,7 +2026,13 @@ void tk_ac_window() {
         (void)Ac::enable(true);
         (void)Lower::enable(true);
         (void)Upper::enable(true);
-        for (uint32_t k = 0; k < 200'000u && !Win::ready(); ++k) {
+        // Fifty milliseconds, as in letter h; a window that never reports
+        // ready ends its leg with no rounds, which the verdicts refuse.
+        if (!brio::wait_until<Ruler>([] { return Win::ready(); }, 50'000u)) {
+            (void)Lower::enable(false);
+            (void)Upper::enable(false);
+            (void)Ac::enable(false);
+            continue;
         }
         l.consistent = Win::pair_consistent();
         for (uint8_t r = 0; r < rounds; ++r) {
@@ -2051,6 +2130,7 @@ void ti_ccl() {
         return;
     }
 
+    (void)console_quiet();
     watchdog_backstop(true);
     const uint16_t comb_awake = lut_edges(LutFilter::none, false, false, window);
     const uint16_t comb_asleep = lut_edges(LutFilter::none, false, true, window);
@@ -2125,6 +2205,7 @@ void tj_leftovers() {
     uint16_t tcc_no_std = 0xFFFFu;
     uint16_t tcc_std = 0xFFFFu;
     if (ok) {
+        (void)console_quiet();
         watchdog_backstop(true);
         tcc_awake = events_over(false, window);
         tcc_no_std = events_over(true, window);
@@ -2168,6 +2249,7 @@ void tj_leftovers() {
     uint16_t ch_std = 0xFFFFu;
     uint16_t ch_no_std = 0xFFFFu;
     if (ok) {
+        (void)console_quiet();
         watchdog_backstop(true);
         ch_awake = events_over(false, window);
         ch_std = events_over(true, window);
@@ -2205,10 +2287,12 @@ void tj_leftovers() {
                                                  .run_standby = true});
     // The detector has a start-up of its own and 22.8.4's READY is what
     // says it is over, so the flag is read only once the block admits
-    // to being ready.
-    for (uint32_t i = 0; i < 200'000u && !BodVdd::ready(); ++i) {
-    }
-    const bool bod_ready = BodVdd::ready();
+    // to being ready - within fifty milliseconds, about what the loop
+    // count this replaces took; a detector never ready fails the verdict
+    // below through bod_ok.
+    const bool bod_ready =
+        brio::wait_until<Ruler>([] { return BodVdd::ready(); }, 50'000u);
+    bod_ok = bod_ok && bod_ready;
     Supc::clear_flags(SupcFlag::bodvdd_detect);
     const bool detected_awake = bod_ok && BodVdd::detected();
 
@@ -2217,7 +2301,7 @@ void tj_leftovers() {
     // reads 1), the flag is cleared, and hundreds of sampling periods
     // are allowed to pass.
     Supc::clear_flags(SupcFlag::bodvdd_detect);
-    spin(200'000);
+    brio::spin_us<Ruler>(25'000u);   // what the turn count this replaces took
     const bool flag_returns = (Supc::flags() & SupcFlag::bodvdd_detect) != 0u;
     const bool still_detected = BodVdd::detected();
 
@@ -2226,7 +2310,9 @@ void tj_leftovers() {
     // and its interrupt armed. If a sampling detector re-raised the flag
     // this would be a wake; the RTC backstop is what ends it instead.
     bool woke_by_bod = false;
+    bool sampled_leg = false;
     uint32_t bod_sleep = 0;
+    (void)console_quiet();
     if (BodVdd::configure(BodVddConfig{.level = BodVdd::level_max,
                                        .action = BodAction::none,
                                        .run_standby = true,
@@ -2240,6 +2326,7 @@ void tj_leftovers() {
         bod_sleep = standby_until_wake(window);
         watchdog_backstop(false);
         woke_by_bod = supc_irqs != 0u && !rtc_fired;
+        sampled_leg = bod_sleep != 0u && rtc_fired;
         Supc::disarm(SupcFlag::all);
         Nvic::disable(Supc::irq());
     }
@@ -2254,20 +2341,20 @@ void tj_leftovers() {
     bench.verdict("a BODVDD level above the supply is detected while awake, "
                   "with ACTION = none so nothing resets",
                   bod_ok && detected_awake && still_detected);
+    // The sampling half is the standby leg: the backstop ended it, and
+    // the detector raised no interrupt in it.
     bench.verdict("and INTFLAG.BODVDDDET is a TRANSITION, not a level: "
                   "cleared under a standing condition it does not come back, "
                   "not even to a SAMPLING detector",
-                  !flag_returns);
+                  !flag_returns && sampled_leg && !woke_by_bod);
     // Which is exactly why the wake claim cannot be made here: a
     // detection needs the SUPPLY to cross the threshold, or the
     // threshold to move - and the CPU that could move it is asleep.
     // Forcing a brown-out needs a programmable supply this bench has
-    // not got. Printed, counted, claiming nothing about the silicon.
-    bench.verdict("the BODVDD as a STANDBY WAKE SOURCE: DECLINED - a "
-                  "detection is a supply crossing, and nothing on this board "
-                  "can make one while the CPU is stopped",
-                  true);
-    (void)woke_by_bod;
+    // not got. Skipped, claiming nothing about the silicon.
+    bench.skip("the BODVDD as a STANDBY WAKE SOURCE: a detection is a supply "
+               "crossing, and nothing on this board can make one while the CPU "
+               "is stopped");
 
     // The board's own brown-out configuration back, bit for bit.
     (void)BodVdd::enable(false);
@@ -2325,6 +2412,7 @@ void tp_bus_clock() {
                   "usable without a reset",
                   armable && read_after == before);
 
+    (void)console_quiet();
     watchdog_backstop(true);
     const bool slept = standby_for(200);
     watchdog_backstop(false);
@@ -2447,10 +2535,11 @@ int main() {
         const uint32_t want = 4096u;
         const uint32_t r0 = rtc_now();
         const uint32_t w0 = watch_now();
-        while (rtc_now() - r0 < want) {
-        }
+        // 4096 ticks are 125 ms at the nominal 32768 Hz; half a second is
+        // four times that, wide of OSCULP32K's tolerance.
+        rulers = brio::wait_until<Ruler>([r0] { return rtc_now() - r0 >= want; }, 500'000u);
         const uint32_t wd = watch_now() - w0;
-        if (wd != 0u) {
+        if (rulers && wd != 0u) {
             ulp_hz = static_cast<uint32_t>(
                 (static_cast<uint64_t>(want) * crystal_hz) / wd);
         }

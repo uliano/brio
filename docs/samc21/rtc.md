@@ -365,13 +365,15 @@ flags together. 24.6.2.3's note is exact.
 
 ### Mode 1
 
-- **The period is PER + 1 source ticks, not PER.** 33 overflows in one
-  second against a source measured at 33041 Hz gives **1001 ticks a
-  period for PER = 999**, and the counter is never seen above 998. The
-  same one-off that the AVR TCD's printed dual-slope formula got wrong
-  ([avrxt/tcd.md](../avrxt/tcd.md)) is right here, and 24.6.2.4's
-  wording ("increments until it reaches the PER value, and then wraps")
-  is exact.
+- **The period against PER.** 24.6.2.4's wording ("increments until it
+  reaches the PER value, and then wraps") gives a period of PER + 1
+  ticks. Counting overflows in a one-second window cannot tell that
+  from PER - about 33 overflows a second is a 3 % quantization - so
+  `test_samc_rtc` g times the period edge to edge: 32 overflow periods
+  on the crystal ruler, in source ticks through the source rate
+  measured on the same ruler, judged to within half a tick of PER + 1
+  (PER and PER + 2 are each a whole tick away). The counter's raw read
+  has not been seen above 998 for PER = 999.
 - **A MODE CHANGE DOES NOT CLEAR COUNT**, and a 16-bit counter that
   starts ABOVE PER never meets it: it runs to 0xFFFF instead, carrying
   whatever value the previous mode left behind. Nothing in the chapter
@@ -490,6 +492,9 @@ Driver gaps:
   implements it.
 
 Implemented but not bench-verified:
+- **Mode 1's period, PER + 1 rather than PER**: what measures it is
+  letter g's edge-timed period, judged to half a tick, run on the
+  bench.
 - **The XOSC1K / XOSC32K clock selects**, which wait for the 32 kHz
   pass of [osc32kctrl.md](osc32kctrl.md).
 - **`debug_run(true)` under an actual halted debugger.** The bit is set

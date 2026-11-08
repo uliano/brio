@@ -535,6 +535,15 @@ converter reads k x 64 counts:
 
 - **Monotonic through zero over the whole sweep**, spread per point
   usually 1..7 counts.
+- The suite measures the source's own noise first - the rms of 64
+  conversions at k = 0 - and derives from it both numbers the sweep is
+  judged by: a point of eight conversions whose spread passes six times
+  that rms, plus two counts of quantization, is taken again (up to four
+  takes), and the inner residual is judged against 28 counts - table
+  45-27's +/-11 LSB at the point, and what the same INL can tilt an
+  eleven-point least-squares line by at its outermost point - plus 1.6
+  times the rms for the noise of the point and of the line. The sweep is
+  measured whole with the console quiet and printed after.
 - Best-fit line over |k| <= 320 (eleven points): **slope 65.132 counts
   per k where ideal is 64.000, intercept 4 counts**. That is a **gain of
   +1.7 %** - inside table 45-27's +/-3.4 % maximum, above its +/-1.1 %
@@ -590,7 +599,9 @@ references at OSR 1024:
 | VDDANA | 4172 | 3 | 656 mV |
 
 - **The same input measured against four different references agrees to
-  0.8 %.** The bandgap's three levels come out a factor of two apart with
+  0.8 %.** (The suite reads VDDANA first and leaves the 4.096 V level out
+  where the supply does not hold it, a 3.3 V supply, weighing the
+  cross-check below on the 2.048 V level instead.) The bandgap's three levels come out a factor of two apart with
   the input cancelling out: **1987 and 1996 per mille** against 2000
   nominal.
 - **THE CROSS-CHECK BETWEEN THE TWO ARCHITECTURES.** There is no DC

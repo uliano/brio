@@ -111,7 +111,9 @@
 //      max over 100 events after one warm-up, the console drained first;
 //      the bound is the quiet path measured plus what a kernel tick adds,
 //      counted by the M0+'s own cycles and this flash's fetch, written
-//      beside it.
+//      beside it; the tick count read in the handler just before its
+//      stamp and in High's handler just after its own says which events
+//      a tick landed in.
 //   d  THE RULER, THE SCAN AND THE POST: the ruler's two-read cost and
 //      its count across four tick reloads; activate() with nothing ready
 //      below the Console's ceiling (four empty queues, the fifth object at
@@ -143,7 +145,9 @@
 //      ends, before the statement after it; from the Console (to Mid) and
 //      from Low's dispatch (to High), ten runs each, with PENDSVSET read
 //      inside the section and the cycles from the section's last
-//      statement to the receiver's first.
+//      statement to the receiver's first, judged over the runs no kernel
+//      tick lengthened (a tick's count read around each; the others
+//      printed with their figures).
 //   w  THE REQUEST PENDING AT THE IDLE'S WFI: with interrupts masked as
 //      the kernel's idle path masks them, a post to Mid pends PendSV and
 //      the platform's own idle() follows - its DSB, its WFI under the mode
@@ -167,7 +171,9 @@
 //      high-water mark against the deepest stack pointer the dispatches
 //      and the interrupt sampled in letters a..w plus what lies below a
 //      sample (a basic exception frame, the handlers' own frames), the
-//      arithmetic beside the verdict.
+//      arithmetic beside the verdict. Run by name before any letter that
+//      dispatches or interrupts, it has no sample to hold the paint
+//      against and skips.
 //
 // RUNNING IT: `brio flash <board> test_samc_rubato`, then
 // `brio run <board> z` (one image: the SAMC21J18A's 256 KB and 32 KB
@@ -195,6 +201,7 @@
 #include "samc21/tc.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -207,9 +214,11 @@ using namespace brio;
 using P = SamRubatoPlatform;
 using Edge = Tc<4>;
 
-/// The kernel ticker read as CPU cycles (the file header).
+/// The kernel ticker read as CPU cycles (the file header): the ruler of
+/// the spans and of this suite's waits (util/test_wait.hpp).
 struct Ruler {
     [[gnu::always_inline, gnu::flatten]] static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
 
 constexpr UartPads console_pads{
@@ -292,12 +301,6 @@ volatile uint32_t sp_low_isr = 0xFFFF'FFFFu;
     const uint32_t sp = __get_MSP();
     if (sp < low) {
         low = sp;
-    }
-}
-
-[[gnu::always_inline]] inline void spin(uint32_t cycles) {
-    const uint32_t t0 = Ruler::now();
-    while (Ruler::now() - t0 < cycles) {
     }
 }
 
@@ -412,6 +415,7 @@ volatile uint8_t rx_ceiling = 0;
 
 volatile uint8_t edge_to = 1;           ///< 0: post to Top, 1: to High
 volatile uint32_t edge_last = 0;        ///< the ruler at the handler's last statement
+volatile uint32_t edge_ticks = 0;       ///< the tick count just before that stamp
 volatile uint32_t edge_hits = 0;
 
 void reset_scenario() {
@@ -423,16 +427,11 @@ void reset_scenario() {
     tracing = true;
 }
 
-/// Wait until `runs` moves past `before`, at most `cycles`: true when it
-/// did.
-bool wait_runs(const volatile uint32_t& runs, uint32_t before, uint32_t cycles) {
-    const uint32_t t0 = Ruler::now();
-    while (runs == before) {
-        if (Ruler::now() - t0 >= cycles) {
-            return false;
-        }
-    }
-    return true;
+/// Wait until High's dispatch count moves past `before`, at most 1 ms:
+/// true when it did. A dispatch that should run within a few hundred
+/// cycles is given a whole tick period.
+bool wait_high(uint32_t before) {
+    return brio::wait_until<Ruler>([before] { return High::runs != before; }, 1'000);
 }
 
 /// A post from the Console to Low with nothing to do and nothing traced:
@@ -441,13 +440,28 @@ void flush() {
     post<Low>(Hit{0});
 }
 
-/// Let the console's transmitter fall silent (at most 50 ms, 2.4 M
-/// cycles at 48 MHz; 230 bytes at 115200 are 20 ms): its interrupt,
-/// landing in a measured path, would be measured.
-void console_drain() {
-    const uint32_t t0 = Ruler::now();
-    while (!Serial::tx_idle() && Ruler::now() - t0 < 2'400'000u) {
+/// Every queued console byte off the wire, bounded (util/test_wait.hpp):
+/// false on a wedged console. Its interrupt, landing in a measured path,
+/// would be measured.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
+
+/// The console drained before a timed window, or a failed verdict that
+/// says it was not: false tells the letter to return.
+bool drained_for_window() {
+    if (console_drain()) {
+        return true;
     }
+    bench.verdict("the console drained before the timed window", false);
+    return false;
+}
+
+/// Whether the kernel tick moved within two tick periods: the raw polls
+/// of the tick count below (letter d's span, whose bound counts their
+/// turn) end only on a running tick, and nothing in those letters masks
+/// it for longer than a few cycles.
+bool tick_runs() {
+    const uint32_t t = Ticker::ticks();
+    return brio::wait_until<Ruler>([t] { return Ticker::ticks() != t; }, 2'000);
 }
 
 uint32_t ruler_cost() {
@@ -468,8 +482,7 @@ uint32_t ruler_cost() {
     return span > ruler ? span - ruler : 0u;
 }
 
-/// One millisecond of CPU cycles: the letters' wait for a dispatch that
-/// should have run within a few hundred cycles.
+/// One millisecond of CPU cycles: one SysTick period.
 constexpr uint32_t one_ms = SysClock::hz / 1000u;
 
 /// The ruler's two-read cost, measured at the start of every letter that
@@ -516,7 +529,7 @@ void ta_ceiling() {
             note('L', 'm');
             edge_to = 1;
             edge_in(2000u);      // 42 us into a 417 us spin at 48 MHz: the edge lands inside it
-            spin(20000u);
+            brio::spin_us<Ruler>(417);
             note('L', 'r');
         };
         const uint32_t h0 = High::runs;
@@ -634,28 +647,42 @@ void sort(uint32_t* v, uint32_t n) {
 constexpr uint32_t latency_quiet = 268u;
 constexpr uint32_t latency_bound = 415u;
 
+/// The tick count High's action read, right after its dispatch's stamp:
+/// with edge_ticks, the two ends of letter c's witness.
+volatile uint32_t high_ticks = 0;
+
 void tc_latency() {
     reset_scenario();
     tracing = false;
+    // The witness of a tick inside an event: the tick count read in the
+    // interrupt handler just before its stamp and in High's action just
+    // after High's stamp, so the window is the span and the few
+    // instructions beside its two stamps (a tick there is called
+    // landed-in, the conservative way). The action runs after the stamp:
+    // the measured path is not changed by it.
+    High::action = [](uint8_t) { high_ticks = Ticker::ticks(); };
     // One warm-up event (the cache, the bridge) not counted, then 100;
     // each waits at most 1 ms for High's first statement.
-    console_drain();
+    if (!drained_for_window()) {
+        reset_scenario();
+        return;
+    }
     ruler = ruler_cost();
     uint32_t missed = 0;
     // An event slower than the quiet path's threshold is one a tick
-    // landed in: the kernel tick read around each says so.
+    // landed in: the witness says so.
     uint32_t slow = 0;
     uint32_t slow_ticked = 0;
     for (uint32_t i = 0; i <= latency_events; ++i) {
         const uint32_t r = High::runs;
-        const uint32_t t0 = Ticker::ticks();
         edge_to = 1;
         edge_in(400u);
-        if (!wait_runs(High::runs, r, one_ms)) {
+        const bool ran = wait_high(r);
+        if (!ran) {
             ++missed;
             flush();
         }
-        const bool ticked = Ticker::ticks() != t0;
+        const bool ticked = !ran || high_ticks != edge_ticks;
         if (i > 0u) {
             const uint32_t d = net(High::entered - edge_last, ruler);
             latency[i - 1u] = d;
@@ -711,11 +738,20 @@ constexpr uint32_t span_bound = 59u;
 void td_scan() {
     reset_scenario();
     tracing = false;
-    console_drain();
+    if (!drained_for_window()) {
+        return;
+    }
+    if (!tick_runs()) {
+        bench.verdict("the kernel tick runs (it moved within 2 ms)", false);
+        return;
+    }
     ruler = ruler_cost();
     // The ruler across four tick reloads: each span starts at the first
     // reading after one tick and ends at the first after the fourth
-    // tick on, so it must read four periods of SysTick, 4 x 48 000.
+    // tick on, so it must read four periods of SysTick, 4 x 48 000. The
+    // two polls are bare loads of the tick count, not a shared wait: their
+    // turn is in span_bound's arithmetic, and tick_runs() above saw the
+    // tick move, which nothing here masks.
     uint32_t span_hi = 0;
     for (int i = 0; i < 4; ++i) {
         uint32_t t = Ticker::ticks();
@@ -839,7 +875,10 @@ void te_depth2() {
     const char* const want = "Hs1 Hm1 Ts0 Te0 Hr1 He1";
     ruler = ruler_cost();
     for (int road = 2; road >= 1; --road) {
-        console_drain();
+        if (!drained_for_window()) {
+            reset_scenario();
+            return;
+        }
         uint8_t alike = 0;
         uint32_t least = 0xFFFF'FFFFu;
         uint32_t most = 0;
@@ -849,7 +888,7 @@ void te_depth2() {
                 note('H', 'm');
                 edge_to = 0;
                 edge_in(2000u);
-                spin(20000u);
+                brio::spin_us<Ruler>(417);
                 note('H', 'r');
             };
             const uint32_t r = High::runs;
@@ -858,7 +897,7 @@ void te_depth2() {
             } else {
                 edge_to = 1;     // the first edge starts High over the Console
                 edge_in(400u);
-                if (!wait_runs(High::runs, r, one_ms)) {
+                if (!wait_high(r)) {
                     flush();
                 }
             }
@@ -917,13 +956,6 @@ void base_turn() {
     TE::process();
     P::ceiling = c;
     (void)activate_here();
-}
-
-/// Wait until the kernel tick has moved `ticks` on.
-void wait_ticks(uint32_t ticks) {
-    const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() - t0 < ticks) {
-    }
 }
 
 void tf_timers() {
@@ -999,7 +1031,10 @@ void tf_timers() {
     Low::action = [](uint8_t n) { ++fired[n]; };
     base_turn();                           // te_c and te_d: due at once
     const bool turn1 = fired[51] == 0u && fired[52] == 0u && fired[53] == 1u && fired[54] == 1u;
-    wait_ticks(4u);                        // te_a's three ticks, and one more
+    // te_a's three ticks, and one more: four tick periods given ten.
+    const uint32_t t4 = Ticker::ticks();
+    const bool ticked4 =
+        brio::wait_until<Ruler>([t4] { return Ticker::ticks() - t4 >= 4u; }, 10'000);
     base_turn();
     const bool turn2 = fired[51] == 1u && fired[52] == 0u && fired[53] == 1u && fired[54] == 1u;
     base_turn();
@@ -1008,7 +1043,7 @@ void tf_timers() {
 
     // 3. One arm() timed from the Console, the least of 16: the masked
     //    window is inside it.
-    console_drain();
+    const bool drained = console_drain();
     ruler = ruler_cost();
     uint32_t least = 0xFFFF'FFFFu;
     for (int i = 0; i < 16; ++i) {
@@ -1040,7 +1075,7 @@ void tf_timers() {
                   turn1);
     bench.verdict("three ticks on: the re-armed one fired once; a turn more: nothing "
                   "twice, the list empty",
-                  turn2 && turn3 && empty);
+                  ticked4 && turn2 && turn3 && empty);
     // arm() over a list of one node (itself, re-armed), by the release
     // listing: the stamp's tail and the call; arm()'s frame, the guard's
     // mrs and cpsid; the unlink, out of line - the head's load, the walk's
@@ -1050,8 +1085,9 @@ void tf_timers() {
     // VAL. 75 instructions, 128 cycles and 64 of fetch: 192, less 50, 142
     // (92 at zero wait states); 171 with the fifth (letter d's comment
     // says how the bounds are drawn).
-    bench.verdict("one arm(), the least of 16, costs under 171 cycles, its masked window inside",
-                  arm_cycles < 171u);
+    bench.verdict("one arm(), the least of 16, costs under 171 cycles, its masked window inside "
+                  "(the console drained first)",
+                  drained && arm_cycles < 171u);
 }
 
 // =============================================================================
@@ -1085,7 +1121,9 @@ template <class Receiver>
 }
 
 void tg_primask() {
-    console_drain();
+    if (!drained_for_window()) {
+        return;
+    }
     ruler = ruler_cost();
     pend_inside = true;
     ran_inside = false;
@@ -1096,16 +1134,31 @@ void tg_primask() {
     const char* const want_low = "Ls3 Lm3 Lp3 Hs1 He1 La3 Le3";
     uint8_t alike_console = 0;
     uint8_t alike_low = 0;
+    // The lengtheners rule: a kernel tick held off by the section and
+    // served at its end lands in the measured span, so the witness's
+    // ticks are read around each run and only the quiet runs are judged
+    // against the path's bound; a lengthened run is printed with its
+    // figure.
     uint32_t least = 0xFFFF'FFFFu;
     uint32_t most = 0;
+    uint8_t quiet_runs = 0;
+    uint32_t lengthened[10];
+    uint8_t lengthened_n = 0;
     bool back = true;
     for (int run = 0; run < 10; ++run) {
         reset_scenario();
+        const TickWitness<P> witness;
         post_in_section<Mid>('C');
+        const bool quiet = witness.quiet();
         {
             const uint32_t d = net(Mid::entered - section_last, ruler);
-            least = d < least ? d : least;
-            most = d > most ? d : most;
+            if (quiet) {
+                ++quiet_runs;
+                least = d < least ? d : least;
+                most = d > most ? d : most;
+            } else {
+                lengthened[lengthened_n++] = d;
+            }
         }
         if (trace_is(want_console)) {
             ++alike_console;
@@ -1127,7 +1180,11 @@ void tg_primask() {
           want_console, crlf);
     print(serial, "  from Low to High: ", alike_low, " of 10 runs traced ", want_low, crlf);
     print(serial, "  the section's last statement to Mid's first: ", least, "..", most,
-          " cycles", crlf);
+          " cycles over the ", quiet_runs, " quiet runs; lengthened by a tick:");
+    for (uint8_t k = 0; k < lengthened_n; ++k) {
+        print(serial, " ", lengthened[k]);
+    }
+    print(serial, lengthened_n == 0u ? " none" : " cycles", crlf);
     bench.verdict("PendSV stood pending inside every section, and no receiver ran inside one",
                   pend_inside && !ran_inside);
     bench.verdict("the Console's post to Mid under PRIMASK is served when the section ends, "
@@ -1146,8 +1203,9 @@ void tg_primask() {
     // cycles and 122 of fetch: 336, less 50, 286 (178 at zero wait
     // states); 343 with the fifth (letter d's comment says how the bounds
     // are drawn).
-    bench.verdict("the section's end to the receiver's first statement under 343 cycles",
-                  most < 343u);
+    bench.verdict("the section's end to the receiver's first statement under 343 cycles, "
+                  "over the runs no tick lengthened (at least one)",
+                  quiet_runs > 0u && most < 343u);
     bench.verdict("the ceiling is the Console's again, interrupts enabled", back);
 }
 
@@ -1167,16 +1225,18 @@ uint8_t wfi_leg(SleepMode mode, bool& pending_all, uint32_t& least, uint32_t& mo
         return 0;
     }
     for (int run = 0; run < 10; ++run) {
-        const uint32_t t = Ticker::ticks();
-        while (Ticker::ticks() == t) {
+        const uint32_t before = Ticker::ticks();
+        if (!brio::wait_until<Ruler>([before] { return Ticker::ticks() != before; }, 2'000)) {
+            break;                         // no tick: the run cannot be placed; woke stays short
         }
+        const uint32_t t = Ticker::ticks();   // the tick just begun
         const uint32_t r = Mid::runs;
         disable_interrupts();              // the mask the kernel's idle path holds
         post<Mid>(Hit{0});                 // below the Console's ceiling: PendSV pended
         pending_all = pending_all && pendsv_pending();
         const uint32_t t0 = Ruler::now();
         P::idle();                         // DSB, WFI at the armed mode, cpsie
-        const bool same_tick = Ticker::ticks() == t + 1u;
+        const bool same_tick = Ticker::ticks() == t;
         if (Mid::runs != r && same_tick) {
             ++woke;
             const uint32_t d = net(Mid::entered - t0, ruler);
@@ -1207,7 +1267,9 @@ constexpr uint32_t wfi_bound = 361u;
 void tw_wfi() {
     reset_scenario();
     tracing = false;
-    console_drain();
+    if (!drained_for_window()) {
+        return;
+    }
     ruler = ruler_cost();
     bool pending0 = true;
     bool pending2 = true;
@@ -1265,8 +1327,18 @@ void th_stack() {
         }
     }
     const uint32_t used = paint_top - lowest;
-    const uint32_t deepest_dispatch = paint_top - sp_low_dispatch;
-    const uint32_t deepest_isr = paint_top - sp_low_isr;
+    // A sample still at its initial value was never taken: run by name
+    // before the letters that dispatch and interrupt, h has no deepest
+    // stack pointer to hold the paint against, and declines.
+    const bool seen_dispatch = sp_low_dispatch != 0xFFFF'FFFFu;
+    const bool seen_isr = sp_low_isr != 0xFFFF'FFFFu;
+    if (!seen_dispatch && !seen_isr) {
+        print(serial, "  painted ", paint_top - paint_bottom, " bytes, used ", used, crlf);
+        bench.skip("no dispatch or interrupt has sampled the stack yet (z runs a..w first)");
+        return;
+    }
+    const uint32_t deepest_dispatch = seen_dispatch ? paint_top - sp_low_dispatch : 0u;
+    const uint32_t deepest_isr = seen_isr ? paint_top - sp_low_isr : 0u;
     print(serial, "  painted ", paint_top - paint_bottom, " bytes below main's frame (",
           hex(paint_bottom), "..", hex(paint_top), "); used ", used,
           " bytes; the deepest stack pointer sampled: a dispatch at ", deepest_dispatch,
@@ -1356,8 +1428,8 @@ extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 extern "C" [[gnu::naked]] void PendSV_Handler() { brio::scheduler_exception<K>(); }
 extern "C" [[gnu::naked]] void SVCall_Handler() { brio::scheduler_return(); }
 
-/// TC4's compare: the edge disarmed, the post, and the ruler as the last
-/// statement - letter c's near end.
+/// TC4's compare: the edge disarmed, the post, the tick count, and the
+/// ruler as the last statement - letter c's near end and its witness's.
 extern "C" void TC4_Handler() {
     Edge::disarm(Edge::match_flag(0));
     Edge::clear_flags(Edge::match_flag(0));
@@ -1368,6 +1440,7 @@ extern "C" void TC4_Handler() {
     } else {
         brio::post<High>(Hit{1});
     }
+    edge_ticks = brio::Ticker::ticks();
     edge_last = Ruler::now();
 }
 

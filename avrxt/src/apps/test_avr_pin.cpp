@@ -22,7 +22,12 @@
 // count must follow the selection (slot 0, never routed here, must read
 // its reset PIN0 throughout). On the AVR EA board PC6/PC7 are
 // jumpered to PE2/PE3 (and on to the partner board): PE2/PE3 stay inputs
-// with no pull, so driving PC6/PC7 drives the net alone.
+// with no pull, so driving PC6/PC7 drives the net alone - provided the
+// partner leaves it alone. The letters that drive PC6/PC7 (4, 7, 8, 9)
+// first look at the two nets with this chip's pull-ups on, and skip when
+// either reads low (something outside holds it); a partner driving a net
+// high reads as the pull-up does and is not seen. Every letter hands the
+// pads back as it found them: inputs, no pull (quiesce()).
 
 // build: boards = db48,da48,ea48
 // build: monitor_speed = 460800
@@ -68,10 +73,22 @@ void clear_irqs() {
     sei();
 }
 
-uint8_t passed = 0, failed = 0;
+uint8_t passed = 0, failed = 0, skipped = 0;
 void verdict(const char* name, bool ok) {
     if (ok) ++passed; else ++failed;
     print(serial, "  ", ok ? "PASS" : "FAIL", "  ", name, crlf);
+}
+/// A check this board cannot run, counted apart from passes and failures
+/// in TestBench's grammar (util/testbench.hpp, "SKIP  <reason>").
+void skip(const char* reason) {
+    if (skipped != 0xFFu) ++skipped;
+    print(serial, "  SKIP  ", reason, crlf);
+}
+/// A tally line: "N pass, M fail", then ", K skipped" when K is not zero.
+void tally(const char* head, uint16_t p, uint16_t f, uint16_t s) {
+    print(serial, head, p, " pass, ", f, " fail");
+    if (s != 0u) print(serial, ", ", s, " skipped");
+    print(serial, crlf);
 }
 /// n edges >= 4 CLK_PER apart (the partially-async dead-time is 3).
 void toggle_d3(uint8_t n) {
@@ -86,6 +103,27 @@ void quiesce() {
     D3::input(); C6::input(); C7::input();
     Port<'D'>::clear_flags(0xFF); Port<'C'>::clear_flags(0xFF);
     clear_irqs();
+}
+
+/// Whether PC6 and PC7 are free to drive: both read high with this chip's
+/// pull-ups on, after 20 us (a pull-up of tens of kilohms into a net of
+/// tens of picofarads settles in microseconds). A net that reads low is held by
+/// something outside - on the AVR EA board the jumper to PE2/PE3 and the
+/// partner board beyond - and the letter skips with that reason instead
+/// of driving against it. A net driven high from outside reads like the
+/// pull-up and passes. The pads are handed back with no pull.
+bool partner_nets_idle() {
+    C6::input(); C7::input();
+    C6::configure({.pull = PinPull::up});
+    C7::configure({.pull = PinPull::up});
+    delay_us(clock, 20);
+    const bool idle = C6::read() && C7::read();
+    C6::configure({}); C7::configure({});
+    if (!idle) {
+        skip("PC6/PC7 read low with the pull-ups on: a net held from outside (on the AVR EA "
+             "board, PE2/PE3 and the partner board), not driven by this letter");
+    }
+    return idle;
 }
 
 // ---- 1: the edge senses -----------------------------------------------------------
@@ -153,6 +191,10 @@ void t3_invert() {
 void t4_flags() {
     print(serial, "4 INTFLAGS: one pin's clear must not eat the other's flag", crlf);
     quiesce();
+    if (!partner_nets_idle()) {
+        quiesce();
+        return;
+    }
     C6::output(); C7::output(); C6::clear(); C7::clear();
     // senses on, INTERRUPTS observed via flags only: keep the vector
     // quiet by clearing inside the ISR? No - the ISR would take them.
@@ -213,6 +255,10 @@ void t6_input_off() {
 void t7_multipin() {
     print(serial, "7 PinSet{PD3, PC6, PC7}.configure: one setting, two ports, one shot", crlf);
     quiesce();
+    if (!partner_nets_idle()) {
+        quiesce();
+        return;
+    }
     using Set = PinSet<D3, C6, C7>;
     static_assert(Set::port_mask<'D'>() == 0x08 && Set::port_mask<'C'>() == 0xC0);
     const PinConfig cfg{.pull = PinPull::up, .sense = PinSense::both};
@@ -236,6 +282,10 @@ void t7_multipin() {
 void t8_port() {
     print(serial, "8 Port<'C'> mask verbs and the slew limit", crlf);
     quiesce();
+    if (!partner_nets_idle()) {
+        quiesce();
+        return;
+    }
     using PC = Port<'C'>;
     PC::dir_set(0xC0);
     PC::out_clear(0xC0);
@@ -267,6 +317,10 @@ void t8_port() {
 void t9_pinref() {
     print(serial, "9 PinRef on PC6: the edges, the null ref, and an ISR's edge on PC7", crlf);
     quiesce();
+    if (!partner_nets_idle()) {
+        quiesce();
+        return;
+    }
     C6::output(); C7::output(); C6::clear(); C7::clear();
     const PinRef r = C6::ref();
     r.set();
@@ -370,8 +424,10 @@ constexpr Test tests[] = {
 
 void run(TestFn fn) {
     passed = failed = 0;
+    skipped = 0;
     fn();
-    print(serial, "  -> ", passed, " pass, ", failed, " fail", crlf, crlf);
+    tally("  -> ", passed, failed, skipped);
+    print(serial, crlf);
 }
 
 void help() {
@@ -426,9 +482,9 @@ int main() {
         print(serial, static_cast<char>(c), crlf);
         if (c == '?') { help(); }
         else if (c == 'a' || c == 'A') {
-            uint8_t tp = 0, tf = 0;
-            for (const Test& t : tests) { run(t.fn); tp += passed; tf += failed; }
-            print(serial, "ALL: ", tp, " pass, ", tf, " fail", crlf);
+            uint16_t tp = 0, tf = 0, ts = 0;
+            for (const Test& t : tests) { run(t.fn); tp += passed; tf += failed; ts += skipped; }
+            tally("ALL: ", tp, tf, ts);
         } else {
             bool found = false;
             for (const Test& t : tests) if (t.key == c) { run(t.fn); found = true; }

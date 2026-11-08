@@ -740,9 +740,9 @@ None of this is read by the code: the program names its engine.
   PrepareSleep and a busy one refused. `util/i2c_bus.hpp` and
   `util/bus_master.hpp` arbitrate this engine as written: the same
   vocabulary both buses speak on every target.
-- THE TIMED BUS (letter l): a tenure into the peer's 60 ms SDA hold -
-  a START parked with no clock moving, which no time-out of this silicon
-  sees - came
+- THE TIMED BUS (letter l): a tenure into the peer's SDA hold (its
+  400 ms deadline) - a START parked with no clock moving, which no
+  time-out of this silicon sees - came
   back `i2c_timeout` on the arbiter's 35 ms clock WITH THE WIRE STILL
   HELD, the engine recover()ed inside the same dispatch, and the same
   bus AO carried the next tenure i2c_ok after the release; a client

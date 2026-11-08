@@ -167,6 +167,7 @@
 #include "samc21/sercom.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // The two-board half's protocol: shared with the far board's usart_peer,
@@ -291,6 +292,38 @@ ErrCounts mode_errors() {
             UPlain::hw_overruns(), UPlain::dma_faults()};
 }
 
+/// The live transport's loss counters and skip epoch over a window,
+/// WIDENED: the driver keeps each as a byte that wraps at 255
+/// (samc21/sercom.hpp), so a window that may count hundreds of losses (a
+/// wrong rate, 3 Mbaud) reads them at every turn of its loop and adds each
+/// one's move modulo 2^8 here - exact while fewer than 256 of a kind land
+/// between two reads, and a turn is microseconds where 256 frames are
+/// 850 us at 3 Mbaud. start() after the transport's counters are cleared,
+/// update() every turn and once more at the window's end.
+struct ErrTally {
+    uint32_t rx_overrun = 0, frame = 0, parity = 0, hw_overrun = 0, dma_faults = 0;
+    uint32_t skips = 0;   ///< moves of the skip epoch
+    ErrCounts last{};
+    uint32_t skips_last = 0;
+
+    void start() {
+        last = mode_errors();
+        skips_last = mode_skips();
+    }
+    void update() {
+        const ErrCounts e = mode_errors();
+        rx_overrun += static_cast<uint8_t>(e.rx_overrun - last.rx_overrun);
+        frame += static_cast<uint8_t>(e.frame - last.frame);
+        parity += static_cast<uint8_t>(e.parity - last.parity);
+        hw_overrun += static_cast<uint8_t>(e.hw_overrun - last.hw_overrun);
+        dma_faults += static_cast<uint8_t>(e.dma_faults - last.dma_faults);
+        last = e;
+        const uint32_t s = mode_skips();
+        skips += (s - skips_last) & 0xFFu;
+        skips_last = s;
+    }
+};
+
 // =============================================================================
 // The stream, and the clock
 // =============================================================================
@@ -307,34 +340,46 @@ constexpr uint32_t lfsr_seed = 0x12345678UL;
     return static_cast<uint8_t>(s & 0xFFu);
 }
 
-/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
-/// tick count and the counter's position composed right across the reload
-/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
-uint32_t cycles_now() {
-    return Ticker::cycles();
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's waits
+/// and spans (util/test_wait.hpp) - the tick count and the counter's
+/// position composed across the reload (util/cycle_count.hpp), wrapping at
+/// 2^32, so only differences are used. It needs interrupts enabled: under
+/// a mask longer than a tick it stops advancing (burst() says what that
+/// costs there).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// Milliseconds as cycles of the ruler, for the windows a letter loops over.
+uint32_t ms_cycles(uint32_t ms) { return brio::us_cycles<Ruler>(ms * 1000u); }
+
+/// The live transport drained, nudging as it waits (an empty write gives a
+/// blocked transmitter its push and its repair, mode_nudge()): true once
+/// its ring is empty and its last stop bit out (tx_idle() covers the
+/// shifter, util/test_wait.hpp), false after 200 ms - a 512-byte ring at
+/// 115200, the slowest rate a transport here drains at, is 44 ms.
+bool drain() {
+    return brio::wait_until<Ruler>(
+        [] {
+            if (mode_tx_idle()) {
+                return true;
+            }
+            mode_nudge();
+            return false;
+        },
+        200'000u);
 }
 
-uint32_t ms_cycles(uint32_t ms) { return (SysClock::hz / 1000u) * ms; }
-
-void spin_ms(uint32_t ms) {
-    const uint32_t t0 = cycles_now();
-    const uint32_t want = ms_cycles(ms);
-    while (cycles_now() - t0 < want) {
+/// The console drained before a TIMED WINDOW, whose span a console byte's
+/// interrupt would lengthen: false, with a failed verdict, when it did not
+/// drain - the letter's figures would then mean nothing, and it returns.
+bool console_quiet() {
+    if (drain()) {
+        return true;
     }
-}
-
-/// Bounded drain, nudging as it waits. True when the transport emptied.
-bool drain(uint32_t spins = 20'000'000UL) {
-    while (!mode_tx_idle() && spins-- != 0u) {
-        mode_nudge();
-    }
-    if (!mode_tx_idle()) {
-        return false;
-    }
-    spins = 2'000'000UL;
-    while (!Sc5::txc_flag() && spins-- != 0u) {
-    }
-    return true;
+    bench.verdict("the console drained before the timed window", false);
+    return false;
 }
 
 // =============================================================================
@@ -418,7 +463,7 @@ struct LegResult {
     uint32_t first_bad;   ///< 1-based position of the first byte off the stream
     uint32_t skips;       ///< how far rx_skips() moved over the window
     bool drained;
-    ErrCounts err;
+    ErrTally err;
 };
 
 uint8_t hop[256];
@@ -449,11 +494,13 @@ void open_leg(const Leg& leg) {
     print(plain, "  HOST ", op_name(leg.op), " ", static_cast<uint32_t>(leg.mode),
           " ", say_baud, " ", format_bits(say_format), format_parity(say_format),
           say_format.two_stop ? '2' : '1', " ", leg.window_ms, " ", leg.count, crlf);
+    // Dropped: the host reads the line or times out, and the leg's own
+    // counts say what crossed.
     (void)drain();
     mode_release();
 
     (void)mode_init(leg.mode, leg.baud, leg.format);
-    spin_ms(120);
+    brio::spin_us<Ruler>(120'000);
     mode_clear_errors();
     DmaTxEngine<0>::clear_faults();
 }
@@ -462,7 +509,7 @@ void open_leg(const Leg& leg) {
 LegResult run_leg(const Leg& leg) {
     LegResult r{};
     open_leg(leg);
-    const uint32_t skips0 = mode_skips();
+    r.err.start();
 
     // A frame narrower than eight bits carries only its low bits, so the
     // pattern is compared through the same mask the wire applies.
@@ -476,14 +523,16 @@ LegResult run_leg(const Leg& leg) {
 
     uint32_t s_rx = lfsr_seed;
     uint32_t s_tx = lfsr_seed;
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     const uint32_t window = ms_cycles(leg.window_ms);
     uint32_t turns = 0;
     uint8_t out[128];
     uint32_t out_have = 0;
     uint32_t out_done = 0;
 
-    while (cycles_now() - t0 < window) {
+    while (Ruler::now() - t0 < window) {
+        r.err.update();
+
         // ---- the receive half ------------------------------------------
         if (leg.op != Op::source) {
             const uint32_t got = mode_read_bulk(hop, sizeof hop);
@@ -532,14 +581,14 @@ LegResult run_leg(const Leg& leg) {
         if (leg.op == Op::burst) {
             ++turns;
             if ((turns & 0x1FFu) == 0u) {
-                spin_ms(4);
+                brio::spin_us<Ruler>(4'000);
             }
         }
     }
 
     r.drained = drain();
-    r.err = mode_errors();
-    r.skips = (mode_skips() - skips0) & 0xFFu;
+    r.err.update();
+    r.skips = r.err.skips;
     return r;
 }
 
@@ -547,7 +596,7 @@ LegResult run_leg(const Leg& leg) {
 void back_to_console() {
     mode_release();
     (void)mode_init(Mode::plain, 115200);
-    spin_ms(150);
+    brio::spin_us<Ruler>(150'000);
 }
 
 void report(const Leg& leg, const LegResult& r) {
@@ -637,13 +686,21 @@ void ta_baud() {
     // THE LADDER ON THE WIRE: each rung's divisor driving the loop's
     // transmitter, a run of frames timed against its wire time at the rate
     // ASKED - the arithmetic above is checked against its own inverse, and
-    // only the wire can tell a divisor that is wrong in both.
+    // only the wire can tell a divisor that is wrong in both. Every rung
+    // timed with the console quiet, the readings printed after the last.
+    if (!console_quiet()) {
+        return;
+    }
+    constexpr uint32_t rungs = sizeof rates / sizeof rates[0];
+    uint32_t pms[rungs] = {};
+    for (uint32_t i = 0; i < rungs; ++i) {
+        pms[i] = wire_permille(rates[i]);
+    }
     bool ladder_ok = true;
     print(plain, "  the ladder on the loop, a run of frames in thousandths of its wire time:");
-    for (uint32_t baud : rates) {
-        const uint32_t pm = wire_permille(baud);
-        print(plain, " ", baud, " ", pm);
-        ladder_ok = ladder_ok && wire_ok(pm);
+    for (uint32_t i = 0; i < rungs; ++i) {
+        print(plain, " ", rates[i], " ", pms[i]);
+        ladder_ok = ladder_ok && wire_ok(pms[i]);
     }
     print(plain, crlf);
     bench.verdict("EVERY RUNG RUNS AT THE RATE ASKED: 9600 baud to 3 Mbaud, a run of frames on the "
@@ -676,7 +733,8 @@ void tb_format() {
     bool chsize_ok = true, parity_ok = true, stop_ok = true, dord_ok = true;
     uint32_t ctrla_seen = 0, ctrlb_seen = 0;
     // What the console still holds - the letter before this one's last
-    // lines - goes out before the first re-init clears the ring.
+    // lines - goes out before the first re-init clears the ring (dropped:
+    // a line lost there is the transcript's, the sweep is judged apart).
     (void)drain();
     for (const Row& row : rows) {
         const UartFormat f{.bits = row.bits, .parity = row.parity,
@@ -707,7 +765,7 @@ void tb_format() {
         }
     }
     (void)UPlain::init(clock, 115200);
-    spin_ms(20);
+    brio::spin_us<Ruler>(20'000);
 
     print(plain, "  last of the sweep: CTRLA=", hex(ctrla_seen), " CTRLB=",
           hex(ctrlb_seen), "; back at 8N1", crlf);
@@ -724,15 +782,25 @@ void tb_format() {
     // THE FRAME ON THE WIRE: the same formats on the loop, a run of each
     // timed against its frame's own length at 115200 - start, data,
     // parity and stop bits - which the register readback above cannot
-    // show.
+    // show. Timed with the console quiet, printed after the last.
+    if (!console_quiet()) {
+        return;
+    }
+    constexpr uint32_t formats = sizeof rows / sizeof rows[0];
+    uint32_t pms[formats] = {};
+    for (uint32_t i = 0; i < formats; ++i) {
+        const UartFormat f{.bits = rows[i].bits, .parity = rows[i].parity,
+                           .two_stop = rows[i].two_stop};
+        pms[i] = wire_permille(115200, f);
+    }
     bool frames_ok = true;
     print(plain, "  the frames on the loop at 115200, in thousandths of their wire time:");
-    for (const Row& row : rows) {
-        const UartFormat f{.bits = row.bits, .parity = row.parity, .two_stop = row.two_stop};
-        const uint32_t pm = wire_permille(115200, f);
+    for (uint32_t i = 0; i < formats; ++i) {
+        const UartFormat f{.bits = rows[i].bits, .parity = rows[i].parity,
+                           .two_stop = rows[i].two_stop};
         print(plain, " ", format_bits(f), format_parity(f), f.two_stop ? '2' : '1', " (",
-              frame_bits(f), " bits) ", pm);
-        frames_ok = frames_ok && wire_ok(pm);
+              frame_bits(f), " bits) ", pms[i]);
+        frames_ok = frames_ok && wire_ok(pms[i]);
     }
     print(plain, crlf);
     bench.verdict("every frame takes its own length on the wire: a run of each format on the loop "
@@ -747,14 +815,19 @@ void tc_ring() {
     // fills exactly the room there is. Every one of those refusals goes
     // through the blocked-transmitter nudge, so this also proves that
     // path cannot wedge.
+    // Dropped: the fill below counts what the ring takes, whatever the
+    // console still held.
     (void)drain();
     // The filler is a printable dot: these bytes really do go out on the
-    // console wire, and a binary ramp would paint the transcript.
+    // console wire, and a binary ramp would paint the transcript. THE FIRST
+    // REFUSAL is the one judged: the fill stops at it, short of its cap of
+    // 64 past the ring (a byte or so leaves the wire while it fills), and a
+    // byte offered after it may be taken - the shifter frees a slot.
     uint32_t queued = 0;
     while (queued < tx_ring + 64u && UPlain::write_byte('.')) {
         ++queued;
     }
-    const bool full_refused = !UPlain::write_byte(0) || queued >= tx_ring + 64u;
+    const bool full_refused = queued < tx_ring + 64u;
     print(plain, "  the ring took ", queued,
           " bytes before refusing (capacity ", tx_ring - 1u,
           " plus whatever left on the wire meanwhile)", crlf);
@@ -766,6 +839,8 @@ void tc_ring() {
     for (uint32_t i = 0; i < sizeof block; ++i) {
         block[i] = '.';
     }
+    // Dropped: it lets the verdict line above leave before the block
+    // fills the ring; what the block placed is judged on its own.
     (void)drain();
     const uint32_t placed =
         UPlain::write_bulk(std::span<const uint8_t>(block, sizeof block));
@@ -793,6 +868,8 @@ void td_engine() {
     // transport holds the engine for the reading, and the console goes back
     // to its interrupt.
     std::optional<uint8_t> level;
+    // Dropped: a console that did not drain loses a line, and the level is
+    // judged from the channel all the same.
     (void)drain();
     mode_release();
     if (mode_init(Mode::txdma, 115200)) {
@@ -810,6 +887,16 @@ void td_engine() {
 // =============================================================================
 // The host letters
 // =============================================================================
+
+/// "Nothing lost silently": the stream was whole, or its break shows in a
+/// count of a kind of loss the receiver reports - a hardware overrun, a
+/// byte refused by a full ring, a frame or parity error (each such byte
+/// dropped, samc21/sercom.hpp), or a move of the skip epoch - every count
+/// widened over the window (ErrTally).
+bool loss_reported(const LegResult& r) {
+    return r.first_bad == 0u || r.err.hw_overrun != 0u || r.err.rx_overrun != 0u ||
+           r.err.frame != 0u || r.err.parity != 0u || r.skips != 0u;
+}
 
 void run_and_report(const Leg& leg, bool lossless) {
     const LegResult r = run_leg(leg);
@@ -881,10 +968,10 @@ void th_duplex_echo() {
             // sending back slower than the bridge sends in - OSC48M is half
             // a per cent off nominal on this board (docs/boards/
             // samc21j.md), and half a per cent of the 105000 bytes a
-            // window carries is the ring's 511. Dropped is allowed there;
-            // uncounted is not.
-            bench.verdict("what the echo could not hold was counted",
-                          r.echoed + r.dropped == r.received);
+            // window carries is the ring's 511. Dropped is allowed there,
+            // and PRINTED (report()'s dropped=), not judged: run_leg()
+            // counts every byte it read as echoed or dropped, so the two
+            // add up to received by construction.
         }
         if (rate <= 1'000'000u) {
             bench.verdict("every received byte was on the stream, in order",
@@ -893,9 +980,7 @@ void th_duplex_echo() {
         } else {
             print(plain, "  (at 2 Mbaud the interrupt receiver is the limit - loss "
                          "is allowed, silence is not)", crlf);
-            bench.verdict("nothing was lost silently at this rate",
-                          r.first_bad == 0 || r.err.hw_overrun != 0 ||
-                              r.err.rx_overrun != 0);
+            bench.verdict("nothing was lost silently at this rate", loss_reported(r));
         }
         bench.verdict("no transmit block was abandoned (one channel, nothing to "
                       "corrupt it)",
@@ -940,11 +1025,9 @@ void tk_rates() {
         if (rate <= 1'000'000u) {
             bench.verdict("byte-exact at this rate", r.first_bad == 0);
         } else {
-            const bool accounted =
-                r.first_bad == 0 || r.err.hw_overrun != 0 || r.err.rx_overrun != 0;
             print(plain, "  (above 1 Mbaud the receiver's own filler is the "
                          "limit - loss is expected, silence is not)", crlf);
-            bench.verdict("nothing was lost silently at this rate", accounted);
+            bench.verdict("nothing was lost silently at this rate", loss_reported(r));
         }
     }
 }
@@ -999,8 +1082,7 @@ void tm_mismatch() {
     print(plain, "  host at 57600 into a 115200 receiver: received=",
           wrong_rate.received, " frame=", wrong_rate.err.frame,
           " parity=", wrong_rate.err.parity, " hw_overrun=",
-          wrong_rate.err.hw_overrun, "  (the counters are bytes and wrap at 255)",
-          crlf);
+          wrong_rate.err.hw_overrun, crlf);
     bench.verdict("a wrong RATE shows: framing errors are raised and counted",
                   wrong_rate.err.frame != 0);
 
@@ -1112,8 +1194,8 @@ struct StreamCheck {
 
 struct ConsumerLeg {
     StreamCheck check;
-    ErrCounts err;
-    uint32_t skips;   ///< how far rx_skips() moved, modulo 2^8
+    ErrTally err;
+    uint32_t skips;   ///< how far rx_skips() moved, widened (ErrTally)
     uint32_t holds;   ///< hold phases the window held
     bool drained;
 };
@@ -1129,15 +1211,16 @@ ConsumerLeg consumer_leg(bool lazy) {
     leg.window_ms = 1400;
     open_leg(leg);
     ConsumerLeg r{};
-    const uint32_t skips0 = UPlain::rx_skips();
-    r.check.start(skips0);
+    r.check.start(UPlain::rx_skips());
+    r.err.start();
     const uint32_t look_c = ms_cycles(150);
     const uint32_t hold_c = ms_cycles(100);
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     const uint32_t window = ms_cycles(leg.window_ms);
     bool holding = false;
     uint32_t phase_t0 = t0;
-    for (uint32_t now = t0; now - t0 < window; now = cycles_now()) {
+    for (uint32_t now = t0; now - t0 < window; now = Ruler::now()) {
+        r.err.update();
         if (lazy && now - phase_t0 >= (holding ? hold_c : look_c)) {
             holding = !holding;
             phase_t0 = now;
@@ -1160,8 +1243,8 @@ ConsumerLeg consumer_leg(bool lazy) {
         UPlain::consume(static_cast<uint32_t>(run.size()));
     }
     r.drained = drain();
-    r.err = mode_errors();
-    r.skips = (UPlain::rx_skips() - skips0) & 0xFFu;
+    r.err.update();
+    r.skips = r.err.skips;
     return r;
 }
 
@@ -1174,7 +1257,7 @@ void tn_pressure() {
               ": delivered ", c.delivered, ", holds ", r.holds, ", gaps ", c.gaps, " (skips ",
               r.skips, "), resyncs ", c.resyncs, " jumping ", c.jumped, " positions, lost ",
               c.lost, ", silent join at ", c.first_silent, crlf);
-        print(plain, "     rx_overrun=", r.err.rx_overrun, " (modulo 256) frame=", r.err.frame,
+        print(plain, "     rx_overrun=", r.err.rx_overrun, " frame=", r.err.frame,
               " parity=", r.err.parity, " hw_overrun=", r.err.hw_overrun, " drained=",
               r.drained ? "yes" : "NO", crlf);
         bench.verdict("bytes crossed", c.delivered != 0u);
@@ -1233,12 +1316,9 @@ volatile uint32_t loop_edges = 0;
 
 uint32_t bit_cycles(uint32_t baud) { return SysClock::hz / baud; }
 
-/// A few frames of idle line after the transport comes up.
-void loop_settle(uint32_t baud) {
-    const uint32_t t0 = cycles_now();
-    while (cycles_now() - t0 < 40u * bit_cycles(baud)) {
-    }
-}
+/// A few frames of idle line after the transport comes up: forty bit
+/// times, rounded up to the next microsecond.
+void loop_settle(uint32_t baud) { brio::spin_us<Ruler>(40'000'000u / baud + 1u); }
 
 /// Polled transmission through the resource, for a sender at the wire's
 /// own rate beside the interrupt receiver: DATA written whenever DRE
@@ -1305,32 +1385,47 @@ uint32_t wire_permille(uint32_t baud, const UartFormat& format) {
     loop_settle(baud);
     Nvic::disable(Sc1::irq());   // the receiver unserved: the run is the transmitter's
     uint32_t q = LTxDma::write_bulk(std::span<const uint8_t>(run, frames));
-    const uint32_t t0 = cycles_now();   // the first block started: its first beat is in DATA
+    const uint32_t t0 = Ruler::now();   // the first block started: its first beat is in DATA
     const uint64_t wire =
         static_cast<uint64_t>(bits) * frames * SysClock::hz / baud;
-    while (q < frames) {
-        q += LTxDma::write_bulk(std::span<const uint8_t>(run + q, frames - q));
-    }
-    while (!LTxDma::tx_idle()) {
-        if (cycles_now() - t0 > 2u * static_cast<uint32_t>(wire)) {
-            break;
-        }
-    }
-    const uint32_t took = cycles_now() - t0;
+    // The rest of the run offered as the ring frees, then its last stop
+    // bit: each wait bounded at twice the run's wire time and a
+    // millisecond more, a stalled engine read as 0 (outside every band).
+    const uint32_t budget_us =
+        static_cast<uint32_t>(2u * static_cast<uint64_t>(bits) * frames * 1'000'000u / baud) + 1'000u;
+    const bool whole =
+        brio::wait_until<Ruler>(
+            [&q, frames] {
+                q += LTxDma::write_bulk(std::span<const uint8_t>(run + q, frames - q));
+                return q >= frames;
+            },
+            budget_us) &&
+        brio::wait_until<Ruler>([] { return LTxDma::tx_idle(); }, budget_us);
+    const uint32_t took = Ruler::now() - t0;
     LTxDma::release();
     loop_live = Loop::none;
-    return static_cast<uint32_t>(1000ull * took / wire);
+    return whole ? static_cast<uint32_t>(1000ull * took / wire) : 0u;
 }
 
-/// The rungs a loop letter ran at, each timed: printed, and judged all at
-/// once.
+/// The rungs a loop letter ran at, each timed with the console quiet, the
+/// readings printed after the last, and judged all at once.
 bool wire_rungs(std::initializer_list<uint32_t> rates) {
+    constexpr uint32_t most = 4;
+    uint32_t pms[most] = {};
+    if (rates.size() > most || !console_quiet()) {
+        return false;
+    }
+    uint32_t i = 0;
+    for (const uint32_t baud : rates) {
+        pms[i++] = wire_permille(baud);
+    }
     bool ok = true;
+    i = 0;
     print(plain, "  on the wire, a run of frames in thousandths of its time at the rate asked:");
     for (const uint32_t baud : rates) {
-        const uint32_t pm = wire_permille(baud);
-        print(plain, " ", baud, " ", pm);
-        ok = ok && wire_ok(pm);
+        print(plain, " ", baud, " ", pms[i]);
+        ok = ok && wire_ok(pms[i]);
+        ++i;
     }
     print(plain, crlf);
     return ok;
@@ -1406,13 +1501,20 @@ ResourceRun resource_run(const SercomUartConfig& c, uint32_t baud, uint32_t bits
     uint32_t frames = baud / (100u * bits);
     frames = frames < 16u ? 16u : (frames > 256u ? 256u : frames);
     const uint64_t wire = static_cast<uint64_t>(bits) * frames * SysClock::hz / baud;
-    // The bound is a count of turns, not a clock read: the ticker's cycle
-    // count costs some tens of cycles, and a turn has to be shorter than
-    // a 3x frame at 4 Mbaud (120 cycles) for the run to be the wire's.
-    while (!Sc1::dre_flag()) {
+    // A freshly enabled transmitter's DATA is empty: DRE within a frame,
+    // bounded at a millisecond (eight frames at the slowest rung, 3750).
+    if (!brio::wait_until<Ruler>([] { return Sc1::dre_flag(); }, 1'000u)) {
+        r.up = false;
+        resource_down();
+        return r;
     }
     Sc1::data(0x35u);
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
+    // The run's bound is a count of turns, not a clock read: the ruler's
+    // read costs some tens of cycles, and a turn has to be shorter than a
+    // 3x frame at 4 Mbaud (120 cycles) for the run to be the wire's. A turn
+    // is at least a cycle, so the count bounds the run at 64 wire times or
+    // more, and finitely.
     r.sent = 1;
     for (uint32_t turns = 64u * static_cast<uint32_t>(wire); r.got < frames && turns != 0u;
          --turns) {
@@ -1432,11 +1534,11 @@ ResourceRun resource_run(const SercomUartConfig& c, uint32_t baud, uint32_t bits
             ++r.got;
         }
     }
-    const uint32_t spin0 = cycles_now();
-    while (!Sc1::txc_flag() && cycles_now() - spin0 < ms_cycles(2)) {
-    }
-    const uint32_t took = cycles_now() - t0;
-    r.permille = static_cast<uint32_t>(1000ull * took / wire);
+    // The last stop bit: TXC within two frames of the last read, bounded at
+    // 2 ms; a TXC that never came reads 0 (outside every band).
+    const bool out = brio::wait_until<Ruler>([] { return Sc1::txc_flag(); }, 2'000u);
+    const uint32_t took = Ruler::now() - t0;
+    r.permille = out ? static_cast<uint32_t>(1000ull * took / wire) : 0u;
     resource_down();
     return r;
 }
@@ -1448,7 +1550,6 @@ struct RegimeRung {
 };
 
 void tg_resource() {
-    print(plain, "  regime        rate     BAUD    sent got bad  wire (thousandths)", crlf);
     const RegimeRung rungs[] = {
         {UartSampling::x16_arithmetic, 115200, "16x arith"},
         {UartSampling::x16_fractional, 3750, "16x frac"},
@@ -1457,17 +1558,33 @@ void tg_resource() {
         {UartSampling::x8_fractional, 2'000'000, "8x frac"},
         {UartSampling::x3_arithmetic, 2'000'000, "3x arith"},
     };
+    constexpr uint32_t rung_n = sizeof rungs / sizeof rungs[0];
+    // Every rung run with the console quiet - a polled run that both feeds
+    // DATA and reads the loop back has a frame of slack at 2 Mbaud, less
+    // than a console interrupt - and printed after the last.
+    if (!console_quiet()) {
+        return;
+    }
+    std::optional<uint16_t> regs[rung_n];
+    ResourceRun runs[rung_n];
+    for (uint32_t i = 0; i < rung_n; ++i) {
+        const auto reg = sercom_uart_baud_reg(SysClock::hz, rungs[i].baud, rungs[i].sampling);
+        regs[i] = reg;
+        if (reg) {
+            runs[i] = resource_run({.pads = loop_pads, .baud = *reg, .sampling = rungs[i].sampling},
+                                   rungs[i].baud, 10);
+        }
+    }
+    print(plain, "  regime        rate     BAUD    sent got bad  wire (thousandths)", crlf);
     bool every = true, timed = true;
-    for (const RegimeRung& g : rungs) {
-        const auto reg = sercom_uart_baud_reg(SysClock::hz, g.baud, g.sampling);
-        if (!reg) {
+    for (uint32_t i = 0; i < rung_n; ++i) {
+        if (!regs[i]) {
             every = false;
             continue;
         }
-        const ResourceRun r = resource_run(
-            {.pads = loop_pads, .baud = *reg, .sampling = g.sampling}, g.baud, 10);
-        print(plain, "  ", g.name, "  ", g.baud, "  ", *reg, "  ", r.sent, " ", r.got, " ", r.bad,
-              "  ", r.permille, crlf);
+        const ResourceRun& r = runs[i];
+        print(plain, "  ", rungs[i].name, "  ", rungs[i].baud, "  ", *regs[i], "  ", r.sent, " ",
+              r.got, " ", r.bad, "  ", r.permille, crlf);
         every = every && r.up && r.got == r.sent && r.sent >= 16u && r.bad == 0u;
         timed = timed && wire_ok(r.permille);
     }
@@ -1477,11 +1594,18 @@ void tg_resource() {
     // The synchronous host, both clock polarities, the internal XCK at 1 MHz.
     {
         const uint8_t reg = sercom_sync_baud_reg(SysClock::hz, 1'000'000).value();
+        if (!console_quiet()) {
+            return;
+        }
+        ResourceRun pols[2];
+        for (uint8_t pol = 0; pol < 2; ++pol) {
+            pols[pol] = resource_run({.pads = loop_pads, .baud = reg, .synchronous = true,
+                                      .invert_clock = pol != 0},
+                                     1'000'000, 10);
+        }
         bool both = true, both_timed = true;
         for (uint8_t pol = 0; pol < 2; ++pol) {
-            const ResourceRun r = resource_run({.pads = loop_pads, .baud = reg,
-                                                .synchronous = true, .invert_clock = pol != 0},
-                                               1'000'000, 10);
+            const ResourceRun& r = pols[pol];
             print(plain, "  sync host 1 MHz, CPOL ", pol, ": sent ", r.sent, " got ", r.got,
                   " bad ", r.bad, ", wire ", r.permille, crlf);
             both = both && r.up && r.got == r.sent && r.sent >= 16u && r.bad == 0u;
@@ -1494,6 +1618,15 @@ void tg_resource() {
 
     const uint16_t reg115 = sercom_baud_reg(SysClock::hz, 115200).value();
     const SercomUartConfig plain_cfg{.pads = loop_pads, .baud = reg115};
+    /// One frame out on the loop once DATA has room: a frame at 115200 is
+    /// 87 us, the bound a millisecond. False when DRE never rose.
+    const auto put = [](uint8_t v) {
+        if (!brio::wait_until<Ruler>([] { return Sc1::dre_flag(); }, 1'000u)) {
+            return false;
+        }
+        Sc1::data(v);
+        return true;
+    };
 
     // RXEN at run time: a disabled receiver takes nothing; on again, all.
     {
@@ -1501,22 +1634,20 @@ void tg_resource() {
         up = Sc1::enable_rx(false) && up;
         const bool rx_off = !Sc1::rx_enabled();
         for (uint8_t i = 0; i < 4; ++i) {
-            while (!Sc1::dre_flag()) {
-            }
-            Sc1::data(static_cast<uint8_t>(0xA0u + i));
+            up = put(static_cast<uint8_t>(0xA0u + i)) && up;
         }
-        spin_ms(1);
+        brio::spin_us<Ruler>(1'000);
         const bool heard_off = Sc1::rxc_flag();
         up = Sc1::enable_rx(true) && up;
         uint8_t got = 0;
         for (uint8_t i = 0; i < 4; ++i) {
-            while (!Sc1::dre_flag()) {
+            up = put(static_cast<uint8_t>(0xB0u + i)) && up;
+            // A frame's 87 us, bounded at a millisecond; the read below
+            // judges whether it came.
+            if (brio::wait_until<Ruler>([] { return Sc1::rxc_flag(); }, 1'000u) &&
+                static_cast<uint8_t>(Sc1::data()) == 0xB0u + i) {
+                ++got;
             }
-            Sc1::data(static_cast<uint8_t>(0xB0u + i));
-            const uint32_t w0 = cycles_now();
-            while (!Sc1::rxc_flag() && cycles_now() - w0 < ms_cycles(1)) {
-            }
-            if (Sc1::rxc_flag() && static_cast<uint8_t>(Sc1::data()) == 0xB0u + i) ++got;
         }
         resource_down();
         print(plain, "  RXEN off: rx_enabled ", rx_off ? 0 : 1, ", heard ", heard_off ? 1 : 0,
@@ -1532,17 +1663,17 @@ void tg_resource() {
         bool up = resource_up(plain_cfg);
         LoopPad::function(PinFunction::c, {.input_enable = true, .pull = PinPull::down});
         (void)Sc1::enable(false);
-        spin_ms(1);
+        brio::spin_us<Ruler>(1'000);
         const bool high_disabled = LoopPad::read();
         up = Sc1::enable(true) && up;
-        spin_ms(1);
+        brio::spin_us<Ruler>(1'000);
         const bool high_on = LoopPad::read();
         up = Sc1::enable_rx(false) && up;
         up = Sc1::enable_tx(false) && up;
-        spin_ms(1);
+        brio::spin_us<Ruler>(1'000);
         const bool high_both_off = LoopPad::read();
         up = Sc1::enable_rx(true) && up;
-        spin_ms(1);
+        brio::spin_us<Ruler>(1'000);
         const bool off_flag = !Sc1::tx_enabled();
         const bool high_off = LoopPad::read();
         // Driven, or floating at the level it had? Take the pad to PORT
@@ -1551,10 +1682,10 @@ void tg_resource() {
         // driven one rises.
         LoopPad::release();
         LoopPad::input(PinPull::down);
-        spin_ms(1);
+        brio::spin_us<Ruler>(1'000);
         const bool high_released = LoopPad::read();
         LoopPad::function(PinFunction::c, {.input_enable = true, .pull = PinPull::down});
-        spin_ms(1);
+        brio::spin_us<Ruler>(1'000);
         const bool high_remuxed = LoopPad::read();
         print(plain, "  the pad under its pull-down: instance disabled ",
               high_disabled ? "HIGH" : "low", ", TXEN and RXEN off ",
@@ -1563,11 +1694,11 @@ void tg_resource() {
               high_remuxed ? "HIGH" : "low", crlf);
         Sc1::flush_rx();
         Sc1::data(0x5A);
-        spin_ms(1);
+        brio::spin_us<Ruler>(1'000);
         const bool sent_off = Sc1::rxc_flag();
         Sc1::flush_rx();
         up = Sc1::enable_tx(true) && up;
-        spin_ms(1);
+        brio::spin_us<Ruler>(1'000);
         const bool high_again = LoopPad::read();
         const bool queued_went = Sc1::rxc_flag();
         resource_down();
@@ -1591,21 +1722,24 @@ void tg_resource() {
     // high pulse: 17 % of the frame's ten bits).
     {
         const uint16_t reg = sercom_baud_reg(SysClock::hz, 9600).value();
-        const bool up = resource_up({.pads = loop_pads, .baud = reg, .irda = true});
-        spin_ms(2);
+        // The frame is sampled with the console quiet: a console interrupt
+        // inside it would take samples from its pulses.
+        if (!console_quiet()) {
+            return;
+        }
+        bool up = resource_up({.pads = loop_pads, .baud = reg, .irda = true});
+        brio::spin_us<Ruler>(2'000);
         const bool idle_high = LoopPad::read();
         Sc1::flush_rx();
         uint32_t samples = 0, high = 0;
-        while (!Sc1::dre_flag()) {
-        }
-        Sc1::data(0x00);
-        const uint32_t t0 = cycles_now();
+        up = put(0x00) && up;
+        const uint32_t t0 = Ruler::now();
         const uint32_t frame = 10u * bit_cycles(9600);
-        while (cycles_now() - t0 < frame) {
+        while (Ruler::now() - t0 < frame) {
             ++samples;
             if (LoopPad::read()) ++high;
         }
-        spin_ms(1);
+        brio::spin_us<Ruler>(1'000);
         bool clean = false;
         for (uint8_t k = 0; k < 4 && Sc1::rxc_flag(); ++k) {
             const uint16_t st = Sc1::status();
@@ -1656,16 +1790,19 @@ IdleProbe probe_idle(uint32_t baud, uint32_t n, Handed handed) {
         out[i] = lfsr_next(s);
     }
     (void)U::write_bulk(std::span<const uint8_t>(out, n));
-    uint32_t spins = 0;
-    while (!handed() && spins++ < 4'000'000u) {
-        asm volatile("" ::: "memory");
+    // The hand-over within the run's wire time: bounded at twice it and a
+    // millisecond more, and a probe whose transport never handed its run
+    // over measures nothing - its verdicts fail on idle_seen and last_seen.
+    const uint32_t budget_us = 2u * n * 10u * (1'000'000u / baud + 1u) + 1'000u;
+    if (!brio::wait_until<Ruler>(handed, budget_us)) {
+        return r;
     }
     Nvic::disable(Sc1::irq());
     uint32_t got = static_cast<uint32_t>(U::rx_pending());
     uint32_t turn_last = 0;
     uint32_t turn_idle = 0;
     uint32_t turn = 0;
-    const uint32_t c0 = cycles_now();
+    const uint32_t c0 = Ruler::now();
     // The receiver is read on both sides of tx_idle(), so the longest gap
     // between two reads is half a turn and not a whole one: at 3 Mbaud the
     // two-level buffer holds two frames, 320 cycles, and a turn that read
@@ -1691,7 +1828,7 @@ IdleProbe probe_idle(uint32_t baud, uint32_t n, Handed handed) {
             break;
         }
     }
-    const uint32_t c1 = cycles_now();
+    const uint32_t c1 = Ruler::now();
     Nvic::enable(Sc1::irq());
     r.turn = turn != 0u ? (c1 - c0) / turn : 0u;
     r.received = got;
@@ -1730,53 +1867,69 @@ void judge_idle(uint32_t baud, const IdleProbe& r) {
 /// (31.8.8)? TXC is left standing by one byte sent and drained, a block
 /// is started, and TXC is read once the block's first beats have landed
 /// and long before its end.
-void txc_under_the_engine() {
+struct TxcProbe {
+    bool stood;   ///< TXC standing after one byte sent and drained
+    bool after;   ///< TXC standing three frames into the block
+};
+
+TxcProbe txc_under_the_engine() {
+    TxcProbe p{};
     loop_live = Loop::txdma;
     (void)LTxDma::init(clock, 115'200u);
     loop_settle(115'200u);
     static const uint8_t one[1] = {0x55};
     static uint8_t block[32];
     (void)LTxDma::write_bulk(std::span<const uint8_t>(one, 1));
-    uint32_t spins = 0;
-    while (!Sc1::txc_flag() && spins++ < 400'000u) {
-    }
-    const bool stood = Sc1::txc_flag();
+    // One frame at 115200 is 87 us: TXC bounded at a millisecond.
+    p.stood = brio::wait_until<Ruler>([] { return Sc1::txc_flag(); }, 1'000u);
     (void)LTxDma::write_bulk(std::span<const uint8_t>(block, sizeof block));
-    const uint32_t t0 = cycles_now();
-    while (cycles_now() - t0 < 3u * 10u * bit_cycles(115'200u)) {
-    }
-    const bool after = Sc1::txc_flag();
-    spins = 0;
-    while (!LTxDma::tx_idle() && spins++ < 4'000'000u) {
-    }
+    brio::spin_us<Ruler>(3u * 10u * 1'000'000u / 115'200u + 1u);   // three frames
+    p.after = Sc1::txc_flag();
+    // The block's 2.8 ms, bounded at 20 ms; dropped: release() stops a
+    // block that did not drain, and what is judged is TXC alone.
+    (void)brio::wait_until<Ruler>([] { return LTxDma::tx_idle(); }, 20'000u);
     LTxDma::release();
     loop_live = Loop::none;
-    print(plain, "  TXC standing before the block ", stood ? 1u : 0u,
-          ", three frames into it ", after ? 1u : 0u, crlf);
-    bench.verdict("a channel's beat into DATA clears TXC, as a CPU write does",
-                  stood && !after);
+    return p;
 }
 
 void tq_tx_idle() {
-    txc_under_the_engine();
+    // Every probe run with the console quiet - a console interrupt inside a
+    // probe lengthens the turns it averages - and printed after the last.
+    if (!console_quiet()) {
+        return;
+    }
+    const TxcProbe txc = txc_under_the_engine();
     constexpr uint32_t n = 48;
-    for (const uint32_t baud : {115'200u, 1'000'000u}) {
+    constexpr uint32_t plain_rates[] = {115'200u, 1'000'000u};
+    constexpr uint32_t engine_rates[] = {115'200u, 1'000'000u, 3'000'000u};
+    IdleProbe plain_probes[2];
+    IdleProbe engine_probes[3];
+    for (uint32_t i = 0; i < 2u; ++i) {
         loop_live = Loop::plain;
-        const IdleProbe r = probe_idle<LPlain>(
-            baud, n, [] { return (Sc1::armed() & SercomFlag::dre) == 0u; });
+        plain_probes[i] = probe_idle<LPlain>(
+            plain_rates[i], n, [] { return (Sc1::armed() & SercomFlag::dre) == 0u; });
         LPlain::release();
         loop_live = Loop::none;
-        report_idle("plain transport", baud, r);
-        judge_idle(baud, r);
     }
-    for (const uint32_t baud : {115'200u, 1'000'000u, 3'000'000u}) {
+    for (uint32_t i = 0; i < 3u; ++i) {
         loop_live = Loop::txdma;
         // SERCOM1's vector feeds nothing here: its line is held off at once.
-        const IdleProbe r = probe_idle<LTxDma>(baud, n, [] { return true; });
+        engine_probes[i] = probe_idle<LTxDma>(engine_rates[i], n, [] { return true; });
         LTxDma::release();
         loop_live = Loop::none;
-        report_idle("transmit engine", baud, r);
-        judge_idle(baud, r);
+    }
+    print(plain, "  TXC standing before the block ", txc.stood ? 1u : 0u,
+          ", three frames into it ", txc.after ? 1u : 0u, crlf);
+    bench.verdict("a channel's beat into DATA clears TXC, as a CPU write does",
+                  txc.stood && !txc.after);
+    for (uint32_t i = 0; i < 2u; ++i) {
+        report_idle("plain transport", plain_rates[i], plain_probes[i]);
+        judge_idle(plain_rates[i], plain_probes[i]);
+    }
+    for (uint32_t i = 0; i < 3u; ++i) {
+        report_idle("transmit engine", engine_rates[i], engine_probes[i]);
+        judge_idle(engine_rates[i], engine_probes[i]);
     }
     bench.verdict("and the loop runs at the rates asked: 115200, 1 and 3 Mbaud, a run of frames in "
                   "its wire time within -1 % and +3 %",
@@ -1791,19 +1944,27 @@ void tq_tx_idle() {
 /// few frames more, so the vector has taken it all. The bytes sent.
 uint32_t loop_burst(uint32_t baud, uint32_t& s, uint32_t n) {
     uint32_t sent = 0;
-    uint32_t spins = 0;
     uint8_t next = lfsr_next(s);
-    while (sent < n && spins++ < 20'000'000u) {
-        if (loop_send_polled(next)) {
-            ++sent;
-            if (sent < n) {
-                next = lfsr_next(s);
+    // Every write DRE allows before the ruler is read again, so the poll
+    // keeps the wire full (a frame of slack against the ruler's read);
+    // bounded at four times the burst's wire time and a millisecond.
+    const uint32_t budget_us = 4u * n * 10u * (1'000'000u / baud + 1u) + 1'000u;
+    // Dropped: a burst cut short returns the bytes it sent, which the
+    // letter judges.
+    (void)brio::wait_until<Ruler>(
+        [&] {
+            while (sent < n && loop_send_polled(next)) {
+                ++sent;
+                if (sent < n) {
+                    next = lfsr_next(s);
+                }
             }
-        }
-    }
-    spins = 0;
-    while (!Sc1::txc_flag() && spins++ < 400'000u) {
-    }
+            return sent >= n;
+        },
+        budget_us);
+    // Dropped: the last frame's stop bit, a frame's time; the bytes the
+    // receiver took are what the letter judges.
+    (void)brio::wait_until<Ruler>([] { return Sc1::txc_flag(); }, 1'000u);
     loop_settle(baud);
     return sent;
 }
@@ -1931,31 +2092,33 @@ void tr_receiver_edge() {
 struct ErrorLeg {
     uint32_t received;
     bool in_order;         ///< the received bytes are the pattern's, in order, some skipped
-    ErrCounts err;
-    uint32_t skips;        ///< how far rx_skips() moved
+    ErrTally err;
+    uint32_t skips;        ///< how far rx_skips() moved, widened (ErrTally)
 };
 
 ErrorLeg error_leg(uint32_t n) {
     constexpr uint32_t window_ms = 1400;
     print(plain, "  HOST poke ", static_cast<uint32_t>(Mode::plain), " 115200 8E1 ", window_ms,
           " ", n, crlf);
+    // Dropped: the host reads the line or times out (open_leg()'s reason).
     (void)drain();
     mode_release();
     (void)mode_init(Mode::plain, 115200);
-    spin_ms(120);
+    brio::spin_us<Ruler>(120'000);
     mode_clear_errors();
-    const uint32_t skips0 = mode_skips();
     static uint8_t got[300];
     ErrorLeg r{};
-    const uint32_t t0 = cycles_now();
+    r.err.start();
+    const uint32_t t0 = Ruler::now();
     const uint32_t window = ms_cycles(window_ms);
-    while (cycles_now() - t0 < window) {
+    while (Ruler::now() - t0 < window) {
+        r.err.update();
         if (r.received < sizeof got) {
             r.received += mode_read_bulk(got + r.received, sizeof got - r.received);
         }
     }
-    r.err = mode_errors();
-    r.skips = (mode_skips() - skips0) & 0xFFu;
+    r.err.update();
+    r.skips = r.err.skips;
     back_to_console();
     r.in_order = true;
     uint32_t at = 0;   // pattern position
@@ -2011,20 +2174,32 @@ void tt_levels() {
     uint32_t received = 0;
     uint32_t bad = 0;
     uint8_t next = lfsr_next(s_tx);
-    uint32_t spins = 0;
     // The ring holds 511: the stream is drained as it comes, between the
-    // polled writes, so the sender keeps the wire full.
-    while ((sent < n || received < n) && spins++ < 20'000'000u) {
-        if (sent < n && loop_send_polled(next)) {
-            ++sent;
-            next = lfsr_next(s_tx);
-        }
-        uint8_t b = 0;
-        if (LPlain::read_byte(b)) {
-            bad += b != lfsr_next(s_rx) ? 1u : 0u;
-            ++received;
-        }
-    }
+    // polled writes, so the sender keeps the wire full - the ruler read
+    // only once a turn has neither written nor read, a frame of slack
+    // against its cost. Bounded at 20 ms, fifteen times the stream's
+    // 1.3 ms; a stream cut short is judged by its counts.
+    (void)brio::wait_until<Ruler>(
+        [&] {
+            for (;;) {
+                bool moved = false;
+                if (sent < n && loop_send_polled(next)) {
+                    ++sent;
+                    next = lfsr_next(s_tx);
+                    moved = true;
+                }
+                uint8_t b = 0;
+                if (LPlain::read_byte(b)) {
+                    bad += b != lfsr_next(s_rx) ? 1u : 0u;
+                    ++received;
+                    moved = true;
+                }
+                if (!moved) {
+                    return sent >= n && received >= n;
+                }
+            }
+        },
+        20'000u);
     const uint8_t hw = LPlain::hw_overruns();
     LPlain::release();
     loop_live = Loop::none;
@@ -2076,14 +2251,14 @@ bool stand_trigger(uint32_t baud, uint32_t n) {
         out[i] = static_cast<uint8_t>(0x30u + i);
     }
     (void)LTxDma::write_bulk(std::span<const uint8_t>(out, len));
-    uint32_t spins = 0;
-    while (!LTxDma::tx_idle() && spins++ < 4'000'000u) {
-    }
+    // At most 64 frames, 5.6 ms at 115200, bounded at 20 ms; judged below,
+    // with DRE, by the return.
+    const bool idle = brio::wait_until<Ruler>([] { return LTxDma::tx_idle(); }, 20'000u);
     loop_settle(baud);
     uint8_t sink[64];
     while (LTxDma::read_bulk(std::span<uint8_t>(sink, sizeof sink)) != 0u) {
     }
-    return LTxDma::tx_idle() && Sc1::dre_flag();
+    return idle && LTxDma::tx_idle() && Sc1::dre_flag();
 }
 
 /// The three releases letter w compares.
@@ -2141,12 +2316,10 @@ Handover next_uart(uint32_t baud) {
         b = lfsr_next(s);
     }
     (void)LTxDma::write_bulk(std::span<const uint8_t>(out, sizeof out));
-    uint32_t spins = 0;
-    while (!LTxDma::tx_idle() && spins++ < 4'000'000u) {
-    }
-    h.idle = LTxDma::tx_idle();
+    // 256 frames, 2.6 ms at 1 Mbaud, bounded at 20 ms; judged as h.idle.
+    h.idle = brio::wait_until<Ruler>([] { return LTxDma::tx_idle(); }, 20'000u);
     loop_settle(baud);
-    spin_ms(1);
+    brio::spin_us<Ruler>(1'000);
     uint32_t r = lfsr_seed;
     uint8_t in[64];
     for (;;) {
@@ -2173,16 +2346,16 @@ void tw_released_requester() {
     // once (DRE falls and rises again while the channel is disabled), the
     // second stays in DATA behind it: DRE low.
     Sc1::data(0xC1u);
-    uint32_t spins = 0;
-    while (!Sc1::dre_flag() && spins++ < 10'000u) {
-    }
+    // DATA moves to the idle shifter within a bit: DRE bounded at a
+    // millisecond, its outcome read in dre_low (DATA must hold 0xC2 alone).
+    const bool moved = brio::wait_until<Ruler>([] { return Sc1::dre_flag(); }, 1'000u);
     Sc1::data(0xC2u);
-    const bool dre_low = !Sc1::dre_flag();
+    const bool dre_low = moved && !Sc1::dre_flag();
     static const uint8_t one[1] = {0xB1u};
     (void)LTxDma::write_bulk(std::span<const uint8_t>(one, 1));
-    spins = 0;
-    while (!LTxDma::tx_idle() && spins++ < 4'000'000u) {
-    }
+    // Three frames, 260 us at 115200, bounded at 20 ms; dropped: the bytes
+    // the loop read judge it.
+    (void)brio::wait_until<Ruler>([] { return LTxDma::tx_idle(); }, 20'000u);
     loop_settle(slow);
     uint8_t seen[8] = {};
     const uint32_t n_seen = LTxDma::read_bulk(std::span<uint8_t>(seen, sizeof seen));
@@ -2320,12 +2493,16 @@ PairResult pair_run(uint32_t baud, uint32_t total) {
     PairStream ps{};
     const uint32_t skips0 = LPair::rx_skips();
     if (r.up) {
-        const uint32_t t0 = cycles_now();
-        // Bounded: the stream's wire time four times over, and 50 ms more.
-        const uint32_t budget = (total / (baud / 10u) + 1u) * 4u * SysClock::hz + SysClock::hz / 20u;
-        while ((ps.got < total || ps.sent < total) && cycles_now() - t0 < budget) {
-            pair_turn(ps, total);
-        }
+        // Bounded: the stream's wire time in whole seconds rounded up, four
+        // times over, and 50 ms more; a run cut short is judged by its
+        // counts.
+        const uint32_t budget_us = (total / (baud / 10u) + 1u) * 4'000'000u + 50'000u;
+        (void)brio::wait_until<Ruler>(
+            [&ps, total] {
+                pair_turn(ps, total);
+                return ps.got >= total && ps.sent >= total;
+            },
+            budget_us);
     }
     r.sent = ps.sent;
     r.got = ps.got;
@@ -2410,10 +2587,16 @@ void t2_pair_shape() {
         }
         pair_turn(ps, 0xFFFFFFFFu);
     }
-    const uint32_t tail0 = Ticker::millis();
-    while (Ticker::millis() - tail0 < 50u) {
-        pair_turn(ps, ps.sent);
-    }
+    // THE TAIL, sent no further and taken to the last byte: what the rings
+    // still hold - 1024 each way, 20 ms of wire at 1 Mbaud - bounded at
+    // 50 ms. Every byte sent is then received, exactly (the verdict).
+    const uint32_t tail_total = ps.sent;
+    (void)brio::wait_until<Ruler>(
+        [&ps, tail_total] {
+            pair_turn(ps, tail_total);
+            return ps.got >= tail_total;
+        },
+        50'000u);
     const PairResult r{ps.sent, ps.got, ps.wrong, LPair::hw_overruns(), LPair::rx_overruns(),
                        LPair::frame_errors(), LPair::dma_faults(), LPair::rx_skips() - skips0, up};
     LPair::release();
@@ -2422,7 +2605,7 @@ void t2_pair_shape() {
     print_pair(1'000'000u, r);
     bench.verdict("THE UART PAIR'S SHAPE for the run: every byte exact, nothing lost, skipped or "
                   "abandoned",
-                  up && r.got + 1024u >= r.sent && r.wrong == 0u && r.hw_overruns == 0u &&
+                  up && r.got == r.sent && r.wrong == 0u && r.hw_overruns == 0u &&
                       r.rx_overruns == 0u && r.frame == 0u && r.skips == 0u && r.dma_faults == 0u);
 }
 
@@ -2432,6 +2615,7 @@ void t2_pair_shape() {
  * host's judge counts them whole (#count).
  */
 void t3_console_shape() {
+    // Dropped: a line lost here is the host's to see in its count.
     (void)drain();
     mode_release();
     (void)mode_init(Mode::txdma, 115200);
@@ -2442,14 +2626,14 @@ void t3_console_shape() {
     }
     print(utx, "#count ", marked, crlf);
     const uint8_t faults = UTxDma::dma_faults();
-    while (!UTxDma::tx_idle()) {
-    }
+    const bool drained = drain();
     mode_release();
     (void)mode_init(Mode::plain, 115200);
     print(plain, "  the console alone on its transmit engine: ", marked, " marked lines, DMA faults ",
-          faults, crlf);
-    bench.verdict("THE CONSOLE ALONE: no transmit block abandoned (the lines are the host's to count)",
-                  faults == 0u);
+          faults, drained ? "" : ", the ring NOT drained", crlf);
+    bench.verdict("THE CONSOLE ALONE: no transmit block abandoned, the ring drained at the end (the "
+                  "lines are the host's to count)",
+                  faults == 0u && drained);
 }
 
 // =============================================================================
@@ -2551,8 +2735,8 @@ link::Topology topo = link::Topology::full_duplex;
 bool topo_known = false;
 bool link_quiet = false;
 /// The peer refused the leg in hand (usart_link.hpp: report_cfg_failed):
-/// every judgement of it prints SKIP and counts nothing until the next
-/// peer_act() or letter.
+/// every judgement of it is a skip (judge()) until the next command of an
+/// action (peer_command()) or the next letter's ensure_link().
 bool leg_refused = false;
 link::Decoder dec;
 /// When the last answer of the peer was heard: the start of a silence.
@@ -2560,20 +2744,24 @@ uint32_t last_answer_ms = 0;
 
 bool shared_line() { return topo == link::Topology::shared; }
 
-/// The configuration the DUT's end is in, and the bit time it runs at.
+/// The configuration the DUT's end is in, and the rate it runs at (bits a
+/// second: the guards' unit).
 SercomUartConfig cur{};
-uint32_t cur_bit_cycles = SysClock::hz / link::command_baud;
+uint32_t cur_rate = link::command_baud;
 
+/// A verdict on the leg in hand, or a skip when the peer refused the leg
+/// (leg_refused): the check could not run, so it claims neither a pass
+/// nor a fail.
 void judge(const char* name, bool ok) {
     if (leg_refused) {
-        print(plain, "  SKIP  ", name, crlf);
+        bench.skip(name);
         return;
     }
     bench.verdict(name, ok);
 }
 void judge(const char* a, const char* b, bool ok) {
     if (leg_refused) {
-        print(plain, "  SKIP  ", a, b, crlf);
+        bench.skip(a, b);
         return;
     }
     bench.verdict(a, b, ok);
@@ -2592,13 +2780,6 @@ const char* num(uint32_t v) {
         v /= 10u;
     }
     return &num_buf[i];
-}
-
-void spin_us(uint32_t us) {
-    const uint32_t t0 = cycles_now();
-    const uint32_t want = us * (SysClock::hz / 1'000'000u);
-    while (cycles_now() - t0 < want) {
-    }
 }
 
 // ---- the pads --------------------------------------------------------------
@@ -2727,34 +2908,32 @@ SercomUartConfig listen_cfg(const SercomUartConfig& c) {
     return l;
 }
 
-/// One frame out, DRE bounded.
+/// The bound on one frame's wait, DRE or TXC: four frames of twelve bits
+/// at the slowest rate a two-board letter runs, 2400 baud (20 ms) - a
+/// synchronous client's frame waits on the far XCK too, at 100 kHz and up.
+constexpr uint32_t frame_wait_us = 20'000u;
+
+/// One frame out, DRE bounded (frame_wait_us): false, nothing written,
+/// when DATA never had room.
 [[gnu::always_inline]] inline bool put_frame(uint16_t v) {
-    for (uint32_t n = 400'000u; !Lk::dre_flag(); --n) {
-        if (n == 0u) {
-            return false;
-        }
+    if (!brio::wait_until<Ruler>([] { return Lk::dre_flag(); }, frame_wait_us)) {
+        return false;
     }
     Lk::data(v);
     return true;
 }
 
-/// The last stop bit gone: TXC, bounded (only after a frame was written).
-/// Whether it came is kept for a link failure's report.
+/// The last stop bit gone: TXC, bounded (frame_wait_us; only after a frame
+/// was written). Whether it came is kept for a link failure's report.
 bool tx_done_seen = true;
 void wait_tx_done() {
-    const uint32_t t0 = cycles_now();
-    while (!Lk::txc_flag() && cycles_now() - t0 < ms_cycles(20)) {
-    }
-    tx_done_seen = Lk::txc_flag();
+    tx_done_seen = brio::wait_until<Ruler>([] { return Lk::txc_flag(); }, frame_wait_us);
 }
 
-/// Four bit times before taking the line: RXC rises in the middle of the
-/// far stop bit, half a bit before the far transmitter lets go.
-void turnaround_guard() {
-    const uint32_t t0 = cycles_now();
-    while (cycles_now() - t0 < 4u * cur_bit_cycles) {
-    }
-}
+/// Four bit times before taking the line, rounded up to the next
+/// microsecond: RXC rises in the middle of the far stop bit, half a bit
+/// before the far transmitter lets go.
+void turnaround_guard() { brio::spin_us<Ruler>(4'000'000u / cur_rate + 1u); }
 
 /// Take the line. On the crossed pair the transmitter is already the
 /// SERCOM's; on the shared wire TxD comes onto PAD[0].
@@ -2779,7 +2958,7 @@ void line_listen() {
 /// The DUT's end as `c` says, at `rate` bits a second (the guard's unit).
 bool dut_up(const SercomUartConfig& c, uint32_t rate) {
     cur = c;
-    cur_bit_cycles = SysClock::hz / (rate != 0u ? rate : link::command_baud);
+    cur_rate = rate != 0u ? rate : link::command_baud;
     // The pads move with the instance disabled, between the write and the
     // enable (pads_crossed()).
     const SercomUartConfig w = shared_line() ? listen_cfg(c) : c;
@@ -2839,29 +3018,32 @@ struct Got {
 uint8_t raw_seen[12];
 uint8_t raw_n = 0;
 
+/// A frame of the protocol within `ms`, each character's STATUS judged:
+/// true with `out` filled, false on the time-out.
 bool recv_frame(link::Frame& out, uint16_t ms) {
-    const uint32_t t0 = Ticker::millis();
     dec.reset();
     raw_n = 0;
-    while (Ticker::millis() - t0 < ms) {
-        const Got g = take();
-        if (!g.any) {
-            continue;
-        }
-        if (raw_n < sizeof raw_seen) {
-            raw_seen[raw_n++] = g.clean ? static_cast<uint8_t>(g.data) : 0xEEu;
-        }
-        if (!g.clean) {
-            dec.reset();
-            continue;
-        }
-        if (dec.feed(static_cast<uint8_t>(g.data)) == link::Decoder::Result::frame) {
-            out = dec.frame();
-            last_answer_ms = Ticker::millis();
-            return true;
-        }
+    const bool got = brio::wait_until<Ruler>(
+        [] {
+            const Got g = take();
+            if (!g.any) {
+                return false;
+            }
+            if (raw_n < sizeof raw_seen) {
+                raw_seen[raw_n++] = g.clean ? static_cast<uint8_t>(g.data) : 0xEEu;
+            }
+            if (!g.clean) {
+                dec.reset();
+                return false;
+            }
+            return dec.feed(static_cast<uint8_t>(g.data)) == link::Decoder::Result::frame;
+        },
+        static_cast<uint32_t>(ms) * 1000u);
+    if (got) {
+        out = dec.frame();
+        last_answer_ms = Ticker::millis();
     }
-    return false;
+    return got;
 }
 
 const uint8_t no_payload[1] = {0};
@@ -2892,7 +3074,7 @@ bool command(link::Op op, const uint8_t* p = no_payload, uint8_t len = 0, uint16
             for (uint8_t i = 0; i < raw_n; ++i) first_seen[i] = raw_seen[i];
         }
         (void)link_command_mode();
-        spin_ms(70);
+        brio::spin_us<Ruler>(70'000);
     }
     if (!link_quiet) {
         print(plain, "    LINK FAILURE op ", hex(link::byte_of(op)), " (",
@@ -2919,6 +3101,7 @@ bool query(link::Op op, link::Frame& data, uint16_t ms = 80) {
 /// Find the peer on the desk's crossed pair - for as long as a peer that
 /// still believes the shared wire takes to give it up and search again.
 bool ensure_link() {
+    leg_refused = false;
     if (!link_begin()) {
         print(plain, "  the 24 MHz crystal did not start: no two-board figure means anything",
               crlf);
@@ -2963,7 +3146,7 @@ bool peer_ident(link::Ident& d) {
 bool peer_report(link::Report& r, uint16_t wait_ms) {
     (void)link_command_mode();
     if (wait_ms != 0u) {
-        spin_ms(wait_ms);
+        brio::spin_us<Ruler>(static_cast<uint32_t>(wait_ms) * 1000u);
     }
     for (uint8_t k = 0; k < 4; ++k) {
         link::Frame f;
@@ -2977,33 +3160,58 @@ bool peer_report(link::Report& r, uint16_t wait_ms) {
             r = link::get_report(f.data);
             if ((r.flags & link::report_cfg_failed) != 0u && !leg_refused) {
                 leg_refused = true;
-                print(plain, "  SKIPPED, no verdict claimed: the peer REFUSED op ", hex(r.op),
-                      " (report_cfg_failed) - a configuration its silicon cannot serve", crlf);
+                print(plain, "  the peer REFUSED op ", hex(r.op),
+                      " (report_cfg_failed) - a configuration its silicon cannot serve: the leg's "
+                      "checks skip",
+                      crlf);
             }
             return true;
         }
-        spin_ms(40);
+        brio::spin_us<Ruler>(40'000);
     }
     return false;
+}
+
+/// Command an action and return at its ack, the peer's end not yet taken
+/// up: for a receiver that must be listening before the peer's first edge
+/// (autobaud_listen()'s callers).
+bool peer_command(link::Op op, const link::Params& a) {
+    leg_refused = false;
+    uint8_t p[link::max_payload] = {};
+    link::put_params(p, a);
+    return command(op, p, link::params_size);
 }
 
 /// Command an action; the peer takes up its end link::settle_ms after its
 /// ack, so this end waits that long before taking up its own.
 bool peer_act(link::Op op, const link::Params& a) {
-    leg_refused = false;
-    uint8_t p[link::max_payload] = {};
-    link::put_params(p, a);
-    if (!command(op, p, link::params_size)) {
+    if (!peer_command(op, a)) {
         return false;
     }
-    spin_ms(link::settle_ms);
+    brio::spin_us<Ruler>(link::settle_ms * 1000u);
+    return true;
+}
+
+/// THE LISTEN ARMED FIRST, for the auto-baud legs: the peer reconfigures at
+/// once after its ack and plays its break settle_ms + 2 ms after it
+/// (usart_peer's settle()), on a millisecond count that may make that 4 ms;
+/// a receiver brought up settle_ms after the ack, as peer_act()'s callers
+/// do, meets the break with a millisecond to spare, or a part of it - at
+/// half the rate a break of 26 far bits is 13 here, two past the 11 it
+/// needs. One millisecond after the ack is past the peer's
+/// reconfiguration and three before its first edge.
+bool peer_command_listen_first(link::Op op, const link::Params& a) {
+    if (!peer_command(op, a)) {
+        return false;
+    }
+    brio::spin_us<Ruler>(1'000);
     return true;
 }
 
 /// The peer opens its window link::settle_ms + 2 ms after its ack and
 /// flushes what this end's reconfiguration left on the line: transmit
 /// after it.
-void wait_for_peer_window() { spin_ms(6); }
+void wait_for_peer_window() { brio::spin_us<Ruler>(6'000); }
 
 /// Milliseconds a frame count needs at a rate, generously.
 uint16_t bound_ms(uint32_t rate, uint32_t frames) {
@@ -3171,19 +3379,22 @@ uint16_t echo_mismatches(uint8_t bits, uint16_t n) {
     uint16_t bad = 0;
     wait_for_peer_window();
     echo_first_sent = echo_first_got = 0;
-    const uint32_t wait = 40u * cur_bit_cycles + ms_cycles(2);
+    // The echo within forty bit times and 2 ms (the far turnaround's guard
+    // and its frame, with room); whether it came is g.any, judged below.
+    const uint32_t wait_us = 40'000'000u / cur_rate + 2'000u;
     for (uint16_t i = 0; i < n; ++i) {
         const uint16_t v = static_cast<uint16_t>((0x5Au + i * 37u) & mask);
         line_talk();
         const bool sent = put_frame(v);
         line_listen();
         Got g{};
-        const uint32_t t0 = cycles_now();
-        while (sent && cycles_now() - t0 < wait) {
-            g = take();
-            if (g.any) {
-                break;
-            }
+        if (sent) {
+            (void)brio::wait_until<Ruler>(
+                [&g] {
+                    g = take();
+                    return g.any;
+                },
+                wait_us);
         }
         if (i < 8u) {
             echo_got[i] = g.any ? static_cast<uint16_t>(g.data | (g.clean ? 0u : 0x8000u)) : 0xFFFFu;
@@ -3200,7 +3411,8 @@ uint16_t echo_mismatches(uint8_t bits, uint16_t n) {
 }
 
 /// `n` frames gapless - DATA refilled the moment DRE stands - and the
-/// last stop bit out. The values walk from `v0`; their sum is returned.
+/// last stop bit out. The values walk from `v0`; their sum is returned, or
+/// nothing when DATA stopped taking frames.
 ///
 /// MASKED, the measurement's own feeder: the transmit buffer gives one
 /// frame of slack, 160 cycles at 3 Mbaud, and one SysTick entry outlasts
@@ -3208,17 +3420,33 @@ uint16_t echo_mismatches(uint8_t bits, uint16_t n) {
 /// far crystal, the same burst masked runs as the register predicts). The
 /// ticker's ticks of the run are lost - its milliseconds lag the wall
 /// after a long burst, which only lengthens the waits that follow.
-uint16_t burst(uint32_t n, uint16_t v0, uint16_t mask) {
+///
+/// THE BOUND ON EACH FRAME'S DRE is a count of turns, not the ruler: under
+/// the mask the ticker's cycles() stops advancing past one tick period, and
+/// a burst lasts up to 300 ms. A turn of the poll is at least one core
+/// cycle, so four frames' worth of core cycles in turns bounds the wait at
+/// four frames of thirteen bits at the rate in hand or more - and finitely,
+/// so an instance that never raises DRE gives the mask back.
+std::optional<uint16_t> burst(uint32_t n, uint16_t v0, uint16_t mask) {
     uint16_t sum = 0;
+    const uint32_t turns_a_frame = 4u * 13u * (SysClock::hz / cur_rate + 1u);
+    bool fed = true;
     {
         SamPlatform::CriticalSection cs;
-        for (uint32_t i = 0; i < n; ++i) {
+        for (uint32_t i = 0; i < n && fed; ++i) {
             const uint16_t v = static_cast<uint16_t>((v0 + i) & mask);
-            while (!Lk::dre_flag()) {
+            uint32_t turns = turns_a_frame;
+            while (!Lk::dre_flag() && --turns != 0u) {
             }
-            Lk::data(v);
-            sum = static_cast<uint16_t>(sum + v);
+            fed = turns != 0u;
+            if (fed) {
+                Lk::data(v);
+                sum = static_cast<uint16_t>(sum + v);
+            }
         }
+    }
+    if (!fed) {
+        return std::nullopt;
     }
     wait_tx_done();
     return sum;
@@ -3245,8 +3473,10 @@ std::optional<uint16_t> engine_burst(uint32_t n, const SercomUartConfig& u, uint
     uint8_t chunk[128];
     uint16_t sum = 0;
     uint32_t q = 0;
-    const uint32_t t0 = cycles_now();
-    const uint32_t most = ms_cycles(4000);
+    // Each wait bounded at 400 ms, four times the longest run it is asked
+    // for (30000 frames at 3 Mbaud, 100 ms); the first that runs out ends
+    // the burst as a failure.
+    constexpr uint32_t most_us = 400'000u;
     while (ok && q < n) {
         const uint32_t k = n - q < sizeof chunk ? n - q : static_cast<uint32_t>(sizeof chunk);
         for (uint32_t i = 0; i < k; ++i) {
@@ -3254,16 +3484,25 @@ std::optional<uint16_t> engine_burst(uint32_t n, const SercomUartConfig& u, uint
             sum = static_cast<uint16_t>(sum + chunk[i]);
         }
         uint32_t done = 0;
-        while (done < k && cycles_now() - t0 < most) {
-            done += LkDma::write_bulk(std::span<const uint8_t>(chunk + done, k - done));
-        }
-        ok = done == k;
+        ok = brio::wait_until<Ruler>(
+            [&chunk, &done, k] {
+                done += LkDma::write_bulk(std::span<const uint8_t>(chunk + done, k - done));
+                return done >= k;
+            },
+            most_us);
         q += k;
     }
-    while (ok && !LkDma::tx_idle() && cycles_now() - t0 < most) {
-        (void)LkDma::write_bulk(std::span<const uint8_t>());
-    }
-    ok = ok && LkDma::tx_idle() && LkDma::dma_faults() == 0u;
+    // The last block out, nudged as it waits (an empty write).
+    ok = ok && brio::wait_until<Ruler>(
+                   [] {
+                       if (LkDma::tx_idle()) {
+                           return true;
+                       }
+                       (void)LkDma::write_bulk(std::span<const uint8_t>());
+                       return false;
+                   },
+                   most_us);
+    ok = ok && LkDma::dma_faults() == 0u;
     LkDma::release();
     loop_live = Loop::none;
     ok = link_begin() && ok;
@@ -3450,8 +3689,14 @@ void tK_rate() {
                 link_core(0);
             }
             up = dut_up(u, g.rate);
-            wait_for_peer_window();
-            sum = burst(n, 0x30u, 0xFFu);
+            // The burst only on an instance that came up: a disabled one
+            // never raises DRE, and burst() would spend its bound masked.
+            if (up) {
+                wait_for_peer_window();
+                const auto b = burst(n, 0x30u, 0xFFu);
+                up = b.has_value();
+                sum = b.value_or(0);
+            }
             if (g.generator == 0u) {
                 link_core(gen_xtal);
             }
@@ -3751,7 +3996,7 @@ void tM_errors() {
                                         .sampling = command_baud.sampling,
                                         .immediate_overflow = ibon != 0u},
                                        115'200);
-        spin_ms(bound_ms(115'200, 16));
+        brio::spin_us<Ruler>(static_cast<uint32_t>(bound_ms(115'200, 16)) * 1000u);
         // STATUS read before and after every DATA read, and cleared only
         // at the end: under IBON = 0 the overflow is raised "after the
         // received data is read" (31.6.2.6.2), which a clear behind each
@@ -3805,18 +4050,23 @@ void tM_errors() {
                                        9'600);
         uint32_t t_rxs = 0, t_rxc = 0;
         bool rxs = false, rxc = false;
-        const uint32_t t0 = cycles_now();
-        while (cycles_now() - t0 < ms_cycles(40) && !rxc) {
-            const uint8_t f = Lk::flags();
-            if (!rxs && (f & SercomFlag::rxs) != 0u) {
-                t_rxs = cycles_now();
-                rxs = true;
-            }
-            if ((f & SercomFlag::rxc) != 0u) {
-                t_rxc = cycles_now();
-                rxc = true;
-            }
-        }
+        // The frame within 40 ms (the peer's 2 ms lead and its settle, a
+        // 9600 frame's 1 ms, with room), RXS and RXC stamped as they rise;
+        // whether RXC came is rxc, judged below.
+        (void)brio::wait_until<Ruler>(
+            [&] {
+                const uint8_t f = Lk::flags();
+                if (!rxs && (f & SercomFlag::rxs) != 0u) {
+                    t_rxs = Ruler::now();
+                    rxs = true;
+                }
+                if ((f & SercomFlag::rxc) != 0u) {
+                    t_rxc = Ruler::now();
+                    rxc = true;
+                }
+                return rxc;
+            },
+            40'000u);
         (void)take();
         if (sfde) {
             const uint32_t lead = rxs && rxc ? t_rxc - t_rxs : 0u;
@@ -3949,7 +4199,7 @@ uint32_t reference_bit_q8(uint32_t rate) {
     if (!dut_up({.pads = link_pads, .baud = b.reg, .sampling = b.sampling}, rate)) {
         return 0;
     }
-    spin_ms(2);
+    brio::spin_us<Ruler>(2'000);
     PadLog g{};
     Lk::data(0x55);
     pad_log(g, TxdPin::mask, 0, 20'000u, 20'000u);
@@ -4054,7 +4304,7 @@ void tN_waveforms() {
             (void)dut_up(base, 9'600);
             PadLog g{};
             pad_log(g, RxdPin::mask, 0, 2'000'000u, 40'000u);
-            spin_ms(2);
+            brio::spin_us<Ruler>(2'000);
             const Drain d = collect(5);
             const uint32_t run = g.n >= 2u ? millibits(g.turn[1] - g.turn[0], ref) : 0u;
             print(plain, "  cell 5 +", static_cast<uint32_t>(p), " %: a low run of ");
@@ -4110,7 +4360,7 @@ void tN_waveforms() {
                 (void)dut_up(u, 9'600);
                 PadLog g{};
                 pad_log(g, RxdPin::mask, 0, 2'000'000u, 2'000u);
-                spin_ms(3);
+                brio::spin_us<Ruler>(3'000);
                 const Drain d = collect(2);
                 const uint32_t width = g.n >= 2u ? millibits(g.turn[1] - g.turn[0], ref) : 0u;
                 const bool taken = d.frames != 0u;
@@ -4164,6 +4414,13 @@ struct AbRun {
     uint16_t reg = 0;
     Drain d{};
 };
+
+/// An auto-baud leg's listening window: the action's own deadline and
+/// 20 ms, plus the settle_ms the listen now spends before the peer's
+/// first edge (peer_command_listen_first()).
+uint32_t listen_ms(uint32_t action_ms) {
+    return action_ms + 20u + static_cast<uint32_t>(link::settle_ms);
+}
 
 AbRun autobaud_listen(uint32_t fallback, uint32_t ms) {
     AbRun r{};
@@ -4222,9 +4479,8 @@ void tO_autobaud() {
             a.value = 0x55;
             a.aux16 = 26;   // 26 far bits: 13 at half the rate, past the 11 a break needs
             a.aux8 = 4;
-            const bool sent = peer_act(link::Op::autobaud_tx, a);
-            const AbRun r = sent ? autobaud_listen(fallback, static_cast<uint32_t>(a.ms) + 20u)
-                                 : AbRun{};
+            const bool sent = peer_command_listen_first(link::Op::autobaud_tx, a);
+            const AbRun r = sent ? autobaud_listen(fallback, listen_ms(a.ms)) : AbRun{};
             const uint32_t want = (8u * xtal_hz) / (16u * rate);
             const uint32_t got = eighths_of(r.reg);
             const bool payload = r.d.frames >= 4u && r.d.last == 0xA3u;
@@ -4250,8 +4506,8 @@ void tO_autobaud() {
         a.value = 0x53;
         a.aux16 = 20;
         a.aux8 = 2;
-        const bool sent = peer_act(link::Op::autobaud_tx, a);
-        const AbRun r = sent ? autobaud_listen(9'600, static_cast<uint32_t>(a.ms) + 20u) : AbRun{};
+        const bool sent = peer_command_listen_first(link::Op::autobaud_tx, a);
+        const AbRun r = sent ? autobaud_listen(9'600, listen_ms(a.ms)) : AbRun{};
         const uint16_t fallback = sercom_fractional_baud_reg(xtal_hz, 9'600).value();
         print(plain, "  sync 0x53: RXBRK ", r.brk ? 1 : 0, " ISF ", r.isf ? 1 : 0, " ERROR ",
               r.error ? 1 : 0, " BAUD ", hex(r.reg), " (the fallback ", hex(fallback), ")", crlf);
@@ -4271,9 +4527,8 @@ void tO_autobaud() {
             a.value = 0x55;
             a.aux16 = lows[k];
             a.aux8 = 2;
-            const bool sent = peer_act(link::Op::autobaud_tx, a);
-            const AbRun r =
-                sent ? autobaud_listen(9'600, static_cast<uint32_t>(a.ms) + 20u) : AbRun{};
+            const bool sent = peer_command_listen_first(link::Op::autobaud_tx, a);
+            const AbRun r = sent ? autobaud_listen(9'600, listen_ms(a.ms)) : AbRun{};
             brk[k] = r.brk;
             print(plain, "  a low of ", lows[k], " bit times: RXBRK ", r.brk ? 1 : 0, crlf);
         }
@@ -4300,13 +4555,14 @@ void tO_autobaud() {
             a.cell = k == 0u ? -1 : 8;
             a.pct = k == 0u ? 0 : 100;
             a.aux16 = 20;
-            const bool sent = peer_act(link::Op::bitbang, a);
+            // Listening first, as the legs above (peer_command_listen_first()).
+            const bool sent = peer_command_listen_first(link::Op::bitbang, a);
             if (sent) {
                 (void)dut_up(u, 9'600);
             }
             bool isf = false, ferr = false;
             const uint32_t t0 = Ticker::millis();
-            while (sent && Ticker::millis() - t0 < 60u) {
+            while (sent && Ticker::millis() - t0 < listen_ms(40u)) {
                 if ((Lk::flags() & SercomFlag::rxbrk) != 0u) {
                     brk[k] = true;
                     Lk::clear_flags(SercomFlag::rxbrk);
@@ -4360,7 +4616,7 @@ void tO_autobaud() {
                 Lk::data(0x3C);
                 pad_log(g, TxdPin::mask, 0, 20'000u, 40'000u);
                 wait_tx_done();
-                spin_ms(1);
+                brio::spin_us<Ruler>(1'000);
                 txe = (Lk::status() & SercomStatus::transmitter_empty) != 0u;
             }
             link::Report r{};
@@ -4458,11 +4714,13 @@ void tQ_sync() {
             }
             link::Cfg dc = pc;
             dc.mode = link::Mode::sync_host;
-            const bool up = dut_link(dc);
+            bool up = dut_link(dc);
             uint16_t sum = 0;
             if (up) {
                 wait_for_peer_window();
-                sum = burst(8, 0x30u, 0xFFu);
+                const auto b = burst(8, 0x30u, 0xFFu);
+                up = b.has_value();
+                sum = b.value_or(0);
             }
             link::Report r{};
             const bool have = peer_report(r, 10);
@@ -4606,16 +4864,19 @@ void tS_irda() {
         dc.rate = 115'200;
         const bool up = sent && dut_link(dc);
         uint16_t sum = 0;
+        bool fed = false;
         if (up) {
             wait_for_peer_window();
-            sum = burst(6, 0x41u, 0xFFu);
+            const auto b = burst(6, 0x41u, 0xFFu);
+            fed = b.has_value();
+            sum = b.value_or(0);
         }
         link::Report r{};
         const bool have = peer_report(r, 10);
         print(plain, "  this coder into a plain far receiver: count ", have ? r.count : 0u,
               " sum ", hex(have ? r.sum : 0u), " want ", hex(sum), crlf);
         judge("a plain receiver cannot read the pulse-coded frames",
-              up && have && !(r.count == 6u && r.sum == sum && r.ferr == 0u));
+              up && fed && have && !(r.count == 6u && r.sum == sum && r.ferr == 0u));
 
         a.value = 0x41;
         const bool sent2 = peer_act(link::Op::send, a);
@@ -4681,7 +4942,7 @@ void tC_flow() {
     const auto frame_leaves = []() {
         Lk::clear_flags(SercomFlag::txc);
         Lk::data(0x5A);
-        spin_ms(1);
+        brio::spin_us<Ruler>(1'000);
         return Lk::txc_flag();
     };
 
@@ -4698,18 +4959,18 @@ void tC_flow() {
         // not drive, or drives a running clock, reads both ways.
         pad_dark<XckPin>();
         XckPin::input(high ? PinPull::down : PinPull::up);
-        spin_us(200);
+        brio::spin_us<Ruler>(200);
         uint16_t highs = 0;
         for (uint16_t k = 0; k < 200u; ++k) {
             if (XckPin::read()) ++highs;
-            spin_us(10);
+            brio::spin_us<Ruler>(10);
         }
         pad_dark<XckPin>();
         const bool probed = sent && (high ? highs == 200u : highs == 0u);
         bool cts = false, went = false;
         if (probed) {
             const bool up = flow_up(PinPull::none);
-            spin_ms(1);
+            brio::spin_us<Ruler>(1'000);
             cts = (Lk::status() & SercomStatus::cts) != 0u;
             went = up && frame_leaves();
         }
@@ -4731,9 +4992,11 @@ void tC_flow() {
             }
         } else {
             print(plain, crlf);
-            if (!leg_refused) {
-                print(plain, "  SKIPPED, no verdict claimed: the far XCK does not hold the "
-                             "wire ", high ? "high" : "low", " against this end's pull", crlf);
+            if (leg_refused) {
+                bench.skip("the peer refused hold_pad: CTS held ", high ? "high" : "low");
+            } else {
+                bench.skip("the far XCK does not hold the wire against this end's pull: CTS held ",
+                           high ? "high" : "low");
             }
         }
     }
@@ -4742,7 +5005,7 @@ void tC_flow() {
     //    go: a frame leaves, and CTSIC stays down - CTS never changed.
     {
         const bool up = flow_up(PinPull::down);
-        spin_ms(1);
+        brio::spin_us<Ruler>(1'000);
         const bool cts = (Lk::status() & SercomStatus::cts) != 0u;
         const bool went = up && frame_leaves();
         const bool ctsic = (Lk::flags() & SercomFlag::ctsic) != 0u;
@@ -4750,17 +5013,14 @@ void tC_flow() {
               went ? "left" : "HELD", ", CTSIC ", ctsic ? 1 : 0, crlf);
         bench.verdict("CTS low lets a frame go", up && !cts && went);
     }
-    if (!presented[1]) {
-        print(plain, "  (CTS high: not judged - the far board presented no level)", crlf);
-    }
 
     // 3. RTS on its own pad: the receiver enabled with room, then disabled.
     {
         const bool up = flow_up(PinPull::down);
-        spin_us(100);
+        brio::spin_us<Ruler>(100);
         const bool rts_on = TxdPin::read();
         (void)Lk::enable_rx(false);
-        spin_us(100);
+        brio::spin_us<Ruler>(100);
         const bool rts_off = TxdPin::read();
         print(plain, "  RTS: receiver enabled ", rts_on ? "high" : "low", ", disabled ",
               rts_off ? "high" : "low", crlf);
@@ -4858,7 +5118,7 @@ void tR_rs485() {
             up = write(te) && up;
             TxdPin::function(PinFunction::c, {.input_enable = true});
             up = start(te) && up;
-            spin_us(50);
+            brio::spin_us<Ruler>(50);
             low_before = !TxdPin::read();
             Lk::clear_flags(SercomFlag::txc);
             // The frame written by the log's own first turn, once it has read
@@ -4933,7 +5193,7 @@ void tR_rs485() {
             up = write(te) && up;
             TxdPin::function(PinFunction::c, {.input_enable = true});
             up = start(te) && up;
-            spin_us(50);
+            brio::spin_us<Ruler>(50);
             const uint8_t data[4] = {0x70, 0x71, 0x72, 0x73};
             PadLog g{};
             pad_log_feeding(g, TxdPin::mask, 0, data, 4, 12'000u);
@@ -5009,11 +5269,14 @@ void tW_onewire() {
             coll = coll || (Lk::status() & SercomStatus::collision) != 0u;
             (void)apply(listen_cfg(cur));
             Got back{};
-            const uint32_t t0 = cycles_now();
-            while (cycles_now() - t0 < ms_cycles(4)) {
-                back = take();
-                if (back.any) break;
-            }
+            // The far reply within 4 ms (its turnaround and a 19200 frame's
+            // 0.5 ms, with room); whether it came is back.any, judged below.
+            (void)brio::wait_until<Ruler>(
+                [&back] {
+                    back = take();
+                    return back.any;
+                },
+                4'000u);
             const bool ok = back.any && back.clean &&
                             static_cast<uint8_t>(back.data) == static_cast<uint8_t>(v ^ 0xFFu);
             if (!ok && answered) first_back = back.any ? back.data : 0xFFFFu;
@@ -5093,13 +5356,13 @@ void tW_onewire() {
             Lk::flush_rx();
             const bool dre_before = Lk::dre_flag();
             const bool reenabled = Lk::enable_tx(true);
-            spin_us(200);
+            brio::spin_us<Ruler>(200);
             flushed = !Lk::rxc_flag();
             const Got back = take();
-            spin_ms(1);
+            brio::spin_us<Ruler>(1'000);
             const bool dre_later = Lk::dre_flag();
             Lk::data(0x5A);
-            spin_us(200);
+            brio::spin_us<Ruler>(200);
             const Got fresh = take();
             const bool txc_fresh = Lk::txc_flag();
             print(plain, "    after the collision: DRE ", dre_before ? 1 : 0, "; enable_tx(true) ",
@@ -5113,18 +5376,18 @@ void tW_onewire() {
             Lk::clear_flags(SercomFlag::error | SercomFlag::txc);
             (void)Lk::enable_tx(false);
             (void)Lk::enable_tx(true);
-            spin_us(200);
+            brio::spin_us<Ruler>(200);
             const bool dre_cleared = Lk::dre_flag();
             (void)take();
             Lk::data(0x5B);
-            spin_us(200);
+            brio::spin_us<Ruler>(200);
             const Got after_clear = take();
             // And the instance reconfigured.
             (void)apply(talk_cfg(cur));
             Lk::flush_rx();
             const bool dre_reconf = Lk::dre_flag();
             Lk::data(0x5C);
-            spin_us(200);
+            brio::spin_us<Ruler>(200);
             const Got after_reconf = take();
             restarts_clear = after_clear.any && static_cast<uint8_t>(after_clear.data) == 0x5Bu;
             restarts_reconf = after_reconf.any && static_cast<uint8_t>(after_reconf.data) == 0x5Cu;

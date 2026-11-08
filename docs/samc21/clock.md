@@ -334,6 +334,13 @@ measurand.
   Restoring XTALEN clears the failure and SWBEN is consumed by the
   hardware, after which XOSCCKSW is clear again. Erratum 1.22.1
   confirmed inapplicable by behaviour as well as by the row.
+- **Arming the detector can trip it.** Setting CFDEN (`Xosc::init` with
+  `failure_detector`) on a crystal that has run for milliseconds latched
+  XOSCFAIL and switched the output to the safe clock at once in 6 runs
+  of 60, the crystal healthy before and after; clearing the flag and
+  asking SWBEN put the output back on the crystal. A program that arms
+  the detector reads XOSCCKSW afterwards. Why the first windows fail is
+  not established.
 - **The DPLL's ratio arithmetic is exact.** Locked to the crystal
   through a 2 MHz reference and measured against the same crystal -
   so the crystal's own error cancels - the counts are the predicted

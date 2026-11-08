@@ -72,6 +72,7 @@
 #include "samc21/ticker.hpp"
 #include "samc21/tsens.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #include "bench_sleep.hpp"
@@ -114,6 +115,29 @@ using Serial = Uart<5, console_pads>;
 constexpr Serial serial;
 
 TestBench<Serial, 16> bench;
+
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's
+/// waits. The CPU stays on OSC48M through every letter - the clocks this
+/// suite rebuilds are GCLK_TSENS's and FREQM's - so the rate is constant
+/// (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// Every queued console byte off the wire, bounded (util/test_wait.hpp):
+/// false on a wedged console.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
+
+/// The bound on one measurement at the factory GAIN: 100 ms, over twenty
+/// times the 3.7 ms one takes (docs/samc21/tsens.md).
+constexpr uint32_t ts_measure_budget_us = 100'000;
+
+/// RESRDY within that bound.
+bool result_lands() {
+    return brio::wait_until<Ruler>([] { return Tsens::result_ready(); },
+                                   ts_measure_budget_us);
+}
 
 using brio::crlf;
 using brio::print;
@@ -180,18 +204,6 @@ volatile int32_t tsens_last_value = 0;
 // looks for that arrow to find a letter's tally line, and a stray one in
 // a report line ends the capture early. Learned on the bench, twice.
 
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
-
-void spin(uint32_t turns) {
-    volatile uint32_t sink = 0;
-    for (uint32_t i = 0; i < turns; ++i) {
-        sink = sink + 1u;
-    }
-}
 
 bool near(uint32_t a, uint32_t b, uint32_t tol) {
     return (a > b ? a - b : b - a) <= tol;
@@ -597,17 +609,13 @@ void tb_calibration() {
               " centi-C (");
         print_celsius(delta);
         print(serial, " C) against a combined spread of ", noise, crlf);
+        // How much CAL is worth is the die's figure: printed when it
+        // clears the noise, skipped when it does not.
         if (abs_signed(delta) > noise) {
-            bench.verdict("CAL.TCAL and CAL.FCAL ARE WORTH A MEASURABLE "
-                          "NUMBER OF DEGREES - 43.8.15's 'must be copied' is "
-                          "not decoration",
-                          true);
+            print(serial, "  CAL.TCAL and CAL.FCAL are worth a measurable "
+                          "number of degrees on this die", crlf);
         } else {
-            print(serial, "  DECLINED: the shift does not clear this bench's "
-                          "own noise, so nothing is claimed about it", crlf);
-            bench.verdict("the CAL shift is reported and not judged - it is "
-                          "inside the reading's own spread",
-                          true);
+            bench.skip("the CAL shift: inside the reading's own spread");
         }
     }
 
@@ -630,15 +638,14 @@ void tb_calibration() {
     bench.verdict("...and comes back with every calibration register zero",
                   Tsens::enable(true) && Tsens::gain() == 0u && Tsens::offset() == 0);
     Tsens::clear_flags(Tsens::flag_all);
-    // TIMED, and with a wait measured in SECONDS rather than in the poll
-    // counts read() uses - because what comes back is not what the reset
+    // TIMED, and with a wait of SECONDS on the ruler rather than the
+    // bound read() uses - because what comes back is not what the reset
     // value looks like it should be, and the time is half the evidence.
-    const uint32_t blank_start = Ticker::millis();
     Tsens::start();
-    while (!Tsens::result_ready() && Ticker::millis() - blank_start < 3000UL) {
-    }
-    const uint32_t blank_ms = Ticker::millis() - blank_start;
-    const bool blank_finished = Tsens::result_ready();
+    const auto blank =
+        brio::cycles_until<Ruler>([] { return Tsens::result_ready(); }, 3'000'000);
+    const uint32_t blank_ms = blank ? *blank / (SysClock::hz / 1000u) : 3000u;
+    const bool blank_finished = blank.has_value();
     const int32_t blank_value = Tsens::value();
     print(serial, "  with GAIN = OFFSET = CAL = 0: RESRDY ", yes_no(blank_finished),
           " after ", blank_ms, " ms, STATUS.OVF ", yes_no(Tsens::overflowed()),
@@ -1314,7 +1321,7 @@ void tf_datapath_width() {
     fr.free_running = true;
     bench.verdict("a free-running block comes up", tsens_up(gen_sys, fr));
     Tsens::clear_flags(Tsens::flag_all);
-    wait_ms(20);
+    brio::spin_us<Ruler>(20'000);
     bench.verdict("INTFLAG.OVERRUN sets when nobody reads VALUE - 43.6.2.3's "
                   "'failing to do so will result in an overrun error'",
                   Tsens::overrun());
@@ -1349,16 +1356,17 @@ void tg_window() {
     print(serial, "  the die reads ", t, " centi-C; every window below is "
                   "placed +-", margin, " centi-C around that", crlf);
 
-    /// Arm one window and say whether it matched. The block is disabled
+    /// Arm one window and say whether it matched; nothing when the block
+    /// did not come up or the measurement did not land. The block is disabled
     /// around the write because WINLT, WINUT and CTRLC are all
     /// enable-protected.
-    auto probe = [](TsensWindow mode, int32_t lower, int32_t upper) -> bool {
+    auto probe = [](TsensWindow mode, int32_t lower, int32_t upper) -> std::optional<bool> {
         TsensConfig cfg = base_cfg();
         cfg.window = mode;
         cfg.window_lower = lower;
         cfg.window_upper = upper;
         if (!tsens_up(gen_sys, cfg)) {
-            return false;
+            return std::nullopt;
         }
         Tsens::clear_flags(Tsens::flag_all);
         // Two measurements: the flag is set "on the next cycle after a
@@ -1366,29 +1374,31 @@ void tg_window() {
         (void)Tsens::measure();
         Tsens::clear_flags(Tsens::flag_window);
         Tsens::start();
-        uint32_t spins = 2'000'000UL;
-        while (!Tsens::result_ready() && spins-- != 0u) {
+        // A measurement that never lands is no answer at all, so neither a
+        // "fired" nor a "silent" verdict can pass on it.
+        if (!result_lands()) {
+            return std::nullopt;
         }
         return Tsens::window_hit();
     };
 
     // ABOVE: VALUE > WINLT.
     bench.verdict("ABOVE fires with the lower threshold below the reading",
-                  probe(TsensWindow::above, t - margin, 0));
+                  probe(TsensWindow::above, t - margin, 0) == true);
     bench.verdict("...and stays silent with it above",
-                  !probe(TsensWindow::above, t + margin, 0));
+                  probe(TsensWindow::above, t + margin, 0) == false);
 
     // BELOW: VALUE < WINUT.
     bench.verdict("BELOW fires with the upper threshold above the reading",
-                  probe(TsensWindow::below, 0, t + margin));
+                  probe(TsensWindow::below, 0, t + margin) == true);
     bench.verdict("...and stays silent with it below",
-                  !probe(TsensWindow::below, 0, t - margin));
+                  probe(TsensWindow::below, 0, t - margin) == false);
 
     // INSIDE: WINLT < VALUE < WINUT.
     bench.verdict("INSIDE fires with the reading between the thresholds",
-                  probe(TsensWindow::inside, t - margin, t + margin));
+                  probe(TsensWindow::inside, t - margin, t + margin) == true);
     bench.verdict("...and stays silent with the window moved off it",
-                  !probe(TsensWindow::inside, t + margin, t + 2 * margin));
+                  probe(TsensWindow::inside, t + margin, t + 2 * margin) == false);
 
     // OUTSIDE - THE MODE THE TWO DOCUMENTS DESCRIBE DIFFERENTLY. 43.8.3
     // prints "WINUT < VALUE < WINLT" (a band with the thresholds
@@ -1397,38 +1407,39 @@ void tg_window() {
     // readings disagree on both the CONDITION and the ORDER, so the
     // silicon is asked directly.
     const bool outside_as_complement =
-        probe(TsensWindow::outside, t + margin, t + 2 * margin);
-    const bool outside_complement_silent =
+        probe(TsensWindow::outside, t + margin, t + 2 * margin) == true;
+    const std::optional<bool> outside_between =
         probe(TsensWindow::outside, t - margin, t + margin);
+    const bool outside_complement_silent = outside_between == false;
     const bool outside_as_reversed_band =
-        probe(TsensWindow::outside, t + margin, t - margin);
+        probe(TsensWindow::outside, t + margin, t - margin) == true;
     print(serial, "  OUTSIDE with WINLT above the reading and WINUT above it "
                   "(the header's complement reading would fire): ",
           yes_no(outside_as_complement), crlf);
     print(serial, "  OUTSIDE with the reading between the thresholds (the "
                   "header's reading would stay silent): ",
-          yes_no(outside_complement_silent), crlf);
+          outside_between ? yes_no(*outside_between) : "no measurement", crlf);
     print(serial, "  OUTSIDE with WINUT below and WINLT above, i.e. 43.8.3's "
                   "reversed band containing the reading: ",
           yes_no(outside_as_reversed_band), crlf);
     bench.verdict("OUTSIDE IS THE COMPLEMENT OF INSIDE - the device header's "
                   "enumerator comment is right and 43.8.3's printed "
                   "'WINUT < VALUE < WINLT' is not",
-                  outside_as_complement && !outside_complement_silent);
+                  outside_as_complement && outside_complement_silent);
 
     // The two hysteresis modes: from a cold start they behave like their
     // plain counterparts, which is all a bench with no temperature knob
     // can ask of them.
     bench.verdict("HYST_ABOVE fires from rest with the upper threshold below "
                   "the reading",
-                  probe(TsensWindow::hysteresis_above, t - 2 * margin, t - margin));
+                  probe(TsensWindow::hysteresis_above, t - 2 * margin, t - margin) == true);
     bench.verdict("...and stays silent with both thresholds above it",
-                  !probe(TsensWindow::hysteresis_above, t + margin, t + 2 * margin));
+                  probe(TsensWindow::hysteresis_above, t + margin, t + 2 * margin) == false);
     bench.verdict("HYST_BELOW fires from rest with the lower threshold above "
                   "the reading",
-                  probe(TsensWindow::hysteresis_below, t + margin, t + 2 * margin));
+                  probe(TsensWindow::hysteresis_below, t + margin, t + 2 * margin) == true);
     bench.verdict("...and stays silent with both thresholds below it",
-                  !probe(TsensWindow::hysteresis_below, t - 2 * margin, t - margin));
+                  probe(TsensWindow::hysteresis_below, t - 2 * margin, t - margin) == false);
     print(serial, "  THE HYSTERESIS ITSELF IS NOT EXERCISED: it needs the die "
                   "to cross a threshold and come back, and this bench has no "
                   "way to move the temperature on command", crlf);
@@ -1443,10 +1454,7 @@ void tg_window() {
         (void)Tsens::measure();
         Tsens::clear_flags(Tsens::flag_all);
         Tsens::start();
-        uint32_t spins = 2'000'000UL;
-        while (!Tsens::result_ready() && spins-- != 0u) {
-        }
-        const bool hit = Tsens::window_hit();
+        const bool hit = result_lands() && Tsens::window_hit();
         (void)Tsens::value();
         bench.verdict("WINMON stands after a match", hit);
         bench.verdict("and READING VALUE CLEARS IT, as it clears RESRDY",
@@ -1594,7 +1602,7 @@ void th_event_chain() {
         capture_on();
         (void)Tsens::enable(true);
         (void)Pacer::enable(true);
-        wait_ms(60);
+        brio::spin_us<Ruler>(60'000);
         (void)Pacer::enable(false);
         (void)Tsens::enable(false);
         capture_off();
@@ -1705,7 +1713,7 @@ void th_event_chain() {
     // The control: with the pacer stopped nothing moves.
     capture_on();
     (void)Tsens::enable(true);
-    wait_ms(60);
+    brio::spin_us<Ruler>(60'000);
     (void)Tsens::enable(false);
     capture_off();
     uint16_t idle_taken = 0;
@@ -1746,7 +1754,7 @@ void th_event_chain() {
                                              .path = EventPath::asynchronous}));
             (void)Counter::enable(true);
             (void)Counter::set_count16(0);
-            wait_ms(50);
+            brio::spin_us<Ruler>(50'000);
             const uint32_t counted = Counter::count16();
             (void)Counter::enable(false);
             print(serial, "  50 ms of free-running measurement produced ",
@@ -1769,7 +1777,7 @@ void th_event_chain() {
                                                  .path = EventPath::asynchronous}));
             (void)Counter::enable(true);
             (void)Counter::set_count16(0);
-            wait_ms(50);
+            brio::spin_us<Ruler>(50'000);
             const uint32_t missed = Counter::count16();
             (void)Counter::enable(false);
             print(serial, "  the same 50 ms with the window out of reach: ",
@@ -1812,7 +1820,7 @@ void ti_interrupts() {
     bench.verdict("RESRDY arms", (Tsens::armed() & Tsens::flag_result_ready) != 0u);
     Nvic::enable(Tsens::irq());
     Tsens::start();
-    wait_ms(10);
+    brio::spin_us<Ruler>(10'000);
     Nvic::disable(Tsens::irq());
     Tsens::disarm(Tsens::flag_all);
     print(serial, "  one started measurement produced ", tsens_irqs,
@@ -1839,7 +1847,7 @@ void ti_interrupts() {
     Tsens::clear_flags(Tsens::flag_all);
     Tsens::arm(Tsens::flag_overrun);
     Nvic::enable(Tsens::irq());
-    wait_ms(10);
+    brio::spin_us<Ruler>(10'000);
     Nvic::disable(Tsens::irq());
     Tsens::disarm(Tsens::flag_all);
     print(serial, "  ten milliseconds of unread free-running results: ",
@@ -1857,7 +1865,7 @@ void ti_interrupts() {
     Tsens::clear_flags(Tsens::flag_all);
     Nvic::enable(Tsens::irq());
     (void)Tsens::measure();
-    wait_ms(5);
+    brio::spin_us<Ruler>(5'000);
     Nvic::disable(Tsens::irq());
     bench.verdict("a flag with nothing armed sets without interrupting",
                   tsens_irqs == 0u);
@@ -1893,8 +1901,8 @@ void tj_drift() {
     }
 
     print(serial, "  loading the die for 60 seconds (CPU spinning and "
-                  "copying memory, TSENS measuring without pause), sampling "
-                  "the temperature every ten; nothing is printed until it ends",
+                  "copying memory), sampling the temperature every ten "
+                  "seconds; nothing is printed until it ends",
           crlf);
     constexpr uint8_t trend_points = 6;
     int32_t trend[trend_points];
@@ -1909,7 +1917,7 @@ void tj_drift() {
         // back - and a buffer whose address never escapes is one a plain
         // "memory" clobber does not cover.
         asm volatile("" : : "r"(churn_dst), "r"(churn_src) : "memory");
-        spin(2000);
+        brio::spin_us<Ruler>(400);
         ++blocks;
         if (Ticker::millis() - t0 >= next_sample && trend_n < trend_points) {
             const auto v = Tsens::measure_average(10);
@@ -1945,11 +1953,9 @@ void tj_drift() {
                           "die is measurably ",
                   slope > 0 ? "warming" : "cooling", " under the load", crlf);
         } else {
-            print(serial, "  DECLINED: the trend is inside the reading's own "
-                          "spread, so nothing is claimed about self-heating",
-                  crlf);
+            bench.skip("the trend: inside the reading's own spread");
         }
-        bench.verdict("A MINUTE OF CONTINUOUS CONVERSION UNDER LOAD DOES NOT "
+        bench.verdict("A MINUTE UNDER LOAD, SAMPLED EVERY TEN SECONDS, DOES NOT "
                       "WALK THE READING AWAY - whatever the trend is, it stays "
                       "inside a couple of degrees, which is the only claim "
                       "this bench is entitled to make about it",
@@ -1966,18 +1972,9 @@ void tj_drift() {
         if (abs_signed(delta) > noise) {
             print(serial, "  the shift CLEARS the noise: the die is measurably ",
                   delta > 0 ? "warmer" : "cooler", " after the load", crlf);
-            bench.verdict("the sensor FOLLOWS the die's own working "
-                          "temperature - a shift larger than the reading's own "
-                          "spread",
-                          true);
         } else {
-            print(serial, "  DECLINED: the shift is inside the reading's own "
-                          "spread, so this bench cannot tell self-heating from "
-                          "noise and claims nothing", crlf);
-            bench.verdict("the drift is reported and NOT judged - which is the "
-                          "honest answer when the effect is smaller than the "
-                          "instrument",
-                          true);
+            bench.skip("self-heating: the shift is inside the reading's own "
+                       "spread");
         }
         // What IS claimable either way: the sensor did not wander off.
         bench.verdict("the reading stayed a plausible temperature throughout "
@@ -2035,10 +2032,7 @@ void tp_pac_protection() {
     const bool protection_on = (statusa & (1ul << 12)) != 0u;
     Tsens::clear_flags(Tsens::flag_all);
     Tsens::start();
-    uint32_t spins = 500'000UL;
-    while (!Tsens::result_ready() && spins-- != 0u) {
-    }
-    const bool started = Tsens::result_ready();
+    const bool started = result_lands();
     const uint32_t intflaga = PAC_REGS->PAC_INTFLAGA;
     const uint32_t intflagb = PAC_REGS->PAC_INTFLAGB;
 
@@ -2056,11 +2050,11 @@ void tp_pac_protection() {
     bench.verdict("PAC write protection for the TSENS can be set at all, and "
                   "STATUSA reports it on bridge A bit 12",
                   protection_on);
-    bench.verdict("A PAC-PROTECTED WRITE DOES NOT FAULT THIS CORE. 11.5.2.4's "
-                  "'peripheral returns an access error' is not a bus error "
-                  "here: the CPU walks straight past it, which is why this "
-                  "letter's breadcrumb was never needed",
-                  true);
+    // Printed, not judged: a fault would have reset the board before this
+    // line, so reaching it is the whole of the evidence.
+    print(serial, "  a PAC-protected write does not fault this core: 11.5.2.4's "
+                  "'peripheral returns an access error' is not a bus error here",
+          crlf);
     bench.verdict("ERRATUM 1.19.1 IS REPRODUCED: with PAC write protection set "
                   "for the TSENS the START does nothing, so 43.5.8's list of "
                   "the two registers protection 'does not apply to' is wrong "
@@ -2110,16 +2104,18 @@ void tk_wake() {
         const uint32_t i0 = tsens_irqs;
         Tsens::arm(Tsens::flag_result_ready);
         Nvic::enable(Tsens::irq());
-        while (!Serial::tx_idle()) {
+        if (!console_drain()) {   // the leg reports no WFI: its verdicts fail
+            Tsens::disarm(Tsens::flag_all);
+            Nvic::disable(Tsens::irq());
+            return;
         }
         Tsens::start();
         wakes = benchsleep::sleep_until<Serial>(SleepMode::standby,
                                                 [i0] { return tsens_irqs != i0; });
         pend = benchsleep::first_pending;
         backstop = benchsleep::rtc_fired;
-        const uint32_t t0 = Ticker::millis();
-        while (tsens_irqs == i0 && Ticker::millis() - t0 < 20u) {
-        }
+        // The result, whichever ended the sleep: none is a count of zero.
+        (void)brio::wait_until<Ruler>([i0] { return tsens_irqs != i0; }, 20'000);
         irqs = tsens_irqs - i0;
         Tsens::disarm(Tsens::flag_all);
         Nvic::disable(Tsens::irq());

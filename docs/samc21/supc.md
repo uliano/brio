@@ -168,8 +168,7 @@ const bool below = brio::BodVdd::detected();
 
 ## Bench findings
 
-`test_samc_supc`, 3 letters / 44 verdicts, nothing wired and nothing
-forced.
+`test_samc_supc`, 3 letters, nothing wired and nothing forced.
 
 - **THE FUSE ROW AND THE REGISTER AGREE FIELD BY FIELD**: level 8,
   enabled, action RESET, hysteresis off, read from the user row

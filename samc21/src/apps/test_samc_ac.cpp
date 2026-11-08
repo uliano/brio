@@ -15,11 +15,14 @@
 // test possible, and the AC reads what PORT drives.) The other voltage
 // in the room is each comparator's own 64-step VDD scaler.
 //
-// THE ONE THING THIS BOARD CANNOT PRODUCE is an analog level strictly
-// between the rails on a PIN: there is no DAC driver, and the bandgap
-// needs SUPC.VREF, which no driver here turns on. Letter c says so and
-// works around it by making the SCALER the window's shared input signal
-// instead of a pad - which reaches all three window states.
+// THE ONE THING THIS SUITE DOES NOT PRODUCE is an analog level strictly
+// between the rails on a PIN: PORT drives a pad to a rail and nothing
+// else, and the two sources that sit between them are another suite's -
+// the DAC, whose output pad PA02 is COMP2/COMP3's PIN0 and not this
+// pair's, and the bandgap, which test_samc_analog weighs through a
+// comparator. Letter c works around it by making the SCALER the window's
+// shared input signal instead of a pad - which reaches all three window
+// states.
 //
 // What is exercised, letter by letter:
 //   a  the block: geometry, the EVSYS codes it publishes, and every
@@ -52,6 +55,7 @@
 #include "samc21/tc.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -71,6 +75,13 @@ using Serial = Uart<5, console_pads>;
 constexpr Serial serial;
 
 TestBench<Serial> bench;
+
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's
+/// waits (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
 using brio::crlf;
 using brio::print;
@@ -122,14 +133,12 @@ static_assert(tc_event_config_valid(witness_cfg, witness_events),
 // Helpers
 // ---------------------------------------------------------------------------
 
-void spin(uint32_t turns) {
-    volatile uint32_t sink = 0;
-    for (uint32_t i = 0; i < turns; ++i) {
-        sink = sink + 1u;
-    }
-}
-
-void settle() { spin(20'000UL); }
+/// The pause after every change of a pad, a scaler or a route: 4 ms,
+/// hundreds of times a comparison (table 45-34's 8.5 us start-up is the
+/// slowest thing a comparator does) and over a hundred periods of the
+/// 32 kHz event channel clock, so erratum 1.12.4's blind first tick is
+/// spent inside it.
+void settle() { brio::spin_us<Ruler>(4'000); }
 
 /// Drive an analog input pad from PORT - the stimulus this whole suite
 /// runs on. The pad stays under PORT (no PMUX): the comparator's input
@@ -143,6 +152,14 @@ void drive(bool high) {
     } else {
         P::clear();
     }
+}
+
+/// Hand a pad back as reset leaves it: an input, its buffer off, no pull
+/// (configure({}) alone would leave the output driver on).
+template <class P>
+void hand_back() {
+    P::input();
+    P::configure({});
 }
 
 /// The precondition every measurement below rests on: does this pad
@@ -201,14 +218,10 @@ bool witness_arm() {
 uint16_t witnessed() { return Witness::count16(); }
 
 /// Wait out t_STARTUP without pretending to know it: READY is the
-/// chapter's own answer to "is the output valid yet" (40.8.8).
-bool wait_ready(uint32_t spins = 200'000UL) {
-    for (uint32_t i = 0; i < spins; ++i) {
-        if (Comp0::ready()) {
-            return true;
-        }
-    }
-    return false;
+/// chapter's own answer to "is the output valid yet" (40.8.8). The
+/// budget, 1 ms, is over a hundred times table 45-34's 8.5 us start-up.
+bool wait_ready() {
+    return brio::wait_until<Ruler>([] { return Comp0::ready(); }, 1'000);
 }
 
 // =============================================================================
@@ -276,8 +289,10 @@ void ta_block() {
     bench.verdict("inverting an event input nothing listens to is refused",
                   !Ac::event_config(AcEventControl{.invert_in = 0x1}));
 
-    bench.verdict("every comparator reads not-ready while the block is down",
-                  !Comp0::ready() && !Comp1::ready());
+    // Printed, not judged: no comparator was enabled in this letter, so
+    // not-ready is what any reading would say.
+    print(serial, "  READY with the block down and no comparator enabled: COMP0 ",
+          Comp0::ready() ? "1" : "0", ", COMP1 ", Comp1::ready() ? "1" : "0", crlf);
     Ac::release();
 }
 
@@ -355,8 +370,8 @@ void tb_comparator() {
                   Comp0::state());
 
     Cmp0Pad::release();
-    Cmp0Pad::configure({});
-    Ain0::configure({});
+    hand_back<Cmp0Pad>();
+    hand_back<Ain0>();
     Ac::release();
 }
 
@@ -467,13 +482,13 @@ void tc_window() {
     bench.verdict("a rail-driven shared pin reads above the window at VDD",
                   pin_high == AcWindowState::above);
     bench.verdict("and below it at ground", pin_low == AcWindowState::below);
-    print(serial, "  (INSIDE is unreachable in this shape on this board: it "
-          "needs an analog level between the rails on a PIN, and neither the "
-          "DAC nor the bandgap has a driver here)", crlf);
+    print(serial, "  (INSIDE is unreachable in this shape here: it needs a "
+          "level between the rails on PA04, which PORT cannot drive, and the "
+          "DAC's output pad belongs to COMP2/COMP3)", crlf);
 
     (void)Window0::configure(false, AcWindowInterrupt::above);
-    Ain0::configure({});
-    Ain1::configure({});
+    hand_back<Ain0>();
+    hand_back<Ain1>();
     Ac::release();
 }
 
@@ -557,8 +572,8 @@ void td_window_interrupt() {
                   silent);
 
     (void)Window0::configure(false, AcWindowInterrupt::above);
-    Ain0::configure({});
-    Ain1::configure({});
+    hand_back<Ain0>();
+    hand_back<Ain1>();
     Ac::release();
 }
 
@@ -675,8 +690,8 @@ void te_generator() {
     Evsys::disconnect(user_witness);
     GclkChannel::disconnect(Evsys::gclk_id(ev_ch));
     (void)Window0::configure(false, AcWindowInterrupt::above);
-    Ain0::configure({});
-    Ain1::configure({});
+    hand_back<Ain0>();
+    hand_back<Ain1>();
     Ac::release();
 }
 
@@ -774,18 +789,27 @@ void tf_user() {
     EicPad::clear();
     settle();
     Comp0::clear_flag();
+    Eic::clear_flag(EicLine::line);
     settle();
     EicPad::set();
     settle();
-    bench.verdict("the same edge now starts nothing - EVCTRL.COMPEI is the "
-                  "gate",
-                  !Comp0::flag_set());
+    // The silence means something only if the edge was there: the EIC's
+    // own flag for the line is the witness that it was (INTFLAG.EXTINT is
+    // set when the condition is met, 26.6.3, directly in the asynchronous
+    // mode, 26.6.4.2, whether or not the line's interrupt is enabled).
+    const bool edge_seen = Eic::flag(EicLine::line);
+    const bool started = Comp0::flag_set();
+    print(serial, "  with COMPEI clear: EIC flag ", edge_seen ? "1" : "0",
+          ", EOC ", started ? "1" : "0", crlf);
+    bench.verdict("the edge reached the EIC again", edge_seen);
+    bench.verdict("and now starts nothing - EVCTRL.COMPEI is the gate",
+                  edge_seen && !started);
 
     Evsys::disconnect(Ac::start_user(0));
     (void)Eic::enable(false);
     Eic::release();
     EicPad::configure({});
-    Ain0::configure({});
+    hand_back<Ain0>();
     Ac::release();
 }
 

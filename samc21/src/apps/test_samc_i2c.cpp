@@ -63,6 +63,7 @@
 #include "util/power.hpp"
 #include "util/crc.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
@@ -95,6 +96,32 @@ TestBench<Serial> bench;
 /// channel 0, so that the I2C write's channel runs beside a console's.
 using SerialDma = Uart<5, console_pads, 64, 256, DmaTxEngine<0>>;
 constexpr SerialDma serial_dma;
+
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's
+/// waits and spans (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// Every queued console byte off the wire, bounded (util/test_wait.hpp):
+/// false on a wedged console.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
+
+/// The console drained before a timed window opens (its transmit
+/// interrupt would land inside the span), or a failed verdict saying so
+/// and false: the letter then skips the window.
+bool quiet_console() {
+    if (console_drain()) {
+        return true;
+    }
+    bench.verdict("the console drained before the timed window", false);
+    return false;
+}
+
+/// A span of the ruler in microseconds, for the prints and the bounds
+/// written in microseconds.
+constexpr uint32_t us_of(uint32_t cycles) { return cycles / (SysClock::hz / 1'000'000u); }
 
 // ---------------------------------------------------------------------------
 // The bus: SERCOM3 on the desk's I2C node
@@ -203,17 +230,14 @@ uint8_t tenure(const I2cHw::Request& r, uint16_t deadline_ms = 300) {
     if (host_start(r)) {
         return host_status();   // the degenerate synchronous failure
     }
-    const uint32_t t0 = Ticker::millis();
-    while (!xfer_done) {
-        if (Ticker::millis() - t0 > deadline_ms) {
-            // The engine is MID-TENURE (a parked START against a busy
-            // bus, usually): abandoning it without recovery would hand
-            // every later letter a wedged engine. Release and re-init -
-            // the deadline is the suite's own, so the cleanup is too.
-            host_release();
-            (void)engine_up();
-            return 0xEE;   // the suite's own "it did not finish" marker
-        }
+    if (!brio::wait_until<Ruler>([] { return xfer_done; }, deadline_ms * 1000u)) {
+        // The engine is MID-TENURE (a parked START against a busy
+        // bus, usually): abandoning it without recovery would hand
+        // every later letter a wedged engine. Release and re-init -
+        // the deadline is the suite's own, so the cleanup is too.
+        host_release();
+        (void)engine_up();
+        return 0xEE;   // the suite's own "it did not finish" marker
     }
     return xfer_status;
 }
@@ -255,25 +279,6 @@ uint8_t frame_buf[twilink::max_payload + 4];
 twilink::Decoder dec;
 bool link_quiet = false;
 
-void settle_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
-
-/// Microseconds on SysTick: the millisecond count and the counter's
-/// position inside the millisecond, read until the count did not move
-/// across the read (a reload between the two reads moves it; the tick's
-/// handler runs at once, interrupts being on wherever this is used).
-uint32_t us_now() {
-    uint32_t m = 0, v = 0;
-    do {
-        m = Ticker::millis();
-        v = SysTick->VAL;
-    } while (m != Ticker::millis());
-    const uint32_t per = SysTick->LOAD + 1u;
-    return m * 1000u + (per - 1u - v) * 1000u / per;
-}
 
 bool send_frame(Op op, const uint8_t* p, uint8_t len) {
     uint8_t n = 0;
@@ -301,7 +306,7 @@ bool recv_frame(twilink::Frame& out) {
 
 bool command_once(Op op, const uint8_t* p, uint8_t len) {
     if (!send_frame(op, p, len)) return false;
-    settle_ms(2);
+    brio::spin_us<Ruler>(2'000u);
     twilink::Frame f;
     if (!recv_frame(f)) return false;
     return f.op == Op::ack && f.len == 2 && f.data[0] == twilink::byte_of(op);
@@ -313,10 +318,10 @@ const uint8_t no_payload[1] = {0};
 bool command(Op op, const uint8_t* p = no_payload, uint8_t len = 0) {
     for (uint8_t k = 0; k < 3; ++k) {
         if (command_once(op, p, len)) {
-            settle_ms(twilink::arm_ms);
+            brio::spin_us<Ruler>(twilink::arm_ms * 1000u);
             return true;
         }
-        settle_ms(400);
+        brio::spin_us<Ruler>(400'000u);
     }
     if (!link_quiet) {
         print(serial, "    LINK FAILURE op ", hex(twilink::byte_of(op)),
@@ -335,7 +340,7 @@ bool peer_act(Op op, const twilink::Params& a) {
 
 bool query(Op op, twilink::Frame& data) {
     if (!command(op)) return false;
-    settle_ms(2);
+    brio::spin_us<Ruler>(2'000u);
     return recv_frame(data);
 }
 
@@ -347,7 +352,7 @@ bool peer_report(twilink::Report& r) {
             r = twilink::get_report(f.data);
             return true;
         }
-        settle_ms(60);
+        brio::spin_us<Ruler>(60'000u);
     }
     return false;
 }
@@ -477,7 +482,7 @@ void ta_block() {
     // force_idle() a convenience rather than a necessity.
     (void)Raw::configure(cfg);
     (void)Raw::enable(true);
-    settle_ms(2);
+    brio::spin_us<Ruler>(2'000u);
     print(serial, "  with INACTOUT us205: BUSSTATE 2 ms after enable=",
           static_cast<uint8_t>(Raw::bus_state()), crlf);
     // OBSERVED, NOT JUDGED: whether the INACTOUT walks UNKNOWN -> IDLE
@@ -517,10 +522,11 @@ void tb_channel() {
         bench.verdict("the engine comes up", false);
         return;
     }
-    if (!need_peer()) return;
+    const bool up = ensure_link();
     bench.verdict("the peer answers a ping over the two wires (each command is "
                   "TWO tenures of the engine under test)",
-                  true);
+                  up);
+    if (!up) return;
 
     twilink::Frame f;
     const bool got = query(Op::ident, f) && f.op == Op::ident_data &&
@@ -596,7 +602,7 @@ void tc_shapes() {
                                .rx_len = 4,
                                .reply = {},
                                .speed = I2cSpeed::standard_100k});
-    settle_ms(300);   // past the serve's own deadline: the peer is back
+    brio::spin_us<Ruler>(300'000u);   // past the serve's own deadline: the peer is back
     twilink::Report r{};
     const bool rep = peer_report(r);
     print(serial, "  write=", hex(ws), " read=", hex(rs), " mism=", rmism,
@@ -648,7 +654,7 @@ void td_nacks() {
                                   .rx_len = 0,
                                   .reply = {},
                                   .speed = I2cSpeed::standard_100k});
-    settle_ms(700);   // let the deaf action expire
+    brio::spin_us<Ruler>(700'000u);   // let the deaf action expire
 
     // A data NACK at a commanded byte: the peer ACKs its address, takes
     // nack_at - 1 bytes, and refuses the next.
@@ -663,7 +669,7 @@ void td_nacks() {
     }
     uint8_t w6[6] = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60};
     const uint8_t nack = write_tenure(twilink::dut_addr, w6, 6);
-    settle_ms(30);
+    brio::spin_us<Ruler>(30'000u);
     twilink::Report r{};
     const bool rep = peer_report(r);
     print(serial, "  deaf=", hex(deaf), " probe=", hex(probe),
@@ -706,7 +712,7 @@ void td_nacks() {
     const bool sync_call = host_start(bad);
     const uint8_t st_call = host_status();
     const uint8_t own = write_tenure(twilink::dut_addr, txbuf, 2);
-    settle_ms(300);
+    brio::spin_us<Ruler>(300'000u);
     twilink::Report gr{};
     const bool grep = peer_report(gr);
     print(serial, "  0x7A: ", sync_prefix ? "refused at start()" : "STARTED", " ", hex(st_prefix),
@@ -748,7 +754,7 @@ void te_stretch() {
         if (write_tenure(twilink::dut_addr, w, 8) != i2c_ok) base_ok = false;
     }
     const uint32_t base_ms = Ticker::millis() - t0;
-    settle_ms(750);
+    brio::spin_us<Ruler>(750'000u);
 
     // Stretched: 2 ms PER DATA BYTE, commanded.
     twilink::Params st{};
@@ -764,7 +770,7 @@ void te_stretch() {
     const uint8_t s2 =
         write_tenure(twilink::dut_addr, w, 8, I2cSpeed::standard_100k, 900);
     const uint32_t stretched_ms = Ticker::millis() - t0;
-    settle_ms(200);
+    brio::spin_us<Ruler>(200'000u);
     twilink::Report r{};
     const bool rep = peer_report(r);
     print(serial, "  8 x 8 bytes unstretched: ", base_ms,
@@ -808,10 +814,14 @@ constexpr uint16_t scl_cap = 320;
 /// tenure's interval between two rises is far under its 1 ms period).
 uint16_t scl_at[scl_cap];
 
+/// The sampler's bound in time: 300 ms, the bare letters' tenure deadline
+/// (tenure()), checked only on the turns that saw no edge for 4096 counts.
+constexpr uint32_t sample_ms = 300;
+
 /// SysTick's count at every rising edge of SCL until the tenure's
-/// completion edge or the cap. The edge's own path is one load of the
-/// count and one store - the interval arithmetic waits for the end -
-/// because at Fm+ a path longer than a period missed every other rise.
+/// completion edge, the cap or sample_ms. The edge's own path is one load
+/// of the count and one store - the interval arithmetic waits for the end
+/// - because at Fm+ a path longer than a period missed every other rise.
 [[gnu::section(".fast_text"), gnu::noinline]] uint16_t sample_scl() {
     // PORT through the IOBUS, the core's single-cycle port (28.6.5): over
     // the APB bridge a read waits for the bridge and two PORT clocks of
@@ -823,7 +833,8 @@ uint16_t scl_at[scl_cap];
     const uint32_t mask = SclPad::mask;
     uint16_t n = 0;
     uint32_t prev = in & mask;
-    for (uint32_t idle = 0; idle < 4000u;) {
+    const uint32_t t0 = Ticker::millis();
+    for (;;) {
         uint32_t now = prev;
         uint32_t spin = 4096u;
         // Written out, four samples a count, four instructions a sample:
@@ -854,10 +865,9 @@ uint16_t scl_at[scl_cap];
             : [in] "l"(&in), [mask] "l"(mask), [prev] "l"(prev)
             : "cc", "memory");
         if (spin == 0u) {
-            if (xfer_done) {
+            if (xfer_done || Ticker::millis() - t0 >= sample_ms) {
                 break;
             }
-            ++idle;
             continue;
         }
         prev = now;
@@ -913,10 +923,7 @@ SclReading sampled_write(const uint8_t* p, uint8_t n, I2cSpeed speed, uint32_t a
         const uint32_t d = a >= b ? a - b : a + period - b;
         scl_iv[i] = static_cast<uint16_t>(d < 0xFFFFu ? d : 0xFFFFu);
     }
-    const uint32_t t0 = Ticker::millis();
-    while (!xfer_done && Ticker::millis() - t0 < 300u) {
-    }
-    r.status = xfer_done ? xfer_status : 0xEEu;
+    r.status = brio::wait_until<Ruler>([] { return xfer_done; }, 300'000u) ? xfer_status : 0xEEu;
     if (r.edges == 0u) {
         return r;
     }
@@ -990,8 +997,12 @@ void tf_speeds() {
             }
         }
         took[s] = Ticker::millis() - t0;
-        scl[s] = sampled_write(w, 16, speeds[s], asked[s]);
-        settle_ms(650);
+        if (quiet_console()) {
+            scl[s] = sampled_write(w, 16, speeds[s], asked[s]);
+        } else {
+            scl[s].status = 0xEEu;   // not sampled: the verdict below fails on it
+        }
+        brio::spin_us<Ruler>(650'000u);
         print(serial, "  ", names[s], ": 25 tenures x 16 bytes in ", took[s],
               " ms (the divisor says SCL = ", I2cHw::scl_hz(speeds[s]) / 1000u,
               " kHz); on the pad: status ", scl[s].status, ", ", scl[s].used, " of ",
@@ -1041,23 +1052,30 @@ void tg_arbitration() {
     }
     if (!need_peer()) return;
 
-    // The peer pins SDA low for 60 ms. A falling SDA under a high SCL
-    // IS a Start, so the bus reads BUSY - and a tenure started into it
-    // PARKS IN HARDWARE until the wire frees: the held START. THE
-    // WITNESS IS THE
-    // CLOCK: an unheld two-byte tenure is ~1 ms; this one completes at
-    // the HOLD'S length. And it completes with i2c_nack_addr - the
-    // peer's TWI is off the bus while its PORT holds the pin, so the
-    // fired START meets nobody - a STATUS, never a hang.
+    // The peer pins SDA low for its action's deadline, 100 ms (no
+    // twi_peer reads hold_sda's aux16 bound). A falling SDA under a high
+    // SCL IS a Start, so the bus reads BUSY - and a tenure started into
+    // it PARKS IN HARDWARE until the wire frees: the held START. THE
+    // WITNESS IS THE CLOCK: an unheld two-byte tenure is about 1 ms, and
+    // this one must not end, nor the bus monitor leave BUSY, while the
+    // hold stands. The hold starts once the peer has served the ack and
+    // lasts at least 100 ms of its clock (a peer looks at its deadline
+    // coarsely, which only lengthens it); the window below opens some
+    // 8 ms after the ack reached this end (command()'s arm_ms and the 5 ms
+    // below), so the hold stands for its first 92 ms less OSC48M's 0.6 %
+    // against the peer's clock: the park is judged over the first
+    // park_ms. The 300 ms window runs on past the release, and what the
+    // parked START does then is printed, not judged.
+    constexpr uint32_t park_ms = 85;
     twilink::Params h{};
-    h.ms = 400;
-    h.aux16 = 60000;   // hold SDA low for 60 ms
+    h.ms = 100;
+    h.aux16 = 0;
     h.aux8 = 0;        // released by the hold's own clock, not by SCL edges
     if (!peer_act(Op::hold_sda, h)) {
         bench.verdict("the peer accepted the hold_sda command", false);
         return;
     }
-    settle_ms(twilink::arm_ms + 2);   // the hold is on
+    brio::spin_us<Ruler>((twilink::arm_ms + 2u) * 1000u);   // the hold is on
     // The tenure is driven RAW here so the window can be WATCHED: the
     // bus state and the flags sampled the whole way, one record per
     // distinct state.
@@ -1090,7 +1108,7 @@ void tg_arbitration() {
         }
     }
     const uint8_t st = xfer_done ? xfer_status : 0xEE;
-    print(serial, "  tenure into the held wire (hold 60 ms): status=", hex(st),
+    print(serial, "  tenure into the held wire (hold 100 ms): status=", hex(st),
           " done at ", done_at, " ms; BUSSTATE timeline:");
     for (uint8_t i = 0; i < sn; ++i) {
         print(serial, " ", states[i], "@", stamps[i]);
@@ -1101,14 +1119,17 @@ void tg_arbitration() {
         (void)engine_up();
     }
     // THE PARK is the claim: while the wire is held the bus reads BUSY
-    // and not one byte moves; what happens at the release is the PRINT
-    // (fires-and-completes, or stays parked until the suite recovers) -
-    // the silicon's answer, recorded either way.
-    bench.verdict("a tenure into a held-low wire PARKS: the bus reads BUSY for the "
-                  "hold's whole length and the engine neither lies nor crashes "
-                  "(the timeline above is the record)",
-                  sn >= 1 && states[0] == 3u);
-    settle_ms(420);   // the peer's own deadline restores its command client
+    // and not one byte moves - BUSY from the first sample, no other state
+    // and no completion before park_ms. What happens at the release (the
+    // START fired and the tenure ended, or parked on until the suite
+    // recovered the engine above) is the timeline's, the silicon's answer
+    // recorded either way.
+    const bool moved_early = sn >= 2u && stamps[1] < park_ms;
+    const bool ended_early = xfer_done && done_at < park_ms;
+    bench.verdict("a tenure into a held-low wire PARKS: the bus reads BUSY and the tenure does "
+                  "not end while the hold stands (the timeline above is the record)",
+                  sn >= 1u && states[0] == 3u && !moved_early && !ended_early);
+    brio::spin_us<Ruler>(420'000u);   // the peer's own deadline restores its command client
     bench.verdict("and the bus recovers: the next command round trip is clean",
                   command(Op::ping));
 }
@@ -1191,7 +1212,7 @@ void th_client() {
     const bool scl_muxed = Pin<'A', 23>::has_function();
     Client::release();
 
-    settle_ms(50);
+    brio::spin_us<Ruler>(50'000u);
     const bool engine_back = engine_up();
     twilink::Report r{};
     const bool rep = peer_report(r);
@@ -1236,16 +1257,15 @@ void ti_unstick() {
     // The peer holds SDA low and releases it AT THE 4TH SCL FALLING
     // EDGE - edges only unstick()'s own pulses can produce.
     twilink::Params h{};
-    h.ms = 900;
-    h.aux16 = 60000;   // or 60 ms, whichever comes first
+    h.ms = 900;        // the deadline, should no edge come (no twi_peer reads aux16)
     h.aux8 = 4;        // released by the 4th falling edge
     if (!peer_act(Op::hold_sda, h)) {
         bench.verdict("the peer accepted the hold_sda command", false);
         return;
     }
-    settle_ms(twilink::arm_ms + 2);
+    brio::spin_us<Ruler>((twilink::arm_ms + 2u) * 1000u);
     const uint8_t pulses = I2cHw::unstick();
-    settle_ms(80);
+    brio::spin_us<Ruler>(80'000u);
     print(serial, "  unstick against a client releasing on the 4th falling edge: ",
           pulses, " pulses", crlf);
     bench.verdict("unstick() clocks the stuck client free and counts the edge it "
@@ -1271,10 +1291,10 @@ constexpr uint8_t slow_gen = 4;
 /// channel DISCONNECTED and no time-out counting at any meter rate.
 bool move_slow(uint8_t generator) {
     GclkChannel::disconnect(Sercom<3>::gclk_slow_id());
-    bool clear = false;
-    for (uint32_t k = 0; k < 100000u && !clear; ++k) {
-        clear = !GclkChannel::connected(Sercom<3>::gclk_slow_id());
-    }
+    // The clear crosses into the generator the channel was on - a few of
+    // its cycles, 92 us at most for four cycles of a 32 kHz one: 1 ms.
+    const bool clear = brio::wait_until<Ruler>(
+        [] { return !GclkChannel::connected(Sercom<3>::gclk_slow_id()); }, 1'000u);
     return clear && GclkChannel::connect(Sercom<3>::gclk_slow_id(), generator);
 }
 
@@ -1386,7 +1406,7 @@ void tj_timeouts() {
         return;
     }
     const TimedTenure base = timed_write(twilink::dut_addr, 2, 900);
-    settle_ms(750);
+    brio::spin_us<Ruler>(750'000u);
     print(serial, "  time-outs OFF: 2 bytes at 40 ms/byte -> status=", hex(base.status),
           " in ", base.ms, " ms", crlf);
     bench.verdict("with the time-outs off a 40 ms-per-byte client is TOLERATED: "
@@ -1414,7 +1434,7 @@ void tj_timeouts() {
         return;
     }
     const TimedTenure held = timed_write(twilink::dut_addr, 2, 900);
-    settle_ms(750);
+    brio::spin_us<Ruler>(750'000u);
     print(serial, "  both time-outs armed, client stretching 40 ms/byte: status=",
           hex(held.status), " in ", held.ms, " ms, STATUS bits seen live=",
           hex(held.status_seen), crlf);
@@ -1438,13 +1458,14 @@ void tj_timeouts() {
     Nvic::disable(I2cHw::Resource::irq());
     uint16_t seen = 0;
     (void)I2cm<3>::start_address(twilink::command_addr, false);
-    const uint32_t t0 = us_now();
+    brio::Stopwatch<Ruler> hold;
+    hold.start();
     uint32_t fired_us = 0;
-    while (us_now() - t0 < 60'000u) {
+    while (hold.elapsed() < brio::us_cycles<Ruler>(60'000u)) {
         const uint16_t st = I2cm<3>::status();
         seen = static_cast<uint16_t>(seen | st);
         if ((st & I2cmStatus::low_timeout) != 0u && fired_us == 0u) {
-            fired_us = us_now() - t0;
+            fired_us = us_of(hold.elapsed());
         }
     }
     const uint32_t fired_at = fired_us / 1000u;
@@ -1489,19 +1510,20 @@ void tj_timeouts() {
         Nvic::disable(I2cHw::Resource::irq());
         uint16_t mseen = 0;
         (void)I2cm<3>::start_address(twilink::command_addr, false);
-        const uint32_t tm = us_now();
+        brio::Stopwatch<Ruler> shot_sw;
+        shot_sw.start();
         uint32_t at = 0;
-        while (us_now() - tm < 40'000u) {
+        while (shot_sw.elapsed() < brio::us_cycles<Ruler>(40'000u)) {
             const uint16_t st = I2cm<3>::status();
             mseen = static_cast<uint16_t>(mseen | st);
             if ((st & I2cmStatus::mext_timeout) != 0u) {
-                at = us_now() - tm;
+                at = us_of(shot_sw.elapsed());
                 break;
             }
         }
         const uint8_t mflags = I2cm<3>::flags();
         // The automatic STOP the chapter promises, and the ERROR flag.
-        settle_ms(1);
+        brio::spin_us<Ruler>(1'000u);
         mseen = static_cast<uint16_t>(mseen | I2cm<3>::status());
         if (at == 0u || (mseen & I2cmStatus::bus_error) == 0u ||
             (mseen & I2cmStatus::low_timeout) != 0u || (mflags & I2cmFlag::error) == 0u) {
@@ -1518,7 +1540,7 @@ void tj_timeouts() {
         Nvic::enable(I2cHw::Resource::irq());
     }
     (void)engine_up();
-    settle_ms(5);
+    brio::spin_us<Ruler>(5'000u);
     print(serial, "  MEXTTOEN alone, the host's own unserviced hold, 16 shots: MEXTTOUT at ",
           mext_min, " .. ", mext_max, " us = ",
           static_cast<uint32_t>(static_cast<uint64_t>(mext_min) * slow_hz / 1'000'000u), " .. ",
@@ -1546,7 +1568,7 @@ void tj_timeouts() {
         mc = timed_write(twilink::dut_addr, 2, 300);
         mext_client_ok = true;
     }
-    settle_ms(450);
+    brio::spin_us<Ruler>(450'000u);
     print(serial, "  MEXTTOEN alone, the client stretching 15 ms/byte: status=", hex(mc.status),
           " in ", mc.ms, " ms, STATUS bits seen live=", hex(mc.status_seen), crlf);
     bench.verdict("MEXT does not see a CLIENT's stretch: 2 bytes at 15 ms each complete "
@@ -1575,7 +1597,8 @@ void tj_timeouts() {
     if (peer_act(Op::serve, s40) && timeouts_on(false, true)) {
         for (uint8_t i = 0; i < 2; ++i) txbuf[i] = static_cast<uint8_t>(0x31u + i);
         xfer_done = false;
-        const uint32_t ts = us_now();
+        brio::Stopwatch<Ruler> sext_sw;
+        sext_sw.start();
         if (!I2cHw::start({.addr = twilink::dut_addr,
                            .tx = lend<Lease::reply>(static_cast<const uint8_t*>(txbuf)),
                            .tx_len = 2,
@@ -1586,17 +1609,17 @@ void tj_timeouts() {
             // The time-out's ERROR completes the tenure inside the vector,
             // whose finish() sweeps the W1C statuses before this loop can
             // see them: the completion's instant is the trip's.
-            while (!xfer_done && us_now() - ts < 120'000u) {
+            while (!xfer_done && sext_sw.elapsed() < brio::us_cycles<Ruler>(120'000u)) {
                 sseen = static_cast<uint16_t>(sseen | I2cm<3>::status());
             }
-            if (xfer_done) sext_us = us_now() - ts;
+            if (xfer_done) sext_us = us_of(sext_sw.elapsed());
             sstatus_end = xfer_done ? xfer_status : 0xEE;
             if (!xfer_done) {
                 I2cHw::release();
             }
         }
     }
-    settle_ms(450);
+    brio::spin_us<Ruler>(450'000u);
     (void)engine_up();
     print(serial, "  SEXTTOEN alone, the client stretching 40 ms: status=", hex(sstatus_end),
           ", SEXTTOUT at ", sext_us, " us = ",
@@ -1617,29 +1640,37 @@ void tj_timeouts() {
     // "slow" clock does not shrink the window to microseconds, it
     // SILENTLY DISABLES the counter (a clock-domain limit the chapter
     // never states), which is precisely why this letter WEIGHS its
-    // meter on FREQM before trusting it.
+    // meter on FREQM before trusting it. "Never" is judged over the same
+    // 60 ms the weighed meter's leg watches, 25 ms past LOWTOUT's ceiling
+    // on that meter: a counter that ran at all - and on a faster clock it
+    // could only fire sooner - would be seen firing inside it.
     bench.verdict("the SLOW channel moves to generator 0 (48 MHz) with the "
                   "synchronization waited out",
                   move_slow(0) && timeouts_on(true, false));
     Nvic::disable(I2cHw::Resource::irq());
     uint16_t fast_seen = 0;
     (void)I2cm<3>::start_address(twilink::command_addr, false);
-    const uint32_t t1 = Ticker::millis();
-    uint32_t fast_fired = 0xFFFFu;
-    while (Ticker::millis() - t1 < 20u) {
+    brio::Stopwatch<Ruler> fast_sw;
+    fast_sw.start();
+    uint32_t fast_fired = 0xFFFFFFFFu;
+    while (fast_sw.elapsed() < brio::us_cycles<Ruler>(60'000u)) {
         const uint16_t st = I2cm<3>::status();
         fast_seen = static_cast<uint16_t>(fast_seen | st);
-        if ((st & I2cmStatus::low_timeout) != 0u && fast_fired == 0xFFFFu) {
-            fast_fired = Ticker::millis() - t1;
+        if ((st & I2cmStatus::low_timeout) != 0u && fast_fired == 0xFFFFFFFFu) {
+            fast_fired = us_of(fast_sw.elapsed());
         }
     }
-    print(serial, "  the 48 MHz meter: LOWTOUT at ", fast_fired,
-          " ms (65535 = never), STATUS bits=", hex(fast_seen), crlf);
+    if (fast_fired == 0xFFFFFFFFu) {
+        print(serial, "  the 48 MHz meter: LOWTOUT never in 60 ms, STATUS bits=", hex(fast_seen), crlf);
+    } else {
+        print(serial, "  the 48 MHz meter: LOWTOUT at ", fast_fired, " us, STATUS bits=",
+              hex(fast_seen), crlf);
+    }
     bench.verdict("with the meter at 48 MHz the same hold NEVER TRIPS: the wrong "
                   "rate does not scale the window, it silently DISABLES the "
                   "counter - worse than wrong, MUTE - so a design that enables "
                   "these time-outs must WEIGH its slow clock, not assume it",
-                  fast_fired == 0xFFFFu &&
+                  fast_fired == 0xFFFFFFFFu &&
                       (fast_seen & I2cmStatus::low_timeout) == 0u);
     Nvic::enable(I2cHw::Resource::irq());
     (void)engine_up();
@@ -1753,6 +1784,19 @@ private:
 
 using BusKernel = Tenuto<P, Driver, I2cArb>;
 
+/// Every queue drained, then again until `done` or `budget_us`: whether
+/// `done` came true.
+template <typename Done>
+bool run_until(Done done, uint32_t budget_us) {
+    return brio::wait_until<Ruler>(
+        [&] {
+            while (BusKernel::step()) {
+            }
+            return done();
+        },
+        budget_us);
+}
+
 } // namespace kl
 
 void tk_kernel() {
@@ -1778,12 +1822,9 @@ void tk_kernel() {
     bus_ao_live = true;
 
     post<kl::Driver>(kl::Kick{});
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < 1500u) {
-        while (kl::BusKernel::step()) {
-        }
-        if (kl::Driver::replies >= kl::queued) break;
-    }
+    // The verdicts below count the replies; a reply missing at 1.5 s fails
+    // them.
+    (void)kl::run_until([] { return kl::Driver::replies >= kl::queued; }, 1'500'000u);
     print(serial, "  4 tenures queued in ONE dispatch: ", kl::Driver::replies,
           " replies (", kl::Driver::ok_replies, " ok, ", kl::Driver::nack_replies,
           " nack_addr), order:");
@@ -1807,12 +1848,7 @@ void tk_kernel() {
     // mid-letter peer_act was this letter's own flaky verdict).
     kl::Driver::init();
     post<kl::Driver>(kl::Fill{});
-    const uint32_t t1 = Ticker::millis();
-    while (Ticker::millis() - t1 < 1500u) {
-        while (kl::BusKernel::step()) {
-        }
-        if (kl::Driver::replies >= kl::queued + 2) break;
-    }
+    (void)kl::run_until([] { return kl::Driver::replies >= kl::queued + 2; }, 1'500'000u);
     print(serial, "  ", kl::queued + 2, " tenures into a bus holding one in "
           "flight plus a 3-deep FIFO: ", kl::Driver::replies, " replies, ",
           kl::Driver::rejected, " rejected (arbiter tally ",
@@ -1825,10 +1861,9 @@ void tk_kernel() {
     // The sleep vote: idle ok...
     kl::Driver::init();
     post<kl::Driver>(kl::Ask{});
-    for (uint8_t k = 0; k < 40 && kl::Driver::votes == 0; ++k) {
-        while (kl::BusKernel::step()) {
-        }
-    }
+    // The vote is two dispatches away, microseconds: 10 ms, and the
+    // verdict counts it.
+    (void)kl::run_until([] { return kl::Driver::votes != 0; }, 10'000u);
     const bool idle_vote = kl::Driver::last_vote;
     const uint8_t idle_votes = kl::Driver::votes;
 
@@ -1842,18 +1877,11 @@ void tk_kernel() {
     // breath is dispatched microseconds later, well inside it.
     post<kl::I2cArb>(kl::Driver::request(0, false));
     post<kl::Driver>(kl::Ask{});
-    for (uint8_t k = 0; k < 200 && kl::Driver::votes == 0; ++k) {
-        while (kl::BusKernel::step()) {
-        }
-    }
+    (void)kl::run_until([] { return kl::Driver::votes != 0; }, 10'000u);
     const bool busy_vote = kl::Driver::last_vote;
     const uint8_t busy_votes = kl::Driver::votes;
-    const uint32_t t2 = Ticker::millis();
-    while (Ticker::millis() - t2 < 500u) {
-        while (kl::BusKernel::step()) {
-        }
-        if (kl::Driver::replies >= 1) break;
-    }
+    // The tenure's reply, before the letter moves on: nothing judges it.
+    (void)kl::run_until([] { return kl::Driver::replies >= 1; }, 500'000u);
 
     print(serial, "  PrepareSleep(standby): idle votes=", idle_votes,
           " ok=", idle_vote, ", busy votes=", busy_votes, " ok=", busy_vote, crlf);
@@ -1864,10 +1892,6 @@ void tk_kernel() {
                   busy_votes == 1 && !busy_vote);
 
     bus_ao_live = false;
-    bench.verdict("NOT ONE LINE of util/i2c_bus.hpp, util/bus_master.hpp or "
-                  "kernel/ was changed for this architecture - the vocabulary ran "
-                  "the contract as written on this silicon",
-                  true);
 }
 
 // ===========================================================================
@@ -1886,7 +1910,7 @@ void tk_kernel() {
 namespace tl {
 
 /// 35 ms: comfortably above a whole stretched tenure (~10 ms at 1 ms
-/// per byte, leg 1's own measurement) and comfortably below the 60 ms
+/// per byte, leg 1's own measurement) and far below the peer's 400 ms
 /// hold, so the reply provably lands while the wire is STILL HELD.
 constexpr uint32_t timeout_ms = 35;
 using TimedBus = I2cBus<I2cHw, P, 3, BusPassThrough, ticks_from_ms<P>(timeout_ms)>;
@@ -1987,7 +2011,7 @@ void tl_timed() {
     timed_ao_live = false;
     const uint32_t stretched_ms = tl::Driver::last_at - t0;
     const bool stretch_ok = tl::Driver::replies == 1 && tl::Driver::last_status == i2c_ok;
-    settle_ms(450);   // the serve's own deadline restores the peer
+    brio::spin_us<Ruler>(450'000u);   // the serve's own deadline restores the peer
     print(serial, "  stretched tenure (1 ms/byte, 8 bytes) under a ", tl::timeout_ms,
           " ms arbiter: status=", hex(tl::Driver::last_status), " in ", stretched_ms,
           " ms", crlf);
@@ -1996,19 +2020,20 @@ void tl_timed() {
                   "above the whole tenure",
                   stretch_ok && stretched_ms >= 8u && stretched_ms < tl::timeout_ms);
 
-    // Leg 2: THE WEDGE. The peer pins SDA low for 60 ms; a tenure
+    // Leg 2: THE WEDGE. The peer pins SDA low for its action's deadline,
+    // 400 ms (no twi_peer reads hold_sda's aux16 bound); a tenure
     // started into it PARKS IN HARDWARE (letter g's finding) and the
     // engine's completion interrupt never fires. Letter j proved the
     // silicon's time-outs cannot see this; the arbiter's clock can.
     twilink::Params h{};
     h.ms = 400;
-    h.aux16 = 60000;   // hold SDA low for 60 ms
+    h.aux16 = 0;
     h.aux8 = 0;
     if (!peer_act(Op::hold_sda, h)) {
         bench.verdict("the peer accepted the hold_sda command", false);
         return;
     }
-    settle_ms(twilink::arm_ms + 2);   // the hold is on
+    brio::spin_us<Ruler>((twilink::arm_ms + 2u) * 1000u);   // the hold is on
     tl::Driver::init();
     timed_ao_live = true;
     post<tl::Driver>(tl::Send{});
@@ -2017,14 +2042,14 @@ void tl_timed() {
     timed_ao_live = false;
     const uint32_t reply_ms = tl::Driver::last_at - t0;
     const uint8_t wedge_status = tl::Driver::last_status;
-    // Sampled right at the reply's pump exit: the hold has ~25 ms
+    // Sampled right at the reply's pump exit: the hold has some 350 ms
     // left, and the witness is the SDA PAD ITSELF (input_enable is on
     // under the mux) - recover()'s force_idle has just rewritten the
     // monitor's BUSSTATE, so the monitor is no witness here.
     const bool still_held =
         !Pin<bus_pads.sda_pin.port, bus_pads.sda_pin.pin>::read();
     print(serial, "  tenure into the held wire: status=", hex(wedge_status), " at ",
-          reply_ms, " ms (limit ", tl::timeout_ms, ", hold 60), SDA low at reply=",
+          reply_ms, " ms (limit ", tl::timeout_ms, ", hold 400), SDA low at reply=",
           still_held, ", stale=", tl::TimedBus::stale_events(), crlf);
     bench.verdict("the wedged tenure comes back i2c_timeout ON THE ARBITER'S CLOCK "
                   "- a reply in its place, never a hang",
@@ -2038,7 +2063,7 @@ void tl_timed() {
     // Leg 3: THE GIVE-BACK. recover() ran inside the arbiter's own
     // dispatch during the hold; once the wire frees, the SAME bus AO
     // must carry a clean tenure with no hand on the engine.
-    settle_ms(500);   // hold over, the peer's command client restored
+    brio::spin_us<Ruler>(500'000u);   // hold over, the peer's command client restored
     twilink::Params a{};
     a.count = 16;
     a.ms = 400;
@@ -2052,7 +2077,7 @@ void tl_timed() {
     post<tl::Driver>(tl::Send{});
     tl::pump_until(1, 400);
     timed_ao_live = false;
-    settle_ms(450);
+    brio::spin_us<Ruler>(450'000u);
     print(serial, "  after the release: status=", hex(tl::Driver::last_status),
           ", stale=", tl::TimedBus::stale_events(), crlf);
     bench.verdict("the bus SURVIVED its own diagnosis: the recover()ed engine "
@@ -2103,12 +2128,16 @@ QuickRun quick_tenure(bool qcen, bool read) {
         Nvic::enable(I2cHw::Resource::irq());
         return q;
     }
-    // The loop's bound: a pass is two PORT reads over the APB and one
-    // INTFLAG read, some forty cycles at 48 MHz, so 100000 passes are
-    // 80 ms against a tenure of under 0.3 ms at 100 kHz.
+    // The loops' bound, in time: 10 ms each against a tenure of under
+    // 0.3 ms at 100 kHz, on the tick's millisecond count - one load a
+    // pass, so a pass stays two PORT reads over the APB and one INTFLAG
+    // read, some forty cycles, against SCL's high phase of about 200
+    // (the ruler's cycles() would double the pass). The millisecond count
+    // makes it at least 9 ms.
     bool prev = SclPad::read();
     (void)Raw::start_address(twilink::dut_addr, read);
-    for (uint32_t k = 0; k < 100'000u; ++k) {
+    const uint32_t t_flag = Ticker::millis();
+    while (Ticker::millis() - t_flag < 10u) {
         const bool now = SclPad::read();
         if (now && !prev) ++q.to_flag;
         prev = now;
@@ -2122,7 +2151,8 @@ QuickRun quick_tenure(bool qcen, bool read) {
     }
     q.total = q.to_flag;
     (void)Raw::stop(true);
-    for (uint32_t k = 0; k < 100'000u; ++k) {
+    const uint32_t t_idle = Ticker::millis();
+    while (Ticker::millis() - t_idle < 10u) {
         const bool now = SclPad::read();
         if (now && !prev) ++q.total;
         prev = now;
@@ -2158,7 +2188,7 @@ void tm_quick() {
     const QuickRun pr = quick_tenure(false, true);
     const QuickRun qw = quick_tenure(true, false);
     const QuickRun pw = quick_tenure(false, false);
-    settle_ms(320);
+    brio::spin_us<Ruler>(320'000u);
     (void)engine_up();
     twilink::Report r{};
     const bool rep = peer_report(r);
@@ -2277,7 +2307,7 @@ WakeRun wake_burst(SleepMode mode, bool run_standby, uint8_t seed) {
         }
     }
     Client::release();
-    settle_ms(50);
+    brio::spin_us<Ruler>(50'000u);
     (void)engine_up();
     w.rep = peer_report(w.r);
     return w;
@@ -2344,9 +2374,9 @@ void tn_wake() {
 // o - TWO LIVE HOSTS: a START parked behind a real tenure, and the race
 // ===========================================================================
 //
-// Letter g measured that a START parked behind a PHANTOM (an SDA held low
-// from a pin, released with no tenure around it) never fires on this
-// silicon. A real second host answers the two questions left.
+// Letter g parks a START behind a PHANTOM (an SDA held low from a pin,
+// released with no tenure around it) and prints what it does at the
+// release. A real second host answers the two questions left.
 //
 // FIRST: does a START parked behind a REAL foreign tenure fire at its
 // STOP? The peer's `arb` (its host writing 16 bytes to its own client -
@@ -2387,7 +2417,9 @@ struct RaceRun {
 };
 
 /// Spin `cycles` core cycles on SysTick's count (a poll some ten cycles
-/// long: the grain of the wait).
+/// long: the grain of the wait). Not the ruler's spin: the race's fine
+/// pass steps the lag by two cycles, and a turn of the ruler's cycles()
+/// is some forty. Every lag is under SysTick's period (48000 cycles).
 void wait_cycles(uint32_t cycles) {
     const uint32_t per = SysTick->LOAD + 1u;
     const uint32_t v0 = SysTick->VAL;
@@ -2451,26 +2483,21 @@ RaceRun race_once(uint8_t t2_addr, uint32_t lag_cycles) {
         x.t1 = host_status();
         return x;
     }
-    const uint32_t t0 = Ticker::millis();
-    while (!xfer_done && Ticker::millis() - t0 < 100u) {
-    }
-    if (!xfer_done) {
+    if (!brio::wait_until<Ruler>([] { return xfer_done; }, 100'000u)) {
         host_release();
         (void)engine_up();
         return x;
     }
     x.t1 = xfer_status;
     if (lag_cycles != 0u) wait_cycles(lag_cycles);
-    const uint32_t t2_at = us_now();
+    brio::Stopwatch<Ruler> t2_sw;
+    t2_sw.start();
     xfer_done = false;
     const bool sync = engined_now ? I2cDma::start(t2_dma) : I2cHw::start(t2);
     if (sync) {
         x.t2 = host_status();
     } else {
-        const uint32_t t2_ms = Ticker::millis();
-        while (!xfer_done && Ticker::millis() - t2_ms < 100u) {
-        }
-        if (xfer_done) {
+        if (brio::wait_until<Ruler>([] { return xfer_done; }, 100'000u)) {
             x.t2 = xfer_status;
         } else {
             host_release();
@@ -2478,8 +2505,8 @@ RaceRun race_once(uint8_t t2_addr, uint32_t lag_cycles) {
             x.t2 = 0xEE;
         }
     }
-    x.t2_us = us_now() - t2_at;
-    settle_ms(race_peer_ms + 10u);   // the peer's action over, its command client back
+    x.t2_us = us_of(t2_sw.elapsed());
+    brio::spin_us<Ruler>((race_peer_ms + 10u) * 1000u);   // the peer's action over, its command client back
     x.rep = peer_report(x.r);
     return x;
 }
@@ -2521,13 +2548,14 @@ void to_two_hosts() {
     if (peer_act(Op::arb, a)) {
         uint8_t dummy[1] = {0};
         dummy_st = write_tenure(twilink::deaf_addr, dummy, 1);
-        settle_ms(3);   // 2 ms of the peer's lead, then its 16 bytes: about 1 ms in
+        brio::spin_us<Ruler>(3'000u);   // 2 ms of the peer's lead, then its 16 bytes: about 1 ms in
         bus_then = static_cast<uint8_t>(Raw::bus_state());
-        const uint32_t t0 = us_now();
+        brio::Stopwatch<Ruler> parked_sw;
+        parked_sw.start();
         parked = write_tenure(twilink::deaf_addr, dummy, 1, I2cSpeed::standard_100k, 100);
-        parked_us = us_now() - t0;
+        parked_us = us_of(parked_sw.elapsed());
     }
-    settle_ms(420);
+    brio::spin_us<Ruler>(420'000u);
     twilink::Report pr{};
     const bool prep = peer_report(pr);
     print(serial, "  behind the peer's real tenure (BUSSTATE ", bus_then, " at the start): status ",
@@ -2535,7 +2563,7 @@ void to_two_hosts() {
           ", its client took ", pr.count, " bytes", crlf);
     bench.verdict("A START PARKED BEHIND A REAL TENURE FIRES AT ITS STOP: started into the "
                   "peer's tenure (the bus BUSY), this board's tenure waits it out and ends "
-                  "i2c_nack_addr - the phantom of letter g is the one wall",
+                  "i2c_nack_addr",
                   dummy_st == i2c_nack_addr && bus_then == static_cast<uint8_t>(I2cBusState::busy) &&
                       parked == i2c_nack_addr && parked_us >= 300u && prep &&
                       (pr.flags & twilink::report_host_ok) != 0u && pr.count == 16u);
@@ -2673,7 +2701,7 @@ uint16_t sum16(const uint8_t* p, uint16_t n) {
 /// The peer received exactly these bytes in one address match (count,
 /// sum, first) - read after the serve ended on its count.
 bool peer_took(const uint8_t* p, uint16_t n, uint16_t hits = 1) {
-    settle_ms(5);
+    brio::spin_us<Ruler>(5'000u);
     twilink::Report r{};
     if (!peer_report(r)) return false;
     return r.count == n && r.sum == sum16(p, n) && r.first == p[0] && r.addr_hits == hits;
@@ -2809,7 +2837,7 @@ void tp_engine() {
         link_engine = I2cEngine::interrupt;
         bool exact = true;
         for (uint8_t i = 0; i < 8u; ++i) exact = exact && rxbuf[i] == i;
-        settle_ms(5);
+        brio::spin_us<Ruler>(5'000u);
         twilink::Report r{};
         const bool rep = peer_report(r);
         print_run("dma write of 2, repeated START, read of 8", x);
@@ -2867,7 +2895,7 @@ void tp_engine() {
         link_engine = I2cEngine::dma;
         na = engine_run(wreq(twilink::dut_addr, bigbuf, 4));
         link_engine = I2cEngine::interrupt;
-        settle_ms(450);
+        brio::spin_us<Ruler>(450'000u);
     }
     print_run("dma write to a deaf address", na);
     bench.verdict("an address NACK under dma is i2c_nack_addr, the block never started (the "
@@ -2894,7 +2922,7 @@ void tp_engine() {
         link_engine = I2cEngine::dma;
         const EngineRun x = engine_run(wreq(twilink::dut_addr, bigbuf, c.len));
         link_engine = I2cEngine::interrupt;
-        settle_ms(5);
+        brio::spin_us<Ruler>(5'000u);
         twilink::Report r{};
         const bool rep = peer_report(r);
         print_run(c.name, x);
@@ -2933,7 +2961,7 @@ void tp_engine() {
         link_engine = I2cEngine::dma;
         tf = engine_run(wreq(twilink::dut_addr, edge, 16));
         link_engine = I2cEngine::interrupt;
-        settle_ms(450);
+        brio::spin_us<Ruler>(450'000u);
         frep = peer_report(fr);
     }
     print_run("dma write across the end of SRAM", tf);
@@ -3070,8 +3098,10 @@ void ts_soak() {
         return;
     }
     print(serial, "  the console moves to its transmit engine for ten minutes: S lines follow", crlf);
-    for (uint32_t k = 0; k < 2'000'000u && !Serial::tx_idle(); ++k) {
-    }
+    // A wedged console costs this line's tail alone: the soak is judged on
+    // its counters and, by the host, on the S lines the engined console
+    // carries.
+    (void)console_drain();
     Serial::release();
     soak_console = true;
     const bool console_up = SerialDma::init(clock, 115200);
@@ -3103,7 +3133,7 @@ void ts_soak() {
         a.flags = twilink::flag_stop_interrupt;
         if (!peer_act(Op::serve, a)) {
             t.link_fail = t.link_fail + 1u;
-            settle_ms(1600);
+            brio::spin_us<Ruler>(1'600'000u);
             continue;
         }
         uint16_t sum = 0;
@@ -3131,7 +3161,7 @@ void ts_soak() {
             expected_abandons = expected_abandons + 1u;
             t.nack_batches = t.nack_batches + 1u;
         }
-        settle_ms(3);
+        brio::spin_us<Ruler>(3'000u);
         twilink::Report r{};
         if (!peer_report(r)) {
             t.link_fail = t.link_fail + 1u;
@@ -3145,8 +3175,7 @@ void ts_soak() {
     const uint32_t i2c_abandons = DmaTxEngine<1>::faults() - f1;
     const uint32_t console_abandons = DmaTxEngine<0>::faults() - f0;
     print(serial_dma, "S END ", soak_seq, crlf);
-    for (uint32_t k = 0; k < 2'000'000u && !SerialDma::tx_idle(); ++k) {
-    }
+    const bool console_drained = brio::console_drain<Ruler, SerialDma>();
     SerialDma::release();
     soak_console = false;
     (void)Serial::init(clock, 115200);
@@ -3158,8 +3187,9 @@ void ts_soak() {
     print(serial, "  faults: status ", t.bad_status, ", hangs ", t.hangs, ", reports ", t.bad_report,
           ", link ", t.link_fail, ", left enabled ", t.left_enabled, "; I2C blocks abandoned ",
           i2c_abandons, " (NACKs ", expected_abandons, "), console blocks abandoned ",
-          console_abandons, crlf);
-    bench.verdict("the console came up on its transmit engine", console_up);
+          console_abandons, "; the engined console drained at the end ", console_drained, crlf);
+    bench.verdict("the console came up on its transmit engine, and drained at the end",
+                  console_up && console_drained);
     bench.verdict("ten minutes of engined writes beside the console's engine: every status the "
                   "expected one, no hang, every report exact, no link failure, no channel left "
                   "enabled",

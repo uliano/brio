@@ -33,6 +33,7 @@
 #include "samc21/tcc.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 
 using P = brio::SamPlatform;
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -56,11 +57,16 @@ using Wave = brio::Tcc<0>;
 constexpr uint8_t gen_slow = 3;     // OSCULP32K, 32768 Hz
 constexpr uint8_t gen_fast = 0;     // OSC48M
 
-void wait_ms(uint32_t ms) {
-    const uint32_t until = brio::Ticker::ticks() + ms + 1u;
-    while (brio::Ticker::ticks() < until) {
-    }
-}
+/// The SysTick ticker read as CPU cycles: the ruler of this probe's
+/// fixed pauses (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return brio::Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// A fixed pause of `ms` milliseconds on the ruler: the counters' time to
+/// run between the phases.
+void pause_ms(uint32_t ms) { brio::spin_us<Ruler>(ms * 1000u); }
 
 // ---- the double-command read, built locally --------------------------------
 //
@@ -69,7 +75,9 @@ void wait_ms(uint32_t ms) {
 // covers the first's landing gap, so what this returns is the count AT
 // THE FIRST COMMAND - the verb's entry time, which is the honest
 // contract. It is spelled out here rather than called through the
-// driver so that the probe measures the sequence itself.
+// driver so that the probe measures the sequence itself - the driver's
+// waits bounded by a spin count, as samc21/tc.hpp bounds them, which is
+// what phase D prices.
 uint32_t fixed_read_tc(uint32_t spins = 400'000u) {
     for (int pass = 0; pass < 2; ++pass) {
         Watch::regs().TC_CTRLBSET =
@@ -163,7 +171,7 @@ int main() {
     // ---- A: the driver's read_sync(), four times ----
     print(serial, "A  the driver's read_sync() x4 (TC pair at 32768 Hz, 6 ms of running):", crlf);
     (void)watch_up(gen_slow);
-    wait_ms(6);
+    pause_ms(6);
     {
         const uint32_t r1 = Watch::count32(), r2 = Watch::count32(),
                        r3 = Watch::count32(), r4 = Watch::count32();
@@ -174,14 +182,14 @@ int main() {
     // ---- B: observe SYNCBUSY + shadow after one raw READSYNC ----
     print(serial, "B  observe after one raw READSYNC:", crlf);
     (void)watch_up(gen_slow);
-    wait_ms(6);
+    pause_ms(6);
     observe([] { return static_cast<uint32_t>(Watch::regs().TC_SYNCBUSY); },
             [] { return Watch::count32_raw(); }, "TC", tc_cmd);
 
     // ---- C: the locally built double-command read ----
     print(serial, "C  a locally built double-command read x4 after 6 ms:", crlf);
     (void)watch_up(gen_slow);
-    wait_ms(6);
+    pause_ms(6);
     {
         const uint32_t r1 = fixed_read_tc(), r2 = fixed_read_tc(),
                        r3 = fixed_read_tc(), r4 = fixed_read_tc();
@@ -191,7 +199,7 @@ int main() {
     // ---- D: cost, and the fast-clock check ----
     {
         (void)watch_up(gen_slow);
-        wait_ms(6);
+        pause_ms(6);
         const uint32_t t0 = brio::Ticker::ticks();
         for (uint32_t i = 0; i < 256; ++i) {
             (void)Watch::count32();
@@ -205,7 +213,7 @@ int main() {
               " ms, fixed ", t2 - t1, " ms", crlf);
 
         (void)watch_up(gen_fast);
-        wait_ms(2);
+        pause_ms(2);
         {
             const uint32_t r1 = fixed_read_tc(), r2 = fixed_read_tc(),
                            r3 = fixed_read_tc(), r4 = fixed_read_tc();
@@ -232,7 +240,7 @@ int main() {
     (void)Wave::configure(brio::TccConfig{});
     (void)Wave::wave(brio::TccWaveConfig{});
     (void)Wave::enable(true);
-    wait_ms(6);
+    pause_ms(6);
     {
         const uint32_t r1 = Wave::count(), r2 = Wave::count(),
                        r3 = Wave::count(), r4 = Wave::count();
@@ -244,7 +252,7 @@ int main() {
     (void)Wave::configure(brio::TccConfig{});
     (void)Wave::wave(brio::TccWaveConfig{});
     (void)Wave::enable(true);
-    wait_ms(6);
+    pause_ms(6);
     observe([] { return Wave::regs().TCC_SYNCBUSY; },
             [] { return Wave::count_raw(); }, "TCC", tcc_cmd);
     {
@@ -263,10 +271,10 @@ int main() {
     // own two commands).
     print(serial, "F  priming: double read, 6 ms gap, then ONE command:", crlf);
     (void)watch_up(gen_slow);
-    wait_ms(6);
+    pause_ms(6);
     {
         const uint32_t d1 = fixed_read_tc();       // double: current (~196+)
-        wait_ms(6);
+        pause_ms(6);
         // one single-command read:
         Watch::regs().TC_CTRLBSET =
             TC_CTRLBSET_CMD(TC_CTRLBSET_CMD_READSYNC_Val);
@@ -292,10 +300,10 @@ int main() {
     (void)Wave::configure(brio::TccConfig{});
     (void)Wave::wave(brio::TccWaveConfig{});
     (void)Wave::enable(true);
-    wait_ms(6);
+    pause_ms(6);
     {
         const uint32_t d1 = fixed_read_tcc();
-        wait_ms(6);
+        pause_ms(6);
         Wave::regs().TCC_CTRLBSET = TCC_CTRLBSET_CMD_READSYNC;
         uint32_t f = 400000u;
         while ((Wave::regs().TCC_SYNCBUSY &

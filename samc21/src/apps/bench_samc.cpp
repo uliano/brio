@@ -1,8 +1,11 @@
 // bench_samc - the benchmark skeleton on the SAM C21 (docs/design/
 // benchmark.md, util/bench.hpp): seven letters that print NUMBERS, one
 // `bench` line per operation and size, in the grammar every family
-// prints. NOT A TEST: a letter's one verdict is "ran", except letter r,
-// whose verdicts judge the ruler every other line is read with.
+// prints. NOT A TEST: a letter's one verdict is "ran" - it ran, and
+// every run it measured began on a silent console -, except letter r,
+// whose verdicts judge the ruler every other line is read with, and
+// letter i, whose verdict judges its tenures (and which skips when no
+// peer answers).
 //
 // NOTHING TO WIRE BUT LETTER I's BUS (PA22/PA23 to the peer board's
 // node, its file header below). The console is the board's CH340 bridge on PB30 (TX)
@@ -123,17 +126,16 @@
 //      The transport's copy is letter u's uart.copy.
 //   p  a print of 1, 16, 256 and 4096 bytes - print(serial, s) with s a
 //      static string in flash of that length (rows of 62 digits and a
-//      CRLF; the 1-byte one is the last LF) - then the DRAIN: this
-//      transport has no single verb for "ring empty and shifter
-//      finished", so it is the ring's Serial::tx_idle() and then the
-//      resource's INTFLAG.TXC (Serial::Resource::txc_flag()), which
-//      writing DATA clears and only the last stop bit's departure with
-//      nothing new in DATA sets (31.6.2.5, 31.8.8) - both spins bounded,
-//      a bound that runs out printed. Counters read before the print and
-//      after the drain. busy = wall (the print and the drain spin); irq
-//      and isr are the transport's shape: print hands the transport runs
-//      (write_bulk arms DRE once a run), and SERCOM5's handler feeds one
-//      byte an entry.
+//      CRLF; the 1-byte one is the last LF) - then the DRAIN: util/
+//      test_wait.hpp's console_drain() on Serial::tx_idle(), which
+//      answers for the ring and for the resource's INTFLAG.TXC alike - TXC
+//      is what writing DATA clears and only the last stop bit's departure
+//      with nothing new in DATA sets (31.6.2.5, 31.8.8) -, bounded on the
+//      ruler, a bound that runs out printed. Counters read before the
+//      print and after the drain. busy = wall (the print and the drain
+//      spin); irq and isr are the transport's shape: print hands the
+//      transport runs (write_bulk arms DRE once a run), and SERCOM5's
+//      handler feeds one byte an entry.
 //   t  the tick's floor: one second (hz cycles on the ruler) of masked
 //      Idle::idle() turns with the console drained - no kernel loop, none
 //      runs here. wall = the second, irq = the ticks, isr = the tick
@@ -209,6 +211,9 @@
 //      peer's share beside the host's. The host is the byte pump, then
 //      the same SERCOM with the transmit engine on channel 0 for the
 //      writes named I2cEngine::dma (DMAC_Handler bound to it then).
+//      With no peer answering the first command the letter skips: it
+//      sits in both images' `z`, which a desk without the second board
+//      runs too.
 //      SERCOM3_Handler is bound metered or plain per run (a
 //      flag): every op is the BEST of 8 by wall, metered (the thread idles
 //      masked between the vector's edges) and
@@ -310,6 +315,7 @@
 #include "samc21/ticker.hpp"
 #include "util/bench.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // The twi_link wire format the peer speaks: one file, included by its
@@ -459,27 +465,28 @@ constexpr uint32_t max_size = 4096u;
 
 // ---- the drain ------------------------------------------------------------------
 
-/// Spin bounds, the driver's own (Uart::rebase()): the ring holds at most
-/// 256 bytes, 22 ms at 115200, and a frame is 87 us - both far inside.
-constexpr uint32_t ring_spins = 8'000'000u;
-constexpr uint32_t frame_spins = 200'000u;
+/// Whether every drain since the letter's last verdict let the console
+/// fall silent: what the letter's verdict reports (ran()).
+bool drains_ok = true;
 
-/// Let the console fall silent: the transport's ring empty, then the
-/// resource's TXC (the file header, letter p). False when a bound ran out.
-bool drain() {
-    uint32_t spins = 0;
-    while (!Serial::tx_idle()) {
-        if (++spins == ring_spins) {
-            return false;
-        }
-    }
-    spins = 0;
-    while (!Serial::Resource::txc_flag()) {
-        if (++spins == frame_spins) {
-            return false;
-        }
-    }
-    return true;
+/// Let the console fall silent: every queued byte off the wire, its last
+/// stop bit included (Serial::tx_idle() answers for the ring and TXC
+/// alike, the file header's letter p), bounded on the ruler
+/// (util/test_wait.hpp's console_drain(), 200 ms: the 256-byte ring is
+/// 22 ms at 115200). False on a wedged console, and the letter's verdict
+/// is told so.
+bool console_drain() {
+    const bool idle = brio::console_drain<Ruler, Serial>();
+    drains_ok = drains_ok && idle;
+    return idle;
+}
+
+/// A letter's one verdict: it ran (`ok`), and every run it measured began
+/// on a silent console - a line still leaving puts SERCOM5's interrupts
+/// in the run.
+void ran(bool ok = true) {
+    bench.verdict("ran, the console silent before every measured run", ok && drains_ok);
+    drains_ok = true;
 }
 
 /// A run's numbers divided by its units, rounded to the nearest.
@@ -532,7 +539,7 @@ BENCH_PLACEMENT [[gnu::noinline]] uint32_t run_stamps() {
 }
 
 void tr_ruler() {
-    (void)drain();
+    console_drain();
     (void)delay_us(clock, probe_us);   // the wait's code into the flash cache
     const bool whole_ms_refused = !delay_us(clock, 1000u);
 
@@ -549,7 +556,7 @@ void tr_ruler() {
 
     // ruler: one read
     {
-        (void)drain();
+        console_drain();
         volatile uint32_t sink = 0;
         Interval iv;
         iv.start();
@@ -564,7 +571,7 @@ void tr_ruler() {
 
     // stamp: one enter()+leave() pair, nothing between
     {
-        (void)drain();
+        console_drain();
         const BenchCounters c0 = snapshot(sercom_meter, tick_meter, empty_meter);
         const uint32_t wall = run_stamps();
         const BenchSample s =
@@ -574,12 +581,12 @@ void tr_ruler() {
     }
 
     // interval: an empty measured interval, best of 8
-    (void)drain();
+    console_drain();
     bench_line(serial, "interval", 0u, best_of_8([] {}), Ruler::hz(), 0u);
 
     // window: one idle turn with nothing pending but the tick
     {
-        (void)drain();
+        console_drain();
         const uint32_t turns0 = Idle::idle_turns();
         Interval iv;
         iv.start();
@@ -592,7 +599,7 @@ void tr_ruler() {
         print_totals(turns, "turns", s);
         bench_line(serial, "window", 0u, per_unit(s, turns), Ruler::hz(), 0u);
     }
-    bench.verdict("ran", true);
+    ran();
 }
 
 // =============================================================================
@@ -632,14 +639,14 @@ BenchSample copy_at(uint32_t n, uint32_t dof, uint32_t so) {
 /// and at 60.
 void copy_alignment_lines() {
     bench_line(serial, "memcpy", line_run_bytes, copy_at(line_run_bytes, 0, 0), Ruler::hz(), memcpy_wire_bps);
-    (void)drain();
+    console_drain();
     for (const CopyAlignment& a : copy_alignments) {
         for (const uint32_t n : sizes) {
             bench_line(serial, a.op, n, copy_at(n, a.dst, a.src), Ruler::hz(), memcpy_wire_bps);
-            (void)drain();
+            console_drain();
         }
         bench_line(serial, a.op, line_run_bytes, copy_at(line_run_bytes, a.dst, a.src), Ruler::hz(), memcpy_wire_bps);
-        (void)drain();
+        console_drain();
     }
 }
 
@@ -659,7 +666,7 @@ void scan_lines(uint32_t off, const char* strlen_op, const char* memchr_op) {
             scan_sink = strlen(p);
         });
         bench_line(serial, strlen_op, n, a, Ruler::hz(), scan_wire);
-        (void)drain();
+        console_drain();
         const uint32_t bound = n < 64u ? 64u : n + 1u;
         const BenchSample b = best_of_8([off, bound] {
             const void* p = mem_src + off;
@@ -668,7 +675,7 @@ void scan_lines(uint32_t off, const char* strlen_op, const char* memchr_op) {
             scan_sink = reinterpret_cast<size_t>(memchr(p, 0, len));
         });
         bench_line(serial, memchr_op, n, b, Ruler::hz(), scan_wire);
-        (void)drain();
+        console_drain();
     }
 }
 
@@ -679,21 +686,21 @@ void tm_memory() {
     for (const uint32_t n : sizes) {
         mem_len = n;
         const uint32_t len = mem_len;
-        (void)drain();
+        console_drain();
         const BenchSample s = best_of_8([len] { std::memcpy(mem_dst, mem_src, len); });
         bench_line(serial, "memcpy", n, s, Ruler::hz(), memcpy_wire_bps);
     }
     for (const uint32_t n : sizes) {
         mem_len = n;
         const uint32_t len = mem_len;
-        (void)drain();
+        console_drain();
         const BenchSample s = best_of_8([len] { std::memset(mem_dst, 0x5A, len); });
         bench_line(serial, "memset", n, s, Ruler::hz(), memset_wire_bps);
     }
     copy_alignment_lines();
     scan_lines(0, "strlen", "memchr");
     scan_lines(1, "strlen.s1", "memchr.s1");
-    bench.verdict("ran", true);
+    ran();
 }
 
 // =============================================================================
@@ -717,11 +724,11 @@ alignas(4) constexpr std::array<char, max_size + 1u> payload = [] {
 void tp_print() {
     Interval iv;
     for (const uint32_t n : sizes) {
-        (void)drain();
+        console_drain();
         const char* text = payload.data() + (max_size - n);
         iv.start();
         print(serial, text);
-        const bool drained = drain();
+        const bool drained = console_drain();
         const BenchSample s = iv.stop();
         print(serial, crlf);
         if (!drained) {
@@ -729,14 +736,14 @@ void tp_print() {
         }
         bench_line(serial, "print", n, s, Ruler::hz(), print_wire_bps);
     }
-    bench.verdict("ran", true);
+    ran();
 }
 
 // =============================================================================
 // t - the tick's floor
 // =============================================================================
 void tt_tick() {
-    (void)drain();
+    console_drain();
     Interval iv;
     iv.start();
     while (iv.elapsed() < Ruler::hz()) {
@@ -745,7 +752,7 @@ void tt_tick() {
     }
     const BenchSample s = iv.stop();
     bench_line(serial, "tick", 0u, s, Ruler::hz(), 0u);
-    bench.verdict("ran", true);
+    ran();
 }
 
 // =============================================================================
@@ -811,7 +818,7 @@ void poll() {
         for (const uint8_t baud : bauds) {
             const uint32_t sck = spi_sck_hz(SysClock::hz, baud);
             for (const uint16_t n : sizes_e) {
-                (void)drain();
+                console_drain();
                 BenchSample best{};
                 uint8_t overruns = 0;
                 Interval iv;
@@ -847,7 +854,7 @@ void req(const char* op) {
     static constexpr uint16_t lens[] = {0, 2, 15};
     static const uint8_t cmd[1] = {cmd_byte};
     for (const uint16_t len : lens) {
-        (void)drain();
+        console_drain();
         const uint32_t bytes = 1u + len;
         const BenchSample s = best_of_8([len] {
             auto r = request<Host>(len, false, req_baud, true);
@@ -882,10 +889,15 @@ struct TwoWays {
     bool ok = true;
 };
 
+/// The budget of an engined transfer's masked idle wait: 10 ms, fifteen
+/// times the longest letter e starts (1024 frames at 12 MHz, 683 us) and
+/// ten tick periods.
+constexpr uint32_t engine_budget = us_cycles<Ruler>(10'000);
+
 TwoWays two_ways(const char* op, uint16_t n, bool read, uint8_t baud, bool polled) {
     auto r = request<SpiDma>(n, read, baud, polled);
     r.cs = CsPin::ref();
-    (void)drain();
+    console_drain();
     TwoWays t{};
     Interval iv;
     for (uint8_t run = 0; run < 8u; ++run) {
@@ -893,7 +905,11 @@ TwoWays two_ways(const char* op, uint16_t n, bool read, uint8_t baud, bool polle
         iv.start();
         bool done = SpiDma::start(r);
         const bool went = !done;
-        uint32_t spins = 0;
+        // The masked idle wait, bounded in ruler time on the interval's
+        // own start stamp. Not the shared wait_until(): its opening ruler
+        // read would land in the busy this line reports. The ruler is read
+        // only after a wake that did not finish the transfer, so the
+        // common run - one wake, the completion's - reads it never.
         while (!done) {
             disable_interrupts();
             if (spi_dma_done) {
@@ -902,7 +918,7 @@ TwoWays two_ways(const char* op, uint16_t n, bool read, uint8_t baud, bool polle
                 break;
             }
             Idle::idle();
-            if (++spins > 4'000'000u) {
+            if (!spi_dma_done && iv.elapsed() >= engine_budget) {
                 break;
             }
         }
@@ -962,7 +978,7 @@ void te_spi_host() {
     ee::DcPin::clear();
     if (!ee::SpiPoll::init(clock)) {
         print(serial, "  the SPI host did not come up", crlf);
-        bench.verdict("ran", false);
+        ran(false);
         return;
     }
     ee::poll();
@@ -971,7 +987,7 @@ void te_spi_host() {
     ee::engines();
     ee::CsPin::release();
     ee::DcPin::release();
-    bench.verdict("ran", true);
+    ran();
 }
 
 // =============================================================================
@@ -1055,13 +1071,11 @@ const uint8_t* bytes_of(uint32_t n) {
 uint32_t char_cycles(uint32_t baud) { return 10u * SysClock::hz / baud; }
 
 /// The console falls silent (letter p's drain: a line still leaving puts
-/// SERCOM5's interrupts in the run) and the loop's line idles a few frames.
+/// SERCOM5's interrupts in the run) and the loop's line idles four frames
+/// (40 bits, rounded up to the microsecond).
 void settle(uint32_t baud) {
-    (void)drain();
-    const uint32_t t0 = Ruler::now();
-    const uint32_t c = 4u * char_cycles(baud);
-    while (Ruler::now() - t0 < c) {
-    }
+    console_drain();
+    spin_us<Ruler>((40'000'000u + baud - 1u) / baud);
 }
 
 /// The per-unit figures under a line: interrupts and handler cycles per
@@ -1086,21 +1100,37 @@ void counters_line() {
 /// irq and isr), the engined one IDLES between completions (busy is the
 /// CPU's share). `handed` says the transport has given the hardware its
 /// last byte: DRE disarmed on the plain one, the engine free on the other.
+/// The budget of a whole uart.tx run: 1 s, nearly three times the
+/// longest (4096 bytes at 115200, 356 ms).
+constexpr uint32_t tx_run_budget = us_cycles<Ruler>(1'000'000);
+/// The budget of the last stop bit after the last byte is handed over:
+/// 1 ms, nearly six times the two frames still in DATA and the shifter at
+/// 115200 (174 us).
+constexpr uint32_t last_frames_us = 1'000;
+
 template <typename U, bool engined, typename Handed>
 Run tx_run(uint32_t n, Handed handed, bool& ok) {
     const uint8_t* p = bytes_of(n);
     const Mark a = mark();
+    // Both waits are bounded in ruler time on the run's own start stamp,
+    // the ruler read only on a turn that moved nothing: a run that
+    // progresses pays no read in its busy, and a stalled one still ends.
+    // Not the shared wait_until() for the same reason as letter e's wait.
+    bool stalled = false;
     uint32_t done = U::write_bulk(std::span<const uint8_t>(p, n));
-    uint32_t spins = 0;
-    while (done < n && spins++ < 40'000'000u) {
+    while (done < n) {
         if constexpr (engined) {
             disable_interrupts();
             Idle::idle();
         }
-        done += U::write_bulk(std::span<const uint8_t>(p + done, n - done));
+        const uint32_t took = U::write_bulk(std::span<const uint8_t>(p + done, n - done));
+        done += took;
+        if (took == 0u && Ruler::now() - a.t >= tx_run_budget) {
+            stalled = true;
+            break;
+        }
     }
-    spins = 0;
-    for (;;) {
+    while (!stalled) {
         if constexpr (engined) {
             disable_interrupts();
             if (handed()) {
@@ -1108,18 +1138,22 @@ Run tx_run(uint32_t n, Handed handed, bool& ok) {
                 break;
             }
             Idle::idle();
+            if (handed()) {
+                continue;   // asked again, masked, at the loop's top
+            }
         } else if (handed()) {
             break;
         }
-        if (++spins > 40'000'000u) {
-            break;
+        if (Ruler::now() - a.t >= tx_run_budget) {
+            stalled = true;
         }
     }
-    spins = 0;
-    while (!U::Resource::txc_flag() && spins++ < 400'000u) {
-    }
+    // The thread spins here in both shapes: a ruler read per turn lands in
+    // a spin's busy, which is all of its wall anyway.
+    const bool last_out =
+        !stalled && wait_until<Ruler>([] { return U::Resource::txc_flag(); }, last_frames_us);
     const Mark b = mark();
-    ok = done == n && U::Resource::txc_flag();
+    ok = done == n && last_out;
     return between(a, b);
 }
 
@@ -1199,15 +1233,18 @@ void rx_lines() {
             const uint8_t* p = bytes_of(n);
             const Mark a = mark();
             (void)LoopTxE::write_bulk(std::span<const uint8_t>(p, n));
-            uint32_t spins = 0;
-            while (LoopTxE::rx_pending() < n && spins++ < 4'000'000u) {
-            }
+            // The thread spins until the ring holds the burst: 100 ms,
+            // over four times the longest (256 bytes at 115200, 22 ms). A
+            // burst that never completes shows as missing bytes below.
+            const bool whole =
+                wait_until<Ruler>([n] { return LoopTxE::rx_pending() >= n; }, 100'000);
             const Mark b = mark();
             const Run r = between(a, b);
             const uint32_t bad = check_and_consume<LoopTxE>(p, n);
             bench_line(serial, "uart.rx", n, line_of(r.all, r.s1), Ruler::hz(), baud / 10u);
             per_byte("SERCOM1 (the receiver)", r.s1, n);
-            print(serial, "  wrong or missing bytes ", bad, crlf);
+            print(serial, "  wrong or missing bytes ", bad,
+                  whole ? "" : " (the burst did not complete in 100 ms)", crlf);
             counters_line<LoopTxE>();
             LoopTxE::release();
             live = Live::none;
@@ -1233,25 +1270,25 @@ void edge_once(const char* op, uint32_t baud, uint32_t n, Handed handed) {
     edge_seen = false;
     stamping = true;
     (void)U::write_bulk(std::span<const uint8_t>(p, n));
-    uint32_t lead = 0;
-    while (!handed() && lead++ < 4'000'000u) {
-    }
+    // The last byte handed over within 10 ms (four frames at 115200 are
+    // 347 us); then, masked, TXC within 500 us - the two frames left, 174
+    // us, and under the one tick period a masked ruler can count across
+    // (Ticker::cycles() copes with one pending tick); then the vector's
+    // stamp within 10 ms. A wait that runs out shows as NOT SEEN below.
+    const bool lead = wait_until<Ruler>([&handed] { return handed(); }, 10'000);
     disable_interrupts();
-    uint32_t spins = 0;
-    while (!U::Resource::txc_flag() && spins++ < 400'000u) {
-    }
+    const bool txc = lead && wait_until<Ruler>([] { return U::Resource::txc_flag(); }, 500);
     const uint32_t t_txc = Ruler::now();
     enable_interrupts();
-    spins = 0;
-    while (!edge_seen && spins++ < 4'000'000u) {
-    }
+    (void)wait_until<Ruler>([] { return edge_seen; }, 10'000);   // edge_seen is the answer, printed
     stamping = false;
     const uint32_t bad = check_and_consume<U>(p, n);
     const BenchSample s{edge_seen ? edge_at - t_txc : 0u, 0u, 0u, 0u};
     bench_line(serial, op, n, s, Ruler::hz(), 0u);
     print(serial, "  at ", baud, " baud: the edge ", edge_seen ? "seen" : "NOT SEEN",
-          " by the vector, ", static_cast<int32_t>(edge_at - t_txc), " cycles past TXC; a frame is ",
-          char_cycles(baud), " cycles; wrong or missing bytes ", bad, crlf);
+          " by the vector, ", static_cast<int32_t>(edge_at - t_txc), " cycles past TXC",
+          txc ? "" : " (TXC NOT SEEN)", "; a frame is ", char_cycles(baud),
+          " cycles; wrong or missing bytes ", bad, crlf);
 }
 
 void edge_lines() {
@@ -1288,17 +1325,20 @@ void copy_lines() {
     for (const uint32_t n : {1u, 4u, 8u, 12u, 16u, 20u, 24u, 32u, 64u, 128u, 256u, 1024u}) {
         uint32_t alike[4] = {};
         uint32_t across[4] = {};
+        bool engine_idle = true;
         for (uint32_t head = 0; head < 4u; ++head) {
             for (uint32_t which = 0; which < 2u; ++which) {
                 live = Live::txe;
                 (void)LoopTxE::init(clock, baud);
                 LoopTxE::Resource::enable_rxc_interrupt(false);
                 settle(baud);
+                // The engine's block ends within 20 ms: six times the longest,
+                // 1024 bytes at 3 Mbaud (3.4 ms).
                 if (head != 0u) {
                     (void)LoopTxE::write_bulk(std::span<const uint8_t>(bytes_of(max_size), head));
-                    uint32_t spins = 0;
-                    while (DmaTxEngine<0>::busy() && spins++ < 4'000'000u) {
-                    }
+                    engine_idle =
+                        wait_until<Ruler>([] { return !DmaTxEngine<0>::busy(); }, 20'000) &&
+                        engine_idle;
                 }
                 const uint8_t* p = bytes_of(max_size) + (which == 0u ? head : 0u);
                 disable_interrupts();
@@ -1306,9 +1346,8 @@ void copy_lines() {
                 (void)LoopTxE::write_bulk(std::span<const uint8_t>(p, n));
                 const uint32_t w = Ruler::now() - t0;
                 enable_interrupts();
-                uint32_t spins = 0;
-                while (DmaTxEngine<0>::busy() && spins++ < 4'000'000u) {
-                }
+                engine_idle = wait_until<Ruler>([] { return !DmaTxEngine<0>::busy(); }, 20'000) &&
+                              engine_idle;
                 LoopTxE::release();
                 live = Live::none;
                 (which == 0u ? alike : across)[head] = w;
@@ -1316,19 +1355,20 @@ void copy_lines() {
         }
         print(serial, "  uart.copy write_bulk n=", n, ": aligned alike ", alike[0], ' ', alike[1], ' ',
               alike[2], ' ', alike[3], ", source on a word ", across[0], ' ', across[1], ' ', across[2],
-              ' ', across[3], " cycles at ring heads 0..3", crlf);
+              ' ', across[3], " cycles at ring heads 0..3",
+              engine_idle ? "" : " (an engine block did not end in 20 ms)", crlf);
     }
 }
 
 }  // namespace uu
 
 void tu_uart() {
-    (void)drain();
+    console_drain();
     uu::tx_lines();
     uu::rx_lines();
     uu::edge_lines();
     uu::copy_lines();
-    bench.verdict("ran", true);
+    ran();
 }
 
 // =============================================================================
@@ -1406,12 +1446,11 @@ uint8_t link(uint8_t addr, const uint8_t* tx, uint8_t txn, uint8_t* rx, uint8_t 
     if (Pump::start(r)) {
         return Pump::status();
     }
-    const uint32_t t0 = Ticker::millis();
-    while (!done) {
-        if (Ticker::millis() - t0 > 300u) {
-            (void)Pump::recover();
-            return 0xEE;
-        }
+    // 300 ms: a command frame of at most max_payload + 4 bytes at 100 kHz
+    // is a few milliseconds, the peer's stretching included.
+    if (!wait_until<Ruler>([] { return done; }, 300'000)) {
+        (void)Pump::recover();
+        return 0xEE;
     }
     return Pump::status();
 }
@@ -1423,12 +1462,6 @@ uint8_t (&frame_buf)[twilink::max_payload + 4] =
 uint8_t (&resp_buf)[twilink::response_bytes] =
     reinterpret_cast<uint8_t (&)[twilink::response_bytes]>(mem_dst);
 
-void settle_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
-
 /// One command frame to the peer and its ack collected (twi_link.hpp).
 bool command(twilink::Op op, const uint8_t* p, uint8_t len) {
     for (uint8_t k = 0; k < 3u; ++k) {
@@ -1439,21 +1472,21 @@ bool command(twilink::Op op, const uint8_t* p, uint8_t len) {
             },
             op, p, len);
         if (link(twilink::command_addr, frame_buf, n, nullptr, 0) == i2c_ok) {
-            settle_ms(2);
+            spin_us<Ruler>(2'000);
             if (link(twilink::command_addr, nullptr, 0, resp_buf, twilink::response_bytes) == i2c_ok) {
                 twilink::Decoder dec;
                 for (const uint8_t b : resp_buf) {
                     if (dec.feed(b) == twilink::Decoder::Result::frame) {
                         const twilink::Frame& f = dec.frame();
                         if (f.op == twilink::Op::ack && f.len == 2 && f.data[0] == twilink::byte_of(op)) {
-                            settle_ms(twilink::arm_ms);
+                            spin_us<Ruler>(twilink::arm_ms * 1000u);
                             return true;
                         }
                     }
                 }
             }
         }
-        settle_ms(400);
+        spin_us<Ruler>(400'000);
     }
     return false;
 }
@@ -1577,7 +1610,7 @@ bool op(const char* name, const char* bare, I2cSpeed s, uint8_t addr, uint8_t tx
         n == 0u ? 0u : static_cast<uint32_t>((static_cast<uint64_t>(n) * SysClock::hz + wire / 2u) / wire);
     bool all = true;
     for (const bool m : {true, false}) {
-        (void)drain();
+        console_drain();
         metered = m;
         bool ok = false;
         for (uint8_t& b : i2c_rx) {
@@ -1656,18 +1689,33 @@ void ti_i2c() {
     (void)GclkChannel::connect(Sercom<3>::gclk_slow_id(), 0);
     if (!Pump::init(clock, rise_ns)) {
         print(serial, "  the I2C host did not come up", crlf);
-        bench.verdict("ran", false);
+        bench.verdict("the I2C host comes up", false);
+        drains_ok = true;
         return;
     }
     bool all = true;
+    bool first = true;
     for (const Speed& sp : speeds) {
         (void)Pump::init(clock, rise_ns);
         if (!serve(15000u)) {
-            print(serial, "  THE PEER DID NOT ANSWER on 0x6B: board B must run twi_peer", crlf);
+            if (first) {
+                // No second board on the bus: the letter has nothing to
+                // measure, and claims nothing.
+                Pump::release();
+                drains_ok = true;
+                bench.skip("no peer answered on 0x6B: letter i needs a second board running "
+                           "twi_peer on PA22/PA23");
+                return;
+            }
+            print(serial, "  THE PEER STOPPED ANSWERING on 0x6B", crlf);
             all = false;
             break;
         }
-        const uint32_t t0 = Ticker::millis();
+        first = false;
+        // The peer serves for 15 s from its ack; the next command waits
+        // that out (and 100 ms more) on this stopwatch.
+        Stopwatch<Ruler> serving;
+        serving.start();
         print(serial, "-- ", sp.name, ": BAUD ", Pump::baud_of(sp.speed).baud, '/',
               Pump::baud_of(sp.speed).baudlow, ", SCL period ", period<Pump>(sp.speed),
               " cycles (", SysClock::hz / period<Pump>(sp.speed), " Hz) with the node's ", rise_ns,
@@ -1684,8 +1732,10 @@ void ti_i2c() {
         }
         Dma::release();
         dma_live = false;
-        print(serial, "  (", Ticker::millis() - t0, " ms with the peer serving)", crlf);
-        while (Ticker::millis() - t0 < 15100u) {
+        const uint32_t spent_us = serving.elapsed() / (Ruler::hz() / 1'000'000u);
+        print(serial, "  (", spent_us / 1000u, " ms with the peer serving)", crlf);
+        if (spent_us < 15'100'000u) {
+            spin_us<Ruler>(15'100'000u - spent_us);
         }
     }
     // A DATA NACK: the peer refuses the 3rd byte it receives, and a
@@ -1704,12 +1754,15 @@ void ti_i2c() {
         } else {
             all = op<Pump>("i2c.write.nackdata", "i2c.write.nackdata.bare", I2cSpeed::standard_100k,
                            peer_addr, 16, 0, false, i2c_nack_data) && all;
-            settle_ms(3100);
+            spin_us<Ruler>(3'100'000);
             (void)Pump::init(clock, rise_ns);
         }
     }
     Pump::release();
-    bench.verdict("every tenure completed with its status, every read byte-exact", all);
+    bench.verdict("every tenure completed with its status, every read byte-exact, the console "
+                  "silent before every run",
+                  all && drains_ok);
+    drains_ok = true;
 }
 
 void banner() {

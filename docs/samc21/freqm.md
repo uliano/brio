@@ -178,7 +178,7 @@ const uint32_t slow_hz = (uint64_t(refnum) * 48'000'000) / *count;
 
 ## Bench findings
 
-From `test_samc_freqm` (4 letters, 25 verdicts). Nothing to wire, and
+From `test_samc_freqm` (4 letters, 26 verdicts). Nothing to wire, and
 this suite could not need wires in principle: every clock it measures is
 inside the chip.
 
@@ -212,10 +212,10 @@ inside the chip.
   which is the same wander seen through too few of the reference's
   cycles to average it. A ratio test is immune to the reference's
   absolute error but not to its drift between the two measurements.
-- **`refnum_for()`'s budget is where the overflow really is**: a
-  measurement at the computed REFNUM completes with its count under
-  2^24, and OSC48M against OSCULP32K saturates the field at 255 before
-  the overflow edge is reachable at all.
+- **OSC48M against OSCULP32K saturates REFNUM at 255 far below the
+  overflow edge** - a count near 374000 against 2^24 - so `refnum_for()`'s
+  budget is reachable only on a slower reference, which letter c builds
+  (OSCULP32K / 64 on generator 7).
 - **An initialization order that looks arbitrary is not.** Resetting the
   block before its GCLK channels are connected leaves SYNCBUSY.SWRST
   standing forever, and every measurement then returns nothing: SWRST is
@@ -242,6 +242,10 @@ Driver gaps (not built):
 
 Implemented but not bench-verified:
 
+- **The 24-bit overflow edge itself**: letter c measures the ratio on
+  OSCULP32K / 64, then brackets 2^24 at 1 % under (the count must
+  complete, as the ratio predicts) and 1 % past (it must overflow); its
+  runs on the bench measure it.
 - **The ISR body, `Freqm::isr()`.** The DONE interrupt has ended a
   standby on silicon (above, "A measurement finishes while the CPU
   sleeps"), but that handler acknowledges through `clear_flags()`

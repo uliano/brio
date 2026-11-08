@@ -29,6 +29,12 @@
 //
 // Bench diagnostic, NOT a kernel app (sequential, blocking). Console on
 // USART2 ALT1 (PF4/PF5) at 460800 - USART2 is never reconfigured here.
+// The kernel's tick (avrxt/ticker.hpp: the RTC PIT at 1024 Hz, on OSC32K,
+// so a CLK_PER rebase leaves it alone) runs from boot: every time-out
+// below is a time on it (util/test_wait.hpp's wait_ticks), and letter t's
+// timed arbiter counts it. The letters that time a span with a TCB either
+// mask interrupts for it (v's legs) or carry a bound that a tick handler
+// of a few microseconds cannot reach (h, l).
 //
 // Wires: ONE open-drain I2C bus with 1.5k pull-ups to +5 V, two taps of
 // THIS board on it:
@@ -59,7 +65,7 @@
 // a 10-bit prefix refused inside start() with two clients listening
 // for the first, the three bus speeds, a clock rebase, and a
 // tenure parked behind the peer's held SDA answered by the timed I2cBus
-// (letter t, the one letter that runs the RTC PIT as the kernel's clock).
+// (letter t, the one letter that runs the kernel's clock under an arbiter).
 // The peer's command-mode client answers ONE address exactly, with no
 // General Call, no mask, no PMEN and no PIEN, so the single-board half
 // above cannot see it at all - which is why `z` runs unchanged with the
@@ -109,9 +115,11 @@
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #include "twi_link.hpp"
+#include "twi_link_client.hpp"
 
 #include "board.hpp"
 
@@ -199,6 +207,12 @@ TwoKeyTestBench<Serial, 'y'> bench;
 
 void verdict(const char* name, bool ok) { bench.verdict(name, ok); }
 void verdict(const char* a, const char* b, bool ok) { bench.verdict(a, b, ok); }
+
+/// Every queued console byte off the wire, bounded on the kernel tick
+/// (the TCBs belong to the letters): false on a wedged console.
+bool console_drain() {
+    return brio::wait_ticks<P>([] { return Serial::tx_idle(); }, brio::ticks_from_ms<P>(200));
+}
 // ---- the client half, serviced by polling (and by the vector in test i) ------
 
 volatile uint16_t cl_addr_hits = 0;
@@ -269,43 +283,58 @@ void service_client() {
 
 /// MSTATUS as it stood on the pass that completed the last request -
 /// the only place RXACK and the bus state of a failure can be READ, since
-/// the engine's isr() clears what it acts on.
+/// the engine's isr() clears what it acts on - and how many host flags
+/// the engine served in it: the address packet's, then one a data byte,
+/// so an address NACK ends on the first and a NACK of data byte n on
+/// event n + 1.
 uint8_t last_mstatus = 0;
+uint8_t last_events = 0;
+
+/// The host flags a pass of the engine acts on.
+constexpr uint8_t host_flags = TWI_RIF_bm | TWI_WIF_bm | TWI_ARBLOST_bm | TWI_BUSERR_bm;
 
 /// Pump both halves until the HOST raises a flag; returns MSTATUS (0 on
-/// a time-out).
+/// a time-out). The budget, 100 ms, is a thousand times a 9-bit frame at
+/// 100 kHz (90 us) and outlasts the 200 us bus time-out letter h waits
+/// through.
 template <typename C>
-uint8_t pump_to_host_flag(uint32_t spins = 200'000u) {
-    for (uint32_t i = 0; i < spins; ++i) {
-        service_client<C>();
-        const uint8_t s = T::host_status();
-        if (s & (TWI_RIF_bm | TWI_WIF_bm | TWI_ARBLOST_bm | TWI_BUSERR_bm)) return s;
-    }
-    return 0;
+uint8_t pump_to_host_flag() {
+    uint8_t s = 0;
+    const bool flagged = brio::wait_ticks<P>(
+        [&] {
+            service_client<C>();
+            s = T::host_status();
+            return (s & host_flags) != 0u;
+        },
+        brio::ticks_from_ms<P>(100));
+    return flagged ? s : 0u;
 }
 
 /// One whole Request through the engine, pumped by hand (the vectors
 /// stay silent in the polled tests). Returns the engine's status, or
-/// 0xFE when nothing ever completed.
+/// 0xFE when nothing completed within 500 ms - hundreds of times the
+/// longest tenure a letter runs through it (twelve bytes at 100 kHz,
+/// about 1.2 ms; the stretched tenures of letters l and t have loops of
+/// their own).
 template <typename C>
-uint8_t run_request(const Host::Request& r, bool with_client = true,
-                    uint32_t spins = 400'000u) {
+uint8_t run_request(const Host::Request& r) {
     cl_reset();
+    last_events = 0;
     if (Host::start(r)) return Host::status();
-    for (uint32_t i = 0; i < spins; ++i) {
-        if (with_client) service_client<C>();
-        const uint8_t s = T::host_status();
-        if ((s & (TWI_RIF_bm | TWI_WIF_bm | TWI_ARBLOST_bm | TWI_BUSERR_bm))) last_mstatus = s;
-        if ((s & (TWI_RIF_bm | TWI_WIF_bm | TWI_ARBLOST_bm | TWI_BUSERR_bm)) &&
-            Host::isr()) {
-            // Let the client see the STOP that just went out.
-            if (with_client) {
-                for (uint16_t k = 0; k < 4000; ++k) service_client<C>();
-            }
-            return Host::status();
-        }
-    }
-    return 0xFE;
+    const bool done = brio::wait_ticks<P>(
+        [] {
+            service_client<C>();
+            const uint8_t s = T::host_status();
+            if ((s & host_flags) == 0u) return false;
+            last_mstatus = s;
+            ++last_events;
+            return Host::isr();
+        },
+        brio::ticks_from_ms<P>(500));
+    if (!done) return 0xFE;
+    // Let the client see the STOP that just went out.
+    for (uint16_t k = 0; k < 4000; ++k) service_client<C>();
+    return Host::status();
 }
 
 // ---- the injector: PC2/PC3 as plain GPIO on the same open-drain bus ---------
@@ -728,9 +757,9 @@ void ta_routes() {
 void nack_traffic(uint8_t n) {
     for (uint8_t i = 0; i < n; ++i) {
         T::address_write(absent_addr);
-        for (uint32_t s = 0; s < 100'000u; ++s) {
-            if (T::write_flag()) break;
-        }
+        // 5 ms against a 9-bit frame of at most 90 us; dropped on purpose:
+        // the STOP goes out either way, and the meter judges what came.
+        (void)brio::wait_ticks<P>([] { return T::write_flag(); }, brio::ticks_from_ms<P>(5));
         T::host_command(TwiHostCmd::stop);
         delay_us(clock, 60);
     }
@@ -1144,20 +1173,22 @@ void tf_smart() {
     verdict("SCTRLA.SMEN is set", T::client_smart());
     cl_reset();
     T::address_write(client_addr);
-    uint8_t st = 0;
     bool dif_cleared_by_data = false;
-    for (uint32_t i = 0; i < 200'000u && st == 0; ++i) {
-        const auto s = Client::isr();
-        if (s.address_or_stop() && s.is_address()) {
-            cl_addr_hits = cl_addr_hits + 1;
-            Client::respond(TwiAck::ack);
-        }
-        st = T::host_status() & (TWI_WIF_bm | TWI_RIF_bm);
-    }
+    // Each wait 5 ms against a 9-bit frame of 90 us. Their answers are
+    // dropped on purpose: the verdict below reads DIF itself, and an
+    // address the client never matched leaves DIF down.
+    (void)brio::wait_ticks<P>(
+        [] {
+            const auto s = Client::isr();
+            if (s.address_or_stop() && s.is_address()) {
+                cl_addr_hits = cl_addr_hits + 1;
+                Client::respond(TwiAck::ack);
+            }
+            return (T::host_status() & (TWI_WIF_bm | TWI_RIF_bm)) != 0u;
+        },
+        brio::ticks_from_ms<P>(5));
     T::host_write(0x5C);                       // one data byte to the client
-    for (uint32_t i = 0; i < 200'000u; ++i) {
-        if (T::data_flag()) break;
-    }
+    (void)brio::wait_ticks<P>([] { return T::data_flag(); }, brio::ticks_from_ms<P>(5));
     const bool dif_before = T::data_flag();
     const uint8_t got = T::client_read();      // Smart mode: this clears DIF and ACKs
     dif_cleared_by_data = !T::data_flag();
@@ -1261,21 +1292,35 @@ void tg_quick() {
 
 // ---- h: the bus state machine and the injector --------------------------------
 
-/// Microseconds until BUSSTATE leaves Busy (0xFFFF = never within the
-/// budget). The stopwatch is a free-running TCB at CLK_PER.
-uint16_t time_to_idle(uint32_t budget_us) {
+/// The budget of time_to_idle(): 32000 CLK_PER ticks, 1.6 ms at 20 MHz
+/// and 1.33 ms at 24 - more than six times the longest time-out letter h
+/// times (200 us) - and within half the 16-bit stopwatch's wrap, so the
+/// poll that sees it run out (one turn some twenty cycles, a tick
+/// handler a few microseconds) reads it long before the count folds.
+constexpr uint16_t idle_budget = 32'000;
+static_assert(brio::span_fits<16>(idle_budget), "the budget within half the 16-bit wrap");
+static_assert(static_cast<uint32_t>(idle_budget) >= 6ul * 200ul * mhz,
+              "the budget must outlast the 200 us setting with room to spare");
+
+/// Microseconds until BUSSTATE leaves Busy (0xFFFF = not within
+/// idle_budget). The stopwatch is a TCB at CLK_PER counting from 0 at
+/// the call; the poll reads the state first and the stopwatch after, so
+/// a reading is late by up to one turn, never early.
+uint16_t time_to_idle() {
     Stopwatch::init({.mode = TcbMode::capture, .clock = TcbClock::div1, .compare = 0});
     Stopwatch::count(0);
-    const uint32_t spins = budget_us * 6u;      // the loop is well under a microsecond
-    for (uint32_t i = 0; i < spins; ++i) {
-        if (T::bus_state() == TwiBusState::idle) {
-            const uint16_t t = Stopwatch::count();
-            Stopwatch::disable();
-            return static_cast<uint16_t>(t / mhz);
+    uint16_t result = 0xFFFF;
+    for (;;) {
+        const bool idle = T::bus_state() == TwiBusState::idle;
+        const uint16_t t = Stopwatch::count();
+        if (idle) {
+            result = static_cast<uint16_t>(t / mhz);
+            break;
         }
+        if (t > idle_budget) break;
     }
     Stopwatch::disable();
-    return 0xFFFF;
+    return result;
 }
 
 void th_busstate() {
@@ -1294,7 +1339,8 @@ void th_busstate() {
     print(serial, "  after an injected START, BUSSTATE = ",
           static_cast<uint8_t>(T::bus_state()), " (3 = Busy)", crlf);
     verdict("an externally generated START makes the bus Busy", busy);
-    verdict("no time-out configured: it stays Busy", time_to_idle(1000) == 0xFFFF);
+    verdict("no time-out configured: it stays Busy (for the whole budget, over a ms)",
+            time_to_idle() == 0xFFFF);
 
     // A foreign STOP puts it back.
     inject_stop();
@@ -1306,14 +1352,26 @@ void th_busstate() {
     const TwiTimeout tos[3] = {TwiTimeout::us50, TwiTimeout::us100, TwiTimeout::us200};
     const char* names[3] = {"50 us", "100 us", "200 us"};
     const uint16_t nominal[3] = {50, 100, 200};
+    // The three legs on a drained console, printed after the last: no
+    // transmit interrupt inside a timed leg.
+    uint16_t t[3];
+    bool went_busy[3];
+    if (!console_drain()) {
+        verdict("the console drained before the timed legs", false);
+        quiesce();
+        return;
+    }
     for (uint8_t i = 0; i < 3; ++i) {
         T::timeout(tos[i]);
         inject_start_and_leave();
-        const bool went_busy = T::bus_state() == TwiBusState::busy;
-        const uint16_t t = time_to_idle(4000);
-        print(serial, "  TIMEOUT ", names[i], ": Busy -> Idle after ", t, " us", crlf);
+        went_busy[i] = T::bus_state() == TwiBusState::busy;
+        t[i] = time_to_idle();
+    }
+    for (uint8_t i = 0; i < 3; ++i) {
+        print(serial, "  TIMEOUT ", names[i], ": Busy -> Idle after ", t[i], " us", crlf);
         verdict("the inactive-bus time-out returns the bus to Idle at ", names[i],
-                went_busy && t != 0xFFFF && t >= nominal[i] / 2 && t <= nominal[i] * 3);
+                went_busy[i] && t[i] != 0xFFFF && t[i] >= nominal[i] / 2 &&
+                    t[i] <= nominal[i] * 3);
     }
     T::timeout(TwiTimeout::disabled);
     inject_stop();
@@ -1473,7 +1531,9 @@ void ti_interrupts() {
 
     for (uint8_t i = 0; i < 6; ++i) tx_buf[i] = static_cast<uint8_t>(0x21 + i);
     bool started = !Host::start({client_addr, lend<Lease::reply>(tx_buf), 6, {}, 0, {}});
-    for (uint32_t i = 0; i < 400'000u && !host_done; ++i) {}
+    // 50 ms against a 7-frame tenure of 0.7 ms; dropped on purpose: the
+    // verdict below reads host_done itself.
+    (void)brio::wait_ticks<P>([] { return host_done; }, brio::ticks_from_ms<P>(50));
     delay_us(clock, 2000);
     const uint16_t hi = host_ints;
     const uint16_t ci = cl_ints;
@@ -1588,16 +1648,20 @@ void tj_rebase() {
     tx_buf[0] = 0x7B;
     post<Bus>(Host::Request{client_addr, lend<Lease::reply>(tx_buf), 1, lend<Lease::reply>(rx_buf), 2,
                             reply_to<Sink, I2cDone>()});
-    bool replied = false;
     uint8_t status = 0xFF;
-    for (uint32_t i = 0; i < 800'000u && !replied; ++i) {
-        service_client<Client>();
-        (void)serve_one<Bus>();   // in its slot: the arbiter holds what waits
-        if (const auto r = Sink::queue.pop()) {
-            replied = true;
-            status = r->status;
-        }
-    }
+    // 500 ms against a three-frame tenure under a millisecond; the answer
+    // is the verdict's `replied` below.
+    bool replied = brio::wait_ticks<P>(
+        [&] {
+            service_client<Client>();
+            (void)serve_one<Bus>();   // in its slot: the arbiter holds what waits
+            if (const auto r = Sink::queue.pop()) {
+                status = r->status;
+                return true;
+            }
+            return false;
+        },
+        brio::ticks_from_ms<P>(500));
     isr_mode = false;
     bus_mode = false;
     T::enable_read_interrupt(false);
@@ -1619,17 +1683,21 @@ void tj_rebase() {
                  : "speed_ok says no to 1 MHz at 5 MHz, yes to 100 kHz",
             !Host::speed_ok(I2cSpeed::fast_plus_1m) && Host::speed_ok(I2cSpeed::standard_100k));
     cl_reset();
-    replied = false;
     status = 0xFF;
     post<Bus>(Host::Request{client_addr, lend<Lease::reply>(tx_buf), 1, {}, 0, reply_to<Sink, I2cDone>(),
                             I2cSpeed::fast_plus_1m});
-    for (uint32_t i = 0; i < 100'000u && !replied; ++i) {
-        (void)serve_one<Bus>();   // in its slot: the arbiter holds what waits
-        if (const auto r = Sink::queue.pop()) {
-            replied = true;
-            status = r->status;
-        }
-    }
+    // The refusal comes inside start(), in the first dispatch: 50 ms is
+    // generous; the answer is the verdict's `replied` below.
+    replied = brio::wait_ticks<P>(
+        [&] {
+            (void)serve_one<Bus>();   // in its slot: the arbiter holds what waits
+            if (const auto r = Sink::queue.pop()) {
+                status = r->status;
+                return true;
+            }
+            return false;
+        },
+        brio::ticks_from_ms<P>(50));
     print(serial, at24 ? "  a 1 MHz request at 6 MHz replied " : "  a 1 MHz request at 5 MHz replied ",
           status, " (i2c_rejected = ", i2c_rejected,
           "), the client saw ", cl_rx_n, " bytes", crlf);
@@ -1899,7 +1967,10 @@ void tv_ea_facts() {
         const TwiTimeout tos[3] = {TwiTimeout::us50, TwiTimeout::us100, TwiTimeout::us200};
         const uint16_t nominal[3] = {50, 100, 200};
         TimeoutLeg legs[3][3];
-        while (!Serial::tx_idle()) {
+        if (!console_drain()) {
+            verdict("the console drained before the timed legs", false);
+            quiesce();
+            return;
         }
         for (uint8_t k = 0; k < 3; ++k) {
             ClockTimebase::write(tbs[k]);
@@ -2042,78 +2113,50 @@ bool same_board(const char* label, std::string_view mine) {
 
 using twilink::Op;
 
-uint8_t link_tx[twilink::max_payload + 4];
-uint8_t link_rx[twilink::response_bytes];
-twilink::Decoder link_dec;
-twilink::Frame link_ans{};
-
 void wait_ms(uint16_t ms) { delay_us(clock, static_cast<uint32_t>(ms) * 1000u); }
 
-/// One READ tenure, decoded into `link_ans`.
-bool link_collect() {
-    for (uint8_t i = 0; i < twilink::response_bytes; ++i) link_rx[i] = 0;
-    if (run_request<Client>({twilink::command_addr, {}, 0, lend<Lease::reply>(link_rx),
-                             twilink::response_bytes, {}}) != i2c_ok) {
-        return false;
+/// The path twi_link_client.hpp drives the command channel over: one
+/// tenure is one run_request() of the polled host (the vectors silent),
+/// a failed attempt is followed by the engine's recover() - an ENABLE
+/// cycle that keeps the baud the letter set, a rebased one included - and
+/// the client's waits are fixed delays on this clock.
+struct LinkPort {
+    static uint8_t tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx,
+                          uint8_t rx_len) {
+        return run_request<Client>(
+            {addr, lend<Lease::reply>(tx), tx_len, lend<Lease::reply>(rx), rx_len, {}});
     }
-    link_dec.reset();
-    for (uint8_t i = 0; i < twilink::response_bytes; ++i) {
-        if (link_dec.feed(link_rx[i]) == twilink::Decoder::Result::frame) {
-            link_ans = link_dec.frame();
-            return true;
-        }
-    }
-    return false;
-}
+    static void ready() { Host::recover(); }
+    static void wait_ms(uint32_t ms) { delay_us(clock, ms * 1000ul); }
+};
+/// The shared choreography: three attempts with the peer's 400 ms
+/// recovery bound between them, twi_link.hpp's arm margin after an
+/// acknowledged command, the report asked up to four times.
+using Link = TwiLinkClient<LinkPort>;
+
+/// Letter k's raw frames (a corrupted one, a truncated one) and the
+/// answer a raw exchange decodes into.
+uint8_t link_tx[twilink::max_payload + 4];
+twilink::Frame link_ans{};
 
 /// One command: the frame out, the answer back. RAW - no retry, no
 /// verdict on what came back (test k needs the nak as an answer).
 bool link_once(Op op, const uint8_t* p, uint8_t len) {
-    uint8_t n = 0;
-    twilink::write_frame(
-        [&](uint8_t b) {
-            if (n < sizeof link_tx) link_tx[n++] = b;
-        },
-        op, p, len);
-    if (run_request<Client>({twilink::command_addr, lend<Lease::reply>(link_tx), n, {}, 0, {}}) != i2c_ok) {
-        return false;
-    }
-    wait_ms(1);
-    return link_collect();
-}
-
-/// A command that must be acknowledged, retried three times (a peer
-/// still finishing a previous action's deadline is the normal reason a
-/// first attempt is not heard).
-bool link_cmd(Op op, const uint8_t* p = nullptr, uint8_t len = 0) {
-    for (uint8_t attempt = 0; attempt < 3; ++attempt) {
-        if (link_once(op, p, len) && link_ans.op == Op::ack &&
-            link_ans.len >= 1 && link_ans.data[0] == twilink::byte_of(op)) {
-            return true;
-        }
-        wait_ms(20);
-    }
-    return false;
-}
-
-/// Command an action and give the peer its arming margin.
-bool peer_action(Op op, const twilink::Params& a) {
-    uint8_t p[twilink::params_size];
-    twilink::put_params(p, a);
-    if (!link_cmd(op, p, twilink::params_size)) return false;
-    wait_ms(twilink::arm_ms);
-    return true;
-}
-
-/// What the peer saw. The ack comes first, the data frame with a second
-/// read.
-bool peer_report(twilink::Report& out) {
-    if (!link_cmd(Op::report)) return false;
+    if (!Link::send_frame(op, p, len)) return false;
     wait_ms(2);
-    if (!link_collect() || link_ans.op != Op::report_data) return false;
-    out = twilink::get_report(link_ans.data);
-    return true;
+    return Link::recv_frame(link_ans);
 }
+
+/// A command that must be acknowledged (twi_link_client.hpp's command()).
+bool link_cmd(Op op, const uint8_t* p = nullptr, uint8_t len = 0) {
+    return Link::command(op, p, len);
+}
+
+/// Command an action; the arm margin is the client's.
+bool peer_action(Op op, const twilink::Params& a) { return Link::act(op, a); }
+
+/// What the peer saw: the ack, then the data frame with a second read.
+bool peer_report(twilink::Report& out) { return Link::report(out); }
 
 void print_report(const twilink::Report& r) {
     print(serial, "    peer: op=", hex(r.op), " count=", r.count, " (rx ", r.aux0,
@@ -2140,10 +2183,8 @@ bool link_up() {
 /// that peer, read the peer's own way or SKIPPED, with the reason, against
 /// another.
 uint8_t peer_kind() {
-    if (!link_cmd(Op::ident)) return 0;
-    wait_ms(2);
-    if (!link_collect() || link_ans.op != Op::ident_data) return 0;
-    return twilink::peer_kind(twilink::get_ident(link_ans.data).version);
+    twilink::Ident id{};
+    return Link::ident(id) ? twilink::peer_kind(id.version) : 0u;
 }
 
 /// The client's RXACK in the peer's own SSTATUS, which a Report carries
@@ -2163,7 +2204,9 @@ void tk_bringup() {
     verdict("the peer answers a ping", link_cmd(Op::ping));
 
     verdict("ident acknowledged", link_cmd(Op::ident));
-    bool got = link_collect() && link_ans.op == Op::ident_data;
+    wait_ms(2);
+    const bool got = Link::recv_frame(link_ans) && link_ans.op == Op::ident_data &&
+                     link_ans.len == twilink::ident_size;
     twilink::Ident d{};
     if (got) d = twilink::get_ident(link_ans.data);
     print(serial, "  peer ident: label=", d.label[0], d.label[1], d.label[2], d.label[3],
@@ -2177,8 +2220,14 @@ void tk_bringup() {
     // manifest's business, never the firmware's.
     verdict("the peer names a board, and not this one",
             got && d.label[0] != 0 && !same_board(d.label, board_id()));
-    verdict("the peer's 24 MHz crystal started (its byte turnaround is the "
-            "crystal's)", d.xtal == 1);
+    // The peer's crystal is its board's fact, not the bus's: no verdict
+    // rests on it (letter l judges the peer's commanded holds within a
+    // fifth, wider than an internal oscillator's few per cent; l and r
+    // print its turnaround), so a peer that runs none is said, not failed.
+    if (got && d.xtal != 1) {
+        bench.skip("the peer's crystal: it reports none, so its turnaround is its internal "
+                   "oscillator's");
+    }
 
     // A frame whose checksum does not match must be NAKed by op, and the
     // channel must be usable straight afterwards.
@@ -2191,8 +2240,8 @@ void tk_bringup() {
     link_tx[n - 1] ^= 0xFFu;                  // the checksum, ruined
     bool naked = false;
     if (run_request<Client>({twilink::command_addr, lend<Lease::reply>(link_tx), n, {}, 0, {}}) == i2c_ok) {
-        wait_ms(1);
-        naked = link_collect() && link_ans.op == Op::nak && link_ans.len >= 1 &&
+        wait_ms(2);
+        naked = Link::recv_frame(link_ans) && link_ans.op == Op::nak && link_ans.len >= 1 &&
                 link_ans.data[0] == twilink::byte_of(Op::ping);
     }
     verdict("a corrupted frame is NAKed, naming the op it claimed", naked);
@@ -2249,22 +2298,24 @@ Stretch stretch_round(uint16_t hold_us) {
     meter_reset();
     Watch::reset();
     Host::start({twilink::command_addr, lend<Lease::reply>(tx_buf), stretch_bytes, {}, 0, {}});
-    for (uint32_t i = 0; i < 4'000'000u; ++i) {
-        const uint8_t s = T::host_status();
-        if (s & (TWI_RIF_bm | TWI_WIF_bm)) {
-            if (s & TWI_CLKHOLD_bm) res.clkhold = true;
-            if ((s & TWI_BUSSTATE_gm) == TWI_BUSSTATE_OWNER_gc) res.owner = true;
-        }
-        if ((s & (TWI_RIF_bm | TWI_WIF_bm | TWI_ARBLOST_bm | TWI_BUSERR_bm)) &&
-            Host::isr()) {
-            break;
-        }
-    }
+    // 100 ms against the longest tenure, six bytes held 1 ms each; a
+    // tenure that never ends is reported 0xFE, never as its engine's
+    // status (valid only once isr() said the tenure is over).
+    const bool ended = brio::wait_ticks<P>(
+        [&] {
+            const uint8_t s = T::host_status();
+            if (s & (TWI_RIF_bm | TWI_WIF_bm)) {
+                if (s & TWI_CLKHOLD_bm) res.clkhold = true;
+                if ((s & TWI_BUSSTATE_gm) == TWI_BUSSTATE_OWNER_gc) res.owner = true;
+            }
+            return (s & host_flags) != 0u && Host::isr();
+        },
+        brio::ticks_from_ms<P>(100));
     res.ticks = Watch::read();
     meter_stop();
     res.low_max = meter_max;
     res.low_min = meter_min;
-    res.status = Host::status();
+    res.status = ended ? Host::status() : uint8_t{0xFE};
     peer_settle();
     return res;
 }
@@ -2337,10 +2388,12 @@ void tm_nacks() {
     last_mstatus = 0;
     uint8_t st = run_request<Client>({twilink::command_addr, lend<Lease::reply>(tx_buf), 2, {}, 0, {}});
     print(serial, "  a write to a deaf board: engine says ", st, " (i2c_nack_addr = ",
-          i2c_nack_addr, "), MSTATUS at the failure = ", hex(last_mstatus), crlf);
+          i2c_nack_addr, "), MSTATUS at the failure = ", hex(last_mstatus), " on host flag ",
+          last_events, crlf);
     verdict("the engine reports nack_addr", st == i2c_nack_addr);
-    verdict("MSTATUS shows WIF with RXACK: nobody acknowledged the address",
-            (last_mstatus & TWI_WIF_bm) && (last_mstatus & TWI_RXACK_bm));
+    verdict("MSTATUS shows WIF with RXACK on the first host flag, the address's: nobody "
+            "acknowledged it",
+            last_events == 1u && (last_mstatus & TWI_WIF_bm) && (last_mstatus & TWI_RXACK_bm));
     wait_ms(280);
     twilink::Report rep{};
     if (peer_report(rep)) print_report(rep);
@@ -2360,10 +2413,15 @@ void tm_nacks() {
     last_mstatus = 0;
     st = run_request<Client>({twilink::command_addr, lend<Lease::reply>(tx_buf), 6, {}, 0, {}});
     print(serial, "  a six-byte write into that: engine says ", st, " (i2c_nack_data = ",
-          i2c_nack_data, "), MSTATUS = ", hex(last_mstatus), crlf);
+          i2c_nack_data, "), MSTATUS = ", hex(last_mstatus), " on host flag ", last_events,
+          crlf);
     verdict("the engine reports nack_data", st == i2c_nack_data);
-    verdict("MSTATUS shows RXACK on a DATA byte, not on the address",
-            (last_mstatus & TWI_WIF_bm) && (last_mstatus & TWI_RXACK_bm));
+    // The address and two data bytes were acknowledged, so the NACK is
+    // the fourth host flag's: the third data byte's, not the address's.
+    verdict("MSTATUS shows RXACK on a DATA byte, not on the address (WIF with RXACK on "
+            "host flag 4: the address and two bytes acknowledged before it)",
+            last_events == nack_at + 1u && (last_mstatus & TWI_WIF_bm) &&
+                (last_mstatus & TWI_RXACK_bm));
     peer_settle();
     if (peer_report(rep)) print_report(rep);
     verdict("the peer accepted exactly the three bytes it acknowledged",
@@ -2433,15 +2491,19 @@ ArbRound arb_round(uint8_t a_target, uint16_t t_us) {
     delay_us(clock, t_us);                 // the peer arms into the same Busy bus
     inject_stop();                         // both held STARTs go out together
 
-    for (uint32_t i = 0; i < 1'000'000u; ++i) {
-        service_client<Client>();
-        const uint8_t s = T::host_status();
-        if (!(s & (TWI_RIF_bm | TWI_WIF_bm | TWI_ARBLOST_bm | TWI_BUSERR_bm))) continue;
-        r.mstatus = s;
-        r.state = static_cast<uint8_t>(s & TWI_BUSSTATE_gm);
-        if (Host::isr()) break;
-    }
-    r.status = Host::status();
+    // 100 ms against the winner's tenure of under a millisecond; a round
+    // that never ends is reported 0xFE (neither i2c_ok nor i2c_arb_lost).
+    const bool ended = brio::wait_ticks<P>(
+        [&] {
+            service_client<Client>();
+            const uint8_t s = T::host_status();
+            if ((s & host_flags) == 0u) return false;
+            r.mstatus = s;
+            r.state = static_cast<uint8_t>(s & TWI_BUSSTATE_gm);
+            return Host::isr();
+        },
+        brio::ticks_from_ms<P>(100));
+    r.status = ended ? Host::status() : uint8_t{0xFE};
     // Whoever won, the loser's client is about to be written to.
     for (uint32_t k = 0; k < 200'000u; ++k) service_client<Client>();
     r.rx_n = cl_rx_n;
@@ -2462,9 +2524,9 @@ void tn_arbitration() {
         // its letter g), so against it there is no race to stage here;
         // the live race between these two chips is staged from the SAM
         // C21's side, behind a real STOP (test_samc_i2c o).
-        print(serial, "  SKIPPED, no verdict claimed: the peer (kind ", kind,
-              ") does not fire a START held behind a phantom hold - the race "
-              "is test_samc_i2c's letter o there", crlf);
+        print(serial, "  the peer is of kind ", kind, crlf);
+        bench.skip("the peer does not fire a START held behind a phantom hold - the race "
+                   "is test_samc_i2c's letter o there");
         quiesce();
         return;
     }
@@ -2952,8 +3014,8 @@ void ts_rebase() {
 // (i2c_timeout ON THE ARBITER'S CLOCK, recover() - the ENABLE cycle and
 // force-idle - run in the same dispatch, SDA still held at the reply); and
 // the give-back, the same bus AO carrying the next tenure once the wire is
-// free. The kernel's clock is the RTC PIT at 1024 Hz, started here and
-// stopped at the end: no other letter of this suite runs with it.
+// free. The kernel's clock is the RTC PIT at 1024 Hz, running since boot
+// (main()); this letter is the one that arms time events on it.
 //
 // THE BOUND on the reply, derived: the limit is ticks_from_ms(35) = 36
 // ticks of 1024 Hz = 35.16 ms; the time event armed at start() matures on
@@ -3004,7 +3066,6 @@ void tt_timed() {
           crlf);
     quiesce();
     verdict("link up", link_up());
-    Ticker::init();
     TimedBus::init();
     while (Sink::queue.pop()) {
     }
@@ -3062,7 +3123,6 @@ void tt_timed() {
             g.replied && g.status == i2c_ok);
     verdict("no stale event: the parked tenure never completed, there was no straggler",
             TimedBus::stale_events() == 0u);
-    Pit::enable_interrupt(false);
     verdict("and the command channel is whole", link_cmd(Op::ping));
     quiesce();
 }
@@ -3156,6 +3216,7 @@ ISR(TCB0_INT_vect) {
 int main() {
     const bool xtal = SysClock::init();
     Serial::init(clock, 460800);
+    Ticker::init();       // the kernel's tick: every time-out of the suite counts it
     sei();
     auto board = board_id();
     if (board.empty()) board = "?";

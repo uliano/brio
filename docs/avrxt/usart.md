@@ -419,10 +419,11 @@ U::disarm_start_of_frame();         // first thing on the way back
 
 `test_avr_serial` runs on an AVR128DB48 rev. A5 (24 MHz crystal, 5 V)
 - and, green the same, on an AVR128DA48 rev. A7 (its external 24 MHz
-quartz clock, 5 V: `z` 163 of 163 and `y` 118 of 118 twice, `v` `w` `x`
-green, the SAM C21 at -28 ppm against it) - and has two halves: `z` is the SINGLE-BOARD set (11 tests,
-163 verdicts, nothing to wire) and `y` is the TWO-BOARD set (13 tests,
-118 verdicts and one SKIPPED leg against this desk's peer)
+quartz clock, 5 V: `z` and `y` green twice, `v` `w` `x` green, the SAM
+C21 at -28 ppm against it) - and has two halves: `z` is the SINGLE-BOARD
+set (11 tests, 162 verdicts at 24 MHz, nothing to wire) and `y` is the
+TWO-BOARD set (13 tests, 118 verdicts and one skip against this desk's
+peer)
 against a peer board driven IN BAND over the very link under test
 (`usart_link.hpp`). On this desk the peer is a SAM C21, its SERCOM1 on
 the four link wires as the crossed pair - PE0 to its RxD, PE1 to its
@@ -441,7 +442,12 @@ avrxt one (one BAUD both ends), `w` runs on the crossed pair against a
 samc21 peer, `s` skips the fixed-pulse case against it (its IrDA coder
 sends 3/16 pulses only) and inverts PE1 for its pulses, `v` takes PE3
 either open or to the peer's PE3-role pin. A leg the peer REFUSES
-(`report_cfg_failed`) is printed SKIPPED and judged nothing. The peer is DARK until
+(`report_cfg_failed`) is judged nothing: each of its verdicts is a skip,
+counted apart from passes and fails (util/testbench.hpp), and so is a
+sweep's closing verdict when any of its legs was refused. A verdict that
+expects silence - nothing received, nothing learned - asks the peer's
+report whether the peer really sent, and a command the link lost fails
+the leg by name instead of leaving it out of the tally. The peer is DARK until
 addressed (`usart_link.hpp`, the dark discipline): while it searches for
 the wiring its transmitter is released and neither PE0 nor PE1 is
 pulled, and it naks a bad checksum only within `engage_ms` of a frame
@@ -512,10 +518,13 @@ the listing's count above.
   consumer (2.9). Its metered body is 104 cycles between the stamps,
   `rxc()`'s 114.
 - **`tx_idle()` is the wire's**: on the pad (TCB0 capturing PE0's last
-  rising edge, the stop bit of a final 0x00) it turned true 37 CLK_PER
-  after the last stop bit's end at 115200 (a bit is 208), 47 at 460800
-  (52) and 26 at 1 Mbaud (24) - never before it; the poll's own turn is
-  about twenty of those cycles.
+  rising edge, the stop bit of a final 0x00) it turned true never before
+  the last stop bit's end - polled by a bare loop of about twenty cycles
+  a turn, 37 CLK_PER after it at 115200 (a bit is 208), 47 at 460800 (52)
+  and 26 at 1 Mbaud (24). Letter T polls through the shared wait bounded
+  on the kernel tick (util/test_wait.hpp), whose turn is some sixty-five
+  cycles, and so judges "within a bit" at 115200 alone and prints the
+  faster rates' figures.
 - **Errors cost exactly the frames they hit**: 64 slots through the task,
   four of them a break driven on the pad by PORT with the transmitter
   off - 60 bytes delivered intact and in order, the frame-error counter
@@ -768,6 +777,8 @@ nothing, as on the DB at 2 and 3.
   apart.** With TXDATA, the buffer and the shift register all loaded,
   DREIF stays low for a whole frame (1021 polling iterations at 9600)
   and TXCIF for two (2095); DREIF returns while the line is still busy.
+  Letter e times both spans on the TCB ruler and judges the second at
+  two frames, within a bit.
   With only TWO frames loaded the "TXDATA full" state lasts a few dozen
   CPU cycles - long enough to read once, far too short to survive an
   interrupt - so a measurement of it is a race, not a fact.
@@ -997,20 +1008,27 @@ OSCHF with the regulator asleep (313 us) and OSCHF with `PMODE = FULL`
     2.16.1, absent from DS80001048D) is not measured: every way this desk
     has of telling a driven high from a pull-up's drives a net the
     partner or the analog net holds.
-  - **`tx_idle()` turns true 15 to 50 CLK_PER after the last stop bit**
-    (letter T; 81 with the PIT's tick handler inside the poll): within a
-    bit at 115200 (174), not at 460800, where a bit is 44 CLK_PER at 20 MHz
-    - the poll's cost is cycles and the bit is time, so the letter judges
-    "within one bit" where a bit outlasts the poll.
+  - **`tx_idle()` turns true after the last stop bit, never before it**
+    (letter T): polled by a bare loop, 15 to 50 CLK_PER after it (81 with
+    the PIT's tick handler inside the poll) - within a bit at 115200
+    (174), not at 460800, where a bit is 44 CLK_PER at 20 MHz. The
+    poll's cost is cycles and the bit is time, so the letter, whose wait
+    is the shared one bounded on the tick (some sixty-five cycles a
+    turn), judges "within one bit" at 115200 alone.
   - **Auto-baud and the rest** read as on the DA/DB: the GENAUTO/LINAUTO
     legs, the bit-banged operational range (FERR from -6 % and nothing up
     to +6 %), a stretched cell surviving to +50 %, the synchronous roles,
     RS-485's XDIR guard, IrDA both ways against the SAM C21's coder, and a
     20 -> 10 -> 20 MHz rebase under the peer's count.
   - **One extra 0xFF frame** at the synchronous client's 100 kHz leg
-    (letter q), in one run of 31: the client counted nine frames where the
-    peer clocked eight. Its source is not measured (a scope on the XCK
-    net would say whether an edge reached it before the peer's first).
+    (letter q), in one run of 31, with the client armed in the
+    rendezvous window's last two milliseconds: it counted nine frames
+    where the peer clocked eight. Letter q asks the peer for 20 ms of
+    extra lead-in and flushes the client's receiver 10 ms after arming
+    it, so a frame clocked in by either end's switch of role is not
+    counted; whether that was the extra frame's source is not measured
+    (a scope on the XCK net would say whether an edge reached the client
+    before the peer's first frame).
 
 ### Two facts about the flags that shape half-duplex code
 
@@ -1067,7 +1085,9 @@ three AVR64EA packages, but NOT bench-verified:
   EA twin, the workaround stays (above); an external pull-down or a scope
   on a free TXD pad would say whether the output drives high;
 - **the synchronous client's extra frame** (one run of 31, above): a
-  scope on the XCK net;
+  scope on the XCK net; letter q's client legs armed ahead of the
+  host's extended lead-in and flushed, which ten runs or more on this
+  desk would judge;
 
 - **`DBGCTRL.DBGRUN`**;
 - **IRCOM's fixed transmit pulse across the wire** (TXPLCTRL other than

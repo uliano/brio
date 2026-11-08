@@ -50,6 +50,7 @@
 #include "samc21/sercom.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -71,6 +72,13 @@ constexpr Serial serial;
 
 TestBench<Serial> bench;
 
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's
+/// waits (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
 // ---------------------------------------------------------------------------
 // The generators this suite builds
 //
@@ -83,6 +91,7 @@ TestBench<Serial> bench;
 constexpr uint8_t gen_cpu = 0;         // OSC48M, 48 MHz - the known measurand
 constexpr uint8_t gen_slow = 5;        // OSCULP32K, the reference
 constexpr uint8_t gen_slow_div = 6;    // OSCULP32K / 4, a second reference
+constexpr uint8_t gen_edge = 7;        // OSCULP32K / 64, letter c's overflow edge
 
 using GenSlow = Gclk<gen_slow>;
 using GenSlowDiv = Gclk<gen_slow_div>;
@@ -120,6 +129,35 @@ std::optional<uint32_t> measure_hz(uint8_t measured_gen, uint8_t reference_gen,
         return std::nullopt;
     }
     return Freqm::to_hz(*raw, reference_hz, refnum, divref);
+}
+
+/// One measurement's three outcomes, kept apart: the wait ended (DONE),
+/// the count overflowed (STATUS.OVF), and the count itself.
+struct EdgeReading {
+    bool done = false;
+    bool overflow = false;
+    uint32_t value = 0;
+};
+
+/// A measurement awaited on the ruler rather than through measure(), so
+/// that an overflow and a wait that never ended read differently.
+/// budget_us is the caller's: REFNUM reference periods and the margin.
+EdgeReading measure_edge(uint8_t measured_gen, uint8_t reference_gen, uint8_t refnum,
+                         uint32_t budget_us) {
+    EdgeReading r{};
+    if (!Freqm::init(FreqmConfig{.measured_generator = measured_gen,
+                                 .reference_generator = reference_gen,
+                                 .refnum = refnum})) {
+        return r;
+    }
+    Freqm::clear_overflow();
+    Freqm::start();
+    r.done = brio::wait_until<Ruler>([] { return Freqm::done_flag(); }, budget_us);
+    r.overflow = Freqm::overflowed();
+    r.value = Freqm::value();
+    Freqm::clear_flags();
+    Freqm::release();
+    return r;
 }
 
 /// The same, but handing back the raw count instead of hertz.
@@ -170,14 +208,13 @@ void ta_block() {
     // included, with no workaround offered. The device header agrees -
     // it declares CTRLB write-only - so the only evidence a start took
     // is BUSY and DONE, which is what the next verdict uses.
+    // The budget: one reference period of OSCULP32K (about 31 us) for the
+    // whole measurement at REFNUM 1, plus the CTRLB synchronization; 10 ms
+    // is over three hundred reference periods, so a time-out means START
+    // took no effect, not that the meter was slow.
     Freqm::start();
-    bool saw_progress = false;
-    for (uint32_t i = 0; i < 2'000'000UL; ++i) {
-        if (Freqm::running() || Freqm::done_flag()) {
-            saw_progress = true;
-            break;
-        }
-    }
+    const bool saw_progress = brio::wait_until<Ruler>(
+        [] { return Freqm::running() || Freqm::done_flag(); }, 10'000u);
     bench.verdict("a START is visible only through BUSY/DONE (CTRLB is "
                   "write-only, erratum 1.24.1)", saw_progress);
     (void)Freqm::measure();
@@ -300,26 +337,61 @@ void tc_arithmetic() {
               " counts = ", (off * 10000u) / twice, " parts in 10000", crlf);
     }
 
-    // THE 24-BIT OVERFLOW, arriving where the budget says. refnum_for()
-    // returns the largest REFNUM that fits; one step past it must not.
+    // THE 24-BIT OVERFLOW, arriving where the budget says. Against the
+    // 32 kHz reference the ratio is near 1465 and refnum_for() saturates
+    // at 255 (a count near 374000, far under 2^24), so the edge is reached
+    // on a reference 64 times slower: generator 7, OSCULP32K / 64, about
+    // 512 Hz, a ratio near 93750 and an edge near REFNUM 179.
     const uint32_t ratio = SysClock::hz / osculp_nominal_hz;
-    const uint8_t safe = Freqm::refnum_for(ratio);
-    print(serial, "  ratio ~", ratio, " -> refnum_for says ", safe,
-          " is the last that fits in 24 bits", crlf);
-    const auto at_budget = measure_raw(gen_cpu, gen_slow, safe);
-    bench.verdict("a measurement at the budget does not overflow",
-                  at_budget.has_value());
-    if (at_budget) {
-        bench.verdict("and its count really is under 2^24",
-                      *at_budget <= Freqm::value_max);
-    }
-    if (safe < 255u) {
-        const auto past = measure_raw(gen_cpu, gen_slow, static_cast<uint8_t>(safe + 1u));
-        bench.verdict("one REFNUM past the budget overflows, as computed",
-                      !past.has_value());
-    } else {
-        print(serial, "  (REFNUM saturates at 255 for this ratio; the overflow "
-                      "edge is not reachable here)", crlf);
+    print(serial, "  ratio ~", ratio, " against the 32 kHz reference -> refnum_for says ",
+          Freqm::refnum_for(ratio), " (saturated: the edge is not reachable there)", crlf);
+
+    // The ratio on the slow reference is MEASURED first (REFNUM 8, a count
+    // near 750000), because the RC's own error - tens of percent allowed -
+    // would move a nominal edge by tens of REFNUM steps. The two
+    // measurements around the edge then sit 1 % inside and 1 % outside
+    // 2^24: the margin is three times the largest wander this letter has
+    // seen between two measurements (34 parts in 10000, through a
+    // four-cycle window, above), so the RC moving between the ratio's
+    // measurement and the edge's cannot carry a count across. Each wait's
+    // budget is the measurement at an RC 25 % slow (REFNUM / 384 Hz) plus
+    // as much again: 1 s covers REFNUM 181.
+    const bool edge_ref = Gclk<gen_edge>::configure(GclkConfig{
+        .source = GclkSource::osculp32k, .div = 5, .div_pow2 = true});
+    constexpr uint8_t ratio_refnum = 8;
+    constexpr uint32_t edge_budget_us = 1'000'000u;
+    const EdgeReading at8 = measure_edge(gen_cpu, gen_edge, ratio_refnum, edge_budget_us);
+    bench.verdict("the slow edge reference comes up and measures without overflow",
+                  edge_ref && at8.done && !at8.overflow && at8.value != 0u);
+    if (edge_ref && at8.done && !at8.overflow && at8.value != 0u) {
+        const uint32_t r = at8.value / ratio_refnum;   // measured periods per reference
+        const uint32_t lo_n = (Freqm::value_max / 100u * 99u) / r;
+        const uint32_t hi_n = (Freqm::value_max / 100u * 101u + r - 1u) / r;
+        if (lo_n == 0u || hi_n > 255u) {
+            print(serial, "  measured ratio ", r, " puts the edge outside REFNUM 1..255", crlf);
+            bench.skip("the slow reference's ratio leaves the 24-bit edge out of REFNUM's range");
+        } else {
+            const EdgeReading lo = measure_edge(gen_cpu, gen_edge, static_cast<uint8_t>(lo_n),
+                                                edge_budget_us);
+            const EdgeReading hi = measure_edge(gen_cpu, gen_edge, static_cast<uint8_t>(hi_n),
+                                                edge_budget_us);
+            const uint8_t safe = Freqm::refnum_for(r);
+            print(serial, "  measured ratio ", r, ": REFNUM ", lo_n, " counts ", lo.value,
+                  lo.overflow ? " (OVF)" : "", ", REFNUM ", hi_n,
+                  hi.overflow ? " overflows" : " does NOT overflow", "; refnum_for(",
+                  r, ") = ", safe, crlf);
+            // The count under the edge must also be the one the ratio
+            // predicts, within the same 1 %: a counter that wrapped
+            // without raising OVF would read far below it.
+            const uint32_t expect = lo_n * r;
+            const uint32_t miss = lo.value > expect ? lo.value - expect : expect - lo.value;
+            bench.verdict("1 % under 2^24 the count completes without overflow, the "
+                          "count the measured ratio predicts to within 1 %",
+                          lo.done && !lo.overflow && miss < expect / 100u);
+            bench.verdict("1 % past 2^24 the count overflows - the counter is 24 bits, "
+                          "as refnum_for() assumes",
+                          hi.done && hi.overflow);
+        }
     }
 
     // CFGA.DIVREF: A FIELD THE DEVICE HEADER DOES NOT KNOW. 44.8.3 draws

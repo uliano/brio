@@ -271,7 +271,7 @@ brio::Lut<1>::listen(channel, {.generator = some_generator,
 
 ## Bench findings
 
-From `test_samc_ccl` (7 letters, 140 verdicts, about two seconds).
+From `test_samc_ccl` (7 letters, 139 verdicts, about two seconds).
 **Nothing to wire.** The stimuli are a free pad walked between the rails
 by its own internal pull (which survives PMUXEN where the output driver
 does not - [port.md](port.md), [eic.md](eic.md)), TC and TCC waveforms

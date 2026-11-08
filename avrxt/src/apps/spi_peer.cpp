@@ -56,11 +56,14 @@
 #include "avrxt/clock.hpp"
 #include "avrxt/delay.hpp"
 #include "avrxt/pin.hpp"
+#include "avrxt/platform.hpp"
 #include "avrxt/spi.hpp"
 #include "avrxt/ticker.hpp"
 #include "avrxt/usart.hpp"
 #include "avrxt/userrow.hpp"
+#include "kernel/time.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 
 #include "spi_link.hpp"
 
@@ -90,6 +93,10 @@ using Raw = Client::Resource;
 
 using SckPin = Pin<'E', 2>;
 using SsPin = Pin<'E', 3>;
+
+/// The kernel tick's platform (main() starts the tick): the time-outs'
+/// clock (util/test_wait.hpp's wait_ticks).
+using P = AvrPlatform;
 
 constexpr uint16_t firmware_version = 0x0101;
 
@@ -257,14 +264,15 @@ struct Streams {
 /// on a client, and this app's rule against touching PE0/PE2 is about
 /// driving them), and it is the only way to write to DATA on a
 /// chosen side of the inter-byte boundary rather than a random one. At
-/// CLK_PER/32 a byte lasts about 10.7 us and this loop samples every
-/// few cycles, so a write that follows a `true` lands early inside the
-/// transfer with room to spare. False when the host never clocked.
+/// CLK_PER/32 a byte lasts about 10.7 us - 256 CLK_PER at 24 MHz - and
+/// the wait samples the pin once a turn, a pin read and one read of the
+/// tick count, about thirty cycles in the release listing: a write that
+/// follows a `true` lands early inside the transfer with room to spare.
+/// False when the host never clocked within 5 ms (the host's inter-byte
+/// gap is 20 us).
 bool wait_transfer_start(bool idle_level) {
-    for (uint16_t k = 0; k < 20000; ++k) {
-        if (SckPin::read() != idle_level) return true;
-    }
-    return false;
+    return brio::wait_ticks<P>([idle_level] { return SckPin::read() != idle_level; },
+                               brio::ticks_from_ms<P>(5));
 }
 
 // ---- the actions ------------------------------------------------------------------

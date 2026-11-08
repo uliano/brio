@@ -12,7 +12,8 @@
 // What is exercised, letter by letter:
 //   a  geometry and identity, with no wear at all: the device header's
 //      constants against what PARAM reports, the user row decoded into
-//      the fuses it is, the factory calibration and the die's serial
+//      the fuses it is (printed: the board's provisioning, not the
+//      driver's behaviour), the factory calibration and the die's serial
 //      number, and ADDR's encoding PROVEN by loading the page buffer at
 //      a known address on each array and reading the register back
 //   b  the RWWEE round trip: erase a row and see 0xFF, program each of
@@ -43,6 +44,7 @@
 
 #include <stdint.h>
 
+#include <optional>
 #include <span>
 
 #include "samc21/clock.hpp"
@@ -54,6 +56,7 @@
 #include "samc21/ticker.hpp"
 #include "util/nv_heap.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -105,15 +108,74 @@ Heap heap;
 constexpr uint16_t heap_record = 0x5A01;
 
 // ---------------------------------------------------------------------------
-// A cycle-resolution stopwatch: the kernel ticker's own cycles(), the tick count
-// and the counter's position composed right across the reload
-// (util/cycle_count.hpp).
+// The ruler: the kernel ticker's own cycles(), the tick count and the
+// counter's position composed right across the reload
+// (util/cycle_count.hpp) - this suite's waits and spans.
 // ---------------------------------------------------------------------------
-uint32_t cycles_now() {
-    return brio::Ticker::cycles();
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's
+/// waits and spans (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return brio::Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// A span in cycles as microseconds, for printing.
+uint32_t cycles_to_us(uint32_t cycles) { return cycles / (SysClock::hz / 1'000'000UL); }
+
+/// Every queued console byte off the wire, bounded (util/test_wait.hpp):
+/// false on a wedged console.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
+
+/// The console drained before a timed window, or a failed verdict that
+/// says it was not: false tells the letter to return (a console
+/// interrupt inside the window would eat the polling turns it counts).
+bool drained_for_window() {
+    if (console_drain()) {
+        return true;
+    }
+    bench.verdict("the console drained before the timed window", false);
+    return false;
 }
 
-uint32_t cycles_to_us(uint32_t cycles) { return cycles / (SysClock::hz / 1'000'000UL); }
+/// The budget of a row erase awaited by hand: ten times the 6 ms maximum
+/// of table 45-42 (an RWWEE row erase measures 989 us on the bench).
+constexpr uint32_t erase_budget_us = 60'000;
+
+/// One burst of bare polls of INTFLAG.READY, at most 1024 - a load, a
+/// test and a count down each, nothing else in the loop: the polls left
+/// when READY rose (1024 when it stood at once), 0 when it never did.
+[[gnu::noinline]] uint32_t poll_burst() {
+    uint32_t k = 1024u;
+    while (!Nvm::ready() && --k != 0u) {
+    }
+    return k;
+}
+
+/// Poll INTFLAG.READY until it rises, counting the polls that found it
+/// low, for at most `budget_us` on the ruler: the count, or nothing when
+/// the budget ran out. The ruler is read once a burst of 1024 polls, a
+/// small fraction of the burst's time, so the count stays the bare polls
+/// the CPU completed inside the operation.
+std::optional<uint32_t> polls_until_ready(uint32_t budget_us) {
+    uint32_t polls = 0;
+    const bool ready = brio::wait_until<Ruler>(
+        [&polls] {
+            const uint32_t left = poll_burst();
+            polls += 1024u - left;
+            return left != 0u;
+        },
+        budget_us);
+    if (!ready) {
+        return std::nullopt;
+    }
+    return polls;
+}
+
+/// The EEPROM emulation area the fuses carve out of the TOP of the main
+/// array: letters f and m work on the last row, which that area would
+/// hold - writable whatever the region lock says - so with one reserved
+/// they decline.
+bool eeprom_area_reserved() { return brio::NvmUserRow::read().eeprom_rows() != 0u; }
 
 // ---------------------------------------------------------------------------
 // Buffers
@@ -226,14 +288,9 @@ void ta_geometry() {
           " wdt=", user.wdt_enabled() ? "on" : "off",
           user.wdt_always_on() ? "+always" : "", crlf);
 
-    bench.verdict("the user row reads as something, not as erased flash",
-                  user.word0 != 0xFFFFFFFFUL);
-    bench.verdict("no bootloader area is reserved on this board",
-                  user.bootprot_rows() == 0u);
-    bench.verdict("no EEPROM emulation area is reserved either",
-                  user.eeprom_rows() == 0u);
-    bench.verdict("the watchdog is not armed by the fuses",
-                  !user.wdt_enabled() && !user.wdt_always_on());
+    // What the fuses say is the board's provisioning, not the driver's
+    // behaviour: printed above, judged nowhere. Letters f and m read the
+    // EEPROM field again and decline when an area would hold their row.
 
     const brio::NvmCalibration cal = brio::NvmCalibration::read();
     print(serial, "  calibration: adc0 bias=", cal.adc0_biascomp(), "/",
@@ -253,8 +310,9 @@ void ta_geometry() {
     bench.verdict("the die carries a serial number (no label to write)",
                   sn.word[0] != 0xFFFFFFFFUL && sn.word[1] != 0xFFFFFFFFUL);
 
-    bench.verdict("the part is not locked against the debugger",
-                  !Nvm::security_bit());
+    // A part locked against the debugger could not have been flashed with
+    // this image over SWD: the bit is printed, not judged.
+    print(serial, "  security bit: ", Nvm::security_bit() ? "SET" : "clear", crlf);
 }
 
 // =============================================================================
@@ -470,42 +528,47 @@ void tc_ordering() {
 // operation, against a calibration of how much it does in the same time
 // with the flash idle.
 void td_cost() {
+    if (!drained_for_window()) {
+        return;
+    }
     // Calibrate the counting loop: iterations per microsecond, measured
     // with nothing else happening.
-    const uint32_t cal_start = cycles_now();
+    brio::Stopwatch<Ruler> sw;
+    sw.start();
     volatile uint32_t sink = 0;
     for (uint32_t i = 0; i < 20000u; ++i) {
         sink = sink + 1u;
     }
-    const uint32_t cal_cycles = cycles_now() - cal_start;
+    const uint32_t cal_cycles = sw.elapsed();
     const uint32_t cal_us = cycles_to_us(cal_cycles);
 
     // A row erase, timed, with the counting loop running in the gap
     // between issuing the command and READY coming back.
     Nvm::clear_status();
-    const uint32_t e0 = cycles_now();
+    sw.start();
     Nvm::address(NvmArray::rwwee, scratch_row);
     NVMCTRL_REGS->NVMCTRL_CTRLA = static_cast<uint16_t>(
         NVMCTRL_CTRLA_CMD(NVMCTRL_CTRLA_CMD_RWWEEER_Val) |
         NVMCTRL_CTRLA_CMDEX(NVMCTRL_CTRLA_CMDEX_KEY_Val));
-    uint32_t spins_erase = 0;
-    while (!Nvm::ready()) {
-        ++spins_erase;
-    }
-    const uint32_t erase_cycles = cycles_now() - e0;
+    const std::optional<uint32_t> polls = polls_until_ready(erase_budget_us);
+    const uint32_t erase_cycles = sw.elapsed();
+    const NvmError erased = Nvm::outcome();
+    const uint32_t spins_erase = polls.value_or(0u);
 
     fill_pattern(0x77u);
-    const uint32_t w0 = cycles_now();
+    sw.start();
     const NvmError wr = Nvm::program_page(NvmArray::rwwee, scratch_row, out_span());
-    const uint32_t write_cycles = cycles_now() - w0;
+    const uint32_t write_cycles = sw.elapsed();
 
     print(serial, "  calibration : 20000 loop turns in ", cal_us, " us", crlf);
     print(serial, "  RWWEE erase : ", cycles_to_us(erase_cycles), " us, and the CPU ran ",
-          spins_erase, " polling turns inside it", crlf);
+          spins_erase, " polling turns inside it -> ", error_name(erased), crlf);
     print(serial, "  RWWEE write : ", cycles_to_us(write_cycles), " us (page, ",
           Nvm::page_size, " bytes) -> ", error_name(wr), crlf);
 
-    bench.verdict("the erase completed", erase_cycles > 0u);
+    bench.verdict("the erase completed within 60 ms (ten times table 45-42's 6 ms), with no "
+                  "error bit",
+                  polls.has_value() && erased == NvmError::none);
     bench.verdict("the write completed", wr == NvmError::none);
     Nvm::read(scratch_row, in_span());
     bench.verdict("and what it wrote is what was read back", pattern_matches());
@@ -610,12 +673,9 @@ void te_heap() {
 // =============================================================================
 // f - protection and error reporting (no wear: nothing is erased)
 // =============================================================================
-void tf_protection() {
-    const uint16_t before = Nvm::locks();
-    print(serial, "  LOCK at entry: ", brio::hex(before), crlf);
-    bench.verdict("every region is unlocked out of reset (production default)",
-                  before == 0xFFFFu);
-
+/// Letter f's lock half: region 15 locked, an erase into it refused with
+/// the row untouched, the region unlocked again.
+void tf_lock_refusal(uint16_t before) {
     // Region 15 is the top of the main array - the same region letter m
     // writes into, which is exactly why locking it here is a safe way to
     // prove the refusal: a REFUSED erase erases nothing.
@@ -648,6 +708,24 @@ void tf_protection() {
     bench.verdict("the region unlocks again",
                   Nvm::unlock_region(target) == NvmError::none);
     bench.verdict("and LOCK is back where it started", Nvm::locks() == before);
+}
+
+void tf_protection() {
+    const uint16_t before = Nvm::locks();
+    // Which regions the fuses leave locked is the board's provisioning:
+    // printed (all unlocked, 0xFFFF, is the production default), judged
+    // nowhere.
+    print(serial, "  LOCK at entry: ", brio::hex(before), crlf);
+    const bool region15_free = (before & (1u << 15)) != 0u;
+    if (eeprom_area_reserved() || !region15_free) {
+        bench.skip(region15_free
+                       ? "the fuses reserve an EEPROM emulation area at the top of the main "
+                         "array: it ignores region locks, so the refusal cannot be shown there"
+                       : "region 15 is locked by the fuses: a lock that takes cannot be shown "
+                         "on it");
+    } else {
+        tf_lock_refusal(before);
+    }
 
     // STATUS.PROGE: an invalid command code. 0x7 is Reserved in table
     // 27.8.1's command list, so the controller must reject it - and
@@ -671,6 +749,11 @@ void tf_protection() {
 // m - the main array, and the stall (outside z: costs one row of wear)
 // =============================================================================
 void tm_main_array() {
+    if (eeprom_area_reserved()) {
+        bench.skip("the fuses reserve an EEPROM emulation area at the top of the main array: "
+                   "the last row is its, and this letter would erase it");
+        return;
+    }
     print(serial, "  target: the LAST row of the part, ", brio::hex(main_scratch_row),
           " - free flash on any image this size", crlf);
 
@@ -678,25 +761,23 @@ void tm_main_array() {
     // the same reason letter d does it: the polling turns between the
     // command and READY are the measurement.
     Nvm::clear_status();
-    const uint32_t e0 = cycles_now();
     Nvm::address(NvmArray::main, main_scratch_row);
     NVMCTRL_REGS->NVMCTRL_CTRLA = static_cast<uint16_t>(
         NVMCTRL_CTRLA_CMD(NVMCTRL_CTRLA_CMD_ER_Val) |
         NVMCTRL_CTRLA_CMDEX(NVMCTRL_CTRLA_CMDEX_KEY_Val));
-    uint32_t spins_erase = 0;
-    while (!Nvm::ready()) {
-        ++spins_erase;
-    }
-    const uint32_t erase_cycles = cycles_now() - e0;
+    const std::optional<uint32_t> polls = polls_until_ready(erase_budget_us);
     const NvmError erased = Nvm::outcome();
-    bench.verdict("the main-array row erases", erased == NvmError::none);
+    bench.verdict("the main-array row erases within 60 ms (ten times table 45-42's 6 ms)",
+                  polls.has_value() && erased == NvmError::none);
+    if (!polls) {
+        return;
+    }
+    const uint32_t spins_erase = *polls;
     bench.verdict("and reads as 0xFF", all_erased(main_scratch_row, Nvm::row_size));
 
     fill_pattern(0xC5u);
-    const uint32_t w0 = cycles_now();
     const NvmError wr =
         Nvm::program_page(NvmArray::main, main_scratch_row, out_span());
-    const uint32_t write_cycles = cycles_now() - w0;
     Nvm::read(main_scratch_row, in_span());
     bench.verdict("a main-array page programs", wr == NvmError::none);
     bench.verdict("and reads back byte-exact", pattern_matches());
@@ -719,7 +800,7 @@ void tm_main_array() {
     // AND THE DURATIONS ARE NOT PRINTED IN MICROSECONDS, because the
     // stopwatch cannot be trusted across a stall.
     //
-    // A single erase timed with cycles_now() scatters between 234 and
+    // A single erase timed on the ruler scatters between 234 and
     // 1233 us across runs: a whole tick period of spread on a ~1 ms
     // operation. It is NOT that the SysTick handler, being code in the
     // stalled main array, misses ticks - the eight-round total below
@@ -727,7 +808,7 @@ void tm_main_array() {
     // ticks, so nothing is lost.
     //
     // What actually happens is subtler and worth knowing on this target:
-    // cycles_now() mixes the SOFTWARE tick counter with the HARDWARE
+    // the ruler mixes the SOFTWARE tick counter with the HARDWARE
     // SysTick VAL, and the counter is advanced by a handler. During a
     // stall that handler cannot run, so in the moment right after the
     // stall ends SysTick may already have wrapped while the counter has
@@ -738,11 +819,12 @@ void tm_main_array() {
     constexpr uint32_t rounds = 8;
     constexpr uint32_t rwwee_erase_us = 989;   // letter d, stable to the microsecond
     const uint32_t t0 = brio::Ticker::ticks();
-    const uint32_t c0 = cycles_now();
+    brio::Stopwatch<Ruler> sw;
+    sw.start();
     for (uint32_t i = 0; i < rounds; ++i) {
         (void)Nvm::erase_row(NvmArray::main, main_scratch_row);
     }
-    const uint32_t software_us = cycles_to_us(cycles_now() - c0);
+    const uint32_t software_us = cycles_to_us(sw.elapsed());
     const uint32_t ticks_seen = brio::Ticker::ticks() - t0;
     const uint32_t expected_us = rounds * rwwee_erase_us;
 
@@ -761,8 +843,6 @@ void tm_main_array() {
           "survives it (45-42 allows 6 ms)", crlf);
     print(serial, "  what main-array work really costs is not time but the CPU: "
                   "that is why the heap lives in RWWEE", crlf);
-    (void)write_cycles;
-    (void)erase_cycles;
 
     // Leave the row erased rather than holding a pattern: a future run
     // starts from a known state either way, and erased is the tidier one.
@@ -796,18 +876,21 @@ void tm_main_array() {
 volatile uint32_t cache_turns = 1000u;    ///< volatile: no constant folds the loop
 volatile uint32_t cache_sink = 0;
 
-uint32_t timed_body() {
+/// The loop's cycles, or nothing when no tick edge came within two tick
+/// periods (the tick not running: the window could not be placed).
+std::optional<uint32_t> timed_body() {
     const uint32_t n = cache_turns;
     // Right after a tick edge: the masked window (well under the 48000
     // cycles of a tick) then never holds a reload the masked tick would
     // miss.
     const uint32_t k = brio::Ticker::ticks();
-    while (brio::Ticker::ticks() == k) {
+    if (!brio::wait_until<Ruler>([k] { return brio::Ticker::ticks() != k; }, 2'000)) {
+        return std::nullopt;
     }
     __disable_irq();
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     const uint32_t r = cache_body(n);
-    const uint32_t t1 = cycles_now();
+    const uint32_t t1 = Ruler::now();
     __enable_irq();
     cache_sink = r;
     return t1 - t0;
@@ -816,15 +899,23 @@ uint32_t timed_body() {
 void tg_cache() {
     const bool was = Nvm::cache_enabled();
     Nvm::cache(true);
-    const uint32_t on1 = timed_body();
-    const uint32_t on2 = timed_body();
+    const std::optional<uint32_t> t_on1 = timed_body();
+    const std::optional<uint32_t> t_on2 = timed_body();
     Nvm::cache(false);
     const bool off_read = !Nvm::cache_enabled();
-    const uint32_t off = timed_body();
+    const std::optional<uint32_t> t_off = timed_body();
     Nvm::cache(true);
     (void)Nvm::invalidate_cache();
-    const uint32_t after = timed_body();
+    const std::optional<uint32_t> t_after = timed_body();
     Nvm::cache(was);
+    if (!t_on1 || !t_on2 || !t_off || !t_after) {
+        bench.verdict("a tick edge came within 2 ms before every timed run", false);
+        return;
+    }
+    const uint32_t on1 = *t_on1;
+    const uint32_t on2 = *t_on2;
+    const uint32_t off = *t_off;
+    const uint32_t after = *t_after;
     print(serial, "  1000 turns of a flash-resident loop, RWS ", brio::FlashWaitStates::get(),
           ": cache on ", on1, " and ", on2, " cycles, OFF ", off, ", on again after INVALL ",
           after, crlf);

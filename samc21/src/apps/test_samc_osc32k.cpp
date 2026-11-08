@@ -8,7 +8,10 @@
 //
 // NOTHING TO WIRE. Every oscillator here is on the die - or, for
 // XOSC32K, on the board: the 32.768 kHz crystal is optional on this
-// board design, and letter a judges whichever case it finds.
+// board design and not fitted on the bench board, whose page forbids
+// enabling XOSC32K (docs/boards/samc21j.md); letter a starts it only
+// where `board_has_xosc32k` below says the crystal is there, and skips
+// it otherwise.
 //
 // THE INSTRUMENT IS THE FREQUENCY METER (samc21/freqm.hpp). Each
 // oscillator is routed to a GCLK generator and measured against OSC48M -
@@ -21,8 +24,8 @@
 // What is exercised, letter by letter:
 //   a  the block: the RTC clock select, the status and interrupt
 //      surface, the refusals the registers alone could not express,
-//      and XOSC32K - a bounded no-crystal start on a board without,
-//      the crystal started and weighed on a board with one
+//      and XOSC32K - started and weighed on a board with the crystal,
+//      skipped on one without
 //   b  THE FACTORY TRIM, measured: OSC32K started untrimmed and then
 //      retrimmed with the production value, with the meter on both
 //   c  the three roots side by side, in hertz, and OSCULP32K's trim
@@ -41,6 +44,7 @@
 #include "samc21/sercom.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -60,6 +64,18 @@ using Serial = Uart<5, console_pads>;
 constexpr Serial serial;
 
 TestBench<Serial> bench;
+
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's
+/// waits (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// Whether the board carries the 32.768 kHz crystal on PA00/PA01. The
+/// bench board does not, and its page forbids enabling XOSC32K there
+/// (docs/boards/samc21j.md): a board that fits the crystal sets this.
+constexpr bool board_has_xosc32k = false;
 
 using brio::crlf;
 using brio::print;
@@ -93,15 +109,10 @@ std::optional<uint32_t> measure_slow_hz() {
         (static_cast<uint64_t>(refnum) * SysClock::hz) / *count);
 }
 
-/// A few milliseconds for an oscillator or a generator to settle. The
-/// sink is volatile so the loop survives -Os; the COUNTER is not, because
-/// incrementing a volatile is deprecated in this dialect.
-void settle() {
-    volatile uint32_t sink = 0;
-    for (uint32_t i = 0; i < 200'000UL; ++i) {
-        sink = sink + 1u;
-    }
-}
+/// Time for an oscillator or a generator to settle before the meter
+/// reads it: 30 ms, about a thousand periods of a 32 kHz root, where a
+/// generator switch takes a few periods of the slower clock (16.6.2.6).
+void settle() { brio::spin_us<Ruler>(30'000u); }
 
 /// Point generator 5 at a source and give it a moment to settle.
 bool route_slow(GclkSource src) {
@@ -161,20 +172,23 @@ void ta_block() {
     bench.verdict("OSCULP32K refuses a trim past its five-bit field",
                   !Osculp32k::calib(0x20));
 
-    // XOSC32K: THE CRYSTAL IS OPTIONAL ON THIS BOARD DESIGN, so the
-    // letter judges whichever case the board presents. Without one the
-    // start is a bounded wait that ends with the ready flag still low,
-    // reported rather than hung on; with one the flag rises and the
-    // meter then weighs the crystal on OSC48M's scale - which puts a
-    // per-cent band on a crystal that is good to tens of ppm, enough to
-    // tell a 32 kHz resonance from an inverter ringing on its load
-    // capacitors, not enough to grade the crystal.
+    // XOSC32K: THE CRYSTAL IS OPTIONAL ON THIS BOARD DESIGN, and the
+    // bench board does not fit it: its page forbids enabling XOSC32K, so
+    // the letter starts it only where the board says the crystal is
+    // there. With one, the flag rises and the meter then weighs the
+    // crystal on OSC48M's scale - which puts a per-cent band on a crystal
+    // that is good to tens of ppm, enough to tell a 32 kHz resonance from
+    // an inverter ringing on its load capacitors, not enough to grade the
+    // crystal.
+    if constexpr (!board_has_xosc32k) {
+        bench.skip("XOSC32K: the board fits no 32.768 kHz crystal and forbids enabling it");
+        return;
+    }
     const bool crystal = Xosc32k::init(Xosc32kConfig{.crystal = true}, 4'000'000UL);
     print(serial, "  XOSC32K start attempt -> ", crystal ? "READY" : "never ready", crlf);
+    bench.verdict("the crystal the board carries starts", crystal);
     if (!crystal) {
         Xosc32k::stop();
-        bench.verdict("a crystal that is not there is a false return and not a hang",
-                      !crystal);
         return;
     }
     const bool routed = route_slow(GclkSource::xosc32k);
@@ -191,16 +205,14 @@ void ta_block() {
     // cannot be moved off a stopped source.
     (void)route_slow(GclkSource::osculp32k);
     Xosc32k::stop();
-    // The ready flag does not fall with the store: count the polling
-    // turns it stands for after the disable, bounded.
-    uint32_t turns = 0;
-    while (Xosc32k::ready() && turns < 1'000'000UL) {
-        ++turns;
-    }
-    print(serial, "  after the disable the ready flag stood for ", turns,
-          " polling turns", crlf);
+    // The ready flag does not fall with the store: time how long it
+    // stands after the disable, bounded at 10 ms (over three hundred
+    // periods of the crystal it reports on).
+    const auto fall = brio::cycles_until<Ruler>([] { return !Xosc32k::ready(); }, 10'000u);
+    print(serial, "  after the disable the ready flag stood for ", fall ? *fall : 0u,
+          fall ? " cycles" : " (still standing after 10 ms)", crlf);
     bench.verdict("XOSC32K stops and its ready flag falls, not at the store but soon after",
-                  !Xosc32k::enabled() && turns < 1'000'000UL);
+                  !Xosc32k::enabled() && fall.has_value());
 }
 
 // =============================================================================
@@ -294,7 +306,7 @@ void tc_roots() {
     settle();
     const auto ulp_moved = measure_slow_hz();
     (void)Osculp32k::calib(ulp_factory);   // put it back before anything else runs
-    bench.verdict("and the override changes the clock", ulp_moved.has_value());
+    bench.verdict("the retrimmed OSCULP32K measures", ulp_moved.has_value());
 
     // OSC32K, trimmed properly this time.
     bench.verdict("OSC32K starts trimmed",

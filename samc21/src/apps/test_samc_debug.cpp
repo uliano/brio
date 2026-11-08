@@ -53,6 +53,7 @@
 #include "samc21/sercom.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -108,23 +109,22 @@ uint32_t boot_pac_ahb = 0;
 uint8_t boot_dsu_statusa = 0;
 uint8_t boot_dsu_statusb = 0;
 ResetCause boot_cause = ResetCause::unknown;
+bool boot_divas_clock = false;
 
 // ---------------------------------------------------------------------------
-// The cycle stopwatch: the kernel ticker's own cycles(), the tick count
-// and the counter's position composed right across the reload
-// (util/cycle_count.hpp).
+// The ruler: the kernel ticker's own cycles(), the tick count and the
+// counter's position composed right across the reload
+// (util/cycle_count.hpp) - the stopwatch of the timing letters and the
+// ruler of the waits (util/test_wait.hpp).
 // ---------------------------------------------------------------------------
-uint32_t cycles_now() {
-    return Ticker::cycles();
-}
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
-void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    const uint32_t t0 = cycles_now();
-    while (cycles_now() - t0 < SysClock::hz / 500u) {
-    }
-}
+/// Every queued console byte off the wire, bounded (util/test_wait.hpp):
+/// false on a wedged console.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 
 /// Eight zero-padded lowercase hex digits - the format
 /// cli/bench/bench_boards.py records the die serial in, which a bare hex()
@@ -285,18 +285,28 @@ void ta_pac_block() {
 
     // 11.4.8: WRCTRL and the flag banks are NOT PAC-write-protectable,
     // so a fully protected system can still unprotect itself and still
-    // clear its own errors. Proven by protecting the PAC itself.
+    // clear its own errors. Proven by protecting the PAC itself - and the
+    // flag banks are cleared WHILE it is protected, of an error raised
+    // under that protection (a second CLEAR of the victim, the balance
+    // rule above), so the clear has something to remove.
     (void)Pac::protect(Pac::pac_id);
     bench.verdict("the PAC can protect itself", Pac::is_protected(Pac::pac_id));
     (void)Pac::protect(victim);
     const bool still_works = Pac::is_protected(victim);
     (void)Pac::unprotect(victim);
+    const bool released = !Pac::is_protected(victim);
+    (void)Pac::unprotect(victim);
+    const bool raised = Pac::flagged(Pac::pac_id);
+    Pac::clear_all_flags();
+    const bool cleared = !Pac::any_error();
     (void)Pac::unprotect(Pac::pac_id);
     bench.verdict("and WRCTRL still works while it is protected (11.4.8 "
                   "excepts it by name)",
-                  still_works && !Pac::is_protected(victim));
+                  still_works && released);
+    bench.verdict("the flag banks are clearable too: an error raised under "
+                  "the PAC's own protection is cleared under it",
+                  raised && cleared);
     Pac::clear_all_flags();
-    bench.verdict("the flag banks are clearable too", !Pac::any_error());
 
     // The event output, written and read back. Nothing here listens to
     // it - the ACCERR generator is vocabulary evsys.hpp can route the
@@ -725,27 +735,37 @@ void bank(uint8_t leg) {
     token.fail = bench.failed();
 }
 
-[[noreturn]] void await_reset(const char* what) {
+/// Announce a leg's wait, get the words out, and wait a hundred
+/// milliseconds for the reset - over ten times the slowest trigger here,
+/// a CLEAR synchronized into the watchdog's 1.024 kHz domain. It returns
+/// only when the reset never came: the verdict says so and the token is
+/// withdrawn, and the letter ends.
+void await_reset(const char* what) {
     print(serial, "  ", what, crlf);
-    console_drain();
-    for (;;) {
-    }
+    // A wedged console loses this line; the wait runs regardless.
+    (void)console_drain();
+    brio::spin_us<Ruler>(100'000u);
+    token.magic = 0;
+    token.leg = 0;
+    bench.verdict("the reset came within 100 ms of its trigger", false);
 }
 
-[[noreturn]] void leg_system_reset() {
+void leg_system_reset() {
     bank(1);
     print(serial, "  leg 1: a SYSTEM reset (SYSRESETREQ) with the lock "
                   "standing ...", crlf);
-    console_drain();
+    // A wedged console loses the line; the leg runs regardless.
+    (void)console_drain();
     Reset::software();
     await_reset("(waiting for it to land)");
 }
 
-[[noreturn]] void leg_watchdog_reset() {
+void leg_watchdog_reset() {
     bank(2);
     print(serial, "  leg 2: a WATCHDOG reset with the lock re-applied ...",
           crlf);
-    console_drain();
+    // A wedged console loses the line; the leg runs regardless.
+    (void)console_drain();
     Watchdog::force_reset();
     await_reset("(waiting for it to land - CLEAR is synchronized)");
 }
@@ -1042,12 +1062,12 @@ void te_crc32() {
     // WHAT IT COSTS. The number that decides whether the engine is worth
     // using at all: 1024 words through hardware against the same 1024
     // words through the bitwise software reference above.
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     (void)Dsu::crc32(0, 1024);
-    const uint32_t t1 = cycles_now();
-    const uint32_t sw_t0 = cycles_now();
+    const uint32_t t1 = Ruler::now();
+    const uint32_t sw_t0 = Ruler::now();
     (void)sw_crc32(reinterpret_cast<const void*>(0), 1024);
-    const uint32_t sw_t1 = cycles_now();
+    const uint32_t sw_t1 = Ruler::now();
     const uint32_t hw_cycles = t1 - t0;
     const uint32_t sw_cycles = sw_t1 - sw_t0;
     print(serial, "  4096 bytes: engine ", hw_cycles, " cycles (",
@@ -1104,9 +1124,8 @@ void tf_dsu_services() {
     bench.verdict("the device is NOT locked by the NVM security bit - which "
                   "is why every DSU service is available here",
                   !Dsu::device_protected());
-    bench.verdict("nothing is holding the CPU in the extended reset phase - "
-                  "code that can read this bit is by definition running",
-                  !Dsu::cpu_reset_extended());
+    // CRSTEXT is printed above and not judged: code that can read the bit
+    // is running, so a verdict on it could only pass.
     print(serial, "  (DBGPRES is never cleared once set, so it reports "
                   "whether a probe was ever seen since power-on, not now - "
                   "printed, not judged)", crlf);
@@ -1178,10 +1197,10 @@ void tf_dsu_services() {
     for (uint32_t i = 0; i < 64u; ++i) {
         mbist_buffer[i] = 0xDEADBEEFUL;
     }
-    const uint32_t mb_t0 = cycles_now();
+    const uint32_t mb_t0 = Ruler::now();
     const DsuMbistResult r =
         Dsu::mbist(reinterpret_cast<uint32_t>(&mbist_buffer[0]), 64);
-    const uint32_t mb_t1 = cycles_now();
+    const uint32_t mb_t1 = Ruler::now();
     print(serial, "  MBIST over 64 words: done=", r.done, " failed=", r.failed,
           " berr=", r.bus_error, " in ", mb_t1 - mb_t0, " cycles (",
           (mb_t1 - mb_t0) / 64u, " per word)", crlf);
@@ -1230,9 +1249,11 @@ volatile uint32_t v_a = 0;
 volatile uint32_t v_b = 0;
 
 void tg_divas_math() {
-    Divas::bus_clock(true);
+    // Sampled in main() before any letter: a reading taken here would
+    // follow the enable below, or whatever a letter before left.
     bench.verdict("the AHB clock is on out of reset (table 12-3, index 12)",
-                  Divas::bus_clock());
+                  boot_divas_clock);
+    Divas::bus_clock(true);
 
     Divas::configure(false);
     bench.verdict("CTRLA reads back what was written",
@@ -1486,9 +1507,9 @@ constexpr uint32_t bench_n = 4000;
 volatile uint32_t timing_sink = 0;
 
 uint32_t time_loop(uint32_t (*fn)(uint32_t)) {
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     timing_sink = timing_sink + fn(bench_n);
-    const uint32_t t1 = cycles_now();
+    const uint32_t t1 = Ruler::now();
     return t1 - t0;
 }
 
@@ -1820,12 +1841,15 @@ bool start_arrives_at(uint8_t user, EventPath path, EventEdge edge) {
     if (!Evsys::connect(user, ev_channel, ch)) {
         return false;
     }
-    for (uint32_t i = 0; i < 200u; ++i) {
-    }
+    // The channel's configuration crosses into its generic clock's domain
+    // on the resynchronized path - a few cycles of generator 0 - and
+    // erratum 1.12.3 asks three of them before a software event; ten
+    // microseconds is hundreds. Then the start is waited for: a
+    // resynchronized event lands within a few cycles, an asynchronous one
+    // at once, so a hundred microseconds without it is no start.
+    brio::spin_us<Ruler>(10u);
     Evsys::trigger(ev_channel);
-    for (uint32_t i = 0; i < 2000u; ++i) {
-    }
-    const bool started = Mtb::enabled();
+    const bool started = brio::wait_until<Ruler>([] { return Mtb::enabled(); }, 100u);
     Mtb::enable(false);
     Evsys::disconnect(user);
     Evsys::release_channel(ev_channel);
@@ -1844,6 +1868,7 @@ void tj_mtb_events() {
           "; table 12-3 says 44 and 45", crlf);
 
     uint8_t working_user = 0xFF;
+    uint8_t starting_users = 0;
     for (uint8_t user = 44; user <= 46u; ++user) {
         const bool async = start_arrives_at(user, EventPath::asynchronous,
                                             EventEdge::none);
@@ -1852,13 +1877,15 @@ void tj_mtb_events() {
         print(serial, "    user ", user, ": asynchronous ",
               async ? "STARTS THE TRACE" : "nothing", ", resynchronized+rising ",
               resync ? "STARTS THE TRACE" : "nothing", crlf);
-        if ((async || resync) && working_user == 0xFFu) {
-            working_user = user;
+        if (async || resync) {
+            starting_users = static_cast<uint8_t>(starting_users + 1u);
+            if (working_user == 0xFFu) {
+                working_user = user;
+            }
         }
     }
 
-    bench.verdict("exactly one event user starts the trace",
-                  working_user != 0xFFu);
+    bench.verdict("exactly one event user starts the trace", starting_users == 1u);
     if (working_user != 0xFFu) {
         print(serial, "  the connected trace-START user is ", working_user,
               crlf);
@@ -1882,9 +1909,9 @@ void tj_mtb_events() {
         Mtb::enable(true);
         const bool running = Mtb::enabled();
         Evsys::trigger(ev_channel);
-        for (uint32_t i = 0; i < 2000u; ++i) {
-        }
-        const bool halted = !Mtb::enabled();
+        // An asynchronous event lands at once; a hundred microseconds
+        // without the stop is none.
+        const bool halted = brio::wait_until<Ruler>([] { return !Mtb::enabled(); }, 100u);
         Evsys::disconnect(stop_user);
         Evsys::release_channel(ev_channel);
         Mtb::release();
@@ -1919,38 +1946,46 @@ void tk_mtb_halt() {
     // name.
     print(serial, "  the core cannot read DHCSR (debugger-access-only on "
                   "ARMv6-M), so the only evidence is survival", crlf);
-    console_drain();
+    // A wedged console loses the lines above; nothing here is timed.
+    (void)console_drain();
 
     // AUTOHALT at a watermark of two packets: the trace runs into it
-    // immediately.
+    // immediately. What can be judged is that the watermark WAS reached -
+    // the request was raised - and the core ran on to judge it; that a
+    // halt did not follow is the letter reaching its tally.
     MtbConfig cfg{};
     cfg.auto_halt = true;
     cfg.watermark_packets = 2;
     (void)Mtb::configure(trace_buffer, sizeof(trace_buffer), cfg);
+    const uint32_t start_offset = Mtb::write_offset();
     Mtb::enable(true);
     trace_chain();
     trace_chain();
-    const bool alive_after_autohalt = true;
+    const uint32_t written = (Mtb::write_offset() - start_offset) / Mtb::packet_bytes;
     const uint32_t flow_after = Mtb::flow();
+    const uint32_t master_after = Mtb::master();
     Mtb::enable(false);
-    print(serial, "  AUTOHALT reached its watermark and the CPU is still "
-                  "running; FLOW = ", hex(flow_after), crlf);
-    bench.verdict("FLOW.AUTOHALT does not stop a core with no debugger "
-                  "attached",
-                  alive_after_autohalt);
+    print(serial, "  AUTOHALT: ", written, " packets written against a watermark of "
+          "2, the CPU still running; FLOW = ", hex(flow_after), ", MASTER = ",
+          hex(master_after), crlf);
+    bench.verdict("the trace ran past AUTOHALT's watermark - the halt request "
+                  "was raised - and the core ran on with no debugger attached",
+                  written >= 2u);
 
-    // HALTREQ, asked for directly.
-    console_drain();
+    // HALTREQ, asked for directly and held for two milliseconds - a
+    // halt honoured would stop the core within cycles.
+    (void)console_drain();
     const uint32_t m = Mtb::master();
     MTB_REGS->MTB_MASTER = m | MTB_MASTER_HALTREQ_Msk;
-    for (uint32_t i = 0; i < 100'000UL; ++i) {
-    }
+    const uint32_t held = Mtb::master();
+    brio::spin_us<Ruler>(2'000u);
     MTB_REGS->MTB_MASTER = m;
-    print(serial, "  MASTER.HALTREQ was set and cleared and the CPU is still "
-                  "running", crlf);
-    bench.verdict("MASTER.HALTREQ is inert too - a halt request needs "
-                  "DHCSR.C_DEBUGEN, which bench.py clears after every flash",
-                  true);
+    // Printed, not judged: the bit's read-back is the TRM's, not a
+    // document of record here, and that the core ran through the hold is
+    // this line being printed at all.
+    print(serial, "  MASTER.HALTREQ held for 2 ms (MASTER read ", hex(held),
+          " while held) and the CPU ran through it: a halt request needs "
+          "DHCSR.C_DEBUGEN, which bin/brio clears after every flash", crlf);
 
     Mtb::release();
 }
@@ -1988,6 +2023,7 @@ int main() {
     boot_dsu_statusa = DSU_REGS->DSU_STATUSA;
     boot_dsu_statusb = DSU_REGS->DSU_STATUSB;
     boot_cause = brio::Reset::cause();
+    boot_divas_clock = brio::Divas::bus_clock();
 
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);

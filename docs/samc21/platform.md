@@ -481,7 +481,7 @@ Stopping:
   0x0400 - back-bias ON, regulator AUTO.
 - **Waking from IDLE0 costs nothing measurable** over a polled wait on
   the same RTC compare: under a microsecond either way across runs,
-  i.e. a WFI and an exception entry. **IDLE2 costs 24 to 30 us more
+  i.e. a WFI and an exception entry. **IDLE2 costs 24 to 36 us more
   than IDLE0** on a board with no CAN traffic at all - chapter 19
   presents IDLE2 as IDLE0 with one more clock gated and says nothing
   about paying for it at the wake.
@@ -501,8 +501,11 @@ Stopping:
   those could show up here.
 - **The kernel tick freezes, exactly.** A standby of 499 ms of wall
   clock advanced `Ticker::ticks()` by 0 ms; the same sleep in IDLE0
-  advanced it by 496. A time event 50 ms away, slept over for 249 ms,
-  matured 199 ms late and the kernel never knew.
+  advanced it by 496. A time event armed 50 ms ahead and slept over
+  matures late by the whole slept span - the suite times it from the
+  moment it was due to the moment its active object takes it, and
+  judges that against the span within a few milliseconds - and the
+  kernel never knew.
 - **The peripheral's own RUNSTDBY is the whole request.** A TC pair
   counting through a 31 ms standby: with `CTRLA.RUNSTDBY` clear it
   counts 13 ticks of 1024 whatever the generator and the source say;

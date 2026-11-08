@@ -111,6 +111,7 @@
 #include "avrxt/userrow.hpp"
 #include "util/analog.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #include "board.hpp"
@@ -153,6 +154,32 @@ bool near(int32_t a, int32_t b, int32_t tol) {
 }
 void hold_ms(uint32_t ms) {
     while (ms--) delay_us(clock, 1000);
+}
+
+// THE WAITS. This half runs with the kernel tick paused (its windows and
+// holds are counted in crystal time) and TCA0 and TCB1 are the letters'
+// instruments, so neither util/test_wait.hpp's wait on the tick nor a
+// ruler of its own is free across the letters: its time-outs are counted
+// on the delay verb, each turn at least the delay it names on the crystal.
+
+/// RESRDY within `us` turns of at least 1 us each, or false (no letter
+/// waits forever on a flag).
+[[nodiscard]] bool wait_ready(uint32_t us) {
+    while (us--) {
+        if (A::ready()) return true;
+        delay_us(clock, 1);
+    }
+    return A::ready();
+}
+
+/// Every queued console byte off the wire, bounded (at least 10 us a
+/// turn, 20000 turns: 200 ms): false on a wedged console.
+bool console_drain() {
+    for (uint16_t turn = 0; turn < 20000u; ++turn) {
+        if (Serial::tx_idle()) return true;
+        delay_us(clock, 10);
+    }
+    return Serial::tx_idle();
 }
 
 // N blocking reads, averaged.
@@ -239,8 +266,12 @@ uint16_t count_events(G, uint16_t ms) {
 // adds to it; (b) the buffer on, code 0: the same fall with the buffer
 // sinking - the mean sink current = C dV/dt - V/R; (c) a rising step:
 // the mean source current. The ADC at 5 MHz on VDD, LOWLAT, reads PD1
-// every ~5 us; TCA0 times it.
+// every ~5 us; TCA0 times it, at 0.8 us a count, each wait held to 30000
+// counts (24 ms: twelve times the 2 ms the net's V0/e^2 takes) - within
+// half the 16-bit count's wrap, so a late look cannot read a wrapped span.
 struct Fall { uint32_t t1_us; uint32_t t2_us; uint16_t v0; };
+constexpr uint16_t net_budget = 30'000;
+static_assert(brio::span_fits<16>(net_budget));
 
 Fall timed_fall(bool buffer_on) {
     Fall f{0, 0, 0};
@@ -257,7 +288,7 @@ Fall timed_fall(bool buffer_on) {
         const uint16_t dt = static_cast<uint16_t>(tbase() - t0);
         if (!got1 && v <= e1) { f.t1_us = tbase_us(dt); got1 = true; }
         if (v <= e2) { f.t2_us = tbase_us(dt); break; }
-        if (dt > 60000u) break;                    // 48 ms: neither reached
+        if (dt > net_budget) break;                // 24 ms: neither reached
     }
     Tca<0>::reset();
     return f;
@@ -314,13 +345,13 @@ void tn_net() {
         const uint16_t v = A::read();
         const uint16_t dt = static_cast<uint16_t>(tbase() - t0);
         if (v >= hi_target) { rise_us = tbase_us(dt); break; }
-        if (dt > 60000u) break;
+        if (dt > net_budget) break;
     }
     Tca<0>::reset();
     const uint32_t src_ua = (rise_us && c_nf) ? c_nf * 1620u / rise_us + 110u : 0;   // 0.9 x 1.8 V; + the 10 k's mean
     print(serial, "  rise 0.2 -> 2.0 V: 90 % after ", rise_us, " us -> the buffer sources ~", src_ua,
           " uA into the net", crlf);
-    verdict("the rise reaches 90 % within 48 ms", rise_us > 0);
+    verdict("the rise reaches 90 % within 24 ms", rise_us > 0);
 
     // (d) a digital pad on the net: the DAC off (its pin released), PD1
     // driven high then low, PD7 read as a digital input - the time to its
@@ -336,14 +367,18 @@ void tn_net() {
     P1::clear();
     P1::output();
     hold_ms(settle_ms);
+    // Each edge waited 30000 counts of CLK_PER at most (1.5 ms at 20 MHz,
+    // against the microseconds a pad takes), within half the wrap.
+    constexpr uint16_t pad_budget = 30'000;
+    static_assert(brio::span_fits<16>(pad_budget));
     uint16_t t1 = Tca<0>::count();
     P1::set();
-    while (!P7::read() && static_cast<uint16_t>(Tca<0>::count() - t1) < 60000u) {}
+    while (!P7::read() && static_cast<uint16_t>(Tca<0>::count() - t1) < pad_budget) {}
     const uint16_t up = static_cast<uint16_t>(Tca<0>::count() - t1);
     hold_ms(1);
     t1 = Tca<0>::count();
     P1::clear();
-    while (P7::read() && static_cast<uint16_t>(Tca<0>::count() - t1) < 60000u) {}
+    while (P7::read() && static_cast<uint16_t>(Tca<0>::count() - t1) < pad_budget) {}
     const uint16_t down = static_cast<uint16_t>(Tca<0>::count() - t1);
     P1::input();
     Tca<0>::reset();
@@ -851,17 +886,19 @@ void t0_event_start() {
     ChPace::off();
     // the select as the start: a walk of GND and the wire, one store each
     (void)A::init(clock, at(Ref::v2048));
+    // Each conversion waited 1 ms at most: 10 us of initialization and
+    // 11.5 us of conversion at 2 MHz (letter e), many times over.
     A::start_on_select(true);
     A::select(AdcInput::gnd);
-    while (!A::ready()) {}
+    const bool g_done = wait_ready(1000);
     const uint16_t g = A::result();
     A::select(Wire{});
-    while (!A::ready()) {}
+    const bool w_done = wait_ready(1000);
     const uint16_t w = A::result();
     A::start_on_select(false);
     print(serial, "  start on select: GND ", g, ", wire ", w, crlf);
     verdict("each select starts its own conversion (GND <= 8, the wire ~2048)",
-            g <= 8 && near(w, 2048, two_refs(2048)));
+            g_done && w_done && g <= 8 && near(w, 2048, two_refs(2048)));
 }
 
 // ---- w: the window comparator -------------------------------------------------------
@@ -959,14 +996,6 @@ void fine_on() {
     (void)Tca<0>::init({.mode = TcaMode::normal, .clock = TcaClock::div1, .period = 0xFFFF});
 }
 uint16_t fine() { return Tca<0>::count(); }
-/// RESRDY within `us`, or false (no letter waits forever on a flag).
-bool wait_ready(uint32_t us) {
-    while (us--) {
-        if (A::ready()) return true;
-        delay_us(clock, 1);
-    }
-    return A::ready();
-}
 
 void te_flags() {
     print(serial, "e flags and aborts: what clears RESRDY, the overwrite and overrun flags, STOP against the "
@@ -974,14 +1003,19 @@ void te_flags() {
     dac_to(Ref::v2048, 1000);                      // 2.0 V: 1638 at VDD
     (void)A::init(clock, at(Ref::vdd));
     A::select(Wire{});
-    A::start(); (void)wait_ready(1000);
+    // Each conversion waited 1 ms at most (10 us + 11.5 us); a time-out
+    // would leave RESRDY clear, which the first and last verdicts accept,
+    // so the waits' answers are judged with them.
+    A::start();
+    const bool r1 = wait_ready(1000);
     (void)A::result();
-    verdict("a 16-bit read of RESULT clears RESRDY (A8)", !A::ready());
-    A::start(); (void)wait_ready(1000);
+    verdict("a 16-bit read of RESULT clears RESRDY (A8)", r1 && !A::ready());
+    A::start();
+    const bool r2 = wait_ready(1000);
     (void)A::sample();
-    verdict("a SAMPLE read leaves RESRDY", A::ready());
+    verdict("a SAMPLE read leaves RESRDY", r2 && A::ready());
     (void)A::sum();
-    verdict("... and the 32-bit read clears it", !A::ready());
+    verdict("... and the 32-bit read clears it", r2 && !A::ready());
     // two conversions, nothing read: SAMPOVR and RESOVR (each waited out:
     // 10 us of initialization + 11.5 us, 100 us given)
     (void)A::error();
@@ -1013,17 +1047,34 @@ void te_flags() {
     // must cover the longest such delay. Bound: 32 + 2 CLK_PER of latency,
     // + 8 of the poll loop, + 4 of the STOP store and the counter's read:
     // 46 CLK_PER.
+    // The console drained first, the windows timed, the figures printed
+    // after: a transmit interrupt inside a window moves the STOP and the
+    // poll that sees the late result. Each wait for the end is held to
+    // 32000 counts of fine() (1.6 ms, nearly twice the 874 us conversion),
+    // within half the 16-bit count's wrap.
+    if (!console_drain()) {
+        verdict("the console drained before the timed windows", false);
+        return;
+    }
+    constexpr uint16_t end_budget = 32'000;
+    static_assert(brio::span_fits<16>(end_budget));
     fine_on();
     uint16_t t_end = 0xFFFF;
+    bool ends = true;
     for (uint8_t k = 0; k < 3; ++k) {
         const uint16_t t0 = fine();
         A::start();
-        while (!A::ready()) {}
+        while (!A::ready() && static_cast<uint16_t>(fine() - t0) < end_budget) {}
         const uint16_t t = static_cast<uint16_t>(fine() - t0);
+        ends = ends && A::ready();
         if (t < t_end) t_end = t;
         (void)A::result(); (void)A::sample();
     }
-    print(serial, "  start to RESRDY: ", t_end, " CLK_PER (", t_end / tpus, " us) at the earliest of three", crlf);
+    if (!ends) {
+        Tca<0>::reset();
+        verdict("the long conversion ends within 1.6 ms of its start", false);
+        return;
+    }
     uint16_t after_max = 0, after_n = 0, before_n = 0, none_n = 0;
     for (uint8_t d = 12; d != 0xFF; --d) {               // half microseconds: 6 us .. 0
         for (uint8_t k = 0; k < 4; ++k) {
@@ -1046,6 +1097,7 @@ void te_flags() {
         }
     }
     Tca<0>::reset();
+    print(serial, "  start to RESRDY: ", t_end, " CLK_PER (", t_end / tpus, " us) at the earliest of three", crlf);
     print(serial, "  52 STOPs around the end: ", none_n, " aborted, ", before_n, " after the result, ", after_n,
           " with the result rising after the STOP, the latest ", after_max, " CLK_PER after it", crlf);
     verdict("a result rises after a STOP only within the output latency (<= 46 CLK_PER at CLK_PER / 64)",
@@ -1216,9 +1268,15 @@ WalkStats walk(bool engine, uint8_t lag_us, uint16_t results) {
     ChPace::source(EvTcaOvf<0>{});
     A::start_on(ChPace{});
     const uint8_t gnd = A::input_code(AdcInput::gnd), wire = A::input_code(Wire{});
-    uint16_t guard = 0;
-    while (w.results < results && ++guard < 60000u) {
-        if (!s_new) { delay_us(clock, 1); continue; }
+    // Bounded on the time spent waiting for a result: at least 1 us a
+    // turn, 60000 turns - 60 ms, some 750 of the 80 us pace's periods.
+    uint16_t idle_turns = 0;
+    while (w.results < results) {
+        if (!s_new) {
+            if (++idle_turns >= 60000u) break;
+            delay_us(clock, 1);
+            continue;
+        }
         cli();
         const uint16_t v = s_value;
         const uint8_t l = s_label;
@@ -1262,7 +1320,11 @@ void ts_select_engine() {
     print(serial, "  total: the engine ", eng_mis, " mislabelled of ", eng_res, ", the bare store ", bare_mis,
           " of ", bare_res, crlf);
     verdict("the engine labels every result right", eng_mis == 0 && eng_res >= 39u * 100u);
-    verdict("the bare store mislabels somewhere in the sweep (the hazard is real)", bare_mis > 0);
+    // The bare store's mislabels are the hazard the engine closes, shown
+    // as a measurement: no rate of them is derived, so their count is
+    // printed, not judged.
+    print(serial, "  the bare store ", bare_mis > 0 ? "mislabelled " : "mislabelled nothing in ",
+          bare_mis, " of ", bare_res, " results (the hazard; printed, not judged)", crlf);
     D::set(0);
 }
 
@@ -1385,6 +1447,7 @@ int main() {
 #include "avrxt/userrow.hpp"
 #include "util/analog.hpp"
 #include "util/print.hpp"
+#include "util/testbench.hpp"
 
 #include "board.hpp"
 
@@ -1397,6 +1460,9 @@ using namespace brio;
 
 using Serial = Uart<2, Route::alt1>;
 constexpr Serial serial;
+
+// 'a' runs every letter (the suite's all-key).
+TestBench<Serial> bench('a');
 
 using D = Dac<0>;
 using A = Adc<0>;
@@ -1415,13 +1481,8 @@ uint8_t usable_refs(Ref* out) {
     return n;
 }
 
-// ---- tiny test harness ------------------------------------------------------
-uint8_t passed = 0, failed = 0;
-
-void verdict(const char* name, bool ok) {
-    if (ok) ++passed; else ++failed;
-    print(serial, "  ", ok ? "PASS" : "FAIL", "  ", name, crlf);
-}
+// ---- the harness ------------------------------------------------------------
+void verdict(const char* name, bool ok) { bench.verdict(name, ok); }
 
 // |a - b| <= tol
 bool near(int32_t a, int32_t b, int32_t tol) {
@@ -1434,6 +1495,20 @@ uint16_t read_avg(uint8_t n) {
     uint32_t sum = 0;
     for (uint8_t i = 0; i < n; ++i) sum += A::read();
     return static_cast<uint16_t>(sum / n);
+}
+
+/// The next tick of the Ticker, the rate windows' time base: true once it
+/// has advanced, false when it has not within 5 ms (at least 1 us of
+/// crystal time a turn; a tick is 0.98 ms). The windows below run on the
+/// Ticker this proves running; a stopped one fails the letter here
+/// instead of holding a window open.
+bool next_tick() {
+    const uint32_t t0 = Ticker::millis();
+    for (uint16_t turn = 0; turn < 5000u; ++turn) {
+        if (Ticker::millis() != t0) return true;
+        delay_us(clock, 1);
+    }
+    return Ticker::millis() != t0;
 }
 
 // Differential results are signed: average them as such.
@@ -1630,8 +1705,11 @@ void t7_prescalers() {
         A::init(clock, c);
         A::select(Wire{});
         A::start();
-        const uint32_t t0 = Ticker::millis();
-        while (Ticker::millis() == t0) {}                 // align to a tick
+        if (!next_tick()) {                               // align to a tick
+            A::stop();
+            verdict("the Ticker advances (a tick within 5 ms)", false);
+            return;
+        }
         const uint32_t start = Ticker::millis();
         uint32_t n = 0;
         while (Ticker::millis() - start < 100) {
@@ -1689,8 +1767,11 @@ void t9_sampling() {
         A::init(clock, k.c);
         A::select(Wire{});
         A::start();
-        const uint32_t t0 = Ticker::millis();
-        while (Ticker::millis() == t0) {}
+        if (!next_tick()) {
+            A::stop();
+            verdict("the Ticker advances (a tick within 5 ms)", false);
+            return;
+        }
         const uint32_t start = Ticker::millis();
         uint32_t n = 0;
         while (Ticker::millis() - start < 100) {
@@ -1729,8 +1810,12 @@ void t10_event_start() {
     A::select(Wire{});
     EventChannel<1>::source(EvPitDiv<64>{});
     A::start_on(EventChannel<1>{});
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() == t0) {}
+    if (!next_tick()) {
+        A::start_on_events(false);
+        EventChannel<1>::off();
+        verdict("the Ticker advances (a tick within 5 ms)", false);
+        return;
+    }
     const uint32_t start = Ticker::millis();
     uint32_t n = 0;
     uint16_t last = 0;
@@ -1869,7 +1954,7 @@ void t14_vrefa() {
     print(serial, "  VDD/10 with VREFA = 2046 mV: ", v, " (exp ", exp, ")", crlf);
     verdict("VDD/10 vs VREFA", near(v, static_cast<int32_t>(exp), static_cast<int32_t>(exp / 8)));
 #else
-    print(serial, "  VDD/10 against VREFA: SKIP - no VDDDIV10 input on this part (no MVIO)", crlf);
+    bench.skip("VDD/10 against VREFA: no VDDDIV10 input on this part (no MVIO)");
 #endif
 }
 
@@ -1940,26 +2025,27 @@ void t15_extras() {
     Ac<1>::disable(); D::set(0);
 }
 
-using TestFn = void (*)();
-struct Test { char key; TestFn fn; };
-constexpr Test tests[] = {
-    {'1', t1_references}, {'2', t2_ramp}, {'3', t3_outen}, {'4', t4_settling},
-    {'5', t5_resolution}, {'6', t6_differential}, {'7', t7_prescalers},
-    {'8', t8_accumulation}, {'9', t9_sampling}, {'0', t10_event_start},
-    {'w', t11_window}, {'e', t12_errata}, {'i', t13_internal}, {'v', t14_vrefa},
-    {'x', t15_extras},
-};
-
-void run(TestFn fn) {
-    passed = failed = 0;
-    fn();
-    print(serial, "  -> ", passed, " pass, ", failed, " fail", crlf, crlf);
+void register_tests() {
+    bench.letter('1', "references", t1_references);
+    bench.letter('2', "DAC ramp", t2_ramp);
+    bench.letter('3', "OUTEN off", t3_outen);
+    bench.letter('4', "settling", t4_settling);
+    bench.letter('5', "resolution", t5_resolution);
+    bench.letter('6', "differential", t6_differential);
+    bench.letter('7', "prescalers", t7_prescalers);
+    bench.letter('8', "accumulation", t8_accumulation);
+    bench.letter('9', "sampling", t9_sampling);
+    bench.letter('0', "event start", t10_event_start);
+    bench.letter('w', "window", t11_window);
+    bench.letter('e', "errata", t12_errata);
+    bench.letter('i', "internal inputs", t13_internal);
+    bench.letter('v', "VREFA", t14_vrefa);
+    bench.letter('x', "extras", t15_extras);
 }
 
 void help() {
-    print(serial, "test_avr_analog: 1 refs | 2 ramp | 3 outen | 4 settling | 5 res | 6 diff | 7 presc | "
-                  "8 acc | 9 sampling | 0 event start | w window | e errata | i internal | v vrefa | x extras | a all",
-          crlf);
+    print(serial, "test_avr_analog:", crlf);
+    bench.menu();
 }
 
 } // namespace
@@ -1989,26 +2075,17 @@ int main() {
           ", clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF",
           ", silicon rev ", hex(SYSCFG.REVID), ")", crlf,
           "wire PD6->PD1 and PD6->PD7; VDD measured ", vdd_mv, " mV", crlf);
+    register_tests();
     help();
-    print(serial, "> ");
+    bench.prompt();
     for (;;) {
         uint8_t c;
         if (!Serial::read_byte(c)) continue;
         if (c == '\r' || c == '\n') continue;
         print(serial, static_cast<char>(c), crlf);
         if (c == '?') { help(); }
-        else if (c == 'a' || c == 'A') {
-            uint8_t tp = 0, tf = 0;
-            for (const Test& t : tests) { run(t.fn); tp += passed; tf += failed; }
-            print(serial, "ALL: ", tp, " pass, ", tf, " fail", crlf);
-        } else {
-            bool found = false;
-            for (const Test& t : tests) {
-                if (t.key == c) { run(t.fn); found = true; }
-            }
-            if (!found) print(serial, "? for help", crlf);
-        }
-        print(serial, "> ");
+        else if (!bench.handle(static_cast<char>(c))) { print(serial, "? for help", crlf); }
+        bench.prompt();
     }
 }
 

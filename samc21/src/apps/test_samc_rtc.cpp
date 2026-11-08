@@ -67,11 +67,14 @@
 #include "samc21/nvic.hpp"
 #include "samc21/osc32kctrl.hpp"
 #include "samc21/pin.hpp"
+#include "samc21/platform.hpp"
 #include "samc21/rtc.hpp"
 #include "samc21/sercom.hpp"
 #include "samc21/tc.hpp"
 #include "samc21/ticker.hpp"
+#include "kernel/time.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -91,6 +94,19 @@ using Serial = Uart<5, console_pads>;
 constexpr Serial serial;
 
 TestBench<Serial> bench;
+
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's
+/// time-outs and fixed pauses (util/test_wait.hpp). Every RATE below is
+/// timed on the crystal stopwatch instead; this ruler only bounds waits.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+using P = SamPlatform;
+
+/// A fixed pause of `ms` milliseconds on the ruler.
+void pause_ms(uint32_t ms) { brio::spin_us<Ruler>(ms * 1000u); }
 
 using brio::crlf;
 using brio::print;
@@ -138,17 +154,6 @@ bool stopwatch_start() {
 
 uint32_t ticks_now() { return Stopwatch::count32(); }
 
-/// Spin until the stopwatch has advanced by `ticks`, and answer how far
-/// it really went - the caller divides by what it counted, so the small
-/// overshoot of the exit test never becomes an error.
-uint32_t spin_ticks(uint32_t ticks) {
-    const uint32_t t0 = ticks_now();
-    uint32_t elapsed = 0;
-    while (elapsed < ticks) {
-        elapsed = ticks_now() - t0;
-    }
-    return elapsed;
-}
 
 // ---------------------------------------------------------------------------
 // The event witness: TC4 counting events, which is EVSYS user 27 (TC4 EVU,
@@ -218,12 +223,10 @@ std::optional<uint32_t> rtc_at_phase(uint32_t q, uint32_t period) {
 constexpr uint8_t gen_slow = 5;
 using GenSlow = Gclk<gen_slow>;
 
-void settle() {
-    volatile uint32_t sink = 0;
-    for (uint32_t i = 0; i < 200'000UL; ++i) {
-        sink = sink + 1u;
-    }
-}
+/// Time for a generator switch to settle before the meter reads it:
+/// 30 ms, about a thousand periods of a 32 kHz root, where the switch
+/// takes a few periods of the slower clock (16.6.2.6).
+void settle() { pause_ms(30u); }
 
 bool route_slow(GclkSource src_sel) {
     if (!GenSlow::configure(GclkConfig{.source = src_sel})) {
@@ -301,8 +304,21 @@ bool rtc_up(RtcClock which, const RtcConfig& cfg) {
     return Rtc::configure(cfg) && Rtc::enable(true);
 }
 
+/// The wait for COUNT's next change, bounded on the kernel tick: 100 ms
+/// is three periods of the slowest counter measured here (32 Hz, DIV1024
+/// on a 32 kHz root). Its turn is one raw COUNT read and one load of the
+/// tick count, so the change is seen within a few cycles - the edge
+/// alignment below depends on that, and a ruler read in every turn
+/// (about 70 cycles) would loosen it. False when COUNT never moved.
+bool next_count_edge() {
+    const uint32_t v = Rtc::count32_raw();
+    return brio::wait_ticks<P>([v] { return Rtc::count32_raw() != v; },
+                               brio::ticks_from_ms<P>(100));
+}
+
 /// The counter's rate, in hertz on the stopwatch's scale, over a window
-/// of at least `window_ticks` stopwatch ticks.
+/// of at least `window_ticks` stopwatch ticks; zero when the counter
+/// does not move.
 ///
 /// BOTH ENDS ARE EDGE-ALIGNED - the window opens and closes on a change
 /// of COUNT - so the count is a whole number by construction and the
@@ -313,15 +329,15 @@ bool rtc_up(RtcClock which, const RtcConfig& cfg) {
 /// answer would throw away 13000 ppm - more than any effect this suite
 /// is trying to see - before the arithmetic even starts.
 uint32_t count_rate_mhz(uint32_t window_ticks) {
-    uint32_t v = Rtc::count32_raw();
-    while (Rtc::count32_raw() == v) {
+    if (!next_count_edge()) {
+        return 0u;
     }
     const uint32_t c0 = Rtc::count32_raw();
     const uint32_t t0 = ticks_now();
     while ((ticks_now() - t0) < window_ticks) {
     }
-    v = Rtc::count32_raw();
-    while (Rtc::count32_raw() == v) {
+    if (!next_count_edge()) {
+        return 0u;
     }
     const uint32_t c1 = Rtc::count32_raw();
     const uint32_t elapsed = ticks_now() - t0;
@@ -332,15 +348,21 @@ uint32_t count_rate_mhz(uint32_t window_ticks) {
 /// How many stopwatch ticks `counts` counter ticks take, EDGE-ALIGNED at
 /// both ends: the window starts and ends on a change of COUNT, so the
 /// read path's own latency is common to both and cancels exactly. That
-/// is what makes a 129 ppm trim measurable at all.
+/// is what makes a 129 ppm trim measurable at all. Zero when the counter
+/// does not move, or does not cover `counts` within 2 s - four times the
+/// half second every caller's window lasts. The run's wait is on the
+/// kernel tick for the reason next_count_edge() gives.
 uint32_t span_ticks(uint32_t counts) {
-    const uint32_t v0 = Rtc::count32_raw();
-    while (Rtc::count32_raw() == v0) {
+    if (!next_count_edge()) {
+        return 0u;
     }
     const uint32_t start = Rtc::count32_raw();
     const uint32_t t0 = ticks_now();
     const uint32_t target = start + counts;
-    while (static_cast<int32_t>(Rtc::count32_raw() - target) < 0) {
+    if (!brio::wait_ticks<P>(
+            [target] { return static_cast<int32_t>(Rtc::count32_raw() - target) >= 0; },
+            brio::ticks_from_ms<P>(2000))) {
+        return 0u;
     }
     return ticks_now() - t0;
 }
@@ -404,13 +426,27 @@ void ta_block() {
                   Rtc::mode() == RtcMode::count32 &&
                       Rtc::prescaler() == RtcPrescaler::div1 && Rtc::read_sync());
     bench.verdict("the RTC enables", Rtc::enable(true));
-    bench.verdict("and now REFUSES a configuration - CTRLA's fields are "
-                  "enable-protected (24.6.2.1)",
+    bench.verdict("and now the driver REFUSES a configuration - CTRLA's fields "
+                  "are enable-protected (24.6.2.1)",
                   !Rtc::configure(RtcConfig{.prescaler = RtcPrescaler::div1024}));
-    bench.verdict("the prescaler is still the one that was written",
-                  Rtc::prescaler() == RtcPrescaler::div1);
-    bench.verdict("EVCTRL is enable-protected too",
+    bench.verdict("the driver refuses EVCTRL too, which is enable-protected as a "
+                  "whole",
                   !Rtc::event_config(cfg, RtcEventConfig{.overflow_out = true}));
+    // The driver refuses before it writes, so the silicon's own protection
+    // is asked with a raw store: ENABLE kept, PRESCALER changed to DIV1024.
+    // An enable-protected field ignores the write (24.6.2.1); the store
+    // still synchronizes ENABLE, which is waited for.
+    const uint16_t ctrla_before = RTC_REGS->MODE0.RTC_CTRLA;
+    RTC_REGS->MODE0.RTC_CTRLA = static_cast<uint16_t>(
+        (ctrla_before & ~RTC_MODE0_CTRLA_PRESCALER_Msk) |
+        RTC_MODE0_CTRLA_PRESCALER(RTC_MODE0_CTRLA_PRESCALER_DIV1024_Val));
+    const bool raw_synced = Rtc::sync_wait(RTC_MODE0_SYNCBUSY_ENABLE_Msk);
+    print(serial, "  a raw store of DIV1024 into a running RTC's CTRLA leaves the "
+          "prescaler ", Rtc::prescaler() == RtcPrescaler::div1 ? "at DIV1" : "CHANGED",
+          crlf);
+    bench.verdict("and the SILICON ignores a raw store to the prescaler of a "
+                  "running RTC - the protection is the chip's, not only the driver's",
+                  raw_synced && Rtc::prescaler() == RtcPrescaler::div1 && Rtc::enabled());
 
     // COUNTSYNC is the exception: write-synchronized, NOT enable-protected.
     bench.verdict("but COUNTSYNC moves under a RUNNING counter - it is the one "
@@ -483,9 +519,10 @@ void ta_block() {
 // The strong claim of this letter is NOT a frequency. It is that the RTC
 // counter advances once per source cycle, and that claim is made by
 // dividing two measurements taken against the SAME reference: FREQM
-// measures the oscillator against OSC48M, the stopwatch counts the RTC
-// against GCLK0, which is OSC48M. Whatever OSC48M is really doing
-// cancels.
+// measures the oscillator against the ruler's generator, and the
+// stopwatch counts the RTC on that same generator - the 24 MHz crystal,
+// or OSC48M when the crystal did not start. Whatever the reference is
+// really doing cancels.
 void tb_counts_its_source() {
     struct Case {
         RtcClock sel;
@@ -579,8 +616,9 @@ void tc_prescaler() {
                           Rtc::configure(RtcConfig{.mode = RtcMode::count32,
                                                    .prescaler = p}) &&
                           Rtc::enable(true));
-        // The slowest code needs a longer window: at /1024 the counter
-        // runs at 32 Hz and one count is 30000 ppm of a half second.
+        // The slowest code gets a longer window: at /1024 the counter
+        // runs at 32 Hz, so a half second holds sixteen counts and two
+        // seconds sixty-four.
         const uint32_t window =
             d >= 1024u ? (stopwatch_hz * 2u) : (stopwatch_hz / 2u);
         const uint32_t rate = count_rate_mhz(window);
@@ -602,7 +640,7 @@ void tc_prescaler() {
                                                .prescaler = RtcPrescaler::div1}) &&
                       Rtc::enable(true));
     Rtc::clear_flags();
-    (void)spin_ticks(stopwatch_hz / 20u);   // 50 ms
+    pause_ms(50u);
     const bool per_at_div1 = (Rtc::flags() & RtcFlag::periodic(0)) != 0u;
     bench.verdict("at DIV1 the periodic interval flag PER0 is raised",
                   per_at_div1);
@@ -614,7 +652,7 @@ void tc_prescaler() {
                       Rtc::enable(true));
     const uint32_t off_rate = count_rate_mhz(stopwatch_hz / 2u);
     Rtc::clear_flags();
-    (void)spin_ticks(stopwatch_hz / 20u);
+    pause_ms(50u);
     const bool per_at_off = (Rtc::flags() & RtcFlag::periodic(0)) != 0u;
     print(serial, "  OFF counts ", off_rate / 1000u, " Hz - the same rate as DIV1, and "
                   "PER0 is ", per_at_off ? "SET" : "silent", crlf);
@@ -659,6 +697,9 @@ int32_t abba_swing_ppm(uint32_t window_counts, uint8_t value) {
     const int64_t plus = static_cast<int64_t>(t1) + static_cast<int64_t>(t4);
     const int64_t minus = static_cast<int64_t>(t2) + static_cast<int64_t>(t3);
     const int64_t mean = (plus + minus) / 4;
+    if (t1 == 0u || t2 == 0u || t3 == 0u || t4 == 0u) {
+        return 0;   // a window that never closed: no swing, and the sign verdict fails
+    }
     return static_cast<int32_t>(((plus - minus) * 1'000'000LL) / (2 * mean));
 }
 
@@ -776,19 +817,19 @@ void td_frequency_correction() {
     // once at 547 ppm against a 401 ppm swing, with the same firmware
     // passing minutes earlier. When the floor is calm the comparison is
     // real; when the floor alone rivals the swing, no single run can
-    // separate trim from noise, so the verdict PASSES AS DECLINED and
+    // separate trim from noise, so the comparison is SKIPPED and
     // says so - the tally stays stable whatever the weather.
     const bool floor_calm = idle_ppm < 300u;
-    if (!floor_calm) {
+    if (floor_calm) {
+        bench.verdict("and it is well clear of the source's own movement over the "
+                      "same window",
+                      swing2 > static_cast<int32_t>(idle_ppm));
+    } else {
         print(serial, "  the source alone moved ", idle_ppm,
-              " ppm between idle windows this run - too windy to separate "
-              "the trim from the noise, and this verdict declines rather "
-              "than guesses", crlf);
+              " ppm between idle windows this run", crlf);
+        bench.skip("the trim against the floor: the source alone moved too far "
+                   "between idle windows to separate trim from noise");
     }
-    bench.verdict("and it is well clear of the source's own movement over the "
-                  "same window (or the floor is too windy to judge, declared "
-                  "above)",
-                  !floor_calm || swing2 > static_cast<int32_t>(idle_ppm));
 
     // THE MAGNITUDE, AND IT IS NOT THE CHAPTER'S. Five separate bench
     // sessions put the median full swing between 415 and 620 ppm where
@@ -865,7 +906,7 @@ void te_events() {
     Rtc::clear_flags();
     bench.verdict("a compare is armed a few counter ticks ahead",
                   Rtc::set_comp32(Rtc::count32() + 64u));
-    (void)spin_ticks(stopwatch_hz / 20u);   // 50 ms, about 1600 ticks
+    pause_ms(50u);   // about 1600 ticks
     const uint16_t compares = witnessed();
     print(serial, "  one compare match: counted ", compares, crlf);
     bench.verdict("THE COMPARE EVENT WAS COUNTED, EXACTLY ONCE - no CPU in "
@@ -898,7 +939,7 @@ void te_events() {
     const uint32_t quiet = ((phase ? *phase : 0u) + per / 2u) % per;
     const auto c0 = rtc_at_phase(quiet, per);
     const uint16_t n0 = witnessed();
-    (void)spin_ticks(stopwatch_hz / 10u);   // 100 ms, about 51 periods
+    pause_ms(100u);   // about 51 periods
     const auto c1 = rtc_at_phase(quiet, per);
     const uint16_t n1 = witnessed();
     const uint32_t elapsed = (c0 && c1) ? *c1 - *c0 : 0u;
@@ -923,7 +964,7 @@ void te_events() {
     Nvic::enable(Rtc::irq());
     bench.verdict("a compare is armed again, this time as an interrupt",
                   Rtc::set_comp32(Rtc::count32() + 64u));
-    (void)spin_ticks(stopwatch_hz / 20u);
+    pause_ms(50u);
     Rtc::disarm();
     Nvic::disable(Rtc::irq());
     print(serial, "  the handler ran ", rtc_irq_count, " times, acknowledging ",
@@ -947,7 +988,7 @@ void te_events() {
                   Rtc::set_comp32(1024) && Rtc::set_count32(0) &&
                       Rtc::enable(true));
     Rtc::clear_flags();
-    (void)spin_ticks(stopwatch_hz / 5u);   // 200 ms, several match periods
+    pause_ms(200u);   // several match periods
     const uint16_t f = Rtc::flags();
     const uint32_t held = Rtc::count32();
     print(serial, "  with MATCHCLR the counter sits at ", held,
@@ -976,7 +1017,7 @@ void tf_read_sync() {
                                    .read_sync = true}));
 
     const uint32_t a0 = Rtc::count32();
-    (void)spin_ticks(stopwatch_hz / 100u);   // 10 ms, about 328 ticks
+    pause_ms(10u);   // about 328 ticks
     const uint32_t a1 = Rtc::count32();
     bench.verdict("with COUNTSYNC set the counter can be read and it advances",
                   a1 != a0);
@@ -1018,11 +1059,16 @@ void tf_read_sync() {
     // readable value trails the flag, in counter ticks.
     int32_t lag_min = 127;
     int32_t lag_max = -127;
+    bool every_flag = true;
     for (uint8_t i = 0; i < 8u; ++i) {
         const uint32_t target = Rtc::count32() + 32u;
         Rtc::clear_flags(RtcFlag::compare0);
         (void)Rtc::set_comp32(target);
-        while ((Rtc::flags() & RtcFlag::compare0) == 0u) {
+        // 10 ms: ten times the 32 counts (about 1 ms) the match is ahead.
+        if (!brio::wait_until<Ruler>(
+                [] { return (Rtc::flags() & RtcFlag::compare0) != 0u; }, 10'000u)) {
+            every_flag = false;
+            break;
         }
         const int32_t lag =
             static_cast<int32_t>(Rtc::count32_raw()) - static_cast<int32_t>(target);
@@ -1041,10 +1087,11 @@ void tf_read_sync() {
     // there is a lag - a value crossing two clock domains must have one -
     // but that it is the SAME every time, which is what makes it
     // correctable and what a jittery synchronizer would not give.
+    bench.verdict("the compare flag rose on all eight repetitions", every_flag);
     bench.verdict("the lag is IDENTICAL on all eight repetitions - the "
                   "staleness of a synchronized read is a constant, not a "
                   "jitter",
-                  lag_min == lag_max);
+                  every_flag && lag_min == lag_max);
     bench.verdict("and it is a handful of source ticks, not a period of the "
                   "bus clock or a hundred of them",
                   lag_min >= -10 && lag_max <= 2);
@@ -1087,7 +1134,7 @@ void tf_read_sync() {
     bench.verdict("COUNTSYNC goes off under the running counter",
                   Rtc::read_sync(false) && !Rtc::read_sync());
     const uint32_t frozen0 = Rtc::count32_raw();
-    (void)spin_ticks(stopwatch_hz / 20u);   // 50 ms, about 1600 source ticks
+    pause_ms(50u);   // about 1600 source ticks
     const uint32_t frozen1 = Rtc::count32_raw();
     print(serial, "  with COUNTSYNC clear, COUNT read ", frozen0, " and then ",
           frozen1, " fifty milliseconds later", crlf);
@@ -1152,45 +1199,65 @@ void tg_mode1() {
     bench.verdict("a third compare does not exist", !Rtc::set_comp16(2, 1));
 
     Rtc::clear_flags();
-    // Count overflows over a window, and derive the period. 24.6.2.4:
-    // the counter increments "until it reaches the PER value, and then
-    // wraps" - so a period is PER + 1 ticks, not PER.
-    uint32_t overflows = 0;
+    // THE PERIOD, TIMED EDGE TO EDGE. 24.6.2.4: the counter increments
+    // "until it reaches the PER value, and then wraps" - a period of
+    // PER + 1 ticks, which a count of overflows in a window cannot tell
+    // from PER: about 33 a second, a quantization of 3 %. So the first
+    // overflow edge starts the stopwatch and the 32nd after it stops it:
+    // the period is that span over 32, on the crystal, and in source
+    // ticks through the source rate measured above on the same ruler.
+    //
+    // The bound, derived: PER and PER + 2 are each a whole tick (1000
+    // milli-ticks) from PER + 1, so the verdict takes half a tick. Inside
+    // that: the source's wander between its rate measurement and this
+    // window, under 300 ppm (the floor letter d gates on) - 0.3 tick of
+    // 1000; the stopwatch's tick (about 333 ns on the crystal) and the
+    // poll turn that sees each edge (a flag read, a COUNT read and a
+    // stopwatch read, a few microseconds) at both ends of a span near a
+    // second - under 0.01 tick. The flag's own latency after the wrap is
+    // the same at both edges and cancels.
+    constexpr uint16_t periods = 32;
+    uint16_t edges = 0;
     uint16_t seen_top = 0;
+    uint32_t t_first = 0;
+    uint32_t t_last = 0;
     const uint32_t t0 = ticks_now();
-    uint32_t elapsed = 0;
-    while (elapsed < stopwatch_hz) {   // one second
+    // Bounded at two seconds: 33 periods at 32.8 kHz take about one.
+    while (edges <= periods && (ticks_now() - t0) < 2u * stopwatch_hz) {
         if ((Rtc::flags() & RtcFlag::overflow) != 0u) {
+            const uint32_t t = ticks_now();
             Rtc::clear_flags(RtcFlag::overflow);
-            ++overflows;
+            if (edges == 0u) {
+                t_first = t;
+            }
+            t_last = t;
+            ++edges;
         }
         const uint16_t c = Rtc::count16_raw();
         if (c > seen_top) {
             seen_top = c;
         }
-        elapsed = ticks_now() - t0;
     }
     const uint16_t flags_seen = Rtc::flags();
-    // source ticks per overflow = f_source / overflow rate, both measured
-    // on the same ruler, so the ruler cancels and the RC's absolute error
-    // never enters.
-    const uint32_t ticks_per_period =
-        overflows == 0u
-            ? 0u
-            : static_cast<uint32_t>(
-                  (static_cast<uint64_t>(source_mhz) * elapsed) /
-                  (static_cast<uint64_t>(overflows) * stopwatch_hz * 1000ULL));
-    print(serial, "  the source measures ", source_mhz / 1000u,
-          " Hz; ", overflows, " overflows in one second, the counter never seen "
-          "above ", seen_top, "; that is ", ticks_per_period,
-          " source ticks a period against a predicted ", per + 1u, crlf);
+    const bool timed = edges > periods;
+    // source ticks per period, in thousandths: f_source (mHz) x span /
+    // (periods x stopwatch rate); the ruler cancels between the two.
+    const uint32_t mticks_per_period =
+        !timed ? 0u
+               : static_cast<uint32_t>(
+                     (static_cast<uint64_t>(source_mhz) * (t_last - t_first)) /
+                     (static_cast<uint64_t>(periods) * stopwatch_hz));
+    print(serial, "  the source measures ", source_mhz / 1000u, " Hz; ", periods,
+          " periods timed edge to edge give ", mticks_per_period / 1000u, ".",
+          mticks_per_period % 1000u, " source ticks a period against PER + 1 = ",
+          per + 1u, "; the counter never seen above ", seen_top, crlf);
 
     bench.verdict("the counter never exceeds PER - the 16-bit mode's top is "
                   "the register and not the width",
                   seen_top <= per);
-    bench.verdict("and the period is PER + 1 source ticks, not PER - which is "
-                  "one tick more than 24.6.2.4's sentence reads at a glance",
-                  abs_diff(ticks_per_period, per + 1u) <= 5u);
+    bench.verdict("and the period is PER + 1 source ticks, not PER - timed edge to "
+                  "edge, to within half a tick",
+                  timed && abs_diff(mticks_per_period, (per + 1u) * 1000u) < 500u);
     bench.verdict("both compare flags were raised inside the window",
                   (flags_seen & RtcFlag::compare0) != 0u &&
                       (flags_seen & RtcFlag::compare1) != 0u);
@@ -1203,12 +1270,16 @@ void tg_mode1() {
     // from there, which is what a partial write would not give.
     constexpr uint16_t written = 500;
     const bool wrote2 = Rtc::set_count16(written);
-    uint32_t spins = 0;
     uint16_t back = Rtc::count16_raw();
-    while ((back < written || back > written + 200u) && spins < 200'000UL) {
-        back = Rtc::count16_raw();
-        ++spins;
-    }
+    // 5 ms: over twenty times the read's 190 us catch-up after a COUNT
+    // write, and short of the 6 ms the counter takes to run from 500
+    // past 700. A time-out leaves `back` out of the window.
+    (void)brio::wait_until<Ruler>(
+        [&back] {
+            back = Rtc::count16_raw();
+            return back >= written && back <= written + 200u;
+        },
+        5'000u);
     print(serial, "  COUNT written as 500 came back as ", back, crlf);
     bench.verdict("COUNT round-trips through a full-width write - the only "
                   "kind erratum 1.16.3 leaves standing",
@@ -1254,11 +1325,15 @@ void th_calendar() {
     const auto roll = [](const RtcClockValue& from) -> RtcClockValue {
         (void)Rtc::set_clock(from);
         const uint8_t s = from.second;
-        const uint32_t t0 = ticks_now();
         RtcClockValue v = Rtc::clock_value();
-        while (v.second == s && (ticks_now() - t0) < (stopwatch_hz * 3u)) {
-            v = Rtc::clock_value();
-        }
+        // 3 s: three periods of the 1 Hz clock. A time-out returns the
+        // unrolled value, which the caller's verdict then fails.
+        (void)brio::wait_until<Ruler>(
+            [&v, s] {
+                v = Rtc::clock_value();
+                return v.second != s;
+            },
+            3'000'000u);
         return v;
     };
 
@@ -1353,7 +1428,7 @@ void th_calendar() {
     Rtc::clear_flags();
     (void)roll(RtcClockValue{.second = 59, .minute = 59, .hour = 23,
                              .day = 31, .month = 12, .year = 63});
-    (void)spin_ticks(stopwatch_hz * 2u);
+    pause_ms(2000u);
     bench.verdict("and now the same match does NOT raise it, two whole seconds "
                   "later",
                   (Rtc::flags() & RtcFlag::alarm0) == 0u);
@@ -1399,24 +1474,23 @@ void th_calendar() {
 /// to change - the clock is then one second on.
 RtcClockValue roll_from(const RtcClockValue& from) {
     (void)Rtc::set_clock(from);
-    const uint32_t t0 = ticks_now();
     RtcClockValue v = Rtc::clock_value();
-    while (v.second == from.second && (ticks_now() - t0) < (stopwatch_hz * 3u)) {
-        v = Rtc::clock_value();
-    }
+    // A time-out returns the unrolled value, which the caller's verdict
+    // then fails.
+    (void)brio::wait_until<Ruler>(
+        [&v, &from] {
+            v = Rtc::clock_value();
+            return v.second != from.second;
+        },
+        3'000'000u);
     return v;
 }
 
 /// Did ALARM0 rise within `ms` (24.6.2.5: a whole 1 Hz period after the
 /// match it flags)?
 bool alarm_within(uint32_t ms) {
-    const uint32_t t0 = ticks_now();
-    while ((ticks_now() - t0) < (stopwatch_hz / 1000u) * ms) {
-        if ((Rtc::flags() & RtcFlag::alarm0) != 0u) {
-            return true;
-        }
-    }
-    return false;
+    return brio::wait_until<Ruler>([] { return (Rtc::flags() & RtcFlag::alarm0) != 0u; },
+                                   ms * 1000u);
 }
 
 void ti_more() {
@@ -1439,11 +1513,11 @@ void ti_more() {
                                      EventChannelConfig{
                                          .generator = Rtc::overflow_generator,
                                          .path = EventPath::asynchronous}));
-    (void)spin_ticks(stopwatch_hz / 50u);
+    pause_ms(20u);
     const uint16_t before = witnessed();
     bench.verdict("the counter is set 64 ticks short of its top",
                   Rtc::set_count32(0xFFFFFFFFUL - 63u));
-    (void)spin_ticks(stopwatch_hz / 20u);         // 50 ms: 1600 ticks, one wrap
+    pause_ms(50u);   // 1600 ticks, one wrap
     const uint16_t after = witnessed();
     print(serial, "  overflow events counted: ", before, " before the wrap, ", after,
           " after it; the counter now ", Rtc::count32(), crlf);

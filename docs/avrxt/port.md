@@ -220,7 +220,11 @@ exception.
 read back as pin 3 with slot 0 untouched at PIN0, ten rises counted ten,
 the slot moved to a quiet PD5 counting none - three of three in ten runs
 of ten. PC6/PC7 drive the jumpered nets to PE2/PE3 with no change to any
-verdict.
+verdict. Before driving them, letters 4, 7, 8 and 9 read both nets with
+the pull-ups on and skip, with the reason, when either reads low - a net
+held from outside, the partner board's side of the jumper; a net driven
+high from outside reads as the pull-up does and that check does not see
+it.
 
 **On the AVR EA ONE edge of any pin wakes POWER-DOWN** (`test_avr_sleep`
 p and q on the AVR64EA48, ten runs of ten; DS40002443A 18.3.3.1). Six

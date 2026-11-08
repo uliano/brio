@@ -75,6 +75,7 @@
 #include "kernel/time_event.hpp"
 #include "util/print.hpp"
 #include "util/ring.hpp"
+#include "util/test_wait.hpp"
 
 #include "board.hpp"
 
@@ -104,6 +105,7 @@ struct Token {
     uint16_t i_pass;      ///< test i's own tallies so far
     uint16_t i_fail;
     uint16_t wakes;       ///< phases 5/6: the sleeps woken before the watchdog reset
+    uint16_t all_skip;    ///< the skips banked with all_pass / all_fail
 };
 [[gnu::section(".noinit")]] inline Token token;
 
@@ -138,6 +140,18 @@ constexpr uint32_t mhz = crystal_hz / 1'000'000u;
 /// The 32-bit CLK_PER stamp: a software event latches both halves.
 uint32_t cycles_now() { return Watch::read(); }
 
+/// The cascade read as CLK_PER cycles: the ruler of the console drain and
+/// of the waits inside a masked section (k's raised flag). Not the kernel
+/// tick, because the tick is paused through f's second part and all of w
+/// while the drain still runs there; the cascade runs in every letter and
+/// every boot of i. Never polled while a handler stamps the cascade too
+/// (f's alarm, alarm_mode 1): a software snapshot taken in the loop would
+/// race the handler's own.
+struct Ruler {
+    static uint32_t now() { return Watch::read(); }
+    static constexpr uint32_t hz() { return crystal_hz; }
+};
+
 void stopwatch_init() {
     Watch::init(TcbClock::div1, ChCarry{}, ChSnap{});
     Watch::reset();
@@ -160,9 +174,6 @@ volatile uint16_t produce_seq = 0;
 volatile uint16_t produce_limit = 0;
 volatile uint16_t produce_rejects = 0;
 
-/// The kernel's own queue over the same platform (test g).
-EventQueue<uint8_t, 4, P> queue;
-
 // ---- the breadcrumb token (spans the resets of test i) -------------------------
 constexpr uint16_t token_magic = 0x5A17;
 constexpr uint16_t token_canary = 0xC3A5;
@@ -181,11 +192,24 @@ struct ResetReporter {
 
 // ---- tiny test harness --------------------------------------------------------
 uint16_t passed = 0, failed = 0;
+uint8_t skipped = 0;
 bool in_all_run = false;
 
 void verdict(const char* name, bool ok) {
     if (ok) ++passed; else ++failed;
     print(serial, "  ", ok ? "PASS" : "FAIL", "  ", name, crlf);
+}
+/// A check this board cannot run, counted apart from passes and failures
+/// in TestBench's grammar (util/testbench.hpp, "SKIP  <reason>").
+void skip(const char* reason) {
+    if (skipped != 0xFFu) ++skipped;
+    print(serial, "  SKIP  ", reason, crlf);
+}
+/// A tally line: "N pass, M fail", then ", K skipped" when K is not zero.
+void tally(const char* head, uint16_t p, uint16_t f, uint16_t s) {
+    print(serial, head, p, " pass, ", f, " fail");
+    if (s != 0u) print(serial, ", ", s, " skipped");
+    print(serial, crlf);
 }
 bool near(int32_t a, int32_t b, int32_t tol) {
     const int32_t d = a > b ? a - b : b - a;
@@ -219,10 +243,57 @@ uint32_t cycles_of(uint32_t cost, F f) {
     return best - cost;
 }
 
-void console_drain() {
-    while (!Serial::tx_idle()) {
+/// Every queued console byte off the wire, bounded on the cascade
+/// (util/test_wait.hpp): false on a wedged console.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
+
+/// The drain before a timed window, acted on: a console still busy after
+/// the drain's budget fails a verdict, and the caller does not open the
+/// window (the transmit interrupt would land inside it).
+bool quiet_console() {
+    if (console_drain()) return true;
+    verdict("the console drained before the timed window", false);
+    return false;
+}
+
+/// A spin on a flag an interrupt handler sets, or on the tick count,
+/// bounded with no clock read in the loop: TCB3 counts CLK_PER / 2 to
+/// TOP, a period of 131072 cycles (5.46 ms at 24 MHz, 6.55 ms at 20 MHz),
+/// and the spin gives up after `periods` of them. The shared waits
+/// (util/test_wait.hpp) read a clock every turn - the tick under a mask,
+/// which delays the handler whose entry f measures, and stops while the
+/// tick is paused; the cascade, which f's alarm stamps from its handler -
+/// so the letters that time a handler's entry, or wait on the tick
+/// itself, use this instead. TCB3 is w's rescue there and free everywhere
+/// else; its interrupt stays off (init clears INTCTRL). True when done()
+/// held, asked once more after the last period.
+template <typename F>
+bool spin_until(F done, uint16_t periods) {
+    (void)Rescue::init({.mode = TcbMode::periodic, .clock = TcbClock::div2, .compare = 0xFFFF});
+    uint16_t seen = 0;
+    while (!done()) {
+        if (Rescue::capt_flag()) {
+            Rescue::clear_capt();
+            if (++seen >= periods) {
+                Rescue::disable();
+                return done();
+            }
+        }
     }
-    delay_us(clock, 2000);          // the shifter, generously
+    Rescue::disable();
+    return true;
+}
+
+/// TCB3's periods in `ms` milliseconds, rounded up, at the board rate.
+constexpr uint16_t rescue_periods(uint32_t ms) {
+    return static_cast<uint16_t>((ms * (crystal_hz / 1000u) + 131071u) / 131072u);
+}
+
+/// The next edge of the kernel tick, bounded at 10 ms (ten periods of the
+/// 1024 Hz tick): false when the tick does not run.
+bool tick_edge() {
+    const uint32_t t = P::now();
+    return spin_until([t] { return P::now() != t; }, rescue_periods(10));
 }
 
 void quiesce() {
@@ -298,13 +369,10 @@ void tb_runtime() {
     print(serial, "b delay_us, runtime path (the 4-cycle loop)", crlf);
     quiesce();
     const uint32_t cost = stamp_cost();
+    // A compile-time fact, so a compile-time check: no run can fail it.
+    static_assert(cycles_per_us(crystal_hz) == mhz, "cycles_per_us(the board rate) is its whole MHz");
     const uint8_t cpu = cycles_per_us(crystal_hz);
-    if constexpr (at24) {
-        verdict("cycles_per_us(24 MHz) = 24", cpu == 24);
-    } else {
-        print(serial, "  cycles_per_us(", crystal_hz, " Hz) = ", cpu, crlf);
-        verdict("cycles_per_us(the board rate) = its whole MHz", cpu == mhz);
-    }
+    print(serial, "  cycles_per_us(", crystal_hz, " Hz) = ", cpu, crlf);
 
     struct Row { uint32_t us; uint32_t measured; };
     volatile uint32_t v = 0;
@@ -331,10 +399,10 @@ void tb_runtime() {
     verdict("the overhead is a constant, not a per-us cost", hi - lo <= 6);
 
     if constexpr (at24) {
-        // The ceil is what makes 1 us honest: 24 cycles is exactly 6 loops.
-        verdict("1 us at 24 MHz is exactly 6 loops", (1u * cpu + 3u) / 4u == 6u);
-        // The bare loop, without the delay_us wrapper: the pure cost of
-        // _delay_loop_2's own iteration.
+        // The ceil is what makes 1 us honest: 24 cycles is exactly 6 loops
+        // (each row above prints its loop count). The bare loop, without
+        // the delay_us wrapper: the pure cost of _delay_loop_2's own
+        // iteration.
         const uint32_t bare = cycles_of(cost, [] { delay_us_runtime(24, 1); });
         print(serial, "  delay_us_runtime(24, 1) alone: ", bare, " cycles (6 loops = 24)", crlf);
         verdict("the bare loop is at least its nominal 24 cycles", bare >= 24);
@@ -342,7 +410,6 @@ void tb_runtime() {
         // The ceil is what makes 1 us honest: mhz cycles in ceil(mhz / 4)
         // loops (20 cycles = exactly 5 loops at 20 MHz).
         constexpr uint32_t loops1 = (mhz + 3u) / 4u;
-        verdict("1 us at the board rate is ceil(MHz / 4) loops", (1u * cpu + 3u) / 4u == loops1);
         const uint32_t bare = cycles_of(cost, [] { delay_us_runtime(mhz, 1); });
         print(serial, "  delay_us_runtime(", mhz, ", 1) alone: ", bare, " cycles (", loops1,
               " loops = ", 4u * loops1, ")", crlf);
@@ -369,7 +436,10 @@ void tc_rebase() {
     }
     quiesce();
     const bool dyn_ok = DynClock::init();
-    console_drain();                  // the console is about to be re-owned
+    // The console is about to be re-owned: a byte still in flight would be
+    // cut. Nothing is timed here, so a drain that runs out costs only that
+    // byte, and the verdicts below still say what they found.
+    (void)console_drain();
     Serial::init(DynClock{}, 460800);
     verdict("DynamicClock init (boot = the crystal)", dyn_ok);
     const uint32_t cost = stamp_cost();
@@ -455,22 +525,21 @@ void tc_rebase() {
     // 1280 exactly, ceil 2 = 8/5 of nominal).
     constexpr uint32_t slow_hz = crystal_hz / 16u;
     constexpr uint16_t slow_mult = static_cast<uint16_t>((slow_hz * 4096ull + 3'999'999u) / 4'000'000u);
-    if constexpr (at24) {
-        verdict("the driver knows 460800 is unreachable at 1.5 MHz",
-                !Serial::can_baud(1'500'000u, 460800u));
-        verdict("cycles_per_us still rounds 1.5 up to 2 (the stored-byte helper)",
-                cycles_per_us(1'500'000u) == 2);
-        verdict("the dispatch's Q4.12 factor for 1.5 MHz is exact",
-                delay_mult(1'500'000u) == 1536u);
-    } else {
-        verdict("the driver knows 460800 is unreachable at the board rate / 16",
-                !Serial::can_baud(slow_hz, 460800u));
-        verdict("cycles_per_us still rounds the slow rate up to 2 (the stored-byte helper)",
-                cycles_per_us(slow_hz) == 2);
-        verdict("the dispatch's Q4.12 factor for the slow rate is exact",
-                delay_mult(slow_hz) == slow_mult && slow_mult * 4'000'000ull == slow_hz * 4096ull);
+    // Three facts of constants, checked where they are decided: at compile
+    // time (1.5 MHz and its factor 1536 at 24 MHz, 1.25 MHz and 1280 at 20).
+    static_assert(!Serial::can_baud(slow_hz, 460800u),
+                  "the driver knows 460800 is unreachable at the board rate / 16");
+    static_assert(cycles_per_us(slow_hz) == 2,
+                  "cycles_per_us still rounds the slow rate up to 2 (the stored-byte helper)");
+    static_assert(delay_mult(slow_hz) == slow_mult && slow_mult * 4'000'000ull == slow_hz * 4096ull,
+                  "the dispatch's Q4.12 factor for the slow rate is exact");
+    print(serial, "  at ", slow_hz, " Hz: 460800 baud unreachable, cycles_per_us 2, Q4.12 factor ",
+          slow_mult, " (exact; checked at compile time)", crlf);
+    if (!quiet_console()) {
+        Serial::init(clock, 460800);
+        quiesce();
+        return;
     }
-    console_drain();
     uint32_t s1 = 0, s2 = 0;
     bool slow_ok = DynClock::set(slow_hz);
     if (slow_ok) {
@@ -601,8 +670,18 @@ void tf_idle() {
     // 1. woken by the timebase, and disarmed on the way out. The
     // console must be silent first: an unfinished line leaves the DRE
     // interrupt armed, and THAT would be the interrupt doing the waking
-    // (measured: a wake every ~250 cycles, one per frame at 460800).
-    console_drain();
+    // (measured: a wake every ~250 cycles, one per frame at 460800). The
+    // sixteen sleeps below end only on an interrupt: a tick that does not
+    // run is a failed verdict here, not a sleep that never ends.
+    if (!quiet_console()) {
+        quiesce();
+        return;
+    }
+    if (!tick_edge()) {
+        verdict("the 1024 Hz tick runs (an edge within 10 ms)", false);
+        quiesce();
+        return;
+    }
     uint32_t lo = 0xFFFFFFFFu, hi = 0, sum = 0;
     bool woke_on_interrupt = true, disarmed = true, enabled_on_return = true;
     constexpr uint8_t n = 16;
@@ -635,14 +714,22 @@ void tf_idle() {
     // ISR stamps the clock itself, so the interrupt entry cost cancels
     // and what is left between the two variants is the cost of having
     // been ASLEEP (13.3.3.2: six CLK_PER cycles, plus idle()'s own NOP,
-    // arming store and sei).
-    console_drain();
+    // arming store and sei). Each wait for the alarm is bounded by
+    // spin_until() (no clock read in the loop: the handler's entry is the
+    // measurement, and the handler stamps the cascade itself): ten of
+    // TCB3's periods, 55 ms or more, against the alarm's 1 ms.
+    if (!quiet_console()) {
+        quiesce();
+        return;
+    }
     Ticker::pause();
     alarm_mode = 1;
     (void)Alarm::init({.mode = TcbMode::periodic, .clock = TcbClock::div1,
                        .compare = static_cast<uint16_t>(crystal_hz / 1000u)});
     Alarm::enable_capt_interrupt(true);
     uint32_t slept = 0xFFFFFFFFu, spun = 0xFFFFFFFFu;
+    bool alarm_came = true;
+    const auto ran = [] { return alarm_ran; };
     for (uint8_t i = 0; i < 8; ++i) {
         cli();
         alarm_ran = false;
@@ -650,7 +737,9 @@ void tf_idle() {
         Alarm::clear_capt();
         uint32_t t0 = cycles_now();
         P::idle();
-        while (!alarm_ran) {           // any other interrupt is not the end
+        if (!spin_until(ran, 10)) {    // any other interrupt is not the end
+            alarm_came = false;
+            break;
         }
         cli();
         uint32_t d = alarm_stamp - t0;
@@ -661,13 +750,16 @@ void tf_idle() {
         Alarm::clear_capt();
         t0 = cycles_now();
         sei();
-        while (!alarm_ran) {
+        if (!spin_until(ran, 10)) {
+            alarm_came = false;
+            break;
         }
         cli();
         d = alarm_stamp - t0;
         if (d < spun) spun = d;
         sei();
     }
+    sei();
     alarm_mode = 0;
     Alarm::enable_capt_interrupt(false);
     Alarm::disable();
@@ -675,19 +767,34 @@ void tf_idle() {
     print(serial, "  same alarm, stamped inside its ISR: asleep ", slept,
           " cycles vs spinning ", spun, " -> waking costs ",
           static_cast<int32_t>(slept) - static_cast<int32_t>(spun), " cycles", crlf);
+    verdict("the alarm's interrupt came in every try (the instrument)", alarm_came);
     verdict("sleeping delays the ISR by only a handful of cycles",
-            slept >= spun && slept - spun <= 20);
+            alarm_came && slept >= spun && slept - spun <= 20);
 
     // 3. the CPU really stopped. Over the same wall-clock span, a loop
     // that only runs when the CPU runs turns thousands of times awake
     // and once per tick asleep.
+    // The busy span is bounded by spin_until() (100 ms of TCB3 periods
+    // against 32 ticks, 31.25 ms on the nominal rate, OSC32K +-10 %): its
+    // turns are what is counted, so no clock read goes into them either.
     volatile uint32_t work_busy = 0, work_sleep = 0;
-    console_drain();
+    if (!quiet_console()) {
+        quiesce();
+        return;
+    }
     sei();
     {
         const uint32_t t0 = P::now();
-        while (P::now() - t0 < 32u) {
-            work_busy = work_busy + 1;
+        const bool spanned = spin_until(
+            [&] {
+                work_busy = work_busy + 1;
+                return P::now() - t0 >= 32u;
+            },
+            rescue_periods(100));
+        if (!spanned) {
+            verdict("32 ticks passed within 100 ms", false);
+            quiesce();
+            return;
         }
     }
     {
@@ -718,7 +825,6 @@ void tf_idle() {
 void tg_ring() {
     print(serial, "g Ring (lock-free) and EventQueue on the silicon", crlf);
     quiesce();
-    verdict("the ring compiled to the lock-free path", decltype(ring)::lock_free);
     verdict("capacity is size - 1", ring.capacity() == 63);
 
     constexpr uint16_t total = 50000;
@@ -732,19 +838,22 @@ void tg_ring() {
     alarm_mode = 2;
     const uint32_t t0 = cycles_now();
 
+    // A stall is a time on the kernel tick: 10 ms with nothing to take,
+    // two hundred of the producer's 50 us periods, ends the run. The tick
+    // is read only when the ring is empty, so a run that keeps up never
+    // reads it.
     uint16_t expect = 0;
-    uint32_t got = 0, stall = 0;
+    uint32_t got = 0;
     bool exact = true;
     while (got < total) {
-        const std::optional<uint16_t> v = ring.pop();
-        if (v) {
-            if (*v != expect) exact = false;
-            ++expect;
-            ++got;
-            stall = 0;
-        } else if (++stall > 2'000'000u) {
+        std::optional<uint16_t> v = ring.pop();
+        if (!v && !wait_ticks<P>([&v] { return (v = ring.pop()).has_value(); },
+                                 ticks_from_ms<P>(10))) {
             break;
         }
+        if (*v != expect) exact = false;
+        ++expect;
+        ++got;
     }
     const uint32_t elapsed = cycles_now() - t0;
     alarm_mode = 0;
@@ -787,7 +896,9 @@ void tg_ring() {
     // The kernel's own queue over the same platform: idle and holding
     // nothing, it takes its depth and the spare slot a dispatch would
     // use (kernel/event_queue.hpp, the overflow moment); the overflow
-    // counter saturates instead of wrapping.
+    // counter saturates instead of wrapping. Built fresh in every run, so
+    // a second g in one boot starts from an empty queue and a zero count.
+    EventQueue<uint8_t, 4, P> queue;
     for (uint8_t i = 0; i < 5; ++i) queue.push(i);
     verdict("the idle queue takes its depth + 1", queue.size() == 5 && queue.overflows() == 0);
     for (uint8_t i = 0; i < 3; ++i) queue.push(i);
@@ -802,19 +913,27 @@ void tg_ring() {
 void th_timebase() {
     print(serial, "h now() / ticks_per_second, and break_here()", crlf);
     quiesce();
-    verdict("ticks_per_second is the PIT's 1024", P::ticks_per_second == 1024u);
-    verdict("and it is the Ticker's own rate",
-            P::ticks_per_second == Ticker::ticks_per_second);
+    static_assert(P::ticks_per_second == 1024u && P::ticks_per_second == Ticker::ticks_per_second,
+                  "ticks_per_second is the PIT's 1024, the Ticker's own rate");
 
-    // 1024 ticks against the crystal.
-    uint32_t t = P::now();
-    while (P::now() == t) {
+    // 1024 ticks against the crystal, each wait bounded by spin_until():
+    // the tick is what is measured, so a tick that does not run ends the
+    // letter with a failed verdict. The second is bounded at 1.5 s (the
+    // OSC32K's +-10 % and a margin).
+    if (!tick_edge()) {
+        verdict("the 1024 Hz tick runs (an edge within 10 ms)", false);
+        quiesce();
+        return;
     }
     const uint32_t k0 = P::now();
     const uint32_t c0 = cycles_now();
-    while (P::now() - k0 < 1024u) {
-    }
+    const bool second = spin_until([k0] { return P::now() - k0 >= 1024u; }, rescue_periods(1500));
     const uint32_t c1 = cycles_now();
+    if (!second) {
+        verdict("1024 ticks passed within 1.5 s", false);
+        quiesce();
+        return;
+    }
     const uint32_t cycles = c1 - c0;
     const int32_t ppm = static_cast<int32_t>(
         (static_cast<int64_t>(cycles) - crystal_hz) * 1'000'000 / crystal_hz);
@@ -833,23 +952,29 @@ void th_timebase() {
     const uint32_t start = prev;
     uint16_t wraps = 0;
     bool monotonic = true, single_step = true;
-    while (prev - start < 600u) {
-        const uint32_t cur = P::now();
-        const uint32_t d = cur - prev;
-        if (cur < prev) monotonic = false;
-        if (d > 1u) single_step = false;
-        if (d == 1u && (prev & 0xFFu) == 0xFFu) ++wraps;
-        prev = cur;
-    }
+    const bool sampled = spin_until(
+        [&] {
+            const uint32_t cur = P::now();
+            const uint32_t d = cur - prev;
+            if (cur < prev) monotonic = false;
+            if (d > 1u) single_step = false;
+            if (d == 1u && (prev & 0xFFu) == 0xFFu) ++wraps;
+            prev = cur;
+            return prev - start >= 600u;
+        },
+        rescue_periods(1000));
     print(serial, "  600 ticks sampled, ", wraps, " low-byte wraps crossed", crlf);
+    verdict("600 ticks passed within 1 s", sampled);
     verdict("now() never goes backwards", monotonic);
     verdict("it advances one tick at a time", single_step);
     verdict("at least two low-byte wraps were crossed", wraps >= 2);
 
+    // Reaching the next line is all a console can see of break_here()
+    // with no debugger attached: printed, not judged. The with-OCD half
+    // needs a debug session.
     P::break_here();
-    verdict("break_here() falls through as a NOP with no debugger attached", true);
-    print(serial, "  the with-OCD half of break_here() needs a debug session and is "
-                  "not verifiable from this console.", crlf);
+    print(serial, "  break_here() returned (a NOP with no debugger attached); its with-OCD "
+                  "half needs a debug session and is not verifiable from this console.", crlf);
     quiesce();
 }
 
@@ -895,7 +1020,10 @@ void print_profile(const uint16_t* v, uint16_t n) {
 void tw_edge() {
     print(serial, "w the idle path against an edge placed to the cycle", crlf);
     quiesce();
-    console_drain();
+    if (!quiet_console()) {
+        quiesce();
+        return;
+    }
     Ticker::pause();
     alarm_mode = 3;
 
@@ -909,6 +1037,7 @@ void tw_edge() {
     uint16_t slowest[3][2] = {};
     bool profile_ok = true;
     bool no_edge = false;                   // the instrument's own failure
+    bool drained = true;                    // the console fell silent before every walk
     uint16_t k_lo[3] = {}, k_hi[3] = {};    // the rescue-to-edge constant, per path
     for (uint8_t path = 0; path < 3; ++path) {
         const bool standby = path == 2;
@@ -920,11 +1049,14 @@ void tw_edge() {
         Rescue::enable_capt_interrupt(true);
         if (path == 1) Sleep::arm(SleepMode::idle);
         if (path == 2) Sleep::arm(SleepMode::standby);
-        for (uint8_t edges = 1; edges <= 2u; ++edges) {
+        for (uint8_t edges = 1; edges <= 2u && drained; ++edges) {
             // Silence first: a byte still going out would wake the core
             // on its DRE interrupt, and in standby the halted USART
-            // would garble it.
-            console_drain();
+            // would garble it. A walk the console would wake is not run.
+            if (!console_drain()) {
+                drained = false;
+                break;
+            }
             for (uint16_t pos = 0; pos < positions; ++pos) {
                 bool rescued = false;
                 uint16_t to_loop = 0;
@@ -1005,6 +1137,11 @@ void tw_edge() {
     }
     alarm_mode = 0;
     Ticker::resume();
+    verdict("the console drained before every walk", drained);
+    if (!drained) {                         // the walks not run judge nothing
+        quiesce();
+        return;
+    }
 
     for (uint8_t path = 0; path < 3; ++path) {
         print(serial, "  ", path_name[path], ": lost ", lost[path][0], " of ", positions,
@@ -1058,27 +1195,39 @@ using QuietKernel = Tenuto<P, Quiet<1>, Quiet<2>, Quiet<0>>;
 
 /// TCB0's CAPT flag raised under the mask: the next sei finds an
 /// interrupt pending, so an idle() returns as soon as it has taken it.
-void raise_alarm() {
+/// The flag comes sixteen cycles after the preset; the wait is bounded
+/// at 100 us on the cascade, which reads with interrupts masked (no
+/// handler stamps it in k). False when the flag did not come.
+bool raise_alarm() {
     Alarm::count(0xFFF0u);
-    while (!Alarm::capt_flag()) {
-    }
+    return wait_until<Ruler>([] { return Alarm::capt_flag(); }, 100u);
 }
 
 void tk_turns() {
     print(serial, "k the kernel's turns: one per interrupt, and what a quiet one costs", crlf);
     quiesce();
-    console_drain();
+    if (!quiet_console()) {
+        quiesce();
+        return;
+    }
     QuietKernel::init_all();
 
     // Turns over 100 quiet ticks: the PIT is the only interrupt. Once
-    // with idle()'s own IDLE, once with IDLE armed beforehand.
+    // with idle()'s own IDLE, once with IDLE armed beforehand. Each run
+    // starts on a tick's edge, bounded (tick_edge()): a tick that does
+    // not run would leave the turns below asleep with nothing to wake
+    // them, so it ends the letter first.
     uint32_t turns[2] = {0, 0};
     for (uint8_t armed = 0; armed < 2u; ++armed) {
         if (armed != 0u) Sleep::arm(SleepMode::idle);
-        uint32_t t = P::now();
-        while (P::now() == t) {             // start on a tick's edge
+        if (!tick_edge()) {
+            Sleep::disarm();
+            TimeEvents<P>::clear_all();
+            verdict("the 1024 Hz tick runs (an edge within 10 ms)", false);
+            quiesce();
+            return;
         }
-        t = P::now();
+        const uint32_t t = P::now();
         uint32_t n = 0;
         while (P::now() - t < 100u) {
             kernel_turn();
@@ -1098,10 +1247,14 @@ void tk_turns() {
     (void)Alarm::init({.mode = TcbMode::periodic, .clock = TcbClock::div1, .compare = 0xFFFF});
     Alarm::enable_capt_interrupt(true);
     uint32_t turn_cycles = 0xFFFFFFFFu, idle_cycles = 0xFFFFFFFFu, isr_cycles = 0xFFFFFFFFu;
+    bool raised = true;
     for (uint8_t i = 0; i < 16u; ++i) {
         {
             P::CriticalSection cs;          // the same interrupt taken awake
-            raise_alarm();
+            if (!raise_alarm()) {           // no flag: an idle() below would never wake
+                raised = false;
+                break;
+            }
             const uint32_t c0 = cycles_now();
             sei();
             __asm__ __volatile__("nop");    // SEI's shadow: one instruction first
@@ -1111,7 +1264,10 @@ void tk_turns() {
         }
         {
             P::CriticalSection cs;
-            raise_alarm();
+            if (!raise_alarm()) {           // no flag: an idle() below would never wake
+                raised = false;
+                break;
+            }
             const uint32_t c0 = cycles_now();
             kernel_turn();
             const uint32_t c1 = cycles_now();
@@ -1119,7 +1275,10 @@ void tk_turns() {
         }
         {
             P::CriticalSection cs;
-            raise_alarm();
+            if (!raise_alarm()) {           // no flag: an idle() below would never wake
+                raised = false;
+                break;
+            }
             const uint32_t c0 = cycles_now();
             P::idle();
             const uint32_t c1 = cycles_now();
@@ -1140,6 +1299,7 @@ void tk_turns() {
     print(serial, "  the same interrupt taken awake (sei, nop, cli): ", isr_cycles,
           " cycles; so idle() itself, its sleep and wake included: ",
           static_cast<int32_t>(idle_cycles) - static_cast<int32_t>(isr_cycles), crlf);
+    verdict("TCB0 raised its flag for every costed turn (the instrument)", raised);
     verdict("the kernel loop turns once per interrupt (100 ticks: 99..101 turns)",
             turns[0] >= 99u && turns[0] <= 101u);
     verdict("and so it does with IDLE armed beforehand", turns[1] >= 99u && turns[1] <= 101u);
@@ -1178,7 +1338,7 @@ void report_boot() {
     token.context = 0x5A;
     bank(1);
     print(serial, "  arming WDT 8 ms and panicking (the board will reset) ...", crlf);
-    console_drain();
+    (void)console_drain();          // a line cut by the reset costs only its text
     (void)Watchdog::arm(WdtTime::ms8);
     panic<P, HaltReporter>(PanicCode::assert_failed, 0x5A);
 }
@@ -1198,7 +1358,7 @@ void report_boot() {
     bank(phase);
     token.note = 0;
     token.wakes = 0;
-    console_drain();
+    (void)console_drain();          // a line cut by the reset costs only its text
     (void)Watchdog::arm(WdtTime::ms64);
     uint16_t wakes = 0;
     while (wakes < 200u) {
@@ -1234,14 +1394,14 @@ void ti_reset() {
     verdict("the WDT is unlocked (WDTCFG fuse OFF)", !Watchdog::locked());
     verdict("the WDT starts disabled", !Watchdog::enabled());
     if (Watchdog::locked() || Watchdog::enabled()) {
-        print(serial, "  the watchdog is not ours to drive on this board: "
-                      "the reset legs are SKIPPED", crlf);
+        skip("the reset legs: the watchdog is not ours to drive on this board "
+             "(locked or enabled by its fuse)");
         return;
     }
     verdict("arm(8 ms) accepted", Watchdog::arm(WdtTime::ms8));
     verdict("PERIOD and WINDOW read back",
             Watchdog::period() == WdtTime::ms8 && Watchdog::window() == WdtTime::off);
-    verdict("wdt_time_us(ms8) is the data sheet's 7812 us", wdt_time_us(WdtTime::ms8) == 7812u);
+    static_assert(wdt_time_us(WdtTime::ms8) == 7812u, "wdt_time_us(ms8) is the data sheet's 7812 us");
     verdict("arm(8 s, window 8 ms) accepted",
             Watchdog::arm(WdtTime::s8, WdtTime::ms8));
     verdict("both fields read back",
@@ -1277,7 +1437,7 @@ void ti_resume() {
         token.note = 0;
         print(serial, "  arming WDT PERIOD=8 s WINDOW=64 ms, one WDR to activate the "
                       "window and a second one inside it ...", crlf);
-        console_drain();
+        (void)console_drain();      // a line cut by the reset costs only its text
         (void)Watchdog::arm(WdtTime::s8, WdtTime::ms64);
         (void)Watchdog::sync();            // the window is in force only now
         Watchdog::clear();                 // activates the window (22.3.3.2)
@@ -1304,7 +1464,7 @@ void ti_resume() {
         token.context = 0xA5;
         bank(3);
         print(serial, "  panicking into a reporter that resets in software ...", crlf);
-        console_drain();
+        (void)console_drain();      // a line cut by the reset costs only its text
         panic<P, ResetReporter>(PanicCode::kernel_fault, 0xA5);
     }
 
@@ -1328,7 +1488,7 @@ void ti_resume() {
         verdict("and nothing was written", !Watchdog::enabled());
         bank(4);
         print(serial, "  resetting in software with no panic at all ...", crlf);
-        console_drain();
+        (void)console_drain();      // a line cut by the reset costs only its text
         Reset::software();
     }
 
@@ -1352,10 +1512,13 @@ void ti_resume() {
             token.canary == token_canary);
     token.magic = 0;
     token.phase = 0;
-    print(serial, "  -> ", passed, " pass, ", failed, " fail", crlf, crlf);
+    // Letter i skips only before its first reset, so a resumed boot has
+    // no skips of its own; the run's are the ones banked before i.
+    tally("  -> ", passed, failed, 0u);
+    print(serial, crlf);
     if (in_all_run) {
-        print(serial, "ALL: ", static_cast<uint16_t>(token.all_pass + passed), " pass, ",
-              static_cast<uint16_t>(token.all_fail + failed), " fail", crlf);
+        tally("ALL: ", static_cast<uint16_t>(token.all_pass + passed),
+              static_cast<uint16_t>(token.all_fail + failed), token.all_skip);
     }
 }
 
@@ -1372,25 +1535,30 @@ constexpr char all_keys[] = "abcdefghkwi";
 
 void run(TestFn fn) {
     passed = failed = 0;
+    skipped = 0;
     fn();
-    print(serial, "  -> ", passed, " pass, ", failed, " fail", crlf, crlf);
+    tally("  -> ", passed, failed, skipped);
+    print(serial, crlf);
 }
 
 void run_set(const char* keys) {
     uint16_t tp = 0, tf = 0;
+    uint16_t ts = 0;
     in_all_run = true;
     for (const char* k = keys; *k != 0; ++k) {
         for (const Test& t : tests) {
             if (t.key != *k) continue;
             token.all_pass = tp;          // banked before the test that may reset
             token.all_fail = tf;
+            token.all_skip = ts;
             run(t.fn);
             tp += passed;
             tf += failed;
+            ts = static_cast<uint16_t>(ts + skipped);
         }
     }
     in_all_run = false;
-    print(serial, "ALL: ", tp, " pass, ", tf, " fail", crlf);
+    tally("ALL: ", tp, tf, ts);
 }
 
 void help() {

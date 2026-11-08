@@ -104,7 +104,8 @@ Facts that matter to code:
 - **Compare lands at CMP + 1.** The overflow resets CNT to zero and the
   compare fires at the first count after CNT equals CMP, so the compare
   event is exactly CMP + 1 counter ticks after the overflow (measured
-  exact).
+  exact at CMP = 99; at CMP = 8191 the reading through the crystal
+  carries the OSC32K's wander, up to 3 ticks on the AVR64EA48).
 - **Every write crosses a clock domain.** CTRLA, CNT, PER and CMP each
   have a busy flag in STATUS, PITCTRLA one in PITSTATUS, and the flag
   must be clear before the next write to that register (26.10). The

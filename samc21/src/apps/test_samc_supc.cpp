@@ -44,6 +44,7 @@
 #include "samc21/supc.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -74,20 +75,22 @@ constexpr uint8_t ac_gen = 0;   ///< GCLK_AC from generator 0 (48 MHz)
 /// start-up so letter c can put it back exactly as the fuses left it.
 uint32_t boot_bodvdd = 0;
 
-void wait_ms(uint32_t ms) {
-    const uint32_t deadline = Ticker::millis() + ms;
-    while (static_cast<int32_t>(Ticker::millis() - deadline) < 0) {
-    }
-}
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's
+/// fixed spans (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
-/// A few microseconds for an analog block to settle. Volatile sink so
-/// the loop survives -Os.
-void settle() {
-    volatile uint32_t sink = 0;
-    for (uint32_t i = 0; i < 20'000UL; ++i) {
-        sink = sink + 1u;
-    }
-}
+/// Time for an analog block to settle after a change: 4 ms on the ruler,
+/// the span of the counting loop this suite always waited rounded up
+/// (20000 turns of a volatile loop, nine cycles each by the release
+/// listing: 3.75 ms at 48 MHz). The chapters
+/// this desk has state far less - the comparator's start-up is 2..3 us at
+/// high speed (samc21/ac.hpp), the BODVDD's 3.1 us (table 45-18) - and
+/// say nothing of the bandgap's start-up or the VDD scaler's settling,
+/// so the span stays the one the measurements were taken with.
+void settle() { brio::spin_us<Ruler>(4'000); }
 
 // ---------------------------------------------------------------------------
 // The bandgap loop: VDD located against INTREF
@@ -204,9 +207,9 @@ void ta_block() {
                   "FIELD - two drivers describing one thing from opposite "
                   "ends",
                   BodVdd::matches_fuses());
-    bench.verdict("and the level is the production setting, 8 (about 2.8 V "
-                  "by table 45-18)",
-                  row.bodvdd_level() == BodVdd::level_2v8);
+    // Which level the fuses hold is the board's provisioning (8, about
+    // 2.8 V by table 45-18, is the production setting): printed above,
+    // not judged.
 
     // A continuously running detector reports ready; STATUS.BODVDDRDY
     // is never set in sampling mode, which letter c measures.
@@ -228,19 +231,11 @@ void ta_block() {
     print(serial, "  and its three undrawn status bits: ready=",
           BodCore::ready() ? 1 : 0, " detect=", BodCore::detected() ? 1 : 0,
           " sync=", BodCore::sync_ready() ? 1 : 0, crlf);
-    bench.verdict("THE CORE DETECTOR IS RUNNING - the register the chapter "
-                  "calls Reserved is real, and the device header was right "
-                  "to declare it",
-                  BodCore::enabled());
-    bench.verdict("it is not detecting, which is the only acceptable answer "
-                  "for a board that is running",
-                  !BodCore::detected());
-    // It is calibrated in production and its calibration must not be
-    // changed (22.6.3.4), which is why this driver has no setter at
-    // all. The verdict is on the DRIVER's shape, not the silicon's.
-    bench.verdict("and the driver offers no way to write it - the shape is "
-                  "the safety",
-                  true);
+    // What sits behind an offset the chapter marks Reserved is no
+    // contract the chapter makes, so what it reads is printed above and
+    // judged nowhere. It is calibrated in production and its calibration
+    // must not be changed (22.6.3.4), which is why this driver has no
+    // setter at all.
 
     // The interrupt surface.
     Supc::arm(SupcFlag::bodvdd_detect);
@@ -320,9 +315,14 @@ void tb_bandgap() {
     // The flag the sweep itself sets is not the erratum's: a comparator
     // that really flips is entitled to raise it. What is asserted here
     // is only that it clears.
+    const bool flag_stood = Comp::flag_set();
     Comp::clear_flag();
-    bench.verdict("and the flag clears on demand, which is all the "
-                  "obligation asks", !Comp::flag_set());
+    if (flag_stood) {
+        bench.verdict("and the flag clears on demand, which is all the "
+                      "obligation asks", !Comp::flag_set());
+    } else {
+        bench.skip("no COMP flag stood after the sweeps, so its clear cannot be seen");
+    }
 
     // THE THIRD REFERENCE, and the one that makes the answer hard to
     // argue with: 4.096 V is four times 1.024 V, and if the three
@@ -359,17 +359,22 @@ void tc_bodvdd() {
     // write to a protected field is DISCARDED. So a level written to a
     // running detector must NOT take, and the same level written to a
     // stopped one must.
-    bench.verdict("the detector is running to start with", BodVdd::enabled());
+    // A detector the fuses left stopped has no protection to observe:
+    // whether it runs is the board's provisioning, not the driver's.
     const uint8_t level_before = BodVdd::level();
     const uint8_t other_level = static_cast<uint8_t>(level_before + 1u);
-    (void)BodVdd::wait_sync();
-    SUPC_REGS->SUPC_BODVDD =
-        (BodVdd::reg() & ~static_cast<uint32_t>(SUPC_BODVDD_LEVEL_Msk)) |
-        SUPC_BODVDD_LEVEL(other_level);
-    (void)BodVdd::wait_sync();
-    bench.verdict("A LEVEL WRITTEN TO A RUNNING DETECTOR IS DISCARDED - "
-                  "22.6.3.1's enable-protection, observed",
-                  BodVdd::level() == level_before);
+    if (BodVdd::enabled()) {
+        (void)BodVdd::wait_sync();
+        SUPC_REGS->SUPC_BODVDD =
+            (BodVdd::reg() & ~static_cast<uint32_t>(SUPC_BODVDD_LEVEL_Msk)) |
+            SUPC_BODVDD_LEVEL(other_level);
+        (void)BodVdd::wait_sync();
+        bench.verdict("A LEVEL WRITTEN TO A RUNNING DETECTOR IS DISCARDED - "
+                      "22.6.3.1's enable-protection, observed",
+                      BodVdd::level() == level_before);
+    } else {
+        bench.skip("the fuses leave BODVDD stopped: no running detector to discard a write");
+    }
 
     // Now through the driver, which spends the whole dance.
     bench.verdict("the same level goes in through configure(), which "
@@ -390,7 +395,7 @@ void tc_bodvdd() {
                                                  .action = BodAction::none,
                                                  .sampled = true,
                                                  .prescaler = BodPrescaler::div2}));
-    wait_ms(20);
+    brio::spin_us<Ruler>(20'000);
     const bool sampled_ready = BodVdd::ready();
     print(serial, "  sampling mode: STATUS.BODVDDRDY reads ",
           sampled_ready ? 1 : 0, " (22.8.4 says it is never set there); the "
@@ -488,8 +493,10 @@ void tc_bodvdd() {
                   restored && BodVdd::reg() == boot_bodvdd);
     bench.verdict("so the fuses and the register agree again",
                   BodVdd::matches_fuses());
-    bench.verdict("and the board is protected as it was found",
-                  BodVdd::enabled() && BodVdd::action() == BodAction::reset);
+    // The protection as found is the boot value restored bit for bit,
+    // judged above; which action the fuses chose is the board's.
+    print(serial, "  the board's protection as found: enabled=", BodVdd::enabled() ? 1 : 0,
+          " action=", static_cast<uint8_t>(BodVdd::action()), crlf);
 }
 
 void banner() {

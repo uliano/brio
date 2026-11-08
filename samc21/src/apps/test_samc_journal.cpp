@@ -22,15 +22,20 @@
 //      happens, watch the active half change, and prove every value
 //      came through it and through a fresh mount afterwards.
 //   d  what it costs, and the no-stall claim: the polling turns the
-//      CPU completes INSIDE an RWWEE row erase.
+//      CPU completes INSIDE an RWWEE row erase, and the tick count
+//      keeping step through three collections with TC0+TC1, a counter
+//      no interrupt handler drives.
 //   e  COEXISTENCE: a heap in rows 0..27 and the journal in the attic,
 //      both mounted, the heap's block byte-exact while the journal
 //      churns over it.
 //   f  the panic reserve: after every completed save there is room for
 //      one more maximum-size entry, and taking it costs NO erase.
 //   w  the wear this run spent, in row erases, against a declared
-//      budget. It PRINTS the numbers and then zeroes the counters, so
+//      budget. The meter counts from letter a (z's first letter) or from
+//      the last w; w PRINTS the numbers and then zeroes the counters, so
 //      each z run reports its own budget and the letter is re-runnable.
+//      Run with nothing written since, it has nothing to weigh and
+//      skips.
 //
 //   p  the panic letter (by name only: it REBOOTS the board). A real
 //      panic() whose reporter writes the breadcrumb into the journal
@@ -58,10 +63,12 @@
 #include "samc21/platform.hpp"
 #include "samc21/reset.hpp"
 #include "samc21/sercom.hpp"
+#include "samc21/tc.hpp"
 #include "samc21/ticker.hpp"
 #include "util/nv_heap.hpp"
 #include "util/nv_journal.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -86,6 +93,7 @@ struct Token {
     uint8_t path;     ///< 1 = the reporter ran, 2 = the fault body did
     uint16_t pass;    ///< letter p's tally so far
     uint16_t fail;
+    uint8_t skipped;
 };
 [[gnu::section(".noinit")]] inline Token token;
 
@@ -188,22 +196,87 @@ constexpr Calibration calibration{-31415, 4001, 0x5A};
 constexpr uint32_t scratch_row = Nvm::rwwee_base;
 
 // ---------------------------------------------------------------------------
-// A cycle-resolution stopwatch: the kernel ticker's own cycles(), the tick count
-// and the counter's position composed right across the reload
-// (util/cycle_count.hpp).
+// The ruler: the kernel ticker's own cycles(), the tick count and the
+// counter's position composed right across the reload
+// (util/cycle_count.hpp) - this suite's waits and spans.
 // ---------------------------------------------------------------------------
-uint32_t cycles_now() {
-    return Ticker::cycles();
-}
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's
+/// waits and spans (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
+/// A span in cycles as microseconds, for printing.
 uint32_t cycles_to_us(uint32_t cycles) { return cycles / (SysClock::hz / 1'000'000UL); }
 
-void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
+/// Every queued console byte off the wire, bounded (util/test_wait.hpp):
+/// false on a wedged console.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
+
+/// The console drained before a timed window, or a failed verdict that
+/// says it was not: false tells the letter to return (a console
+/// interrupt inside the window would be timed with it, and would eat the
+/// polling turns letter d counts).
+bool drained_for_window() {
+    if (console_drain()) {
+        return true;
     }
-    const uint32_t t0 = cycles_now();
-    while (cycles_now() - t0 < SysClock::hz / 500u) {
+    bench.verdict("the console drained before the timed window", false);
+    return false;
+}
+
+/// The budget of a row erase awaited by hand: ten times the 6 ms maximum
+/// of table 45-42 (an RWWEE row erase measures 989 us on the bench).
+constexpr uint32_t erase_budget_us = 60'000;
+
+/// One burst of bare polls of INTFLAG.READY, at most 1024 - a load, a
+/// test and a count down each, nothing else in the loop: the polls left
+/// when READY rose (1024 when it stood at once), 0 when it never did.
+[[gnu::noinline]] uint32_t poll_burst() {
+    uint32_t k = 1024u;
+    while (!Nvm::ready() && --k != 0u) {
     }
+    return k;
+}
+
+/// Poll INTFLAG.READY until it rises, counting the polls that found it
+/// low, for at most `budget_us` on the ruler: the count, or nothing when
+/// the budget ran out. The ruler is read once a burst of 1024 polls, a
+/// small fraction of the burst's time, so the count stays the bare polls
+/// the CPU completed inside the operation.
+std::optional<uint32_t> polls_until_ready(uint32_t budget_us) {
+    uint32_t polls = 0;
+    const bool ready = brio::wait_until<Ruler>(
+        [&polls] {
+            const uint32_t left = poll_burst();
+            polls += 1024u - left;
+            return left != 0u;
+        },
+        budget_us);
+    if (!ready) {
+        return std::nullopt;
+    }
+    return polls;
+}
+
+// ---------------------------------------------------------------------------
+// The second count letter d holds the tick count against: TC0 and TC1 as
+// one 32-bit counter on generator 0 - OSC48M, the oscillator SysTick
+// counts - divided by 16, 3 MHz. The tick count and the ruler above are
+// one count read two ways (cycles() composes the tick count with
+// SysTick's position), so a tick handler that stalled would move both;
+// this counter is advanced by the hardware alone, and the same oscillator
+// leaves no rate difference between the two to budget.
+// ---------------------------------------------------------------------------
+using Witness = Tc<0>;
+constexpr uint32_t witness_per_ms = SysClock::hz / 16u / 1000u;   // 3000
+
+bool witness_start() {
+    return Witness::init(0) &&
+           Witness::configure(TcConfig{.mode = TcMode::count32,
+                                       .prescaler = TcPrescaler::div16}) &&
+           Witness::enable(true);
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +352,9 @@ const Journal::MountReport& remount() { return journal.mount(); }
 // a - the partition, and a read-only mount
 // =============================================================================
 void ta_partition() {
+    // The wear meter counts from here, the first letter of a z run, so
+    // letter w weighs this run and not letters run by name before it.
+    MeteredZone::clear();
     print(serial, "  RWWEE ", hex(Nvm::rwwee_base), " .. ", hex(Nvm::rwwee_end),
           "   heap ", hex(Nvm::rwwee_base), " .. ", hex(RwweeFlash::flash_end),
           "   journal ", hex(RwweePartition::journal_base), " .. ",
@@ -311,9 +387,13 @@ void ta_partition() {
     const uint32_t erases0 = MeteredZone::erases;
     const uint32_t programs0 = MeteredZone::programs;
     const uint32_t reads0 = MeteredZone::reads;
-    const uint32_t t0 = cycles_now();
+    if (!drained_for_window()) {
+        return;
+    }
+    Stopwatch<Ruler> sw;
+    sw.start();
     const auto& r = remount();
-    const uint32_t mount_us = cycles_to_us(cycles_now() - t0);
+    const uint32_t mount_us = cycles_to_us(sw.elapsed());
     print_mount(r);
     print(serial, "  the mount read ", MeteredZone::reads - reads0,
           " times, programmed ", MeteredZone::programs - programs0, ", erased ",
@@ -443,8 +523,10 @@ void tc_collection() {
           MeteredZone::erases - erases0, " row erases", crlf);
 
     bench.verdict("10 saves of a 24-byte value all land", saved);
-    bench.verdict("A COLLECTION HAPPENED, more than once", collections >= 2u);
-    bench.verdict("and the halves alternated", here != first || collections >= 2u);
+    // `collections` counts changes of the active half, and with two halves
+    // every change is an alternation: the verdict below says both.
+    bench.verdict("A COLLECTION HAPPENED, more than once, the halves alternating",
+                  collections >= 2u);
     bench.verdict("the reserve was intact after every single one of them",
                   reserve_held);
     bench.verdict("the churned value is the last one written",
@@ -471,6 +553,9 @@ void td_cost() {
         bench.verdict("the journal mounts", false);
         return;
     }
+    if (!drained_for_window()) {
+        return;
+    }
 
     // THE NO-STALL CLAIM: the erase is issued by hand so that the
     // POLLING TURNS between the command and READY are the
@@ -479,16 +564,19 @@ void td_cost() {
     // last - not a journal row, because the journal's own bookkeeping
     // must not be disturbed by a measurement.
     Nvm::clear_status();
-    const uint32_t e0 = cycles_now();
+    Stopwatch<Ruler> sw;
+    sw.start();
     Nvm::address(NvmArray::rwwee, scratch_row);
     NVMCTRL_REGS->NVMCTRL_CTRLA = static_cast<uint16_t>(
         NVMCTRL_CTRLA_CMD(NVMCTRL_CTRLA_CMD_RWWEEER_Val) |
         NVMCTRL_CTRLA_CMDEX(NVMCTRL_CTRLA_CMDEX_KEY_Val));
-    uint32_t spins = 0;
-    while (!Nvm::ready()) {
-        ++spins;
+    const std::optional<uint32_t> polls = polls_until_ready(erase_budget_us);
+    const uint32_t erase_us = cycles_to_us(sw.elapsed());
+    if (!polls) {
+        bench.verdict("the row erase ends within 60 ms (ten times table 45-42's 6 ms)", false);
+        return;
     }
-    const uint32_t erase_us = cycles_to_us(cycles_now() - e0);
+    const uint32_t spins = *polls;
     const NvmError erased = Nvm::outcome();
     print(serial, "  one RWWEE row erase: ", erase_us, " us, and the CPU ran ",
           spins, " polling turns INSIDE it", crlf);
@@ -504,11 +592,16 @@ void td_cost() {
     for (uint32_t i = 0; i < Nvm::page_size; ++i) {
         page[i] = static_cast<uint8_t>(i * 3u + 0x11u);
     }
-    const uint32_t p0 = cycles_now();
+    // Every timed window below opens on a silent console: the lines just
+    // printed would otherwise go out inside it.
+    if (!drained_for_window()) {
+        return;
+    }
+    sw.start();
     const NvmError wrote = Nvm::program_page(
         NvmArray::rwwee, scratch_row,
         std::span<const uint8_t>(page, Nvm::page_size));
-    const uint32_t page_us = cycles_to_us(cycles_now() - p0);
+    const uint32_t page_us = cycles_to_us(sw.elapsed());
     bench.verdict("a bare page programs", wrote == NvmError::none);
 
     // WHAT ONE SAVE COSTS. Timed on save_reserved rather than on save,
@@ -521,6 +614,9 @@ void td_cost() {
     uint32_t best = 0xFFFFFFFFu;
     uint32_t worst = 0;
     bool all_landed = true;
+    if (!drained_for_window()) {
+        return;
+    }
     for (uint8_t k = 0; k < 5; ++k) {
         // The ordinary save restores the reserve the previous round
         // spent; its own cost is not part of this measurement. It goes
@@ -528,9 +624,9 @@ void td_cost() {
         // letter b's values after everything else has run.
         all_landed = all_landed && put(id_churn, 32, static_cast<uint8_t>(k));
         fill(32, static_cast<uint8_t>(0xC0u + k));
-        const uint32_t t0 = cycles_now();
+        sw.start();
         const bool ok = journal.save_reserved(id_churn, out_span(32));
-        const uint32_t us = cycles_to_us(cycles_now() - t0);
+        const uint32_t us = cycles_to_us(sw.elapsed());
         all_landed = all_landed && ok;
         best = us < best ? us : best;
         worst = us > worst ? us : worst;
@@ -549,9 +645,12 @@ void td_cost() {
     // id, and that is what it must measure.
     const uint32_t before_erases = MeteredZone::erases;
     const uint32_t before_programs = MeteredZone::programs;
-    const uint32_t c0 = cycles_now();
+    if (!drained_for_window()) {
+        return;
+    }
+    sw.start();
     const bool collected = journal.collect();
-    const uint32_t collect_us = cycles_to_us(cycles_now() - c0);
+    const uint32_t collect_us = cycles_to_us(sw.elapsed());
     const uint32_t rows = MeteredZone::erases - before_erases;
     const uint32_t pages = MeteredZone::programs - before_programs;
     print(serial, "  a collection: ", collect_us, " us, ", rows, " row erases, ",
@@ -567,20 +666,36 @@ void td_cost() {
     // The software timebase keeps up through all of it, which is the
     // other half of the no-stall story: SysTick_Handler is code in the
     // MAIN array, and it is a MAIN-array operation - not an RWWEE one -
-    // that makes the timebase go stale.
+    // that makes the timebase go stale. Held against the witness counter
+    // (above), which no handler advances.
+    if (!witness_start()) {
+        bench.verdict("TC0+TC1 come up as a 32-bit counter on generator 0", false);
+        return;
+    }
+    if (!drained_for_window()) {
+        Witness::release();
+        return;
+    }
+    const uint32_t w0 = Witness::count32();
     const uint32_t t0 = Ticker::ticks();
-    const uint32_t k0 = cycles_now();
+    sw.start();
     for (uint8_t k = 0; k < 3; ++k) {
         (void)journal.collect();
     }
-    const uint32_t sw_us = cycles_to_us(cycles_now() - k0);
+    const uint32_t sw_us = cycles_to_us(sw.elapsed());
     const uint32_t ticks_seen = Ticker::ticks() - t0;
-    print(serial, "  three collections: stopwatch ", sw_us, " us, tick counter ",
-          ticks_seen, " ms", crlf);
-    bench.verdict("the software timebase keeps up with the stopwatch through "
-                  "an RWWEE operation",
-                  ticks_seen + 2u >= sw_us / 1000u &&
-                      ticks_seen <= sw_us / 1000u + 2u);
+    const uint32_t witness_ms = (Witness::count32() - w0) / witness_per_ms;
+    Witness::release();
+    print(serial, "  three collections: TC0+TC1 ", witness_ms, " ms, tick counter ",
+          ticks_seen, " ms, cycle stopwatch ", sw_us, " us", crlf);
+    // The band: the tick count times a span to one tick either way (the
+    // span starts and ends anywhere inside a tick period), and the
+    // witness's whole milliseconds round down by up to one more; the two
+    // counts share OSC48M and are read a READSYNC apart (microseconds), so
+    // nothing else separates them: two ticks either way.
+    bench.verdict("the software timebase keeps up with a counter no handler drives "
+                  "through an RWWEE operation",
+                  ticks_seen + 2u >= witness_ms && ticks_seen <= witness_ms + 2u);
 }
 
 // =============================================================================
@@ -711,6 +826,11 @@ void tf_reserve() {
 void tw_wear() {
     const uint32_t rows = MeteredZone::erases;
     const uint32_t pages = MeteredZone::programs;
+    if (rows == 0u && pages == 0u) {
+        bench.skip("nothing was erased or programmed since letter a or the last w: no wear "
+                   "to weigh (z runs a..f first)");
+        return;
+    }
     print(serial, "  this run spent ", rows, " row erases and ", pages,
           " page programs in the attic", crlf);
     print(serial, "  the attic is four rows at 100k cycles each (45-43), "
@@ -799,16 +919,19 @@ void tp_panic() {
     token.path = 0;
     token.pass = bench.passed();
     token.fail = bench.failed();
+    token.skipped = bench.skipped();
 
     print(serial, "  panic() through JournalPanic, then a reset ...", crlf);
-    console_drain();
+    // Not a timed window: a wedged console only loses this line, and the
+    // panic goes ahead either way.
+    (void)console_drain();
     panic<SamPlatform, JournalThenReset>(PanicCode::assert_failed,
                                          panic_context);
 }
 
 /// Everything after the reset. main() calls this instead of the banner.
 void tp_resume() {
-    bench.resume_tally(token.pass, token.fail);
+    bench.resume_tally(token.pass, token.fail, token.skipped);
     print(serial, crlf, "p (continued after the panic reset)", crlf);
 
     const ResetCause cause = Reset::cause();

@@ -406,7 +406,7 @@ broken - the window never wakes it either. Half a pair is no window.
 
 ## COMP2, COMP3, window 1, the bandgap and the hysteresis
 
-From `test_samc_analog` letters g to j, 41 verdicts, with the DAC on
+From `test_samc_analog` letters g to j, with the DAC on
 PA02 as the swept source - PA02 being AIN4, which is COMP2/3's PIN0.
 
 **COMP2 and COMP3 run, and window 1 gets the arrangement 40.6.4
@@ -438,7 +438,9 @@ REFERENCE paths do ([dac.md](dac.md)).
 Weighed by the DAC, the three SUPC levels cross at codes **203 / 405 /
 812**, i.e. 1044 / 2083 / 4178 mV against a supply this suite locates at
 5269 mV - a THIRD independent route to the same bandgap, after the AC's
-own scaler and the ADC.
+own scaler and the ADC. The DAC cannot rise above the supply, so the
+suite crosses the 4.096 V level only where the supply holds it and skips
+it on a 3.3 V supply.
 
 **ERRATUM 1.5.6 reproduces, rarely, with its own workaround as the
 control.** Sixty-four enables of both the block and the comparator, with

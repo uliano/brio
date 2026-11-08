@@ -41,8 +41,8 @@
 // USART2 ALT1 (PF4/PF5) at 460800. This suite OWNS the RTC block: no
 // Ticker runs here, because the PIT period is the instrument (125 ms)
 // and the counter half is one of the things measured - which is also
-// why every bound in the two-board half is a spin count and not a
-// millisecond.
+// why every bound, the two-board half's included, is a time on the
+// delay verb and not on a kernel tick.
 //
 // WIRING. The single-board half (z) needs NOTHING beyond the desk's
 // standing state - but PD1/PD2 MUST BE FREE of the bus jumpers, because
@@ -66,9 +66,13 @@
 // judge a crystal's start-up judge the regulator's there instead; each
 // leg's label says which part's meaning it carries.
 //
-// Tests e, f, k, m and n enter POWER-DOWN. Every such sleep is bracketed
-// by a watchdog and a .noinit token, so a mode that fails to wake resets
-// the board and SAYS SO at the next boot instead of hanging the bench.
+// Tests e, f, k, m and n enter POWER-DOWN. Every such sleep - and every
+// standby sleep whose one waker is the thing under test, with the PIT's
+// interrupt off (d's TCB, e's pad) - is bracketed by a watchdog and a
+// .noinit token, so a mode that fails to wake resets the board and SAYS
+// SO at the next boot instead of hanging the bench. Every other wait is
+// bounded too: no kernel tick runs here, so a bound is a time on the
+// delay verb (wait_for()).
 //
 // THE AVR EA (DS40002443A ch. 13). Its SLPCTRL is CTRLA alone: the same
 // three modes and no regulator control, so every leg that sets PMODE or
@@ -242,10 +246,36 @@ bool near_u32(uint32_t a, uint32_t b, uint32_t tol) {
     return (a > b ? a - b : b - a) <= tol;
 }
 
-void console_drain() {
-    while (!Serial::tx_idle()) {
+/// The suite's time-out, a stated exception to util/test_wait.hpp's verbs:
+/// no kernel tick runs here (this suite owns the RTC, and its PIT is the
+/// instrument) and the TCBs belong to the letters (the watch is rebuilt by
+/// them and stops in standby, the waker is started and stopped), so a
+/// bound is a time on the target's delay verb. done() is asked, then at
+/// least one microsecond is spun by Clock::hz, `budget_us` times; true
+/// when done() held, asked once more after the budget. Each turn adds
+/// done() and whatever interrupt handlers take to its microsecond, so the
+/// budget is a floor, never a ceiling. The letters move CLK_PER only
+/// between the crystal and OSCHF at the crystal's own rate, within
+/// OSCHF's per cent of it (use_oschf()), so a microsecond stays one.
+/// Main context; masks nothing.
+template <typename F>
+[[nodiscard]] bool wait_for(F&& done, uint32_t budget_us) {
+    for (uint32_t i = 0; i < budget_us; ++i) {
+        if (done()) return true;
+        delay_us(clock, 1);
     }
-    delay_us(clock, 2000);            // the shift register, generously
+    return done();
+}
+
+/// Every queued console byte off the wire, bounded (200 ms, wait_for();
+/// tx_idle() covers the shift register): false on a wedged console.
+bool console_drain() { return wait_for([] { return Serial::tx_idle(); }, 200'000u); }
+
+/// The drain before a timed window - a sleep measured, a clock moved:
+/// a wedged console fails a verdict instead of leaving a byte inside the
+/// window unremarked.
+void drain_for_window() {
+    if (!console_drain()) verdict("the console drained before the timed window", false);
 }
 
 // ---- the stopwatch ----------------------------------------------------------------
@@ -344,22 +374,31 @@ struct SleepRun {
     uint16_t rtc1;       ///< and immediately after the wake (see test f: stale)
 };
 
+/// The longest PIT period a letter waits through, with room: 1.5 s
+/// against the 1 s backstop period letters e and n set (cyc32768).
+constexpr uint32_t pit_wait_us = 1'500'000;
+
 /// Wait for the next PIT interrupt: a sleep entered right after one
-/// spans a whole period, with no boundary to race.
-void pit_sync() {
+/// spans a whole period, with no boundary to race. False when none came
+/// within pit_wait_us (the PIT's interrupt off, or the PIT stopped).
+[[nodiscard]] bool pit_sync() {
     const uint16_t p0 = pit_irqs;
     sei();
-    for (uint32_t i = 0; i < 4'000'000u && pit_irqs == p0; ++i) {
-    }
+    return wait_for([&] { return pit_irqs != p0; }, pit_wait_us);
 }
 
 /// Sleep once in `m` and report what moved. `sync` waits for a PIT edge
 /// first (test e turns it off: there the PIT interrupt is disabled on
-/// purpose). `spin` replaces the sleep with a busy wait for the same
-/// wake-up - the baseline every latency figure is measured against.
+/// purpose); a PIT that does not tick is a failed verdict and an empty
+/// run, never a sleep with no waker. `spin` replaces the sleep with a
+/// busy wait for the same wake-up - the baseline every latency figure is
+/// measured against.
 SleepRun sleep_once(SleepMode m, bool sync = true, bool spin = false) {
-    console_drain();
-    if (sync) pit_sync();
+    drain_for_window();
+    if (sync && !pit_sync()) {
+        verdict("the PIT ticked before the sleep (its waker)", false);
+        return SleepRun{};
+    }
     SleepRun r{};
     cli();
     const uint32_t t0 = Watch::read();
@@ -368,8 +407,10 @@ SleepRun sleep_once(SleepMode m, bool sync = true, bool spin = false) {
     const uint16_t u0 = unit_irqs;
     sei();
     if (spin) {
-        while (pit_irqs == p0 && pad_irqs == d0 && waker_irqs == w0) {
-        }
+        // Dropped on purpose: the counts below say which source ended the
+        // spin, and a time-out leaves all three unmoved.
+        (void)wait_for([&] { return pit_irqs != p0 || pad_irqs != d0 || waker_irqs != w0; },
+                       pit_wait_us);
     } else {
         Sleep::enter(m);
     }
@@ -387,19 +428,31 @@ SleepRun sleep_once(SleepMode m, bool sync = true, bool spin = false) {
     return r;
 }
 
-/// The same, in POWER-DOWN, with the watchdog as the escape hatch: a
-/// mode that never wakes resets the board, and `stage` is what the next
-/// boot prints instead of the bench hanging.
-SleepRun power_down_once(uint8_t stage, bool sync = true) {
-    console_drain();
-    if (sync) pit_sync();
+/// The escape hatch around a sleep that has no backstop of its own: the
+/// watchdog (4 s, longer than any sleep a letter takes) and `stage` in the
+/// .noinit token, so a mode that never wakes resets the board and the next
+/// boot names the sleep instead of the bench hanging.
+void escape_arm(uint8_t stage) {
     token.magic = token_magic;
     token.stage = stage;
     (void)Watchdog::arm(WdtTime::s4);
-    const SleepRun r = sleep_once(SleepMode::power_down, false);
+}
+void escape_disarm() {
     (void)Watchdog::off();
     token.magic = 0;
     token.stage = 0;
+}
+
+/// The same, in POWER-DOWN, inside the escape hatch.
+SleepRun power_down_once(uint8_t stage, bool sync = true) {
+    drain_for_window();
+    if (sync && !pit_sync()) {
+        verdict("the PIT ticked before the sleep (its waker)", false);
+        return SleepRun{};
+    }
+    escape_arm(stage);
+    const SleepRun r = sleep_once(SleepMode::power_down, false);
+    escape_disarm();
     return r;
 }
 
@@ -652,10 +705,20 @@ void tb_idle() {
     verdict("the 2 ms alarm started", PeriodicTick<Waker>::init(clock, 500u));
     Pit::enable_interrupt(false);            // one wake source at a time
 
-    console_drain();
-    uint32_t asleep_turns = 0, awake_turns = 0;
+    drain_for_window();
     bool woke = true, disarmed = true, ints_on = true;
     constexpr uint8_t n = 16;
+    // The alarms counted by their own handler across the n sleeps: the
+    // independent count of what ended them. Each sleep lasts until the
+    // first interrupt after it starts, and the alarm is the only source
+    // left (the PIT's off, the console drained), so the n sleeps span at
+    // least n alarms - one more for each alarm that lands in the few
+    // cycles between a sleep's count and its SLEEP instruction, which the
+    // next alarm then ends. A CPU that did not stop would run its n turns
+    // inside one 2 ms period and span one alarm at most.
+    cli();
+    const uint16_t ws = waker_irqs;
+    sei();
     for (uint8_t i = 0; i < n; ++i) {
         cli();
         const uint16_t w0 = waker_irqs;
@@ -666,35 +729,57 @@ void tb_idle() {
         cli();
         if (waker_irqs == w0) woke = false;
         sei();
-        ++asleep_turns;
     }
+    cli();
+    const uint16_t asleep_alarms = static_cast<uint16_t>(waker_irqs - ws);
+    sei();
     verdict("enter(idle) returned only after an interrupt fired", woke);
     verdict("SLPCTRL is disarmed on return", disarmed);
     verdict("interrupts are still enabled on return", ints_on);
-    verdict("that is 16 sleeps", asleep_turns == n);
+    verdict("each of the 16 sleeps lasted until an alarm: at least 16 alarms across them",
+            asleep_alarms >= n);
 
     // The CPU really stopped: over the same span (16 alarms) a counter
-    // that only advances while the CPU runs turns once per wake asleep
-    // and thousands of times awake.
+    // that only advances while the CPU runs turns once per alarm asleep
+    // and hundreds of times per alarm awake (a turn is wait_for()'s
+    // microsecond and the count, a few microseconds in all). The awake
+    // count is bounded too: 16 alarms are 32 ms, so 100 ms is room.
     volatile uint32_t work = 0;
     cli();
     uint16_t w0 = waker_irqs;
     sei();
-    while (static_cast<uint16_t>(waker_irqs - w0) < n) {
-        work = work + 1;
-    }
-    awake_turns = work;
-    print(serial, "  over 16 alarm periods: ", asleep_turns, " loop turns asleep (one per "
-                  "wake), ", awake_turns, " awake", crlf);
-    verdict("the loop is frozen while the CPU sleeps", asleep_turns <= n);
-    verdict("the same span awake turns it thousands of times",
-            awake_turns > 100u * asleep_turns);
+    const bool spanned = wait_for(
+        [&] {
+            work = work + 1;
+            return static_cast<uint16_t>(waker_irqs - w0) >= n;
+        },
+        100'000u);
+    const uint32_t awake_turns = work;
+    print(serial, "  ", n, " loop turns asleep across ", asleep_alarms, " alarms; ",
+          awake_turns, " turns awake across 16", crlf);
+    // Turns per alarm, asleep n / asleep_alarms and awake awake_turns / n,
+    // compared without a division: awake more than a hundred times asleep.
+    verdict("the same span awake turns the loop a hundred times as often per alarm",
+            spanned && static_cast<uint32_t>(asleep_alarms) * awake_turns > 100ul * n * n);
 
-    // Parity with the kernel's own hook, on the same alarm.
+    // Parity with the kernel's own hook, on the same alarm: entered as the
+    // kernel enters it, with interrupts masked, it must sleep until the
+    // alarm's interrupt - an idle() that returned without sleeping would
+    // see none. The console is drained first: the line printed above is
+    // still leaving, and its transmit interrupt would end the sleep.
+    drain_for_window();
+    cli();
+    w0 = waker_irqs;
     const uint32_t before = Watch::read();
     P::idle();
     const uint32_t after = Watch::read();
-    verdict("the platform's idle() still works next to the new verb", after != before);
+    cli();
+    const bool idle_woke = waker_irqs != w0;
+    sei();
+    print(serial, "  the platform's idle() slept ", after - before, " CLK_PER ticks (the "
+                  "alarm's 2 ms period is the most)", crlf);
+    verdict("the platform's idle() still works next to the new verb: it returned on the "
+            "alarm's interrupt", idle_woke);
     verdict("and leaves SLPCTRL disarmed too", !P::sleep_armed());
     quiesce();
 }
@@ -787,7 +872,9 @@ void td_chain() {
                        .compare = waker_2ms, .run_standby = true});     // 2 ms
     Waker::enable_capt_interrupt(true);
     Pit::enable_interrupt(false);
+    escape_arm(12);                           // the TCB the one waker left: no backstop
     const SleepRun by_tcb = sleep_once(SleepMode::standby, false);
+    escape_disarm();
     Pit::enable_interrupt(true);
     Waker::enable_capt_interrupt(false);
     Waker::disable();
@@ -878,7 +965,9 @@ void te_pin_wake() {
     const uint16_t d0 = pad_irqs;
     verdict("the pad really toggles: its interrupt fires with the CPU awake", d0 > 0);
 
+    escape_arm(13);                           // the pad the one waker left: no backstop
     const SleepRun standby = sleep_once(SleepMode::standby, false);
+    escape_disarm();
     verdict("standby was ended by the pin, not by anything else",
             standby.pads >= 1 && standby.pits == 0 && standby.wakers == 0);
     print(serial, "  standby: ", standby.pads, " pad interrupt(s), stopwatch ",
@@ -985,8 +1074,11 @@ void tg_wake_ticks() {
                      .run_standby = true});
 
     auto wake_ticks = [](bool spin) -> int16_t {
-        console_drain();
-        pit_sync();
+        drain_for_window();
+        if (!pit_sync()) {                    // the PIT is this sleep's waker
+            verdict("the PIT ticked before the sleep (its waker)", false);
+            return INT16_MAX;
+        }
         cli();
         Rtc::count(0);
         sei();
@@ -1070,8 +1162,11 @@ void tg_vreg() {
                      .run_standby = true});
 
     auto wake_ticks = [](bool spin) -> int16_t {
-        console_drain();
-        pit_sync();
+        drain_for_window();
+        if (!pit_sync()) {                    // the PIT is this sleep's waker
+            verdict("the PIT ticked before the sleep (its waker)", false);
+            return INT16_MAX;
+        }
         cli();
         Rtc::count(0);
         sei();
@@ -1225,13 +1320,6 @@ void tg_vreg() {
 const uint8_t no_payload[1] = {0};
 slink::Decoder dec;
 
-/// This suite owns the RTC block, so there is no Ticker to ask the time
-/// of: every bound in the link client is a spin count. One iteration of
-/// the polling loops below is a handful of cycles at 24 MHz, so this is
-/// a generous "at least a millisecond" - a bound only has to outlast the
-/// peer's own deadline, never to be accurate.
-constexpr uint32_t spins_per_ms = 2000;
-
 void put4(uint8_t b) { (void)LinkUart::send(b, 200'000u); }
 
 /// Half-duplex turnaround guard. RXCIF is raised at the MIDDLE of the
@@ -1286,19 +1374,27 @@ bool link_command_mode() {
 
 bool link_quiet = false;      ///< suppress the failure dump while probing
 
+/// One frame from the peer within `ms` milliseconds (wait_for(): this
+/// suite owns the RTC, so no tick bounds it). A turn of the poll is a
+/// microsecond and the decoder's step, far under a byte at command_baud
+/// (87 us), so the receiver's two-byte buffer never overflows.
 bool recv_frame(slink::Frame& out, uint16_t ms) {
     dec.reset();
-    const uint32_t budget = static_cast<uint32_t>(ms) * spins_per_ms;
-    for (uint32_t i = 0; i < budget; ++i) {
-        if (!LinkUart::rxc_flag()) continue;
-        const UsartFrame f = LinkUart::receive();
-        if (!f.clean()) { dec.reset(); continue; }
-        if (dec.feed(static_cast<uint8_t>(f.data)) == slink::Decoder::Result::frame) {
+    return wait_for(
+        [&] {
+            if (!LinkUart::rxc_flag()) return false;
+            const UsartFrame f = LinkUart::receive();
+            if (!f.clean()) {
+                dec.reset();
+                return false;
+            }
+            if (dec.feed(static_cast<uint8_t>(f.data)) != slink::Decoder::Result::frame) {
+                return false;
+            }
             out = dec.frame();
             return true;
-        }
-    }
-    return false;
+        },
+        static_cast<uint32_t>(ms) * 1000u);
 }
 
 bool command_once(slink::Op op, const uint8_t* p, uint8_t len, uint16_t ms) {
@@ -1432,8 +1528,9 @@ void train_answer(bool sleeping, SleepMode m, uint8_t shots) {
             if (sleeping) {
                 Sleep::enter(m);
             } else {
-                for (uint32_t s = 0; s < 1'500'000u && wake_irqs == d0; ++s) {
-                }
+                // 300 ms, the train's lead; dropped on purpose: `got` below
+                // reads the count itself, and the next k turn waits again.
+                (void)wait_for([&] { return wake_irqs != d0; }, 300'000u);
             }
             cli();
             got = wake_irqs != d0;
@@ -1576,7 +1673,7 @@ bool apply_leg_clock(LegClock c) {
 /// PIT's history, not the stimulus.
 bool run_leg(LegClock c, SleepMode m, uint8_t stage, Train& t) {
     if (!train_arm(train_shots)) return false;
-    console_drain();
+    drain_for_window();
     const bool moved = apply_leg_clock(c);
     Pit::enable_interrupt(false);
     token.magic = token_magic;
@@ -1644,7 +1741,7 @@ bool apply_leg_clock(LegClock c) {
 /// .noinit token, which is what every power-down leg asks for.
 bool run_leg(LegClock c, bool perf, SleepMode m, uint8_t stage, Train& t) {
     if (!train_arm(train_shots)) return false;
-    console_drain();
+    drain_for_window();
     const bool moved = apply_leg_clock(c);
     if (perf) Vreg::power(VregPower::performance);
     if (stage) {
@@ -2181,7 +2278,7 @@ bool sfd_once(const SfdLeg& leg, bool& woke, bool& intact, bool& arrived,
     sei();
     LinkUart::enable_rxs_interrupt(true);
 
-    console_drain();
+    drain_for_window();
     const bool moved = apply_sfd_clock(leg.clk);
     // Armed only around the transition, and only here: with SFDEN set in
     // Active mode a read of RXDATA restarts the frame (errata 2.16.2).
@@ -2495,8 +2592,10 @@ bool twi_tenure(SleepMode m, bool sleeping, uint8_t first, slink::Report& r) {
             sei();
             if (matched) break;
         }
-        for (uint32_t i = 0; i < 2'000'000u && twis_stops == s0; ++i) {
-        }
+        // The frame's closing STOP, within the peer's 300 ms deadline;
+        // dropped on purpose: the peer's report below says whether the
+        // tenure ended.
+        (void)wait_for([&] { return twis_stops != s0; }, 300'000u);
 #if defined(__AVR_AVR64EA48__)
         (void)Watchdog::off();
         token.magic = 0;
@@ -2804,8 +2903,11 @@ constexpr uint32_t tca_per_pit = ticks_per_pit / 64u;      ///< 46875 at CLK_PER
 /// One 125 ms standby with TCA0 counting, CNT read at the wake. `spin`
 /// is the awake baseline over the same PIT period.
 uint16_t tca_leg(bool run_standby, bool spin) {
-    console_drain();
-    pit_sync();
+    drain_for_window();
+    if (!pit_sync()) {                        // the PIT is this sleep's waker
+        verdict("the PIT ticked before the sleep (its waker)", false);
+        return 0;
+    }
     (void)TcaU::init({.mode = TcaMode::normal, .clock = TcaClock::div64, .period = 0xFFFF,
                       .run_standby = run_standby});
     (void)sleep_once(SleepMode::standby, false, spin);
@@ -2953,8 +3055,8 @@ void to_runstdby() {
             ac_on.units >= 1 && ac_on.pits == 0);
     verdict("without it the comparator sleeps and the PIT ends the sleep",
             ac_off.units == 0 && ac_off.pits == 1);
-    print(serial, "  the ADC's RUNSTDBY: SKIP - the EA's ADC engine is not written; the op "
-                  "amp and the TCD: this die has neither", crlf);
+    bench.skip("the ADC's RUNSTDBY: the EA's ADC engine is not written; the op amp and the "
+               "TCD: this die has neither");
     quiesce();
 }
 #else
@@ -3054,7 +3156,7 @@ void to_runstdby() {
             near_u32(on.slept, on.awake, 32));
     verdict("the ADC without RUNSTDBY converts nothing in standby: the PIT ends the "
             "sleep", off.run.units == 0 && off.run.pits == 1);
-    print(serial, "  the op amp's RUNSTBY: SKIP - this part has no OPAMP", crlf);
+    bench.skip("the op amp's RUNSTBY: this part has no OPAMP");
 #endif
 
     // TCD0. Its ramp overflows every 43.7 ms (24 MHz / 8 / 32, 4096
@@ -3224,6 +3326,15 @@ void tp_pin_wake() {
 template <typename Sensed>
 bool start_bit_wake(PinPull pull, volatile uint16_t& counter, uint8_t stage, SleepRun& r,
                     uint16_t& got) {
+    // The 1 s backstop is a whole PIT period only from a PIT tick: the
+    // period was just changed, and the first interrupt after a change
+    // comes at whatever phase the counter is in - early enough, after
+    // letter m's 250 ms periods, to end the sleep before the peer's start
+    // bit (60 ms after its acknowledgement) and count as the PIT's wake.
+    if (!pit_sync()) {
+        verdict("the PIT ticked before the sleep (its waker)", false);
+        return false;
+    }
     (void)link_command_mode();
     slink::Params a{};
     a.value = 0x00;
@@ -3507,7 +3618,7 @@ int main() {
                   "command wire, PE2 its stimulus in, PE3 the echo out, PA2/PA3 the bus.",
           crlf);
     if (hung) {
-        print(serial, "  PREVIOUS RUN DID NOT WAKE: a power-down sleep (stage ", hung_stage,
+        print(serial, "  PREVIOUS RUN DID NOT WAKE: a guarded sleep (stage ", hung_stage,
               ") was ended by the watchdog", why.watchdog ? "" : " - though RSTFR does not "
               "name the watchdog", ". That is a FINDING, not a pass.", crlf);
     }

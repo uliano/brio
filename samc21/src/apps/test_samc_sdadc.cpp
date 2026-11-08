@@ -78,6 +78,7 @@
 #include "samc21/ticker.hpp"
 #include "util/analog.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #include "bench_sleep.hpp"
@@ -99,6 +100,27 @@ using Serial = Uart<5, console_pads>;
 constexpr Serial serial;
 
 TestBench<Serial, 16> bench;
+
+/// The SysTick ticker read as CPU cycles: the ruler of this suite's
+/// waits (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// Every queued console byte off the wire, bounded (util/test_wait.hpp):
+/// false on a wedged console.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
+
+/// Before a measurement no console line may disturb: the console
+/// drained, or a failed verdict and false.
+bool quiet_console() {
+    const bool drained = console_drain();
+    if (!drained) {
+        bench.verdict("the console drained before the measurement", false);
+    }
+    return drained;
+}
 
 using brio::crlf;
 using brio::print;
@@ -126,10 +148,10 @@ constexpr uint8_t main_gen = 0;
 constexpr uint32_t main_gen_hz = SysClock::hz;
 constexpr uint8_t fast_prescaler = 3;
 
-/// Where this board's supply sits. A STARTING POINT for the millivolt
-/// prints, never a verdict's authority.
-constexpr uint16_t supply_hint_mv = 5150;
-uint16_t vdd_mv = supply_hint_mv;
+/// Where this board's supply sits, in millivolts: 0 until locate_vdd()
+/// has read it, once a boot. The board takes 3.3 V or 5 V on a jumper
+/// (docs/boards/samc21j.md), so no figure is assumed.
+uint16_t vdd_mv = 0;
 
 // ---------------------------------------------------------------------------
 // The stopwatch (letter e): TC0 + TC1 as one 32-bit counter on the
@@ -193,17 +215,21 @@ constexpr uint32_t pwm_steps = pwm_top + 1u;
 // Helpers
 // ---------------------------------------------------------------------------
 
-void spin(uint32_t turns) {
-    volatile uint32_t sink = 0;
-    for (uint32_t i = 0; i < turns; ++i) {
-        sink = sink + 1u;
-    }
-}
+/// The pause after a pad changes: 400 us, for the pad and the
+/// converter's input to see the new level.
+void settle() { brio::spin_us<Ruler>(400); }
 
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
+/// The bound on one conversion: 100 ms, about ten times the slowest this
+/// suite asks for - OSR 1024 at 6 MHz with SKPCNT 15, 4096 x 16 cycles,
+/// 10.9 ms (sdadc_conversion_cycles()).
+constexpr uint32_t sd_conversion_budget_us = 100'000;
+
+/// Hand a pad back as reset leaves it: an input, its buffer off, no pull
+/// (release() alone leaves PORT's output driver on).
+template <class P>
+void hand_back() {
+    P::input();
+    P::configure({});
 }
 
 bool near(uint32_t a, uint32_t b, uint32_t tol) {
@@ -233,7 +259,7 @@ void drive_pair0(bool negative_high, bool positive_high) {
     Inp0::output();
     if (negative_high) { Inn0::set(); } else { Inn0::clear(); }
     if (positive_high) { Inp0::set(); } else { Inp0::clear(); }
-    spin(2'000UL);
+    settle();
 }
 
 /// The SDADC's baseline configuration: VDDANA, 6 MHz, chopper on (which
@@ -288,11 +314,9 @@ Stats stats_of(uint16_t count) {
         if (!Sdadc::start()) {
             continue;
         }
-        uint32_t spins = 0xFFFFFFu;
-        while (spins-- != 0u && !Sdadc::ready()) {
-        }
-        if (!Sdadc::ready()) {
-            continue;
+        if (!brio::wait_until<Ruler>([] { return Sdadc::ready(); },
+                                     sd_conversion_budget_us)) {
+            continue;   // a conversion that never lands is not taken
         }
         buf[taken] = Sdadc::result24();
         ++taken;
@@ -377,6 +401,61 @@ uint32_t sar_mean(uint16_t count) {
         sum += Adc0::read();
     }
     return count == 0u ? 0u : (sum + count / 2u) / count;
+}
+
+/**
+ * VDDANA located, once a boot, by the SAR: the 1.024 V bandgap level
+ * (MUXPOS INTREF, VREFOE set - the channel is dead without it,
+ * docs/samc21/adc.md) against VDDANA as the reference, at SAMPLEN 14 (the
+ * 10 us table 45-22 asks of the channel). The level sits under every
+ * supply the device runs on (2.7..5.5 V, DS60001479M table 45-2), so the
+ * reading never saturates; its accuracy is the level's own, +-2.05 %
+ * (table 45-36). Leaves ADC0 released and SUPC.VREF at reset.
+ */
+bool locate_vdd() {
+    if (vdd_mv != 0u) {
+        return true;
+    }
+    if (!adc0_up(AdcConfig{.reference = Ref::vddana,
+                           .prescaler = AdcPresc::div32,
+                           .sample_length = 14})) {
+        return false;
+    }
+    (void)Vref::configure(VrefConfig{.level = VrefLevel::v1_024, .output_enable = true});
+    Adc0::select(AdcInput::intref);
+    brio::spin_us<Ruler>(4'000);
+    Adc0::discard(2);
+    uint32_t sum = 0;
+    for (uint8_t i = 0; i < 32u; ++i) {
+        sum += Adc0::read();
+    }
+    const uint32_t counts = (sum + 16u) / 32u;
+    (void)Vref::configure(VrefConfig{});
+    Adc0::release();
+    if (counts == 0u) {
+        return false;
+    }
+    vdd_mv = static_cast<uint16_t>((1024UL * 4096UL + counts / 2u) / counts);
+    return true;
+}
+
+/// locate_vdd() for a letter whose verdicts rest on the supply: a failure
+/// is the letter's verdict.
+bool need_vdd() {
+    const bool ok = locate_vdd();
+    if (!ok) {
+        bench.verdict("VDDANA located through the 1.024 V bandgap level", false);
+    }
+    return ok;
+}
+
+/// Whether a bandgap level of `level_mv` can serve under a supply located
+/// at `supply_mv`, as a reference or as the SAR's input: the level at most
+/// 95 % of the supply. The 5 % is the level's own +-2.05 % at its top
+/// (table 45-36), the located supply's +-2.05 % at its bottom and the
+/// levels' 0.3 %/V supply coefficient.
+constexpr bool level_below_supply(uint32_t level_mv, uint32_t supply_mv) {
+    return level_mv * 20u < supply_mv * 19u;
 }
 
 // =============================================================================
@@ -484,11 +563,12 @@ void ta_block() {
                   ctrlb_reset == 0x2000u && gain_reset == 1u);
 
     // SYNCBUSY's layout, and the register the chapter puts in its
-    // write-synchronized list without giving it a bit.
-    bench.verdict("SYNCBUSY HAS NO REFCTRL BIT, though 39.6.8's prose lists "
-                  "REFCTRL among the registers needing write synchronization - "
-                  "the twelve bits are exactly the header's",
-                  SDADC_SYNCBUSY_Msk == 0x00000FFFu);
+    // write-synchronized list without giving it a bit: the device
+    // header's twelve bits, a fact of the header and so a compile-time
+    // check, not a verdict.
+    static_assert(SDADC_SYNCBUSY_Msk == 0x00000FFFu,
+                  "SYNCBUSY has twelve bits and none for REFCTRL, though 39.6.8's "
+                  "prose lists REFCTRL among the write-synchronized registers");
 
     bench.verdict("the converter comes back up", sdadc_up(base_cfg()));
 
@@ -600,8 +680,8 @@ void ta_block() {
     bench.verdict("release() puts the block back: the APB clock off and the "
                   "generic clock channel disconnected",
                   (MCLK_REGS->MCLK_APBCMASK & MCLK_APBCMASK_SDADC_Msk) == 0u);
-    Inn0::release();
-    Inp0::release();
+    hand_back<Inn0>();
+    hand_back<Inp0>();
 }
 
 // =============================================================================
@@ -660,6 +740,7 @@ void tb_noise() {
     int32_t at_low = 0;
     int32_t at_high = 0;
     int32_t unused = 0;
+    (void)locate_vdd();   // the microvolts below are printed, never judged
 
     drive_pair0(false, false);
     print(serial, "  --- both pads LOW, reference VDDANA (1 raw unit = ",
@@ -682,13 +763,13 @@ void tb_noise() {
     const int32_t shift = at_high - at_low;
     const int32_t shift_uv =
         static_cast<int32_t>((static_cast<int64_t>(shift) * vdd_mv * 1000) / 32768);
+    // Printed, not judged: the verdict above already bounds both readings,
+    // and so their difference.
     print(serial, "  the same zero differential reads ", at_low,
           " with both pads at GND and ", at_high, " with both at VDD: a shift "
           "of ", shift, " counts = ", shift_uv, " uV for a common-mode step of "
-          "the whole supply", crlf);
-    bench.verdict("...which is a common-mode rejection of the differential "
-                  "input, not a claim about its absolute offset",
-                  shift < 2000 && shift > -2000);
+          "the whole supply - a common-mode rejection of the differential "
+          "input, not a claim about its absolute offset", crlf);
 
     // THE FINER REFERENCE, where the datasheet's own noise figure can be
     // seen at all: at INTREF 1.024 V one 16-bit count is 31 uV, so table
@@ -716,8 +797,8 @@ void tb_noise() {
                   bits_low >= 16u && bits_high >= 16u && bits_fine >= 16u);
 
     (void)Vref::configure(VrefConfig{.level = VrefLevel::v1_024});
-    Inn0::release();
-    Inp0::release();
+    hand_back<Inn0>();
+    hand_back<Inp0>();
 }
 
 // =============================================================================
@@ -795,7 +876,7 @@ void tc_full_scale() {
     Sdadc::release();
     bench.verdict("the converter comes back free-running", sdadc_up(cfg));
     Sdadc::clear_flags(Sdadc::flag_resrdy | Sdadc::flag_overrun);
-    wait_ms(5);
+    brio::spin_us<Ruler>(5'000);
     const bool over = Sdadc::overrun();
     print(serial, "  free-running with nothing reading RESULT for 5 ms: "
           "OVERRUN ", yes_no(over), crlf);
@@ -804,8 +885,8 @@ void tc_full_scale() {
                   over);
 
     Sdadc::release();
-    Inn0::release();
-    Inp0::release();
+    hand_back<Inn0>();
+    hand_back<Inp0>();
 }
 
 // =============================================================================
@@ -844,30 +925,84 @@ void td_sweep() {
           "specifies and erratum 1.18.2 (revisions B..E, NOT this one) asks "
           "for.", crlf);
 
+    // THE SWEEP IS MEASURED WHOLE AND PRINTED AFTER: no console line goes
+    // out while a point converts (util/test_wait.hpp's rule for a timed
+    // window, kept here for a noise window).
+    //
+    // THE SOURCE'S OWN NOISE COMES FIRST, at k = 0 (both duties equal): the
+    // rms of 64 conversions, sigma0, derives the two numbers the sweep is
+    // judged by instead of an eye choosing them.
+    //   - A point is eight conversions. Eight Gaussian samples span more
+    //     than 6 sigma about once in a thousand, and each end of the
+    //     sixteen-bit datum is quantized by a count, so a point whose
+    //     spread passes 6 sigma0 + 2 counts was disturbed: it is taken
+    //     again, up to three more times, and the takes are printed.
+    //   - The residual bound. Table 45-27 allows an INL of +/-11 LSB (one
+    //     LSB is one count of the sixteen-bit datum) at CLK_SDADC 6 MHz
+    //     and an internal 5.5 V reference. A point carries its own 11,
+    //     and the least-squares line over the eleven inner points, k =
+    //     -320..320 equally spaced, can be tilted by the same INL by up
+    //     to the sum of its hat weights' magnitudes, 1.55 at the outermost
+    //     point: 17 more, 28 in all. The noise: a point's mean of eight
+    //     and the line at the same place together have
+    //     sigma0 x sqrt(1/8) x sqrt(1 + 0.32) = 0.41 sigma0; four of those
+    //     is 1.62 sigma0, written 13/8. And a count for the datum's
+    //     quantization.
     struct Point {
         int32_t k;
         int32_t measured;
+        uint32_t spread;
+        uint8_t takes;
     };
     Point points[15];
     uint8_t n = 0;
-    bool monotone = true;
-    int32_t previous = -1000000;
+    if (!quiet_console()) {
+        Sdadc::release();
+        (void)Pwm::enable(false);
+        Pwm::release();
+        PwmN::release();
+        PwmP::release();
+        hand_back<Inn0>();
+        hand_back<Inp0>();
+        return;
+    }
+    (void)Pwm::set_cc_buffer(0, 256);
+    (void)Pwm::set_cc_buffer(1, 256);
+    brio::spin_us<Ruler>(5'000);
+    const Stats cal = stats_of(64);
+    const uint32_t sigma0_raw = cal.raw_rms;   // raw 24-bit units, 256 a count
+    const uint32_t spread_limit = (6u * sigma0_raw + 255u) / 256u + 2u;
+    const int32_t inl_bound =
+        static_cast<int32_t>(28u + (13u * sigma0_raw + 2047u) / 2048u + 1u);
     for (int32_t k = -448; k <= 448; k += 64) {
         const uint32_t cc0 = static_cast<uint32_t>(256 - k / 2);
         const uint32_t cc1 = static_cast<uint32_t>(256 + k / 2);
         (void)Pwm::set_cc_buffer(0, cc0);
         (void)Pwm::set_cc_buffer(1, cc1);
-        wait_ms(5);
-        const Stats s = stats_of(8);
-        points[n] = Point{k, s.mean};
-        if (s.mean <= previous) {
+        brio::spin_us<Ruler>(5'000);
+        Stats s = stats_of(8);
+        uint8_t takes = 1;
+        while (s.span() > spread_limit && takes < 4u) {
+            s = stats_of(8);
+            ++takes;
+        }
+        points[n] = Point{k, s.mean, s.span(), takes};
+        ++n;
+    }
+
+    print(serial, "  the source at k = 0: ", cal.taken, " conversions, rms ",
+          cal.raw_rms, " raw (", cal.rms, " counts), mean ", cal.mean,
+          "; a point is taken again past a spread of ", spread_limit,
+          " counts, and the residual is judged at ", inl_bound, crlf);
+    bool monotone = true;
+    for (uint8_t i = 0; i < n; ++i) {
+        if (i != 0u && points[i].measured <= points[i - 1u].measured) {
             monotone = false;
         }
-        previous = s.mean;
-        print(serial, "  k ", k, ": ", s.mean, " counts (ideal ", k * 64,
-              "), spread ", s.span(), ", ", Sdadc::to_mv(s.mean, vdd_mv),
-              " mV", crlf);
-        ++n;
+        print(serial, "  k ", points[i].k, ": ", points[i].measured,
+              " counts (ideal ", points[i].k * 64, "), spread ",
+              points[i].spread, " in ", points[i].takes, " take(s), ",
+              Sdadc::to_mv(points[i].measured, vdd_mv), " mV", crlf);
     }
 
     bench.verdict("THE SWEPT DIFFERENTIAL IS MONOTONIC THROUGH ZERO over the "
@@ -935,25 +1070,16 @@ void td_sweep() {
                   "converter's own decimation filter as the reconstruction "
                   "filter - and the residual is COMBINED nonlinearity this "
                   "letter declines to apportion",
-                  worst_inner <= 40);
-    if (worst_outer > 4 * (worst_inner + 1)) {
-        bench.verdict("AND THE +/-0.7 x VREF LIMIT BITES: past it the points "
-                      "leave the line by several times the inner residual, "
-                      "which is what table 45-26's restricted input range is "
-                      "about",
-                      true);
-    } else {
-        print(serial, "  the points beyond 0.7 x VREF do NOT leave the line by "
-              "more than the inner scatter - so on this die, at this OSR, "
-              "table 45-26's restricted range did not show itself here. "
-              "Recorded as an observation; erratum 1.18.2, which asked for the "
-              "same restriction, is marked revisions B..E and NOT this one.",
-              crlf);
-        bench.verdict("the outer points were measured against the same line "
-                      "and reported rather than a verdict being invented for "
-                      "them",
-                      true);
-    }
+                  fitted == 11 && worst_inner <= inl_bound);
+    // The outer points, past table 45-26's +/-0.7 x VREF, are printed and
+    // not judged: whether the restricted range shows on a die at an OSR is
+    // that die's fact (erratum 1.18.2, which asked for the restriction, is
+    // marked revisions B..E and not this one).
+    print(serial, "  the points beyond 0.7 x VREF leave the line by ", worst_outer,
+          " counts against an inner worst of ", worst_inner, ": table 45-26's "
+          "restricted range ",
+          worst_outer > 4 * (worst_inner + 1) ? "shows here" : "did not show here",
+          crlf);
 
     // THE SAR WATCHING THE SAME TWO PADS. It samples instantaneously, so
     // its average of a waveform synchronous with its own clock is a
@@ -961,7 +1087,7 @@ void td_sweep() {
     // secondary witness and letter g is the cross-check.
     (void)Pwm::set_cc_buffer(0, 192);
     (void)Pwm::set_cc_buffer(1, 320);
-    wait_ms(5);
+    brio::spin_us<Ruler>(5'000);
     const Stats sd = stats_of(16);
     Sdadc::release();
     bench.verdict("the SAR comes up on the same two pads", adc0_up(sar_avg_cfg));
@@ -991,8 +1117,8 @@ void td_sweep() {
     Pwm::release();
     PwmN::release();
     PwmP::release();
-    Inn0::release();
-    Inp0::release();
+    hand_back<Inn0>();
+    hand_back<Inp0>();
 }
 
 // =============================================================================
@@ -1176,8 +1302,8 @@ void te_timing() {
 
     Sdadc::release();
     stopwatch_stop();
-    Inn0::release();
-    Inp0::release();
+    hand_back<Inn0>();
+    hand_back<Inp0>();
 }
 
 // =============================================================================
@@ -1248,22 +1374,19 @@ void tf_dac_reference() {
     print(serial, "    SDADC converting, REFSEL = VDDANA (control):  ",
           against_vddana, crlf);
 
+    // Whether the item reproduces is a fact about the die, printed; the
+    // driver's refusal stands on 39.8.2's Note either way. Where it does,
+    // the workaround is judged.
     if (without_buffer > quiet + 4u && without_buffer > against_vddana + 4u) {
-        bench.verdict("ERRATUM 1.8.10 REPRODUCES: converting against the DAC "
-                      "reference WITHOUT the buffer shakes the DAC's own "
-                      "output, where the same converter running against "
-                      "VDDANA leaves it alone",
-                      true);
+        print(serial, "  erratum 1.8.10 reproduces: converting against the DAC "
+              "reference without the buffer shakes the DAC's own output, where "
+              "the same converter against VDDANA leaves it alone", crlf);
         bench.verdict("AND REFCTRL.ONREFBUF IS THE WORKAROUND IT CLAIMS TO BE: "
                       "the buffer takes the disturbance back down",
                       with_buffer * 2u <= without_buffer + 4u);
     } else {
-        print(serial, "  the item did NOT reproduce in this arrangement - "
-              "recorded as an observation on one die, not as a claim that the "
-              "item is wrong; the driver's refusal stands on 39.8.2's Note "
-              "either way", crlf);
-        bench.verdict("the three arrangements were measured and reported "
-                      "rather than a verdict being invented for them", true);
+        print(serial, "  erratum 1.8.10 did not reproduce in this arrangement - "
+              "an observation on one die", crlf);
     }
 
     // And the SDADC really does convert against the DAC: halving the
@@ -1274,31 +1397,38 @@ void tf_dac_reference() {
     bench.verdict("the converter comes back on the DAC reference", sdadc_up(cfg));
     drive_pair0(false, true);
     (void)Dac::set(1023);
-    spin(20'000UL);
+    brio::spin_us<Ruler>(4'000);
     const Stats at_full = stats_of(8);
     (void)Dac::set(256);
-    spin(20'000UL);
+    brio::spin_us<Ruler>(4'000);
     const Stats at_quarter = stats_of(8);
+    // Printed, not judged: a +VDD differential saturates against either
+    // reference, and against a dead one too, so the two readings cannot
+    // tell the path from its absence. Letter g's ratios are the judgement
+    // of the reference multiplexer.
     print(serial, "  a fixed +VDD differential against a DAC reference of code "
           "1023 reads ", at_full.mean, " and against code 256 reads ",
           at_quarter.mean, " (both saturate: VDD is above either reference)",
           crlf);
-    bench.verdict("REFSEL = DAC IS A REAL REFERENCE PATH - the reading is "
-                  "positive and at full scale under both, which is what a "
-                  "differential above the reference must give",
-                  at_full.mean > 20000 && at_quarter.mean > 20000);
 
     Sdadc::release();
     Adc0::release();
     Dac::release();
-    Inn0::release();
-    Inp0::release();
+    hand_back<Inn0>();
+    hand_back<Inp0>();
 }
 
 // =============================================================================
 // g - the reference multiplexer, and the SAR/SDADC cross-check
 // =============================================================================
 void tg_reference() {
+    if (!need_vdd()) {
+        return;
+    }
+    // The 4.096 V level serves only under a supply that holds it: at 3.3 V
+    // its reference leg is skipped, and the cross-check below weighs the
+    // 2.048 V level instead.
+    const bool top_held = level_below_supply(4096u, vdd_mv);
     // A FIXED differential the whole letter shares: pair 0 at opposite
     // rails is +VDD, which saturates against every reference this board
     // can offer. So the sweep is done with the PWM source instead, at a
@@ -1332,6 +1462,12 @@ void tg_reference() {
 
     int32_t reading[4] = {0, 0, 0, 0};
     for (uint8_t i = 0; i < 4u; ++i) {
+        if (i == 2u && !top_held) {
+            print(serial, "  ", cases[i].label, ": not used - the supply, at ",
+                  vdd_mv, " mV, does not hold it", crlf);
+            bench.skip("a bandgap level the supply does not hold");
+            continue;
+        }
         (void)Vref::configure(VrefConfig{.level = cases[i].level});
         SdadcConfig cfg = base_cfg(SdadcOsr::osr1024);
         cfg.reference = cases[i].reference;
@@ -1341,7 +1477,7 @@ void tg_reference() {
             bench.verdict("the converter came up against ", cases[i].label, false);
             continue;
         }
-        wait_ms(2);
+        brio::spin_us<Ruler>(2'000);
         const Stats s = stats_of(8);
         reading[i] = s.mean;
         const uint16_t ref_mv_here =
@@ -1361,19 +1497,24 @@ void tg_reference() {
     print(serial, "  bandgap ratios from the readings, x1000: 1.024/2.048 -> ",
           ratio_1_to_2, ", 2.048/4.096 -> ", ratio_2_to_4,
           " (both nominally 2000)", crlf);
-    bench.verdict("THE BANDGAP'S THREE LEVELS ARE A FACTOR OF TWO APART, seen "
-                  "from the SDADC's reference multiplexer with the input "
-                  "cancelling out",
+    bench.verdict("THE BANDGAP'S LEVELS ARE A FACTOR OF TWO APART, seen from "
+                  "the SDADC's reference multiplexer with the input cancelling "
+                  "out (every level the supply holds)",
                   near(static_cast<uint32_t>(ratio_1_to_2), 2000u, 120u) &&
-                      near(static_cast<uint32_t>(ratio_2_to_4), 2000u, 120u));
+                      (!top_held ||
+                       near(static_cast<uint32_t>(ratio_2_to_4), 2000u, 120u)));
 
-    // THE CROSS-CHECK. The SDADC's reading against VDDANA and against
-    // INTREF 4.096 V gives VDDANA / 4.096 V; the SAR, converting the
-    // bandgap as an INPUT against VDDANA, gives the same ratio the other
-    // way up. Two converters, no shared mechanism but the bandgap.
+    // THE CROSS-CHECK. The SDADC's reading against VDDANA and against the
+    // highest INTREF level the supply holds gives level / VDDANA; the SAR,
+    // converting the bandgap as an INPUT against VDDANA, gives the same
+    // ratio the other way up. Two converters, no shared mechanism but the
+    // bandgap.
+    const uint8_t x = top_held ? 2u : 1u;
+    const uint32_t x_mv = top_held ? 4096u : 2048u;
     const int32_t sdadc_ratio =
-        reading[2] != 0 ? (reading[3] * 1000) / reading[2] : 0;   // 4.096/VDD
-    (void)Vref::configure(VrefConfig{.level = VrefLevel::v4_096,
+        reading[x] != 0 ? (reading[3] * 1000) / reading[x] : 0;   // level/VDD
+    (void)Vref::configure(VrefConfig{.level = top_held ? VrefLevel::v4_096
+                                                       : VrefLevel::v2_048,
                                      .output_enable = true});
     Sdadc::release();
     bench.verdict("the SAR comes up to read the same bandgap as an INPUT",
@@ -1387,11 +1528,11 @@ void tg_reference() {
     const uint32_t sar_counts = (sum + 8u) / 16u;
     const int32_t sar_ratio = static_cast<int32_t>((sar_counts * 1000u) / 4096u);
     const uint32_t vdd_from_sar =
-        sar_counts != 0u ? (4096u * 4096u) / sar_counts : 0u;
-    print(serial, "  the SAR reads the 4.096 V bandgap at ", sar_counts,
-          " of 4096 against VDDANA, i.e. 4.096 V / VDDANA = ", sar_ratio,
+        sar_counts != 0u ? (x_mv * 4096u) / sar_counts : 0u;
+    print(serial, "  the SAR reads the ", x_mv, " mV bandgap level at ", sar_counts,
+          " of 4096 against VDDANA, i.e. level / VDDANA = ", sar_ratio,
           " per mille, and puts VDDANA at ", vdd_from_sar, " mV", crlf);
-    print(serial, "  the SDADC's own two readings put 4.096 V / VDDANA at ",
+    print(serial, "  the SDADC's own two readings put level / VDDANA at ",
           sdadc_ratio, " per mille", crlf);
     bench.verdict("TWO CONVERTER ARCHITECTURES, ONE RATIO: the sigma-delta's "
                   "reference multiplexer and the SAR's input multiplexer agree "
@@ -1400,7 +1541,9 @@ void tg_reference() {
                       near(static_cast<uint32_t>(sdadc_ratio),
                            static_cast<uint32_t>(sar_ratio),
                            static_cast<uint32_t>(sar_ratio / 20 + 5)));
-    if (vdd_from_sar > 4000u && vdd_from_sar < 6000u) {
+    // Refined only inside the device's 2.7..5.5 V (table 45-2), widened by
+    // the level's own 5 % (level_below_supply()).
+    if (vdd_from_sar >= 2565u && vdd_from_sar <= 5775u) {
         vdd_mv = static_cast<uint16_t>(vdd_from_sar);
     }
 
@@ -1409,17 +1552,17 @@ void tg_reference() {
     Adc0::release();
     VrefbPad::output();
     VrefbPad::set();
-    spin(2'000UL);
+    settle();
     SdadcConfig vb = base_cfg(SdadcOsr::osr1024);
     vb.reference = SdadcRef::vrefb;
     Sdadc::release();
     bench.verdict("the converter comes up against the VREFB pin", sdadc_up(vb));
-    wait_ms(2);
+    brio::spin_us<Ruler>(2'000);
     const Stats on_pin = stats_of(8);
     VrefbPad::clear();
-    spin(2'000UL);
+    settle();
     const Stats on_ground = stats_of(8);
-    VrefbPad::release();
+    hand_back<VrefbPad>();
     print(serial, "  VREFB pad driven to VDD: ", on_pin.mean,
           " counts (VDDANA read internally gave ", reading[3],
           "); driven to GND: ", on_ground.mean,
@@ -1439,8 +1582,8 @@ void tg_reference() {
     Pwm::release();
     PwmN::release();
     PwmP::release();
-    Inn0::release();
-    Inp0::release();
+    hand_back<Inn0>();
+    hand_back<Inp0>();
     (void)k;
 }
 
@@ -1448,6 +1591,7 @@ void tg_reference() {
 // h - the post-processing: OFFSETCORR, GAINCORR, SHIFTCORR, the chopper
 // =============================================================================
 void th_corrections() {
+    (void)locate_vdd();          // the millivolts below are printed, never judged
     drive_pair0(false, false);   // an exact zero to correct
     bench.verdict("the converter comes up with the identity correction "
                   "(OFFSETCORR 0, GAINCORR 1, SHIFTCORR 0)",
@@ -1565,16 +1709,13 @@ void th_corrections() {
                       "reported rather than assumed",
                       moved > without.span() + with.span() + 2u);
     } else {
-        print(serial, "  both offsets are under 40 counts (about 6 mV) and the "
-              "difference between them is inside this suite's own scatter - "
-              "the comparison is DECLINED rather than promoted to a verdict",
-              crlf);
-        bench.verdict("both arrangements were measured and reported", true);
+        bench.skip("the chopper's effect: both offsets are under 40 counts and "
+                   "their difference is inside this suite's own scatter");
     }
 
     Sdadc::release();
-    Inn0::release();
-    Inp0::release();
+    hand_back<Inn0>();
+    hand_back<Inp0>();
 }
 
 // =============================================================================
@@ -1650,8 +1791,8 @@ void ti_window() {
     bench.verdict("...measured", !Sdadc::window_hit());
 
     Sdadc::release();
-    Inn0::release();
-    Inp0::release();
+    hand_back<Inn0>();
+    hand_back<Inp0>();
 }
 
 // =============================================================================
@@ -1747,7 +1888,7 @@ void tj_event_chain() {
         (void)Counter::set_count16(0);
         (void)Sdadc::enable(true);
         (void)Pacer::enable(true);
-        wait_ms(60);
+        brio::spin_us<Ruler>(60'000);
         (void)Pacer::enable(false);
         (void)Sdadc::enable(false);
         // COUNT is read while the timer still RUNS: the read is a
@@ -1810,7 +1951,7 @@ void tj_event_chain() {
     // A control: with the pacer stopped nothing moves at all.
     capture_on();
     (void)Sdadc::enable(true);
-    wait_ms(30);
+    brio::spin_us<Ruler>(30'000);
     (void)Sdadc::enable(false);
     capture_off();
     bool untouched = chain_seen == 0u;
@@ -1828,8 +1969,8 @@ void tj_event_chain() {
     Sdadc::release();
     Pacer::release();
     Counter::release();
-    Inn0::release();
-    Inp0::release();
+    hand_back<Inn0>();
+    hand_back<Inp0>();
 }
 
 // =============================================================================
@@ -1847,7 +1988,7 @@ void tk_sequence() {
     Inp1::output(); Inp1::clear();
     Inn2::output(); Inn2::clear();
     Inp2::output(); Inp2::clear();
-    spin(4'000UL);
+    brio::spin_us<Ruler>(800);
 
     bench.verdict("the converter comes up", sdadc_up(base_cfg(SdadcOsr::osr64)));
 
@@ -1888,13 +2029,15 @@ void tk_sequence() {
     bool busy_seen = busy_at_start;
     bool all_arrived = true;
     for (uint8_t i = 0; i < 3u; ++i) {
-        uint32_t spins = 0x3FFFFFu;
-        while (spins-- != 0u && !Sdadc::ready()) {
-            if (Sdadc::sequence_busy()) {
-                busy_seen = true;
-            }
-        }
-        if (!Sdadc::ready()) {
+        const bool arrived = brio::wait_until<Ruler>(
+            [&busy_seen] {
+                if (Sdadc::sequence_busy()) {
+                    busy_seen = true;
+                }
+                return Sdadc::ready();
+            },
+            sd_conversion_budget_us);
+        if (!arrived) {
             all_arrived = false;
         }
         state[i] = Sdadc::sequence_state();
@@ -1947,9 +2090,9 @@ void tk_sequence() {
     bench.verdict("...measured", near_signed(back.mean, alone[0], 800));
 
     Sdadc::release();
-    Inn0::release(); Inp0::release();
-    Inn1::release(); Inp1::release();
-    Inn2::release(); Inp2::release();
+    hand_back<Inn0>(); hand_back<Inp0>();
+    hand_back<Inn1>(); hand_back<Inp1>();
+    hand_back<Inn2>(); hand_back<Inp2>();
 }
 
 // =============================================================================
@@ -1980,16 +2123,18 @@ void tl_wake() {
         chain_taken = chain_results;           // count, store nothing
         Sdadc::arm(Sdadc::flag_resrdy);
         Nvic::enable(Sdadc::irq());
-        while (!Serial::tx_idle()) {
+        if (!console_drain()) {   // the leg reports no WFI: its verdicts fail
+            Sdadc::disarm(Sdadc::flag_resrdy);
+            Nvic::disable(Sdadc::irq());
+            return;
         }
         (void)Sdadc::start();
         wakes = benchsleep::sleep_until<Serial>(SleepMode::standby,
                                                 [s0] { return chain_seen != s0; });
         pend = benchsleep::first_pending;
         backstop = benchsleep::rtc_fired;
-        const uint32_t t0 = Ticker::millis();
-        while (chain_seen == s0 && Ticker::millis() - t0 < 20u) {
-        }
+        // The result, whichever ended the sleep: none is a count of zero.
+        (void)brio::wait_until<Ruler>([s0] { return chain_seen != s0; }, 20'000);
         seen = static_cast<uint16_t>(chain_seen - s0);
         Sdadc::disarm(Sdadc::flag_resrdy);
         Nvic::disable(Sdadc::irq());

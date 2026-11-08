@@ -131,9 +131,11 @@
 //      (1024 on the 32 kHz oscillator's nominal rate), isr = the tick
 //      handler's cycles, busy = the floor. n=0, wire=0.
 //   e  THE SPI HOST (avrxt/spi.hpp, docs/avrxt/spi.md): SpiHost<0> on
-//      ALT1 - PE0 (MOSI), PE2 (SCK) and PE1 (MISO, FLOATING: the bytes
-//      are not judged, the time is the wire's) - the pins test_avr_spi
-//      runs on. Every request is polled, the one way this host runs one
+//      ALT1 - PE0 (MOSI), PE2 (SCK) and PE1 (MISO: the bytes are not
+//      judged, the time is the wire's; nothing drives it on the AVR DA/DB
+//      boards, and on the AVR EA board it is one net with PC5 and runs on
+//      to the partner board, board.hpp's board::pc_pe_jumpers) - the pins
+//      test_avr_spi runs on. Every request is polled, the one way this host runs one
 //      (no DMA on these parts): no SPI vector is bound. Every line is
 //      the BEST of 8 by wall. n counts BYTES (the frame is a byte here).
 //        spi.poll    a polled full-duplex data phase (tx and rx both
@@ -333,8 +335,10 @@
 #include "avrxt/twi.hpp"
 #include "avrxt/usart.hpp"
 #include "avrxt/userrow.hpp"
+#include "kernel/time.hpp"
 #include "util/bench.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #include "board.hpp"
@@ -413,12 +417,32 @@ constexpr std::array<uint16_t, 4> sizes{1u, 16u, 256u, max_size};
 
 // ---- the console's drain ------------------------------------------------------
 
-/// Let the console fall silent - the ring empty, the last stop bit out -
-/// so its interrupt lands in nothing measured next: tx_idle() is the
-/// wire's (avrxt/usart.hpp).
+/// Every queued console byte off the wire - the ring empty, the last stop
+/// bit out (tx_idle() is the wire's, avrxt/usart.hpp) - bounded on the
+/// kernel tick (the cascade is the letters' ruler): false on a wedged
+/// console.
+bool console_drain() {
+    return wait_ticks<P>([] { return Serial::tx_idle(); }, ticks_from_ms<P>(200));
+}
+
+/// The drains of this letter that ran out of their budget: a measured run
+/// that follows one carries the console's interrupt, and the letter's
+/// closing verdict (drained_verdict()) says so.
+uint8_t drain_misses = 0;
+
+/// Let the console fall silent so its interrupt lands in nothing measured
+/// next; a drain that runs out is counted, the run still printed.
 void drain() {
-    while (!Serial::tx_idle()) {
+    if (!console_drain() && drain_misses != 0xFFu) {
+        ++drain_misses;
     }
+}
+
+/// Every letter's closing verdict: no measured run followed a drain that
+/// ran out. Clears the count for the next letter.
+void drained_verdict() {
+    bench.verdict("the console fell silent before every measured run", drain_misses == 0u);
+    drain_misses = 0;
 }
 
 // ---- helpers --------------------------------------------------------------------
@@ -554,7 +578,7 @@ void tr_ruler() {
         print_totals(turns, "turns", s);
         bench_line(serial, "window", 0u, per_unit(s, turns), Ruler::hz(), 0u);
     }
-    bench.verdict("ran", true);
+    drained_verdict();
 }
 
 // =============================================================================
@@ -582,7 +606,7 @@ void tm_memory() {
         const BenchSample s = best_of_8([len] { memset(mem_dst, 0x5A, len); });
         bench_line(serial, "memset", n, s, Ruler::hz(), memset_wire_bps);
     }
-    bench.verdict("ran", true);
+    drained_verdict();
 }
 
 // =============================================================================
@@ -620,11 +644,16 @@ void tp_print() {
         const Share dre0 = share(dre_meter);
         const Share tick0 = share(tick_meter);
         const BenchCounters c0 = counters();
+        // The drain is the measured thing here: the masked tick read in
+        // its poll costs the DRE handler a few cycles of a 2083-cycle
+        // frame at 115200.
         sw.start();
         print(serial, text);
-        while (!Serial::tx_idle()) {
-        }
+        const bool idle = console_drain();
         const uint32_t wall = sw.elapsed();
+        if (!idle && drain_misses != 0xFFu) {
+            ++drain_misses;
+        }
         const BenchSample s = bench_sample(wall, c0, counters());
         const Share dre1 = share(dre_meter);
         const Share tick1 = share(tick_meter);
@@ -632,7 +661,7 @@ void tp_print() {
               "  tick: irq=", tick1.irq - tick0.irq, " isr=", tick1.cycles - tick0.cycles, crlf);
         bench_line(serial, "print", n, s, Ruler::hz(), print_wire_bps);
     }
-    bench.verdict("ran", true);
+    drained_verdict();
 }
 
 // =============================================================================
@@ -650,7 +679,7 @@ void tt_tick() {
     const uint32_t wall = sw.elapsed();
     const BenchSample s = bench_sample(wall, c0, counters());
     bench_line(serial, "tick", 0u, s, Ruler::hz(), 0u);
-    bench.verdict("ran", true);
+    drained_verdict();
 }
 
 // =============================================================================
@@ -775,7 +804,8 @@ void te_spi() {
     Dc::output();
     if (!SpiHw::init(clock)) {
         print(serial, "  the SPI host did not come up", crlf);
-        bench.verdict("ran", false);
+        bench.verdict("the SPI host came up", false);
+        drain_misses = 0;
         return;
     }
     de::poll();
@@ -785,6 +815,7 @@ void te_spi() {
     Cs::input();
     Dc::input();
     bench.verdict("a request not marked polled is refused, the wire untouched", refused);
+    drained_verdict();
 }
 
 // =============================================================================
@@ -852,15 +883,9 @@ void drain_rx() {
     }
 }
 
-/// TXCIF, bounded by a few frames at the slowest rate.
-bool wait_txc() {
-    for (uint16_t i = 0; i < 4000u; ++i) {
-        if (U4::txc_flag()) {
-            return true;
-        }
-    }
-    return false;
-}
+/// The transmit runs of this letter that did not leave the wire within
+/// their bound (tx_lines()).
+uint8_t tx_timeouts = 0;
 
 constexpr uint16_t tx_sizes[] = {256u, 4096u};
 constexpr uint16_t rx_sizes[] = {16u, 256u};
@@ -892,6 +917,7 @@ void print_run(const char* op, const char* bare_op, uint8_t mode, uint16_t n, ui
 void tx_lines() {
     U4::enable_rx(false);   // the line is the transmitter's alone
     Stopwatch<Ruler> sw;
+    const uint32_t frame = bit64() * frame_bits / 64u;
     for (const uint16_t n : tx_sizes) {
         for (const uint8_t mode : modes) {
             drain();
@@ -899,13 +925,32 @@ void tx_lines() {
             const BenchCounters c0 = counters();
             const uint16_t e0 = dre_entries;
             const Share m0 = share(u4_meter);
+            // The run's time-out is TIME on the running stopwatch, looked
+            // at once every 256 turns as rx_lines() looks at it, so the
+            // wall moves by at most one ruler read: a shared wait would
+            // read a clock under a mask at every turn, inside the run it
+            // times, and delay the DRE handler that paces it. The bound:
+            // a frame and 1000 cycles a byte - the metered binding's
+            // handler, about 220 cycles, is what paces a run above 1 Mbaud
+            // - plus a millisecond.
+            const uint32_t limit =
+                static_cast<uint32_t>(n) * (frame + 1000u) + SysClock::hz / 1000u;
+            uint32_t turns = 0;
+            bool late = false;
             sw.start();
             uint16_t sent = static_cast<uint16_t>(Loop::write_bulk({mem_src, n}));
             while (sent < n) {
+                if ((++turns & 0xFFu) == 0u && sw.elapsed() > limit) {
+                    late = true;
+                    break;
+                }
                 sent = static_cast<uint16_t>(
                     sent + Loop::write_bulk({mem_src + sent, static_cast<size_t>(n - sent)}));
             }
-            while (!Loop::tx_idle()) {
+            while (!late && !Loop::tx_idle()) {
+                if ((++turns & 0xFFu) == 0u && sw.elapsed() > limit) {
+                    late = true;
+                }
             }
             const uint32_t wall = sw.elapsed();
             const BenchSample s = bench_sample(wall, c0, counters());
@@ -913,6 +958,10 @@ void tx_lines() {
             const uint16_t e = static_cast<uint16_t>(dre_entries - e0);
             GPR.GPR0 = plain;
             print_run("uart.tx", "uart.tx.bare", mode, n, n, s, m0, m1, e);
+            if (late) {
+                print(serial, " - NOT DONE within ", limit, " cycles");
+                if (tx_timeouts != 0xFFu) ++tx_timeouts;
+            }
             print(serial, crlf);
         }
     }
@@ -1018,9 +1067,12 @@ void edge_lines() {
             (void)U4::send(0x55u);
         }
         (void)U4::send(0x00u);
-        for (uint32_t i = 0; i < 100'000u && static_cast<uint16_t>(rxc_entries - e0) < n; ++i) {
-        }
-        (void)wait_txc();
+        // A fixed span, not a poll: the stamped handler's entry is the
+        // measurement, and a poll would read a clock under a mask beside
+        // it. 2 ms outlasts the sixteen frames at the slowest loop rate
+        // (115200: 1389 us); the entries read after it say whether the
+        // burst came in whole.
+        delay_us(clock, 2000);
         GPR.GPR0 = plain;
         const uint16_t cap = Stamp::capture();
         const uint16_t entries = static_cast<uint16_t>(rxc_entries - e0);
@@ -1056,7 +1108,9 @@ void tu_uart() {
     Loop::release();
     Stamp::disable();
     ChPad::off();
-    bench.verdict("ran", true);
+    bench.verdict("every transmit run left the wire within its bound", tx_timeouts == 0u);
+    tx_timeouts = 0;
+    drained_verdict();
 }
 
 // =============================================================================
@@ -1156,7 +1210,8 @@ constexpr uint32_t rises(uint8_t tx, uint8_t rx, bool probe) {
 
 /// The SCL period on the wire, in CLK_PER cycles: the shortest period
 /// TCB0 captures between rising edges of PA3 over sixteen-byte writes
-/// (a stretched period is longer, never shorter).
+/// (a stretched period is longer, never shorter); 0 when a write did not
+/// complete.
 uint16_t measure_period(I2cSpeed s) {
     ChScl::source(EvPin<Scl>{});
     SclMeter::init(clock, ChScl{});
@@ -1168,17 +1223,20 @@ uint16_t measure_period(I2cSpeed s) {
     r.tx_len = 16;
     r.reply = {};
     r.speed = s;
+    // Each write waited for on the kernel tick, at most 20 ms: seventeen
+    // frames of nine bits at 100 kHz are 1.53 ms. The periods are captured
+    // in hardware, so the tick's masked read delays nothing measured.
+    bool all_done = true;
     for (uint8_t k = 0; k < 4u; ++k) {
         done = false;
         if (!Host::start(r)) {
-            for (uint32_t i = 0; i < 200'000u && !done; ++i) {
-            }
+            all_done = wait_ticks<P>([] { return done; }, ticks_from_ms<P>(20)) && all_done;
         }
     }
     Tcb<0>::enable_capt_interrupt(false);
     Tcb<0>::disable();
     ChScl::off();
-    return scl_min;
+    return all_done ? scl_min : 0u;
 }
 
 /// One tenure, the best of 8 by wall. Metered, the thread idles until
@@ -1305,6 +1363,12 @@ void ti_i2c() {
             continue;
         }
         const uint16_t period = measure_period(sp.speed);
+        if (period == 0u) {
+            print(serial, "  ", sp.name, ": a write to the client did not complete within 20 ms: "
+                  "the SCL period was not measured", crlf);
+            all = false;
+            continue;
+        }
         print(serial, "-- ", sp.name, ": MBAUD=", Host::baud(), ", SCL period ", period,
               " cycles measured (register floor ", twi_period_ticks(SysClock::hz, Host::baud(), 0),
               "), ", SysClock::hz / period, " Hz", crlf);
@@ -1344,6 +1408,7 @@ void ti_i2c() {
     Host::release();
     GPR.GPR0 = plain;
     bench.verdict("every tenure completed with its status, every read byte-exact", all);
+    drained_verdict();
 }
 
 bool xtal = false;
