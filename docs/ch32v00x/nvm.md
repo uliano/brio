@@ -157,8 +157,8 @@ same turn as a save, and kernel time runs slow across one.
 
 ## Bench findings
 
-The reference suite is `test_ch32_nvm` (46 verdicts in `z`; letter `w`
-wipes the partition) on the CH32V006K8U6 at 48 MHz, and 37 on the
+The reference suite is `test_ch32_nvm` (45 verdicts in `z`; letter `w`
+wipes the partition) on the CH32V006K8U6 at 48 MHz, and 36 on the
 CH32V003F4P6 - one source: no heap letter there, the page letters on
 the attic's pages, the sector letter erasing the attic itself, the
 journal at eight cells a half. Every time is read on TIM2 counting
@@ -171,7 +171,17 @@ so the STK - whose reloads inside one stall raise its pending bit once
   a fast page program 1886 to 1890 us and a 1 KB sector erase 3124 to
   3126 us - each inside the datasheet's maximum (CH32V006 datasheet table 3-14:
   3.0, 2.0 and 3.3 ms), the sector's four pages erased in about the time
-  of one. The media erase by page because the heap and the journal count
+  of one; the CH32V006F8U6 the same, a page erase 2925 us and a program
+  1894 to 1898 us. On the CH32V003F4P6 (eleven runs of letter `b`, six
+  of `d`) a fast page erase takes 3134 to 3136 us, a fast page program
+  2922 to 2924 us and a 1 KB sector erase 50.0 ms: the erase is above
+  the datasheet's 3.1 ms maximum (CH32V003 datasheet V1.6 table 3-14,
+  which gives 2.4 to 3.1 ms to every row, the whole-chip erase
+  included), on the HSI's PLL and on the 24 MHz crystal alike, so it is
+  not the stopwatch's clock. One die is no fact about the part, so the
+  suite prints the erase time beside the datasheet's figure as a
+  finding naming the part and judges no bound on it; the program time
+  keeps its verdict. The media erase by page because the heap and the journal count
   in erase units and a smaller unit wastes less; a media that erased by
   sector would be some four times faster per byte, and is a choice the
   suite's numbers make available.
@@ -186,7 +196,10 @@ so the STK - whose reloads inside one stall raise its pending bit once
   halves' 24 page erases, the copies and the save's own program, which
   the engine's figures above add up to (24 x 2.93 + 3 x 1.89 = 76.0 ms)
   - with the kernel's tick advancing 28 to 32 across it: some 45 to 50
-  ticks of kernel time lost to the stall.
+  ticks of kernel time lost to the stall. On the CH32V003F4P6 (six
+  runs) an ordinary save takes 2960 to 2980 us and a collecting one
+  59.0 ms, both halves' 16 page erases and three programs
+  (16 x 3.135 + 3 x 2.923 = 58.9 ms), the tick advancing 19 to 22.
 - **A programming session through the WCH-LinkE leaves the partition
   virgin**: the journal holding three live ids mounted them again after
   the probe's reset alone, and mounted EMPTY after each programming of
@@ -249,9 +262,3 @@ Implemented but not bench-verified, each with what would measure it:
   unprotected on the bench part, so the bit was never seen set; the
   option-byte work is where a unit gets protected on purpose and the
   engine's refusal reads it.
-- **The CH32V003's engine times**: its page figures were read on a
-  counter that wrapped every millisecond, which no longer times them;
-  the stopwatch letters `b`, `d` and `f` now use, judged against that
-  part's datasheet (V1.6 table 3-14: 3.1 ms for a 64-byte page's
-  program and its erase), would - on a CH32V003 board, which the desk
-  has not got.

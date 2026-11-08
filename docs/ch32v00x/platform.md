@@ -389,10 +389,15 @@ either part, two
 letters ending in real resets):
 
 - **The IWDG bites when the arithmetic says**: /32 and a reload of 999
-  is 258 ms at the 124 kHz LSI the sleep chapter measured, and the
-  feeding stopped, the board rebooted with IWDGRSTF alone after 255 ms
-  (a .noinit token counting the loop's last millisecond). Fed every
-  60 ms it never bites; a fresh boot finds it off.
+  at the LSI the letter measures right before it lets the watchdog go
+  (1024 LSI cycles on the AWU, timed on the STK; the die's LSI, which
+  the sleep chapter shows differs by 17 % between two CH32V006 dies).
+  The feeding stopped, the board rebooted with IWDGRSTF alone where the
+  arithmetic said, within 1 % and 4 ms (a .noinit token counting the
+  loop's last millisecond): 299 to 300 ms against 299 at 106.8 kHz on
+  the CH32V006F8U6, 252 to 253 ms against 252 at 126.5 kHz on the
+  CH32V003F4P6, twelve runs each. Fed every 60 ms it never bites; a
+  fresh boot finds it off.
 - **The update flags cross in 41 us**: PVU seen, then down 2010 cycles
   after the prescaler write - five LSI cycles, as 4.3.4 says.
 - **The WWDG's step is exact**: armed at /8, the first early warning

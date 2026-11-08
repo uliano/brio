@@ -15,10 +15,11 @@
 //
 // THE CONSOLE IS USART2 on PA2/PA3 over the probe's serial. The instance
 // under test is SPI1 on its one column of this package, wired straight to
-// the CH32V006's SPI1 column 0:
+// the CH32V006F8U6's SPI1 column 1 (both WeAct boards,
+// docs/boards/weact-ch32x035f8.md):
 //
 //   PA5 (SCK)   - PC5        PA7 (MOSI) - PC6
-//   PA6 (MISO)  - PC7        PA4 (NSS)  - PC1, the V006's hardware select
+//   PA6 (MISO)  - PC7        PA4 (NSS)  - PC0, the V006's hardware select
 //
 // The suite has TWO SETS:
 //
@@ -29,7 +30,8 @@
 //    MOSI reaches a deselected client or a floating pad. MISO is read
 //    floating and never judged.
 //  - `y`, THE TWO-BOARD LETTERS (n, o, p, k, q, r, m, w), against the
-//    CH32V006 running spi_peer on its 24 MHz crystal, commanded IN BAND
+//    CH32V006 running spi_peer (from its HSI's PLL, its board fitting no
+//    crystal), commanded IN BAND
 //    over the bus under test through avrxt/src/apps/spi_link.hpp - FAILING
 //    loudly when nobody answers. That peer serves its answer windows in
 //    mode 3, spi_link's alternate answer mode, and the rendezvous finds it.
@@ -4415,7 +4417,7 @@ void tm_peer_modf() {
     // frame, the four pads sampled through the frame - then SPE cleared and
     // NSS read.
     (void)link_command_mode();
-    const bool linked = command(Op::ping);   // the peer dark again, its PC1 pulled up
+    const bool linked = command(Op::ping);   // the peer dark again, its PC0 pulled up
     struct OdenRun {
         uint16_t sck_rises = 0;
         bool nss_low_in_frame = false;

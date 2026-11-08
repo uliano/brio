@@ -41,13 +41,14 @@ The documents of record and their revisions are in
 
 ## The boards
 
-Two boards, one per part, each with a page of its own under
+Three boards on the two parts, each with a page of its own under
 [../boards/](../boards/README.md) with its pin numbers, its jumpers and
 its probe.
 
 | Board | Part | Memory | Clock | Console | LED |
 |---|---|---|---|---|---|
 | [a CH32V006K8U6 module](../boards/ch32v006k8.md), the bench board | CH32V006K8U6, QFN32, the QingKe V2C | 62 KB flash, 8 KB SRAM | HSI 24 MHz, the PLL at 48 MHz; a 24 MHz crystal on PA1/PA2 | USART1 PD5/PD6 on the probe's own serial, 115200 | PC0, jumpered |
+| [a WeAct CH32V00x core board](../boards/weact-ch32v006f8.md), the CH32X035's pair | CH32V006F8U6, QFN20, the QingKe V2C | 62 KB flash, 8 KB SRAM | the same, no crystal | the same | PC4, on the board |
 | [WCH's CH32V003F4P6 evaluation board](../boards/ch32v003f4.md) | CH32V003F4P6, TSSOP20, the QingKe V2A, no multiplier | 16 KB flash, 2 KB SRAM | the same, a 24 MHz crystal soldered on PA1/PA2 | the same | two on a row of pins, jumpered |
 
 Both run at 3.3 V. The chip wakes up at 8 MHz on both parts (HSI 24 MHz
@@ -413,11 +414,12 @@ Driver gaps, each with its reason:
   watchdog), the OPA (three bits of EXTEND_CTR), PWR (its PVD table, no
   LDO modes), the flash constants and the reset/watchdog block; each
   document says where the part differs, and every suite but the serial
-  and the SPI ones runs green on the board, the larger ones as group
+  one runs green on the board, the larger ones as group
   images; of the I2C one, the letters that need no peer (the suite's `a` and
-  `i`), its wire letters declining on a board whose pads reach no peer; the SPI suite's
-  nineteen group images link, the letters that need no peer run, and the
-  others wait for a CH32V003 on the CH32X035's wires ([spi.md](spi.md)). The USART's synchronous mode, which the
+  `i`), its wire letters declining on a board whose pads reach no peer; of the
+  SPI suite's twenty-three group images, the letters that need no peer, the
+  others declining with the reason until a CH32V003 sits on the CH32X035's
+  wires ([spi.md](spi.md)). The USART's synchronous mode, which the
   CH32V003 has and the CH32V006 has not, is measured there with no wire
   ([usart.md](usart.md)); what stays declared, each with its reason: the
   smartcard (no card on the desk), the I2C's kernel, two-host and

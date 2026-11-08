@@ -1,7 +1,7 @@
 // test_x035_rubato_i2c - the bench suite of the CH32X035's I2C stack under
 // Rubato, the preemptive kernel (kernel/rubato.hpp): util/i2c_bus.hpp's
 // arbiter over ch32x035/i2c.hpp's I2cHost and its DMA engines, run against
-// the desk's CH32V006K8U6 and its unchanged instrument
+// the desk's CH32V006F8U6 and its unchanged instrument
 // (ch32v00x/src/apps/twi_peer.cpp) while an object of the highest priority
 // preempts it at moments the traffic does not choose. Every verdict is the
 // traffic judged byte-exact and every status the one the wire produced, as
@@ -89,8 +89,8 @@
 //   there to the image's end; under 3.0 V PB3 and the bus's pads stay
 //   floating, no letter is registered and the banner says so.
 //
-// THE PEER, unchanged: twi_peer on the CH32V006K8U6 module, kind 0x06, its
-// I2C1 on column 3 (PB5 SCL, PB6 SDA) a POLLED target that stretches one
+// THE PEER, unchanged: twi_peer on the CH32V006F8U6's WeAct board, kind
+// 0x06, its I2C1 on column 0 (PC2 SCL, PC1 SDA) a POLLED target that stretches one
 // byte late (its header: the next byte enters the shifter while the last
 // still sits in DATAR), its commanded hold spent at the address match and
 // before every byte it takes or gives. It ends a counted serve once the
@@ -102,11 +102,11 @@
 // Speeds: 100 and 400 kHz, the two of RM 15.1.
 //
 // THE WIRES, fixed on the desk (test_x035_i2c's pair, docs/boards/
-// ch32x035-evt-f8u6.md, docs/boards/ch32v006k8.md): this board's PC16
-// (SCL) to the CH32V006's PB5, PC17 (SDA) to its PB6, a 1.5 kOhm resistor
+// weact-ch32x035f8.md, docs/boards/weact-ch32v006f8.md): this board's PC16
+// (SCL) to the CH32V006's PC2, PC17 (SDA) to its PC1, a 1.5 kOhm resistor
 // from each line to this board's PB3 - NEVER to 3.3 V: PC17 high at
 // power-up enters WCH's loader - and a ground. NOTHING LIT: no letter
-// drives the LED's pad PA0.
+// drives PA0, the project's LED pad, or PB12, the WeAct board's LED.
 //
 // The letters (z: n o p q w h i; x and u outside it), each but i, x and u
 // run as seven passes (the shared body's control and six pressures):
@@ -350,10 +350,16 @@ struct I2cTraits {
     /// tenure ends once byte 8 is acknowledged, which needs DATAR emptied
     /// of byte 6, the take after the seventh hold: the address and six,
     /// seven holds (test_x035_i2c's letter e measures seven at 2 ms). The
-    /// wire adds at least the address byte before the first hold, 90 us at
-    /// 100 kHz, more than this end's HSI, some 3000 ppm slow
-    /// (docs/ch32x035/clock.md), takes off seven or nine milliseconds of
-    /// the peer's crystal (27 us at most), so the bound is the holds alone.
+    /// holds are timed on the peer's clock and the tenure on this end's, and
+    /// the wire adds at least the address byte before the first hold, 90 us
+    /// at 100 kHz: against a crystal peer more than this end's HSI, some
+    /// 3000 ppm slow (docs/ch32x035/clock.md), takes off seven or nine
+    /// milliseconds (27 us at most), so the bound is the holds alone. The
+    /// WeAct peer fits no crystal and runs its HSI: there the bound holds
+    /// while the far HSI is less than 1 % (90 us in nine milliseconds) fast
+    /// of this end's - and on the WeAct pair it is 0.35 to 0.54 % SLOW of
+    /// it (the calibrate leg of test_x035_rubato_link's echo premise),
+    /// which only lengthens the holds as this end counts them.
     static constexpr uint8_t stretch_write_holds = 7;
     static constexpr uint8_t stretch_read_holds = 9;
     /// A refused LAST written byte of a write-then-read is closed by a void
@@ -380,7 +386,7 @@ static_assert(tim_clock_hz(SysClock{}) == SysClock::hz, "TIM2 counts HCLK at thi
 constexpr uint32_t pulse_per_us = SysClock::hz / 1'000'000u;
 static_assert(389u * pulse_per_us - 1u <= 0xFFFFu, "the longest period fits TIM2's 16 bits");
 constexpr const char* pressure_name = "TIM2";
-constexpr const char* peer_name = "the CH32V006K8U6";
+constexpr const char* peer_name = "the CH32V006F8U6";
 
 // THE TARGET-FREE HALF IS SHARED, NOT COPIED: every family's I2C suite
 // compiles the same body around its own host.

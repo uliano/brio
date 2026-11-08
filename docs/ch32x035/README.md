@@ -59,9 +59,15 @@ crystal (the series has no oscillator for one), no reset button (the
 QFN20 has no reset pin), two LEDs that reach a pad only through a
 jumper, the chip's USB on a USB-C connector, and every bonded pad on two
 7x2 headers. The apps run the 48 MHz HSI undivided, and the console is
-USART2 on PA2/PA3 on the probe's own serial. On the desk the board is
-wired to a CH32V006K8U6, the peer of its two-board suites
-([../boards/ch32v006k8.md](../boards/ch32v006k8.md)).
+USART2 on PA2/PA3 on the probe's own serial. WeAct's CH32X035 core
+board carries the same part
+([../boards/weact-ch32x035f8.md](../boards/weact-ch32x035f8.md)): no
+crystal and no reset pin either, a LED on PB12, the USB pads on a USB-C
+connector and two test points; on the desk it is wired to a WeAct
+CH32V006F8U6 board, the peer of the two-board suites
+([../boards/weact-ch32v006f8.md](../boards/weact-ch32v006f8.md)), whose
+board fits no crystal, so the two-board timing is the ratio of two RC
+oscillators.
 
 ## Toolchain
 

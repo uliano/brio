@@ -34,8 +34,15 @@
 // crystal doubled by the PLL, 48 MHz (Ident::xtal = 1 when the crystal
 // started; without it - and on a board that has none, board.hpp,
 // where it is never started - the HSI's PLL runs the same 48 MHz
-// nominal, xtal = 0, and calibrate is refused - this peer has no adoption
-// to offer). The
+// nominal, xtal = 0). Calibrate is served either way, timed on whatever
+// clock runs: on the crystal its answer is the DUT's absolute rate error;
+// on the HSI it is the DUT's rate against this chip's HSI, which is all a
+// RELATIVE leg needs (a rate judged against a reference leg taken back to
+// back, the ratio of the two ends' clocks) and nothing an absolute claim
+// may rest on - the DUT reads xtal = 0 in IDENT and declines those. This
+// peer adopts nothing (usart_link.hpp's adoption clause: an RC peer here
+// keeps its own trim and keeps answering xtal = 0), and its console says
+// at boot that it has no crystal. The
 // protocol's 24 MHz tick is TWO HCLK cycles: the Report's span is read on
 // the STK's cycle count (ch32v00x/ticker.hpp) and halved; the waveform
 // engine's TIM1 runs at PSC 1, so its count IS the tick, or at an exact
@@ -884,7 +891,7 @@ void handle(const link::Frame& f) {
     const uint32_t started = Ticker::millis();
 
     // What this peer refuses whatever the Cfg says.
-    const bool refused = op == Op::onewire || (op == Op::calibrate && !crystal_ok);
+    const bool refused = op == Op::onewire;
     const bool ok = !refused && apply_cfg(a.cfg);
     if (!ok) {
         r.flags |= link::report_cfg_failed;
@@ -946,7 +953,8 @@ void status() {
           last_report.ms, " span=", last_report.span, crlf);
     print(console, "  the engine: ", plays, " lists played, ", play_timeouts, " never completed, ", play_refused,
           " refused", crlf);
-    print(console, "  clk ", crystal_ok ? "HSE" : "HSI", " VDD ", supply_mv, " mV; the last receive: window at ",
+    print(console, "  clk ", crystal_ok ? "HSE" : "HSI (NO CRYSTAL: calibrate relative only)", " VDD ", supply_mv,
+          " mV; the last receive: window at ",
           last_window_ms, " ms after the ack, first frame at ", last_first_ms, ", end at ", last_end_ms, crlf);
 }
 
@@ -983,6 +991,10 @@ int main() {
     print(console, crlf, "usart_peer - USART instrument peer on ", device::part_name, ", clk=",
           crystal_ok ? "HSE 24 MHz x2" : (clock_ok ? "HSI x2 (NO CRYSTAL)" : "FAILED"), ", fw ",
           hex(firmware_version), ", VDD ", supply_mv, " mV", crlf);
+    if (!crystal_ok) {
+        print(console, "NO CRYSTAL: calibrate is timed on this chip's HSI - relative legs only, nothing adopted",
+              crlf);
+    }
     if (!supply_ok) {
         print(console, "SUPPLY LOW (under ", supply_floor_mv, " mV): the link stays dark", crlf);
     }

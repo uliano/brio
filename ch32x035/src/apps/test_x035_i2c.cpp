@@ -11,16 +11,19 @@
 // THE CONSOLE IS USART2 on PA2/PA3 over the probe's serial. The bus is
 // I2C1 on its column 010 - SCL PC16, SDA PC17, the USB pads, the one
 // column of the CH32X035F8U6 off the debug port - wired to the desk's
-// CH32V006K8U6, which runs `twi_peer` on its column 3:
+// CH32V006F8U6, which runs `twi_peer` on its column 0 (both WeAct boards,
+// docs/boards/weact-ch32x035f8.md):
 //
-//   SCL   PC16  <->  the CH32V006's PB5
-//   SDA   PC17  <->  the CH32V006's PB6
+//   SCL   PC16  <->  the CH32V006's PC2
+//   SDA   PC17  <->  the CH32V006's PC1
 //   a 1.5 kOhm resistor from each line to this board's PB3, and GND
 //
 // THE PULL-UPS HANG FROM PB3, NEVER FROM VCC: PC17 is this board's boot
-// pin - a high level on it at power-up enters WCH's loader (the board's
-// reference, section 5) - so the bus is pulled up only while an image
-// that uses it drives PB3 high, and PB3 floats from every reset. This
+// pin - a high level on it at power-up enters WCH's loader (the CH32X035
+// evaluation board reference's section 5, a rule of the chip's loader that
+// the WeAct board's DOWNLOAD key uses too) - so the bus is pulled up only
+// while an image that uses it drives PB3 high, and PB3 floats from every
+// reset. This
 // image drives it high, push-pull, from its boot to its end, the supply
 // checked first; letter a lets it float for the one measurement that
 // asks what the USB pads' own pulls do. 1.5 kOhm at 3.3 V sinks 2.2 mA a

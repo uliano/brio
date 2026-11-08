@@ -3,16 +3,22 @@
 // reviewed helpers every suite that drives the far CH32V006's usart_peer
 // goes through - the polled command path with its retries, the action and
 // its report, the gapless blast, the calibrate leg that times this end's
-// HSI against the far crystal. App-level bench tooling beside the suites
+// HSI against the far chip's clock. App-level bench tooling beside the suites
 // that include it, as usart_link.hpp sits beside the peers; nothing in
 // brio knows it exists.
 //
-// THE LINK (docs/boards/ch32x035-evt-f8u6.md, docs/boards/ch32v006k8.md): USART4
-// on its default column, PB0 (TX) and PB1 (RX), wired to the CH32V006's
-// USART2 on column 4 - this PB0 to its PB1, this PB1 to its PB0. The far
-// chip runs usart_peer on its 24 MHz crystal (x2, 48 MHz); this end runs
-// the 48 MHz HSI, so at every rate the two ends divide 48 MHz by one
-// divisor and differ by the HSI's error alone, which calibrate() measures.
+// THE LINK (docs/boards/weact-ch32x035f8.md, docs/boards/weact-ch32v006f8.md):
+// USART4 on its default column, PB0 (TX) and PB1 (RX), wired to the
+// CH32V006F8U6's USART2 on column 3 - this PB0 to its PD3 (RX), this PB1 to
+// its PD2 (TX). The far chip runs usart_peer at 48 MHz from its HSI's PLL,
+// its board fitting no crystal (on a board that fits one, the crystal
+// doubled - IDENT's xtal says which); this end runs the 48 MHz HSI, so at
+// every rate the two ends divide 48 MHz by one divisor and differ by the
+// two clocks' ratio alone, which calibrate() measures. Against an RC peer
+// that ratio is all a calibrate gives: a RELATIVE leg (a rate judged
+// against a reference leg taken back to back) holds, an absolute claim
+// about this end's HSI does not, and the letters that make one decline
+// when IDENT reads xtal = 0.
 //
 // HOW A SUITE INCLUDES IT: inside its own anonymous namespace, with `using
 // namespace brio` in force, after it names its console (`Serial` and its
@@ -216,7 +222,7 @@ bool ensure_link() {
     }
     link_quiet = false;
     if (!found) {
-        print(serial, "  the peer did not answer: the CH32V006 runs usart_peer on its column 4?", crlf);
+        print(serial, "  the peer did not answer: the CH32V006 runs usart_peer on the pair's USART2 column?", crlf);
     }
     return found;
 }
@@ -301,14 +307,15 @@ void dut_blast(uint16_t n, uint16_t mask) {
 }
 
 // ---------------------------------------------------------------------------
-// The HSI against the far crystal
+// The HSI against the far chip's clock
 // ---------------------------------------------------------------------------
 
 constexpr uint32_t calib_rate = 1'000'000;   ///< a divisor of 48: the HSI's error alone
 constexpr uint16_t calib_frames = 4000;      ///< 40 ms, about a million ticks of span
 
 /// One calibrate leg: the peer counts and times `n` gapless frames of the
-/// DUT at `c`; the answer is the DUT's rate against the peer's crystal.
+/// DUT at `c`; the answer is the DUT's rate against the peer's clock - its
+/// crystal where it runs one, its HSI otherwise (the file's header).
 struct Calib {
     bool ok = false;
     int16_t ppm = 0;

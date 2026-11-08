@@ -118,7 +118,9 @@ the image's set of letters; a letter run "by name" is outside `z`).
   measures: one arriving on the cycle the WFE goes to sleep is lost,
   and while line 9's flag stands the AWU's next match makes no new
   one.
-- **The LSI is "about 128 kHz"** (the datasheet's own words).
+- **The LSI is "about 128 kHz"** (the datasheet's own words), and
+  table 3-12 allows 90 to 172 kHz on the CH32V006, 100 to 150 kHz on
+  the CH32V003.
 - **PWR's registers answer rubbish until its gate on the PB1 bus is
   open** (PWREN, RCC_PB1PCENR bit 28): 0x3F in every field on the
   bench, which reads as a plausible configuration to code that trusts
@@ -209,12 +211,23 @@ letters `a` to `e` in the first, 28 verdicts there, and letters `w` and
 the probe attached (so no current was drawn into a number - the meter
 with the probe detached is the desk's next step).
 
-- **The LSI runs at 124 kHz on the CH32V006** (123.7..124.6 kHz across
-  measurements, -3% of nominal) and at 125 kHz on the CH32V003
-  (124.6..125.8 kHz, -2%), and a prescaled window scales as the
-  divider says within 1% on both (8 counts at /128 against 64
-  undivided: 391087 cycles for 394432 expected on the first, 388665
-  for 392960 on the second).
+- **The LSI's rate belongs to the die, not to the part, so a program
+  measures it.** Timed on the STK against the HSI's PLL, so within the
+  HSI's own accuracy (CH32V006 datasheet V2.0 table 3-11: 2 % from
+  -10 to 70 C; CH32V003 datasheet V1.6 table 3-11: -1.2 to +1.6 % from
+  0 to 70 C): 123.7 to 124.6 kHz on the CH32V006K8U6 of the module
+  (-3 % of nominal), 105.2 to 106.8 kHz on the CH32V006F8U6 of WeAct's
+  board (-17 %), and 124.6 to 126.5 kHz on the CH32V003F4P6 of WCH's
+  evaluation board (-2 %) - each inside its datasheet's range (table
+  3-12: 90 to 172 kHz for the CH32V006, 100 to 150 kHz for the
+  CH32V003). Two dies of one part differ by 17 %, so no figure for "the
+  CH32V006's LSI" exists: the
+  timed site measures the LSI at `init()` before it places a window,
+  and `test_ch32_watchdog` letter `i` measures it before it predicts
+  the watchdog's bite. A prescaled window scales as the divider says
+  within 1 % on both parts (8 counts at /128 against 64 undivided:
+  391087 cycles for 394432 expected on the CH32V006K8U6, 388665 for
+  392960 on the CH32V003F4P6).
 - **Standby is entered and left, on both parts.** A time event 300 ms
   out, the timed site placing the AWU at prescaler /1024, window 35
   (297 ticks for the 296 that remained at arm time - rounded up, the

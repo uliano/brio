@@ -397,7 +397,25 @@ doubled. `z` (26 verdicts) is the single-board set, run with the far
 board dark - on its console or with its peer still searching, both
 leaving their link pads floating inputs; `y` (98 verdicts) is the
 two-board set against that peer, every leg judged from what the far chip
-reports. What it measured:
+reports.
+
+On WeAct's pair - this part on its core board
+([../boards/weact-ch32x035f8.md](../boards/weact-ch32x035f8.md)) against
+a CH32V006F8U6 whose board fits no crystal - the peer runs its HSI's PLL
+and its calibrate times this end against that HSI (IDENT's `xtal` reads
+0), so every timed leg is the ratio of two RC oscillators: this end
+0.35 to 0.54 % fast of the far one across runs, and two legs taken back
+to back that should read alike up to 1051 ppm apart (twelve runs of `y`,
+letter `k`'s legs against their 1 Mbaud reference and letter `s`'s SRAM
+blasts against the polled one), twice the 500 ppm the span verdicts
+allow. There `y` judges 71 verdicts, green in twelve runs of twelve:
+the bytes of every letter, and letter `m`'s rate tolerance, which needs
+only the ratio; the spans of letters `k`, `l` and `s` are printed and
+not judged, and letter `j`'s HSI against a crystal and its trim walk
+decline. The Rubato link suite's echo letters decline on that pair too,
+this end being the faster writer (the lead a polled echo can hold is
+under -962 ppm against an RC peer, the suite's header has the
+arithmetic). What the suite measured against the crystal peer:
 
 - **The divisor counts HCLK** (letter `a`): the console's BRR is 417 at
   48 MHz - 26 and 1/16 - which `actual_baud()` puts at 115107 baud, 0.08

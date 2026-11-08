@@ -2,7 +2,7 @@
 // CH32X035 under Rubato, the preemptive kernel (kernel/rubato.hpp):
 // util/spi_bus.hpp's arbiter over ch32x035/spi.hpp's SpiHost and its DMA
 // engines, and util/line_reader.hpp's LineReader over ch32x035/usart.hpp's
-// Uart and its receive engine, run against the desk's CH32V006K8U6 and its
+// Uart and its receive engine, run against the desk's CH32V006F8U6 and its
 // unchanged instruments (ch32v00x/src/apps/spi_peer.cpp, usart_peer.cpp)
 // while an object of the highest priority preempts them at moments the
 // traffic does not choose. Every verdict is the traffic judged byte-exact,
@@ -60,12 +60,13 @@
 //   (docs/ch32x035/usart.md). No receiver time-out on this block. The
 //   port's placement the default, InFlash.
 //   THE CLOCK. This chip has one clock root, the 48 MHz HSI; the far chip
-//   runs its 24 MHz crystal doubled. Both divide 48 MHz by one divisor at
-//   every rate (BRR 104 at 460800, 52 at 921600), so the two rates differ by
-//   the HSI's error alone - which the UART key measures before its legs
-//   (x035_link_dut.hpp's calibrate(): the far chip times 3999 gapless
-//   frames of this end at 1 Mbaud against its crystal) and judges against
-//   the slack the echo has (letters t and v below).
+//   runs 48 MHz from its own HSI's PLL, its WeAct board fitting no crystal
+//   (a crystal doubled on a board that fits one). Both divide 48 MHz by one
+//   divisor at every rate (BRR 104 at 460800, 52 at 921600), so the two
+//   rates differ by the two clocks' ratio alone - which the UART key
+//   measures before its legs (x035_link_dut.hpp's calibrate(): the far chip
+//   times 3999 gapless frames of this end at 1 Mbaud against its own clock)
+//   and judges against the slack the echo has (letters t and v below).
 //   THE DMA RELEASE CONTRACT (docs/ch32x035/dma.md, "A released
 //   requester"): a raised request outlives its peripheral's release unless
 //   the block is reset - so every hand of USART4 between the polled
@@ -100,8 +101,8 @@
 //   kernel", docs/ch32x035/platform.md).
 //   THE UART KEY'S COMMAND CHANNEL. USART4 polled at 115200 between legs
 //   through x035_link_dut.hpp's reviewed helpers: a character every 87 us,
-//   4156 cycles of this end's HSI (some 2600 ppm slow of the far crystal,
-//   the UART key's calibrate leg), into a receiver whose DATAR holds one
+//   4156 cycles of this end's HSI (some 2600 ppm slow of a crystal,
+//   test_x035_usart letter j), into a receiver whose DATAR holds one
 //   frame (ch32x035/usart.hpp), so a reply's character is lost when two
 //   of the helpers' reads of STATR lie farther apart than that. The
 //   longest such gap is a preemption of the Console by Pressure's
@@ -120,15 +121,16 @@
 //   that would drive a link pad from a sagging rail registers no letter
 //   and says so.
 //
-// THE WIRES, fixed on the desk (docs/boards/ch32x035-evt-f8u6.md,
-// docs/boards/ch32v006k8.md; test_x035_spi's and test_x035_usart's pair):
+// THE WIRES, fixed on the desk (docs/boards/weact-ch32x035f8.md,
+// docs/boards/weact-ch32v006f8.md; test_x035_spi's and test_x035_usart's
+// pair, two WeAct boards):
 //   SPI    X035 PA5 - V006 PC5 (SCK), PA7 - PC6 (MOSI), PA6 - PC7 (MISO),
-//          PA4 - PC1 (the select); the V006 module's PC6-PC7 loopback
-//          jumper OFF
-//   UART   X035 PB0 (USART4 TX) -> V006 PB1 (USART2 RX, column 4), X035
-//          PB1 <- V006 PB0
+//          PA4 - PC0 (the select, the V006's SPI1 on column 1)
+//   UART   X035 PB0 (USART4 TX) -> V006 PD3 (USART2 RX, column 3), X035
+//          PB1 <- V006 PD2
 // The SPI letters (key z) want the peer running `spi_peer`, the UART ones
-// (key y) `usart_peer`. NOTHING LIT: no letter drives the LED's pad PA0.
+// (key y) `usart_peer`. NOTHING LIT: no letter drives PA0, the project's
+// LED pad, or PB12, the WeAct board's LED.
 //
 // The letters (z: n o p w i; y: t u v), each of z and y run as seven passes
 // (the shared body's control and six pressures):
@@ -183,11 +185,15 @@
 //      TXE), so it holds two characters of a writer's lead. THE PREMISE,
 //      judged first: a lead of L ppm builds L x N / 10^6 characters over N,
 //      and a leg is at most 200 lines of 72 = 14400 characters, so the echo
-//      holds any lead under 2 / 14400 = 138 ppm; the HSI wanders by about 100
-//      ppm between runs a second apart (test_x035_usart letter j's three
-//      runs), so the lead measured must be under 38 ppm - the HSI measured
-//      some 3000 ppm SLOW of the far crystal, a lead of minus 0.3 %, the echo
-//      never backing up.
+//      holds any lead under 2 / 14400 = 138 ppm, less the lead's wander
+//      between its measurement and the leg: about 100 ppm against a crystal
+//      peer (this end's HSI alone, test_x035_usart letter j's three runs), so
+//      a lead under 38 ppm - the HSI measured some 3000 ppm SLOW of a crystal,
+//      the echo never backing up - and up to 1100 ppm against an RC peer (two
+//      oscillators wandering), so a lead under -962 ppm there. A lead over
+//      the bound is the pair's, not the stack's: the echo legs decline with
+//      it printed. On the WeAct pair this end runs 0.35 to 0.54 % FAST of
+//      the far HSI, and t and v decline.
 //   u  the UART, sent: 300 numbered lines back to back through write_bulk()
 //      and the transmit engine into the peer's SINK at 460800 and 921600,
 //      judged by the peer's report - the bytes counted, their 16-bit sum,
@@ -346,7 +352,7 @@ static_assert(tim_clock_hz(SysClock{}) == SysClock::hz, "TIM2 counts HCLK at thi
 constexpr uint32_t pulse_per_us = SysClock::hz / 1'000'000u;
 static_assert(389u * pulse_per_us - 1u <= 0xFFFFu, "the longest period fits TIM2's 16 bits");
 constexpr const char* pressure_name = "TIM2";
-constexpr const char* peer_name = "the CH32V006K8U6";
+constexpr const char* peer_name = "the CH32V006F8U6";
 
 // THE LINK'S REVIEWED HELPERS (the UART key's command channel), in their
 // own namespace: the shared body below has a wait_ms() of the kernel's.
@@ -439,8 +445,7 @@ void print_port(const PortCounters& c) {
 
 namespace ul {
 
-/// Find the peer and see that it is the CH32V006's usart_peer on its
-/// crystal: a named failure, never a hang.
+/// Find the peer: a named failure, never a hang.
 bool ensure() {
     if (!x035link::ensure_link()) {
         bench.verdict("the peer answers a ping (the peer board running usart_peer)", false);
@@ -915,36 +920,49 @@ constexpr uint16_t echo_lines = 200;
 constexpr uint16_t sink_lines = 300;
 
 /// The echo's slack over a leg (the file header): two characters over 200
-/// lines of 72, less the HSI's wander between runs a second apart.
-constexpr int32_t lead_bound_ppm = static_cast<int32_t>(2u * 1'000'000u / (echo_lines * 72u)) - 100;
-static_assert(lead_bound_ppm == 38, "the file header's arithmetic");
+/// lines of 72, less the lead's wander between the premise's measurement
+/// and the leg. Against a crystal peer that wander is this end's HSI alone,
+/// about 100 ppm between runs a second apart (test_x035_usart letter j's
+/// three runs). Against an RC peer it is two oscillators: on the WeAct pair
+/// two legs back to back read up to 1051 ppm apart (test_x035_usart's
+/// judge_span()), taken here as 1100 - so only a lead well under zero, this
+/// end the slower, is held by the echo there.
+constexpr int32_t echo_slack_ppm = static_cast<int32_t>(2u * 1'000'000u / (echo_lines * 72u));
+constexpr int32_t lead_bound_ppm = echo_slack_ppm - 100;
+constexpr int32_t lead_bound_rc_ppm = echo_slack_ppm - 1100;
+static_assert(lead_bound_ppm == 38 && lead_bound_rc_ppm == -962, "the file header's arithmetic");
 
-/// THE PREMISE of the echo legs: this end's rate against the far crystal,
-/// timed by the peer (x035_link_dut.hpp's calibrate leg at 1 Mbaud, a
-/// divisor of 48 exact), and the far peer's identity; false (judged) when
-/// either is missing, and false with no verdict (skipped) when the peer
-/// runs no crystal.
+/// THE PREMISE of the echo legs: this end's rate against the far chip's
+/// clock, timed by the peer (x035_link_dut.hpp's calibrate leg at 1 Mbaud,
+/// a divisor of 48 exact), and the far peer's identity. The echo runs on
+/// the far clock, so the lead it must hold is this end's rate against THAT
+/// clock - its crystal where it runs one, its HSI otherwise: a ratio either
+/// way, which is what calibrate answers. A peer that does not answer, or a
+/// calibrate that does not come back, is a failure (judged); a lead the
+/// echo cannot hold is the pair's and not the stack's, so the echo legs
+/// decline with the lead printed, no verdict claimed.
 bool echo_premise() {
     link::Ident d{};
     const bool got = x035link::peer_ident(d);
-    // A peer with no crystal (its board fits none) times nothing: the lead
-    // cannot be measured, so the echo legs are skipped, no verdict claimed.
-    if (got && d.sanity == link::ident_sanity && d.xtal == 0u) {
-        print(serial, "  SKIPPED, no verdict claimed: the peer runs no crystal - its board fits none - so this "
-                      "end's lead over the far echo cannot be timed on this pair", crlf);
-        (void)x035link::link_command_mode();
-        return false;
+    bench.verdict("the peer is the CH32V006's usart_peer",
+                  got && d.sanity == link::ident_sanity && link::peer_kind(d.version) == link::peer_ch32v00x);
+    const bool rc = got && d.xtal == 0u;
+    const int32_t bound = rc ? lead_bound_rc_ppm : lead_bound_ppm;
+    if (rc) {
+        print(serial, "  the peer runs no crystal (its board fits none): the lead is timed against its HSI, the "
+                      "clock its echo runs on", crlf);
     }
-    bench.verdict("the peer is the CH32V006's usart_peer on its crystal",
-                  got && d.sanity == link::ident_sanity && link::peer_kind(d.version) == link::peer_ch32v00x &&
-                      d.xtal == 1u);
     link::Cfg c{};
     c.rate = x035link::calib_rate;
     const x035link::Calib k = x035link::calibrate(c, x035link::calib_frames);
-    print(serial, "  this end's HSI against the far crystal: ", static_cast<int32_t>(k.ppm),
-          " ppm (the lead the echo must hold; under ", lead_bound_ppm, " judged)", crlf);
-    const bool ok = got && k.ok && static_cast<int32_t>(k.ppm) < lead_bound_ppm;
-    bench.verdict("the writer does not outrun the far echo: its lead under the echo's slack", ok);
+    print(serial, "  this end's HSI against the far clock: ", static_cast<int32_t>(k.ppm),
+          " ppm (the lead the echo must hold; under ", bound, " to run the legs)", crlf);
+    bench.verdict("the far chip timed this end's lead (the calibrate leg came back)", got && k.ok);
+    const bool ok = got && k.ok && static_cast<int32_t>(k.ppm) < bound;
+    if (got && k.ok && !ok) {
+        print(serial, "  SKIPPED, no verdict claimed: a lead of ", static_cast<int32_t>(k.ppm), " ppm would outrun the "
+                      "far echo's two characters of slack on this pair (", bound, " ppm at most)", crlf);
+    }
     (void)x035link::link_command_mode();
     return ok;
 }

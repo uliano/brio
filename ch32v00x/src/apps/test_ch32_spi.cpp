@@ -27,7 +27,11 @@
 // by them and what goes out on SCK and MOSI reaches a deselected client.
 // Letter i's D/C line is a second pad with no wire: PC4 on the module,
 // PD0 on the WeAct board, whose PC4 carries the LED (board.hpp).
-// The peer FAILS loudly when it does not answer. That peer answers its
+// A peer letter asks for the peer first. When no ping of this boot has
+// ever been answered, the peer is absent and the letter declines with the
+// reason, no verdict claimed - the single-board letters still judge; a
+// peer that answered once in this boot and then stops answering fails the
+// letter. That peer answers its
 // windows in spi_link's mode 0 (its client answers in every mode MSb
 // first) and serves the EXTENDED EXCHANGE - 16-bit frames, the CRC with
 // its polynomial, a receive-only run - which is how the 16-bit frames,
@@ -684,14 +688,19 @@ bool peer_act(Op op, const spilink::Params& a) {
     return true;
 }
 
+/// Has any ping of this boot been answered? It tells an absent peer
+/// (declined) from one that answered and then went quiet (a failure).
+bool peer_seen = false;
+
 /// Is the peer there at all? Every letter that needs it asks first, so
-/// an absent peer is a NAMED failure and never a hang.
+/// an absent peer is a named outcome and never a hang.
 bool ensure_link() {
     link_quiet = true;
     (void)link_command_mode();
     for (uint8_t k = 0; k < 3; ++k) {
         if (command(Op::ping)) {
             link_quiet = false;
+            peer_seen = true;
             return true;
         }
     }
@@ -701,11 +710,23 @@ bool ensure_link() {
     return false;
 }
 
+/// Every peer letter asks first. A peer never heard in this boot is
+/// absent: the letter declines with the reason and claims no verdict, as
+/// the I2C suite's wire letters do with no pull-ups on the wire. A peer
+/// that answered earlier in this boot and is silent now FAILS the letter.
 bool need_peer() {
     if (ensure_link()) {
         return true;
     }
-    bench.verdict("the peer answers a ping (the CH32X035 running spi_peer)", false);
+    if (!peer_seen) {
+        print(serial, "  SKIPPED, no verdict claimed: peer absent - no ping of this boot was answered, so no "
+                      "board running spi_peer is on the wire.",
+              crlf);
+        return false;
+    }
+    bench.verdict("the peer, which answered earlier in this boot, still answers a ping (the CH32X035 running "
+                  "spi_peer)",
+                  false);
     return false;
 }
 

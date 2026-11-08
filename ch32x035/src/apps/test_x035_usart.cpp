@@ -4,7 +4,8 @@
 // a frame's own length on the wire timed by the transmitter, the break,
 // the column the probe's pads forbid - and, across the desk's link to a
 // CH32V006's usart_peer, the bytes, the rates as a foreign receiver times
-// them, the HSI against a crystal, and what only a second chip can drive.
+// them, the HSI against a crystal where the far board fits one, and what
+// only a second chip can drive.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -12,8 +13,9 @@
 //
 // THE CONSOLE IS USART2 on PA2/PA3 over the probe's serial. The instance
 // under test is USART4 on its default column, PB0 (TX) and PB1 (RX) -
-// the desk's link: PB0 wired to the CH32V006's PB1 (its USART2 RX on
-// column 4), PB1 to its PB0 (TX). The suite has TWO SETS:
+// the desk's link (docs/boards/weact-ch32x035f8.md): PB0 wired to the
+// CH32V006F8U6's PD3 (its USART2 RX on column 3), PB1 to its PD2 (TX).
+// The suite has TWO SETS:
 //
 //  - `z`, THE SINGLE-BOARD LETTERS, runnable with the far board dark (its
 //    console, or its usart_peer searching: either leaves both link pads
@@ -21,12 +23,22 @@
 //    h transmit on PB0 into that input and judge nothing the far end does,
 //    and letter i drives PB1 itself, as a GPIO output, into the far end's
 //    floating TX pad.
-//  - `y`, THE TWO-BOARD LETTERS, against the CH32V006 running usart_peer
-//    on its 24 MHz crystal: driven in band over the link itself
-//    (usart_link.hpp), its rendezvous a letter, and every leg judged from
-//    what the far chip reports - FAILING loudly when nobody answers. A
-//    leg the peer REFUSES (a capability its silicon has not got) is
-//    SKIPPED with the reason and judges nothing.
+//  - `y`, THE TWO-BOARD LETTERS, against the CH32V006 running usart_peer:
+//    driven in band over the link itself (usart_link.hpp), its rendezvous
+//    a letter, and every leg judged from what the far chip reports -
+//    FAILING loudly when nobody answers. A leg the peer REFUSES (a
+//    capability its silicon has not got) is SKIPPED with the reason and
+//    judges nothing. THE FAR CLOCK: the WeAct board fits no crystal, so the
+//    peer runs its HSI's PLL and its calibrate times this end against that
+//    HSI (IDENT's xtal = 0). The rate error's onset (m) needs only the two
+//    clocks' ratio, a figure good to a few tenths of a per cent there, and
+//    is judged; the spans judged within 500 ppm of a reference leg taken
+//    back to back - the rates (k), the odd stops (l), the transmit engine's
+//    gaps (s) - are printed and not judged, because two RC oscillators
+//    wander between two legs by more than that bound (judge_span() below
+//    has the figures); the HSI's absolute error and its trim (j) need a
+//    crystal and decline with the reason. Every byte-exact verdict of
+//    those letters is judged on either peer.
 //
 // What is exercised, letter by letter:
 //   a  the divisor: the console's BRR for 115200 at 48 MHz, the rate it
@@ -53,9 +65,10 @@
 //   h  half duplex on PB0 alone: the receiver does NOT hear the instance's
 //      own frames (14.5's "the TX and RX pins connected internally" is the
 //      receive path letter p proves with a second chip), measured
-//   j  (y) the rendezvous - ping, IDENT (a CH32V006 peer on a crystal), a
-//      bad checksum, a desync, the refusals, a stand-off acked and timed
-//      by the peer's silence - and THE HSI AGAINST THE CRYSTAL: the
+//   j  (y) the rendezvous - ping, IDENT (a CH32V006 peer, on a crystal or
+//      not), a bad checksum, a desync, the refusals, a stand-off acked and
+//      timed by the peer's silence - and, with a crystal peer only, THE HSI
+//      AGAINST THE CRYSTAL: the
 //      peer's span of a gapless run at 1 Mbaud (a divisor of 48, exact),
 //      three times; then HSITRIM stepped a step at a time and each step
 //      timed the same way, the trim back at its centre after
@@ -70,7 +83,7 @@
 //   l  (y) the frame matrix across the wire: 8N1, 8E1, 8O1, 7E1, 7O1, 9N1,
 //      8N2, and half and one-and-a-half stop bits - each echoed, and the
 //      two odd stops timed as frames of 9.5 and 10.5 bits
-//   m  (y) the receiver's errors from a crystal sender: PE, FE onset
+//   m  (y) the receiver's errors from a foreign sender: PE, FE onset
 //      against a uniform rate error (the chapter's "not less than 3 %",
 //      14.3), glitches on the idle line, ORE from a run read late, a break
 //   n  (y) the peer's engine shapes: a bit-banged frame, one stretched
@@ -636,6 +649,42 @@ void judge(const char* name, const char* suffix, bool ok) {
     bench.verdict(name, suffix, ok);
 }
 
+/// Whether the far chip's clock is an RC oscillator (IDENT's xtal = 0),
+/// asked once a boot by the first letter that needs to know; unknown (no
+/// IDENT) counts as a crystal, so the verdicts below are judged as before.
+int8_t far_rc_state = -1;
+bool far_clock_rc() {
+    if (far_rc_state < 0) {
+        link::Ident d{};
+        if (!peer_ident(d) || d.sanity != link::ident_sanity) {
+            return false;
+        }
+        far_rc_state = d.xtal == 0u ? 1 : 0;
+    }
+    return far_rc_state == 1;
+}
+
+/// A verdict on a span the far chip timed, judged within 500 ppm of a
+/// reference leg taken back to back (or, for letter s's flash twin above
+/// 1.5 Mbaud, the idle a block that difference gives, a cycle a block 73
+/// ppm at 3 Mbaud). That bound is the instrument's spread
+/// against a CRYSTAL peer: this end's wandering HSI against a steady clock
+/// (two blasts back to back -454 to +314 ppm apart, letter s's comment).
+/// Against an RC peer the instrument is two wandering oscillators, and on
+/// the WeAct pair two legs back to back that should read alike read up to
+/// 1051 ppm apart (twelve runs of `y`: letter k's legs against their 1
+/// Mbaud reference, letter s's SRAM blasts against the polled one) - twice
+/// the bound, and near the 1200 ppm of half the smallest divisor step a
+/// wrong BRR would show. So against an RC peer the figure printed beside
+/// the leg is a measurement and no verdict is claimed.
+void judge_span(const char* name, const char* suffix, bool ok) {
+    if (!leg_refused && far_rc_state == 1) {
+        print(serial, "  NO VERDICT  ", name, suffix, " (an RC far clock wanders more than the bound)", crlf);
+        return;
+    }
+    judge(name, suffix, ok);
+}
+
 /// What the DUT's receiver made of a run, polled: frames, the errors, the
 /// last data word.
 struct Drain {
@@ -697,7 +746,9 @@ const char* num(uint32_t v) {
 int32_t hsi_ppm = 0;                         ///< letter j's figure, used by the later letters
 bool hsi_known = false;
 
-/// The HSI's error, measured once if letter j has not.
+/// This end's rate against the peer's clock, measured once if letter j has
+/// not: the HSI's absolute error against a crystal peer, the two clocks'
+/// ratio against an RC one - what the later letters' relative legs use.
 int32_t hsi_error() {
     if (!hsi_known) {
         link::Cfg c{};
@@ -731,9 +782,10 @@ void tj_link() {
     }
     bench.verdict("the peer is the CH32V006's usart_peer", got && d.sanity == link::ident_sanity &&
                                                                 link::peer_kind(d.version) == link::peer_ch32v00x);
-    // A PEER WITH NO CRYSTAL (its board fits none) offers no time base: it
-    // refuses every timed leg, so the HSI against the crystal and the trim
-    // walk measured against it are skipped below, no verdict claimed.
+    // A PEER WITH NO CRYSTAL (its board fits none) offers no absolute time
+    // base: its calibrate times this end against its own HSI, a ratio of
+    // two RC clocks, so the HSI against the crystal and the trim walk
+    // measured against it are skipped below, no verdict claimed.
     const bool peer_crystal = got && d.xtal == 1u;
     if (got && d.xtal == 0u) {
         print(serial, "  SKIPPED, no verdict claimed: the peer runs no crystal - its board fits none - so this "
@@ -1078,8 +1130,9 @@ void tk_rates() {
         bench.verdict("the peer is reachable", false);
         return;
     }
+    (void)far_clock_rc();
     const int32_t hsi = hsi_error();
-    print(serial, "  the HSI: ");
+    print(serial, "  the HSI against the peer's clock: ");
     print_ppm(hsi);
     print(serial, crlf);
     static constexpr uint32_t rates[] = {115'200, 921'600, 1'000'000, 1'500'000, 2'000'000, 2'400'000, 3'000'000};
@@ -1111,7 +1164,7 @@ void tk_rates() {
         print(serial, "  ", rate, ": BRR ", usart_divisor(SysClock::hz, rate), ", the foreign receiver times ");
         print_ppm(k.ppm);
         print(serial, " against HSI / BRR's ", expect, " ppm", crlf);
-        judge(num(rate), " baud: the rate on the wire is HSI / BRR within 500 ppm, timed by the peer",
+        judge_span(num(rate), " baud: the rate on the wire is HSI / BRR within 500 ppm, timed by the peer",
               r0.ok && k.ok && near(k.ppm, expect, 500));
     }
 
@@ -1338,6 +1391,7 @@ void tl_frames() {
         bench.verdict("the peer is reachable", false);
         return;
     }
+    (void)far_clock_rc();
     static constexpr FmtCase cases[] = {
         {8, 0, 1, "8N1"}, {8, 1, 1, "8E1"}, {8, 2, 1, "8O1"}, {7, 1, 1, "7E1"}, {7, 2, 1, "7O1"},
         {link::bits9_low, 0, 1, "9N1"}, {8, 0, 2, "8N2"}, {8, 0, link::stop_half, "8N0.5"},
@@ -1382,7 +1436,7 @@ void tl_frames() {
         print(serial, "  ", stop == link::stop_half ? "8N0.5" : "8N1.5", " at 1 Mbaud: ");
         print_ppm(k.ppm);
         print(serial, " against frames of ", link::frame_half_bits(8, 0, stop), " half bits", crlf);
-        judge(stop == link::stop_half ? "half a stop bit" : "one and a half stop bits",
+        judge_span(stop == link::stop_half ? "half a stop bit" : "one and a half stop bits",
               ": the frame on the wire is that long, within 500 ppm of an 8N1 run's",
               r0.ok && k.ok && near(k.ppm, hsi, 500));
     }
@@ -1390,7 +1444,7 @@ void tl_frames() {
 }
 
 // ---------------------------------------------------------------------------
-// m - the receiver's errors, from a crystal sender
+// m - the receiver's errors, from a foreign sender
 // ---------------------------------------------------------------------------
 void tm_errors() {
     if (!ensure_link()) {
@@ -1451,16 +1505,17 @@ void tm_errors() {
         }
         print(serial, "  FE onset: +", onset_pos, " %, ", onset_neg, " %", crlf);
         // "Within 3 % of the receiver's own" needs the two clocks' ratio:
-        // the peer bangs on its own clock, so its rates are off by e only
-        // against a crystal this end has been calibrated to. A peer that
-        // refused the calibrate (no crystal on its board) leaves the ratio
-        // unknown - the two RC oscillators may differ by their tolerances
-        // added - and the verdict has no premise.
+        // the peer bangs on its own clock, so its rates are off by e
+        // against that clock, and hsi_error() is this end's rate against
+        // the same clock - its crystal, or its HSI where its board fits
+        // none, a ratio either way. A calibrate that did not come back
+        // leaves the ratio unknown - two RC oscillators may differ by
+        // their tolerances added - and the verdict has no premise.
         if (hsi_known) {
             judge("every rate within 3 % of the receiver's own is clean (14.3)", inside_clean);
         } else {
-            print(serial, "  SKIPPED, no verdict claimed: the peer's clock is not referenced to a crystal (it "
-                          "refused the calibrate), so no rate is known within 3 % of this receiver's", crlf);
+            print(serial, "  SKIPPED, no verdict claimed: the calibrate leg did not come back, so the two clocks' "
+                          "ratio is unknown and no rate is known within 3 % of this receiver's", crlf);
         }
         judge("and a rate far enough off does raise FE", onset_pos != 0 || onset_neg != 0);
     }
@@ -2261,6 +2316,7 @@ void ts_tx_engine() {
         bench.verdict("the peer is reachable", false);
         return;
     }
+    (void)far_clock_rc();
     // 4096 frames through the ring of 256, the engine draining it block by
     // block - each block started from the last one's completion - timed by
     // the far receiver against the polled blast taken back to back (a frame
@@ -2309,18 +2365,18 @@ void ts_tx_engine() {
         // cycle a block at 3 Mbaud is 24 ticks in 328 000, 73 ppm - so 500
         // ppm admits the wander, and a gap of seven cycles a block alone
         // reaches it.
-        judge(num(rate), " baud, the restart in SRAM: the transmit engine's blast is gapless - 4096 frames "
+        judge_span(num(rate), " baud, the restart in SRAM: the transmit engine's blast is gapless - 4096 frames "
               "within 500 ppm of the polled blast's span",
               ref.ok && ram.eng.ok && near(ram.eng.ppm, ref.ppm, 500));
         if (rate <= 1'500'000u) {
-            judge(num(rate), " baud, the restart in the flash: gapless too", ref.ok && flash.eng.ok &&
+            judge_span(num(rate), " baud, the restart in the flash: gapless too", ref.ok && flash.eng.ok &&
                   near(flash.eng.ppm, ref.ppm, 500));
         } else {
             // Above it, from the flash, each block boundary idles the line
             // for what the restart takes beyond the frame the shifter still
             // holds - the vector's entry and exit 104 cycles at most
             // (docs/ch32x035/platform.md) - and for no more.
-            judge(num(rate), " baud, the restart in the flash: every frame through, the line idle at a block "
+            judge_span(num(rate), " baud, the restart in the flash: every frame through, the line idle at a block "
                   "boundary for no more than the restart less one frame",
                   ref.ok && flash.eng.ok && flash.per_block >= 0 &&
                       static_cast<uint32_t>(flash.per_block) <= flash.body + 104u - frame);
@@ -2420,7 +2476,7 @@ int main() {
     bench.second_letter('j', "the rendezvous, and the HSI against the crystal", tj_link);
     bench.second_letter('k', "the rates across the wire, timed by the far chip", tk_rates);
     bench.second_letter('l', "the frame matrix across the wire", tl_frames);
-    bench.second_letter('m', "the receiver's errors from a crystal sender", tm_errors);
+    bench.second_letter('m', "the receiver's errors from a foreign sender", tm_errors);
     bench.second_letter('n', "the peer's engine shapes", tn_shapes);
     bench.second_letter('o', "mute, IrDA and LIN on a wire", to_modes);
     bench.second_letter('p', "half duplex hearing a second chip", tp_half_duplex_wire);

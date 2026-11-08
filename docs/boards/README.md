@@ -28,10 +28,13 @@ architectural layer, and a target's stratum is its family's driver set
 | ST Nucleo-G071RB | STM32G071RB | `g071rb` | [nucleo-g071rb.md](nucleo-g071rb.md) |
 | ST Nucleo-G031K8 | STM32G031K8 | `g031k8` | [nucleo-g031k8.md](nucleo-g031k8.md) |
 | a CH32V006K8U6 module | CH32V006K8U6 | `v006k8` | [ch32v006k8.md](ch32v006k8.md) |
+| a WeAct CH32V00x core board fitted with a CH32V006F8U6 | CH32V006F8U6 | `v006f8` | [weact-ch32v006f8.md](weact-ch32v006f8.md) |
 | WCH's CH32V003F4P6 evaluation board | CH32V003F4P6 | `v003f4` | [ch32v003f4.md](ch32v003f4.md) |
 | a WeAct CH32V203C8T6 core board | CH32V203C8T6 | `v203c8` | [weact-ch32v203c8.md](weact-ch32v203c8.md) |
+| a WeAct CH32V303CBT6 core board | CH32V303CBT6 | `v303cb` | [weact-ch32v303cb.md](weact-ch32v303cb.md) |
 | WCH's CH32V303 evaluation board (CH32xx0xV-R0-1v0) | CH32V303VCT6 | `v303vc` | [ch32v303-evt.md](ch32v303-evt.md) |
 | WCH's CH32X035 evaluation board, QFN20 edition | CH32X035F8U6 | `x035f8` | [ch32x035-evt-f8u6.md](ch32x035-evt-f8u6.md) |
+| a WeAct CH32X035 core board | CH32X035F8U6 | `x035f8` | [weact-ch32x035f8.md](weact-ch32x035f8.md) |
 | Raspberry Pi Pico | RP2040 | `pico` | [pico.md](pico.md) |
 | a WeAct RP2040 board | RP2040 | `weact2040` | [weact-rp2040.md](weact-rp2040.md) |
 | a WeAct RP2350B core board | RP2350 (QFN-80) | `weact2350b` for its Cortex-M33 pair, `weact2350b-rv` for its Hazard3 pair | [weact-rp2350b.md](weact-rp2350b.md) |
@@ -141,7 +144,7 @@ Each type belongs to one project and one way of writing firmware:
 | `c21j` | `samc21/` | OpenOCD over SWD, through a CMSIS-DAP probe |
 | `g0b1re`, `g071rb`, `g031k8` | `stm32g0/` | OpenOCD through the Nucleo's own ST-LINK |
 | `v006k8`, `v006f8`, `v003f4` | `ch32v00x/` | WCH's OpenOCD fork through a WCH-Link |
-| `v203c8`, `v303vc` | `ch32vx03/` | WCH's OpenOCD fork through a WCH-Link |
+| `v203c8`, `v303cb`, `v303vc` | `ch32vx03/` | WCH's OpenOCD fork through a WCH-Link |
 | `x035f8` | `ch32x035/` | the same fork through a WCH-LinkE |
 | `pico`, `picow`, `weact2040` | `rp2040/` | OpenOCD through a CMSIS-DAP probe, the Raspberry Pi Debug Probe |
 | `weact2350b`, `weact2350b-rv` | `rp2350/` | Raspberry Pi's OpenOCD fork through the same probe, in two sessions |

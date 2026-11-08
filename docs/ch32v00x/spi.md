@@ -902,7 +902,9 @@ slips) run by name. On the CH32V003F4P6 the suite is twenty-three group images,
 one letter each - the part's 15 KB with no multiplier decide the cut
 (design/overview.md) - and with no peer wired to that board the letters that
 need none ran: a, c, f and v green in three runs each, g, h, i, j, l and w in
-ten runs or more.
+ten runs or more. A letter that needs the peer asks for it first: when no ping
+of the boot has been answered it declines with the reason and claims no
+verdict, and a peer that answered once and then goes quiet fails it.
 
 - **The reset values are table 16-2's** (STATR 0x0002 with TXE up,
   CRCR 0x0007), and a control word lands as spelled.
