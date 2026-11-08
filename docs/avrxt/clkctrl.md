@@ -115,7 +115,10 @@ console (24 -> 12 -> 2 MHz at 115200). The suite is driven from its
 console a letter at a time - a letter is one command key of the suite's
 console and the group of verdicts it runs: `1` to `7` on the DA and the
 DB, with `8` and `9` on the board that fits a 32.768 kHz crystal (the
-AVR128DA48 board), and `r` and `1` to `8` on the AVR EA; `a` runs every
+AVR128DA48 board), and `r` and `1` to `8` on the AVR EA. A board whose
+crystal is fitted but does not run says so in its board file
+(`board::xosc32k_runs` false, the AVR64EA48 board's) and every verdict
+that needs the crystal running declines there, with that reason; `a` runs every
 letter the image carries (this suite has no `z` or `y` set), and `s`
 toggles, on the DA and the DB, a step mode in which each rate is held
 until a key.
@@ -498,9 +501,11 @@ compare with the current rate to place that store - counted in
 it already pays.
 
 **Bench findings (AVR64EA48 rev B1, REVID 0x21, 5 V; `test_avr_clock`'s
-EA letters from the console, CLKOUT on PA7, 22 of 27 - the board's 32 kHz crystal does
-not run, its page, so letters 2 to 6, which time on that crystal, stop at
-their first verdict there, and letter 1 runs its ladder untimed).**
+EA letters from the console, CLKOUT on PA7, 30 of 30 in ten runs of ten -
+the board's 32 kHz crystal does not run, its page and its board file's
+`board::xosc32k_runs`, so every verdict timed on that crystal declines
+with that reason: letter 1 runs its ladder untimed, letters 2 and 4
+decline whole, and letters 3, 5 and 6 run what needs no ruler).**
 
 - Reset state, read at the reset vector over UPDI: MCLKCTRLA 0x00,
   **MCLKCTRLB 0x11** (DIV6, PEN, as 12.5.2 says), MCLKSTATUS 0x02
@@ -523,6 +528,25 @@ their first verdict there, and letter 1 runs its ladder untimed).**
   ceil(CLK_PER / 1 MHz) after every switch - through `DynamicClock::set()`
   for the eight whole-hertz rates, which it reaches, and by hand for the
   four fractional ones, which it refuses - and 20 again at the end.
+- Without the ruler (ten runs of ten): TUNE written past either end
+  reads back -32 and +31 and 0 once written back (letter 3);
+  `Clock<osc32k>` selects OSC32K and leaves TIMEBASE at 1, and
+  `Clock<crystal>` takes the 20 MHz quartz back (letter 5).
+- **The clock failure detector's fallback resets the prescaler**
+  (letter 6 B, ten runs of ten): with CFDSRC on the main clock and the
+  test bit, CLKSEL reads OSCHF, CLKOUT is cleared by the hardware, and
+  MCLKCTRLB reads 0x11 - DIV6 with PEN, its reset value - so CLK_PER
+  falls to the fuse's 20 MHz over 6, 3.3 MHz: 12.3.5.1's "changed back
+  to its Reset frequency" covers the prescaler too. The interrupt runs
+  (two or three entries in the window), and `Clock<crystal>::init()`
+  recovers the quartz with CLKOUT set again. The rate after the fallback
+  is not timed (no ruler).
+- **The detector does not watch an XOSC32K that never started** (letter
+  6 A): with XOSC32K enabled and forced on, and its crystal not
+  oscillating, CFDSRC on XOSC32K gives no interrupt in 20 ms either
+  without the test bit or with it (ten runs of ten) - 12.3.5.1's
+  "the selected source is active" read as running; so the test bit's
+  verdict needs a running crystal and declines here.
 - Letter 7 (ten of ten, 6 verdicts): MCLKSTATUS with the crystal as the
   main clock has EXTS set and no switch pending; RUNSTDBY toggles through
   CCP without touching bits 3:2.
@@ -555,14 +579,13 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
-- On the AVR EA, the letters of `test_avr_clock` that time on the 32 kHz
-  crystal (the bench board's does not run - its page): the prescaler
-  ladder's rates, OSCHF's accuracy at the fuse's
-  rate, the tune curve, the auto-tune and the late TUNE copy, the 32 kHz
-  main clocks, the clock failure detector on XOSC32K and on the main
-  clock (what the prescaler does at the fallback, CLKOUT cleared and
-  set again) - each measures on a
-  board whose 32 kHz crystal runs; `ClockSource::external` on the EA (the board puts a
+- On the AVR EA, the verdicts of `test_avr_clock` that need the 32 kHz
+  crystal running (the bench board's does not run - its page): the
+  prescaler ladder's rates, OSCHF's accuracy at the fuse's rate, the
+  tune curve, the auto-tune and the late TUNE copy, OSC32K's rate and
+  the crystal as CLK_PER, the clock failure detector's test bit on
+  XOSC32K and the rate after its fallback on the main clock - each
+  measures on a board whose 32 kHz crystal runs; `ClockSource::external` on the EA (the board puts a
   crystal on PA0); `Clock<internal, 16 MHz>` (the bench part is fused
   at 20 MHz).
 - `ClockSource::external` on the DB and the PLL from its XOSCHF (no

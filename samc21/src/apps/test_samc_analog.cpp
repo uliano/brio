@@ -2517,9 +2517,8 @@ void tk_sdadc() {
                       "HERE - the next result arrives sooner than one period "
                       "after it and the stream carries on at its own rate, "
                       "which is NOT what 39.8.17's 'flush the pipeline and "
-                      "restart' would suggest; what a flush undeniably does is "
-                      "the negative witness below, where flushes arriving "
-                      "faster than a window stop every result dead",
+                      "restart' would suggest (the flush events below are "
+                      "counted, not judged, for the same reason)",
                       first_gap < period + period / 2u &&
                           near(marks[1] - marks[0], period, period / 4u));
     }
@@ -2531,9 +2530,21 @@ void tk_sdadc() {
 
     // ---- EVCTRL.FLUSHEI, on a real event -----------------------------------
     //
-    // The witness is a NEGATIVE one and it is the strongest this
-    // peripheral offers: flush events arriving faster than a decimation
-    // window means no window ever completes, so NO RESULT EVER ARRIVES.
+    // Flush events every 20 us, inside the 43 us a decimation window takes.
+    // If each flush threw the window in progress away, no result would
+    // arrive; the single flush above lets a result through a fifth of a
+    // window after it (docs/samc21/sdadc.md), so what a flush event leaves
+    // standing is MEASURED here, not judged: the results counted over ten
+    // milliseconds of flush events, printed beside the same converter's
+    // count over ten milliseconds without them. The pacer runs two
+    // decimation windows before the count opens and the flags are cleared
+    // only then, so every result counted completed while flush events were
+    // already arriving. The control is a verdict: with the pacer stopped
+    // the converter delivers one result a period again - 240000 ticks over
+    // the period measured above, within 2 (a window of fixed length holds
+    // the floor or the ceiling of that quotient, and the period is an
+    // integer quotient under a tick short, which moves it by under a
+    // quarter).
     bench.verdict("the event fabric is up", event_clock_up());
     const TcConfig flusher{.mode = TcMode::count8,
                            .prescaler = TcPrescaler::div8,
@@ -2558,29 +2569,43 @@ void tk_sdadc() {
                                           .path = EventPath::asynchronous}));
     (void)Sdadc::enable(true);
     spin(40'000UL);
-    Sdadc::clear_flags(Sdadc::flag_resrdy | Sdadc::flag_overrun);
+    constexpr uint32_t count_span = 240'000UL;     // ten milliseconds of crystal ticks
+    /// Results read over `count_span` ticks; `first` the tick, from the
+    /// window's opening, of the first one (0 when none came).
+    auto count_results = [](uint32_t& first) -> uint16_t {
+        Sdadc::clear_flags(Sdadc::flag_resrdy | Sdadc::flag_overrun);
+        uint16_t n = 0;
+        first = 0;
+        const uint32_t c0 = ticks_now();
+        uint32_t now = c0;
+        while (now - c0 < count_span) {
+            if (Sdadc::ready()) {
+                (void)Sdadc::result();
+                if (n == 0u) first = now - c0;
+                ++n;
+            }
+            now = ticks_now();
+        }
+        return n;
+    };
     (void)Pacer::set_count8(0);
     (void)Pacer::enable(true);
-    wait_ms(10);
-    const bool any_while_flushing = Sdadc::ready();
+    const uint32_t lead0 = ticks_now();
+    while (ticks_now() - lead0 < 2u * window_ticks) {
+    }
+    uint32_t first_flushing = 0;
+    const uint16_t while_flushing = count_results(first_flushing);
     (void)Pacer::enable(false);
     spin(40'000UL);
-    Sdadc::clear_flags(Sdadc::flag_resrdy | Sdadc::flag_overrun);
-    uint32_t sp2 = 2'000'000UL;
-    while (sp2-- != 0u && !Sdadc::ready()) {
-    }
-    const bool resumed = Sdadc::ready();
-    (void)Sdadc::result();
-    print(serial, "  with a flush event every 20 us for ten milliseconds, a "
-          "result arrived: ", yes_no(any_while_flushing),
-          "; with the pacer stopped again: ", yes_no(resumed), crlf);
-    bench.verdict("EVCTRL.FLUSHEI IS A REAL INPUT AND A FLUSH REALLY DOES "
-                  "THROW THE WINDOW AWAY: flush events arriving faster than a "
-                  "decimation window mean NO WINDOW EVER COMPLETES and not one "
-                  "result appears in ten milliseconds where two hundred were "
-                  "due - and the control is the same converter delivering "
-                  "again the moment the events stop",
-                  !any_while_flushing && resumed);
+    uint32_t first_free = 0;
+    const uint16_t free_count = count_results(first_free);
+    const uint32_t due = period != 0u ? count_span / period : 0u;
+    print(serial, "  results in ten milliseconds with a flush event every 20 us: ",
+          while_flushing, " (the first ", first_flushing, " ticks in); with the pacer "
+          "stopped: ", free_count, " (", due, " due at the period above)", crlf);
+    bench.verdict("the control: with the flush events stopped the same converter "
+                  "delivers one result a period again (+-2 in ten milliseconds)",
+                  near(free_count, due, 2u));
     (void)Sdadc::enable(false);
     (void)Sdadc::stop_events();
     (void)Sdadc::enable(true);
@@ -2887,7 +2912,12 @@ extern "C" void AC_Handler() {
 }
 
 /// The SDADC's one vector for its three sources. RESRDY is cleared by
-/// READING the result, which is what the body's resrdy() half does.
+/// READING the result, which is what the body's resrdy() half does. An
+/// entry with nothing pending does nothing: letter k disables the vector
+/// at the end of its RESRDY window, and a RESRDY that rose just before
+/// leaves the NVIC's pending bit set, so the vector is entered once at the
+/// next enable with RESRDY disarmed - an entry that, if it disarmed
+/// OVERRUN, would hide the overrun the next leg waits for.
 extern "C" void SDADC_Handler() {
     const uint8_t pending = brio::Sdadc::isr();
     if (pending != 0u) {
@@ -2896,7 +2926,7 @@ extern "C" void SDADC_Handler() {
     }
     if ((pending & brio::Sdadc::flag_resrdy) != 0u) {
         sdadc_last_result = brio::Sdadc::result();
-    } else {
+    } else if ((pending & brio::Sdadc::flag_overrun) != 0u) {
         brio::Sdadc::disarm(brio::Sdadc::flag_overrun);
         brio::Sdadc::clear_flags(brio::Sdadc::flag_overrun);
     }

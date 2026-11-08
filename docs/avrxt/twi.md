@@ -505,7 +505,7 @@ and the bus, each item used or declined:
 | the client's Smart mode | 29.3.3.3 | the client task's option; the bench's own client runs it |
 | CTRLA.SDASETUP, the client's own setup stretch | 29.5.1, DS40002443A 27.5.1 | Used at eight clocks, every default of the driver: four are shorter than the I2C specification's Standard-mode data setup (250 ns) above 16 MHz, and on the AVR EA's wire at 20 MHz they lose a Smart-mode client in a long read (On the AVR64EA48, "The client's data setup"); the price is four clocks of stretch on a byte whose clock the client releases |
 | CTRLA.FMEN, the AVR EA's Fm duty | DS40002443A 27.5.1 | Used with the Fm speed: the floor's low phase bought from the high phase (The AVR EA's SCL clock) |
-| the inactive-bus time-out's base, CLKCTRL.MCLKTIMEBASE | DS40002443A 27.3.3.1 | Used: the clock writes TIMEBASE at every init and rate change, so `TwiTimeout` is microseconds; at TIMEBASE 0, its reset value, every setting fires at once (letter v) |
+| the inactive-bus time-out's base, CLKCTRL.MCLKTIMEBASE | DS40002443A 27.3.3.1 | Used: the clock writes TIMEBASE at every init and rate change, so `TwiTimeout` is microseconds; at TIMEBASE 0, its reset value, a setting no longer means microseconds: the 200 us setting releases the bus about 200 cycles after the last activity, the shorter ones by the first poll (letter v) |
 
 ### The host's cost, measured (the benchmark skeleton's letter i)
 
@@ -979,14 +979,25 @@ tR reads 150 ns and tOF 200 ns here. Fm with FMEN runs within a tenth of
 the rate asked where the DA/DB's 50/50 clock ran at 0.73 of it; at 10
 MHz Sm runs a percent fast (The AVR EA's SCL clock).
 
-**The time-out counts MCLKTIMEBASE** (letter v; the injector's START
-leaves the bus Busy, the bus state is polled from the injector's return,
-20 us after the START): with the clock's TIMEBASE (20) the three settings
-release the bus 31, 81..82 and 181..182 us after the return - 50, 100 and
-200 us from the START, within the stopwatch's microsecond; with TIMEBASE
-10 at 6, 31 and 82 us - half of each; with TIMEBASE 0, the register's
-reset value, at once (0 to 1 us). Letter h's verdicts on 50/100/200 us
-read 31/82/181 from the same return.
+**The time-out counts MCLKTIMEBASE, from the last bus activity**
+(letter v, eighteen runs, every figure the same in each: the injector's
+START leaves the bus Busy and its last edge, SCL released, is the last
+activity; each leg runs with interrupts masked on a drained console, and
+the stopwatch stamps every edge and the first poll that sees Idle, in
+CLK_PER ticks at 20 MHz): with the clock's TIMEBASE (20) the three
+settings read Idle 1009, 1999 and 4015 ticks after the last edge's stamp
+- 1000, 2000 and 4000 ticks, the settings, within the stamps' own lags
+(the last edge's stamp 12 cycles late, a poll's 3..21) and one
+supervisor microsecond; with TIMEBASE 10 505, 1009 and 1999 - half of
+each. 27.5.4's "inactive for longer than the TIMEOUT setting" is read
+literally: the count runs from the last edge, not from the START, which
+the injector put 371 ticks earlier. With TIMEBASE 0, the register's reset
+value, the chapter says nothing and brio never leaves it there (`Clock`
+writes it): the 50 and 100 us settings are already Idle at the first
+poll, 127 ticks after the last edge, and the 200 us setting at 199 -
+about 200 CLK_PER cycles, as if a supervisor "microsecond" were one
+cycle there (printed, not judged). Letter h's verdicts on 50/100/200 us
+read 31/82/181 us from the injector's return, with the console running.
 
 **SDAHOLD's codes are straight** (letter v: LUT0 high while SCL is low
 and SDA high, SCL by its pin event, SDA on LUT0's own IN2 = PA2, the

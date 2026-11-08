@@ -315,9 +315,10 @@ with a 32.768 kHz crystal builds):
   Ticker with no source named straight after stopping the crystal.
 
 On the **AVR64EA48** (REVID 0x21, rev B1, 5 V, the board's 20 MHz
-quartz as CLK_PER; `test_avr_rtc`, 91 verdicts, letters 1-8 and p ten
-runs of ten; letter 9 owes the board's 32.768 kHz crystal, which does
-not oscillate - [../boards/avr64ea48.md](../boards/avr64ea48.md)):
+quartz as CLK_PER; `test_avr_rtc`, 89 verdicts, letters 1-8 and p ten
+runs of ten; letter 9 declines, the board's 32.768 kHz crystal not
+oscillating, as its board file states -
+[../boards/avr64ea48.md](../boards/avr64ea48.md)):
 
 - **This die's OSC32K runs about 1.3 % slow**: a counter second is
   20.25..20.27 M quartz ticks against a nominal 20 M (+12600..+13300
@@ -365,9 +366,10 @@ PITEVGENCTRLA, is `Pit::event_divider<slot>`'s and the event routes'
 Implemented but not bench-verified:
 
 - XOSC32K as CLK_RTC on the AVR EA (letter 9): the bench board's 32.768
-  kHz crystal does not oscillate (its page) - the letter runs and fails
-  at its first verdict there, and the Ticker runs from OSC32K; a board
-  whose crystal starts runs it as it stands.
+  kHz crystal does not oscillate (its page), its board file says so
+  (`board::xosc32k_runs` false) and the letter declines there with that
+  reason, the Ticker running from OSC32K; a board whose crystal runs
+  measures it as it stands.
 
 - `RtcSource::extclk` and an external 32 kHz CLOCK on XTAL32K1: neither
   board feeds a clock to XTAL32K1, and the EXTCLK pin carries 24 MHz on

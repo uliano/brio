@@ -46,6 +46,11 @@ using Clock = brio::Clock<brio::ClockSource::external, 24'000'000>;
 /// A 32.768 kHz crystal on PF0/PF1.
 inline constexpr bool xosc32k = true;
 
+/// Whether the 32.768 kHz crystal oscillates: it does, started forced on
+/// and held by the RTC's request (test_avr_rtc letter 9,
+/// docs/avrxt/rtc.md).
+inline constexpr bool xosc32k_runs = true;
+
 /// Nothing fitted on PA7: CLKOUT, a TCD's WOD on its DEFAULT route and
 /// EVOUTA ALT1 may drive it and be read back as a level.
 inline constexpr bool pa7_free = true;

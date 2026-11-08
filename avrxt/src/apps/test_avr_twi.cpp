@@ -1772,22 +1772,111 @@ uint16_t hold_window(TwiSdaHold h) {
     }
 }
 
+/// One time-out leg of letter v, every moment a CLK_PER tick of the
+/// stopwatch (TCB1, counting from 0 at the leg's start): the injector's
+/// four edges - its START (SDA pulled low with SCL high), SCL pulled low,
+/// SDA released, SCL released (the last bus activity) - its return one
+/// phase later, and the first poll that saw BUSSTATE Idle (0xFFFF: not
+/// within the budget).
+struct TimeoutLeg {
+    uint16_t start, scl_low, sda_up, last, ret, idle;
+};
+
+/// One turn of timeout_leg()'s poll in CLK_PER cycles, read in the release
+/// listing (avr64ea48-release, test_avr_twi-1.lst) with the AVRxt column
+/// of the instruction set manual: three LDS of 3 cycles (MSTATUS, then
+/// the stopwatch's two bytes), andi, cpi, an untaken breq, two ldi, cp,
+/// cpc at 1, the taken brcs at 2 - 18. The stopwatch's low byte is read 3
+/// cycles after the state, so a reading is late by 3 to 18 + 3 cycles.
+constexpr int16_t poll_turn = 18;
+constexpr int16_t poll_late = poll_turn + 3;
+/// How far the last edge's stamp lags the release it times, in cycles,
+/// from the same listing: the release helper's DIRCLR store, then its
+/// PINCTRL read-modify-write (LDS 3, ANDI 1, STS 2), its RET (4) and the
+/// stopwatch's first LDS (about 2) - 12, give or take 2.
+constexpr int16_t release_lag = 12;
+
+/// The budget of a leg: 60000 ticks, 3 ms at 20 MHz - fifteen times the
+/// longest time-out timed, and under the 16-bit stopwatch's wrap, so a
+/// reading never folds over it.
+constexpr uint16_t leg_budget = 60'000;
+static_assert(static_cast<uint32_t>(leg_budget) >= 15ul * 200ul * mhz,
+              "the budget must outlast the 200 us setting with room to spare");
+
+/// The injector of inject_start_and_leave(), its edges stamped as they
+/// are made, then the bus state polled from its return. Each stamp is
+/// read right after the pin write it times (the START's and SCL's fall
+/// 1..3 cycles after an inline store, the two releases release_lag after
+/// theirs, which sit in a called helper); the poll reads the state
+/// first and the stopwatch after, so a reading is late by 3..poll_late
+/// cycles and never early. Called with interrupts masked.
+TimeoutLeg timeout_leg() {
+    TimeoutLeg s{};
+    Stopwatch::init({.mode = TcbMode::capture, .clock = TcbClock::div1, .compare = 0});
+    Stopwatch::count(0);
+    inj_sda(true);
+    s.start = Stopwatch::count();
+    delay_us(clock, inj_us);
+    inj_scl(true);
+    s.scl_low = Stopwatch::count();
+    delay_us(clock, inj_us);
+    inj_sda(false);
+    s.sda_up = Stopwatch::count();
+    delay_us(clock, inj_us);
+    inj_scl(false);
+    s.last = Stopwatch::count();
+    delay_us(clock, inj_us);
+    s.ret = Stopwatch::count();
+    s.idle = 0xFFFF;
+    for (;;) {
+        const bool idle = T::bus_state() == TwiBusState::idle;
+        const uint16_t t = Stopwatch::count();
+        if (idle) {
+            s.idle = t;
+            break;
+        }
+        if (t > leg_budget) break;
+    }
+    Stopwatch::disable();
+    return s;
+}
+
 /// v: the inactive-bus time-out against CLKCTRL.MCLKTIMEBASE (27.3.3.1:
 /// "it is necessary to configure the TIMEBASE bit field"), the SDA hold
 /// codes (the DA swaps two of them, DS80000882C 2.14.2; DS80001048D has no
 /// TWI item), the PORT.OUT override the DA/DB's errata name (DB 2.15.1,
 /// DA 2.14.1; none on this die), and MCTRLB.FLUSH (DB 2.15.2 / DA 2.14.3).
 ///
-/// THE BOUNDS. The time-out: the injector puts a START on the bus and
-/// returns 20 us later (four phases of inj_us); time_to_idle() counts
-/// from its return in whole microseconds of a CLK_PER stopwatch, polling
-/// the bus state in under a microsecond. A supervisor that counts its
-/// setting from the START therefore reads setting - 20 us, within the
-/// stopwatch's truncation (-1), the poll (+1) and the call overheads
-/// around the injector (+-1): +-3 us. At half the time base each
-/// "microsecond" is half as long: setting / 2 - 20, the same +-3. At a
-/// time base of 0 - its reset value - a supervisor that fires at once
-/// reads 0..2 us. The SDA hold: the window from SCL's fall to the host's
+/// THE BOUNDS. The time-out: each leg is timeout_leg() above, with the
+/// console drained first, interrupts masked for the leg, and every print
+/// after the nine legs, so nothing but the injector and the poll runs
+/// inside a leg. 27.5.4 returns the bus to Idle once it "is inactive for
+/// longer than the TIMEOUT setting": the count runs from the last bus
+/// activity, the injector's last edge (SCL released). A reading is taken
+/// from that edge, R = Idle's stamp - the last edge's stamp, in CLK_PER
+/// ticks; a supervisor "microsecond" is u = MCLKTIMEBASE ticks and a
+/// setting of N microseconds is N x u ticks:
+///  - the supervisor itself: counting N units from the edge, with a
+///    microsecond prescaler that may run free (its first unit 0..u short)
+///    and "longer than" read either way (N or N + 1 unit edges), it fires
+///    between N u - u and N u + u after the edge, plus the bus's rise and
+///    the TWI's input synchronizer, for which the chapter gives no figure:
+///    7 ticks allowed (the bus rises in about 150 ns here, twi.md);
+///  - the instrument: Idle's stamp is late by 3..poll_late ticks
+///    (poll_turn's comment), and the last edge's stamp by release_lag
+///    +-2: the release's store sits in a called helper that also writes
+///    PINCTRL and returns before the stopwatch is read;
+///  - so R lies within [N u - u + 3 - (release_lag + 2), N u + u + 7 +
+///    poll_late - (release_lag - 2)];
+///  - and the DIFFERENCES between the three settings, which cancel every
+///    fixed lag: R(100) - R(50) = 50 u and R(200) - R(100) = 100 u, each
+///    within +-(poll_turn + u) ticks (two readings' lateness differ by at
+///    most a turn, two first units by at most u).
+/// Both are judged at the clock's time base and at half of it. At a time
+/// base of 0 - its reset value, which the chapter does not describe and
+/// nothing in brio leaves in place (Clock writes it) - the readings are
+/// printed, not judged. The SDA
+/// hold: the window from SCL's fall to the host's
 /// SDA change, each the shortest of some 30 and true within a tick (one
 /// tick, 50 ns, each side); table 35-21 gives 300..900 ns for code 3 and
 /// nothing for codes 1 and 2, which are judged by their order alone.
@@ -1803,40 +1892,79 @@ void tv_ea_facts() {
         print(serial, "  MCLKTIMEBASE as the clock wrote it: ", tb_clock, crlf);
         verdict("the clock wrote MCLKTIMEBASE = ceil(CLK_PER / 1 MHz)",
                 tb_clock == clock_timebase_for(SysClock::hz));
-        // 1. The time-out at three time bases: the clock's, half of it, 0.
+        // 1. The time-out at three time bases: the clock's, half of it, 0 -
+        // nine legs on a drained console, each with interrupts masked,
+        // printed after the last.
         const uint8_t tbs[3] = {tb_clock, static_cast<uint8_t>(tb_clock / 2u), 0};
         const TwiTimeout tos[3] = {TwiTimeout::us50, TwiTimeout::us100, TwiTimeout::us200};
-        const int16_t nominal[3] = {50, 100, 200};
-        bool full_ok = true, half_ok = true, zero_ok = true;
+        const uint16_t nominal[3] = {50, 100, 200};
+        TimeoutLeg legs[3][3];
+        while (!Serial::tx_idle()) {
+        }
         for (uint8_t k = 0; k < 3; ++k) {
             ClockTimebase::write(tbs[k]);
-            uint16_t t[3];
             for (uint8_t i = 0; i < 3; ++i) {
                 T::timeout(tos[i]);
-                inject_start_and_leave();
-                t[i] = time_to_idle(4000);
+                {
+                    P::CriticalSection cs;
+                    legs[k][i] = timeout_leg();
+                }
                 T::timeout(TwiTimeout::disabled);
                 inject_stop();
                 T::force_idle();
-                const int16_t want = k == 0 ? static_cast<int16_t>(nominal[i] - 20)
-                                   : k == 1 ? static_cast<int16_t>(nominal[i] / 2 - 20) : 0;
-                const int16_t got = static_cast<int16_t>(t[i]);
-                if (k == 2) zero_ok = zero_ok && t[i] <= 2u;
-                else if (t[i] == 0xFFFFu || got - want > 3 || want - got > 3) {
-                    if (k == 0) full_ok = false;
-                    else half_ok = false;
-                }
             }
-            print(serial, "  TIMEBASE ", tbs[k], ": 50/100/200 us -> ", t[0], " / ", t[1], " / ",
-                  t[2], " us after the injector's return (its START 20 us before)", crlf);
         }
         ClockTimebase::write(tb_clock);
-        verdict("with the clock's time base the time-outs are 50/100/200 us from the START "
-                "(+-3 us)", full_ok);
-        verdict("with half of it they are half as long (+-3 us): the supervisor counts "
-                "MCLKTIMEBASE clocks a microsecond", half_ok);
-        verdict("with MCLKTIMEBASE = 0 (its reset value) every setting fires at once (<= 2 us)",
-                zero_ok);
+        bool full_diff = true, full_abs = true, half_diff = true, half_abs = true;
+        // Every figure below fits 16 bits: a stamp is under the 60000-tick
+        // budget, which `came` checks first, and a setting is at most 200 x 20
+        // ticks; the differences are taken between two such readings.
+        for (uint8_t k = 0; k < 3; ++k) {
+            const TimeoutLeg* l = legs[k];
+            const int16_t u = tbs[k];                      // ticks a supervisor microsecond
+            print(serial, "  TIMEBASE ", tbs[k], ", injector edges at ", l[0].start, " / ",
+                  l[0].scl_low, " / ", l[0].sda_up, " / ", l[0].last, ", return ", l[0].ret,
+                  " ticks; 50/100/200 us:", crlf);
+            int16_t r[3] = {0, 0, 0};
+            bool all_came = true;
+            for (uint8_t i = 0; i < 3; ++i) {
+                const bool came = l[i].idle != 0xFFFFu;
+                all_came = all_came && came;
+                if (!came) {
+                    print(serial, "    Idle never within the budget", crlf);
+                    if (k == 0) full_abs = false;
+                    else if (k == 1) half_abs = false;
+                    continue;
+                }
+                r[i] = static_cast<int16_t>(l[i].idle - l[i].last);
+                const int16_t nu = static_cast<int16_t>(nominal[i] * static_cast<uint16_t>(u));
+                print(serial, "    Idle ", r[i], " ticks after the last edge (the setting ", nu,
+                      "), ", static_cast<int16_t>(l[i].idle - l[i].ret), " after the return",
+                      crlf);
+                if (k == 2) continue;
+                const bool in = r[i] >= nu - u + 3 - (release_lag + 2) &&
+                                r[i] <= nu + u + 7 + poll_late - (release_lag - 2);
+                if (k == 0) full_abs = full_abs && in;
+                else half_abs = half_abs && in;
+            }
+            if (k == 2) continue;
+            const int16_t d1 = static_cast<int16_t>(r[1] - r[0]);
+            const int16_t d2 = static_cast<int16_t>(r[2] - r[1]);
+            const int16_t slack = static_cast<int16_t>(poll_turn + u);
+            const bool diff = all_came && d1 >= 50 * u - slack && d1 <= 50 * u + slack &&
+                              d2 >= 100 * u - slack && d2 <= 100 * u + slack;
+            print(serial, "    differences ", d1, " and ", d2, " ticks (want ", 50 * u, " and ",
+                  100 * u, ", +-", slack, ")", crlf);
+            if (k == 0) full_diff = diff;
+            else half_diff = diff;
+        }
+        verdict("with the clock's time base each setting is counted from the last bus "
+                "activity (27.5.4: 'inactive for longer than')", full_abs);
+        verdict("and the settings differ by 50 and 100 us of it (+- one poll turn and one unit)",
+                full_diff);
+        verdict("with half of it each is its halved setting from the last activity: the "
+                "supervisor counts MCLKTIMEBASE clocks a microsecond", half_abs);
+        verdict("and the differences are halved too", half_diff);
         // 2. The SDA hold codes, read as the window from SCL's fall.
         const TwiSdaHold holds[4] = {TwiSdaHold::off, TwiSdaHold::ns50, TwiSdaHold::ns300,
                                      TwiSdaHold::ns500};

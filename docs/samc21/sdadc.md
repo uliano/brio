@@ -702,14 +702,18 @@ one result still lands a fifth of a window after the flush and the
 stream then carries on at its own rate. 39.8.17's "flush the pipeline
 and restart the SDADC clock" would suggest otherwise.
 
-**But `EVCTRL.FLUSHEI` shows what a flush really does, through a
-NEGATIVE witness.** With flush events arriving every 20 us - inside the
-43 us a decimation window takes - **not one result appears in ten
-milliseconds where two hundred were due**, and the same converter
-delivers again the moment the pacer stops. So a flush does throw the
-window away; what a single one costs a stream is what the timing above
-declines to reconcile. `flush_on()` refuses a synchronous channel and
-takes an asynchronous one, as it must.
+**`EVCTRL.FLUSHEI`: flush events faster than a window, counted.** With
+flush events arriving every 20 us - inside the 43 us a decimation window
+takes - the letter counts the results over ten milliseconds, opening the
+count only after the events have run for two windows: **no result in
+any of forty-seven runs**, where the same converter delivers 232..233
+in ten milliseconds once the events stop (233 due at its period). The count
+is a printed measurement, not a verdict: no part of brio depends on what
+a flush discards. The two figures above are consistent with a flush that
+throws the window in progress away and lets a result already decimated
+leave - the single flush's early result would be that one - but this
+bench does not establish it. `flush_on()` refuses a synchronous channel
+and takes an asynchronous one, as it must.
 
 **What a flush DISCARDS is declined**, with the reason: this pad pair
 makes a differential at the converter's own rail, where a filter still
@@ -730,7 +734,12 @@ device header declares (`SDADC_Handler`): ten milliseconds of
 free-running conversions with RESRDY armed give **214 vector entries**
 with the handler reading RESULT (which is what clears the flag), and
 with RESRDY disarmed and nothing reading RESULT the OVERRUN bit reaches
-the same vector.
+the same vector. One trap sits between the two: a vector disabled at the
+NVIC while RESRDY is up keeps its pending bit, so the next enable enters
+the handler once with nothing pending in `isr()`'s mask. A handler acts
+only on the bits `isr()` returns, as the letter's does: one that read
+that empty entry as an overrun and disarmed OVERRUN would miss the real
+overrun (measured: once in twenty-two runs of the letter).
 
 ## Not covered yet
 

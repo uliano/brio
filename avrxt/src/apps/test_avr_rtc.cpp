@@ -51,7 +51,9 @@
 //      1023), and the Ticker's rate divided by 32.
 //   9  XOSC32K as CLK_RTC (the board with a 32.768 kHz crystal: the
 //      AVR128DA48 board; the AVR128DB48 board fits none and its build
-//      has no letter 9): preferred() names the crystal once it runs, the
+//      has no letter 9; the AVR64EA48 board's is fitted but does not run,
+//      board.hpp's board::xosc32k_runs, and the letter declines there with
+//      that reason): preferred() names the crystal once it runs, the
 //      counter's period against the 24 MHz external clock within the two
 //      crystals' tolerance - forced on, then held by the RTC's request
 //      alone - and the Ticker's default init taking the crystal, 1024
@@ -670,6 +672,13 @@ constexpr int32_t crystals_ppm = 200;
 void t9_xosc32k() {
     print(serial, "9 XOSC32K as CLK_RTC: the 32.768 kHz crystal against the 24 MHz external clock",
           crlf);
+    if constexpr (!board::xosc32k_runs) {
+        // The crystal is fitted but the board says it does not oscillate:
+        // every verdict below is about the crystal running.
+        print(serial, "  SKIPPED, no verdict claimed: the board's 32.768 kHz crystal is fitted "
+                      "but does not run (board.hpp's board::xosc32k_runs)", crlf);
+        return;
+    }
     quiesce();
     Xosc32k::start_crystal(Xosc32kStartup::cycles1k, false, true);   // forced on: nothing requests it yet
     bool up = false;

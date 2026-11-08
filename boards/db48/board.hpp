@@ -41,6 +41,9 @@ using Clock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
 /// the internal OSC32K, and PF0/PF1 are free.
 inline constexpr bool xosc32k = false;
 
+/// Whether a 32.768 kHz crystal oscillates: none is fitted.
+inline constexpr bool xosc32k_runs = false;
+
 /// Nothing fitted on PA7: CLKOUT, a TCD's WOD on its DEFAULT route and
 /// EVOUTA ALT1 may drive it and be read back as a level.
 inline constexpr bool pa7_free = true;

@@ -44,6 +44,16 @@ using Clock = brio::Clock<brio::ClockSource::crystal, 20'000'000, brio::ClockDiv
 /// A 32.768 kHz crystal on PF0/PF1.
 inline constexpr bool xosc32k = true;
 
+/// Whether the 32.768 kHz crystal oscillates: on this board it does not.
+/// XOSC32K started forced on (64k cycles of start-up, LPMODE off) never
+/// sets XOSC32KS within seconds, and an RTC selected onto it never
+/// finishes synchronizing CTRLA, where the same RTC on OSC32K does at
+/// once (docs/boards/avr64ea48.md). The crystal is fitted, so its pins
+/// stay undriven (`xosc32k` above); a program that needs it running reads
+/// this fact and declines, and the Ticker runs from OSC32K
+/// (RtcClock::preferred() names a crystal only once it runs).
+inline constexpr bool xosc32k_runs = false;
+
 /// Nothing fitted on PA7: CLKOUT, a TCD's WOD on its DEFAULT route and
 /// EVOUTA ALT1 may drive it and be read back as a level.
 inline constexpr bool pa7_free = true;

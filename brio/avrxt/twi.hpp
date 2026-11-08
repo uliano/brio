@@ -361,8 +361,10 @@ constexpr uint8_t twi_sdahold_bits(TwiSdaHold h) {
 /// puts the bus state machine back to Idle after that much silence. The
 /// AVR DA/DB derive its time from MBAUD (DS40002247B 29.3.3.1); the AVR
 /// EA counts it in CLKCTRL.MCLKTIMEBASE clocks a microsecond (DS40002443A
-/// 27.3.3.1) - at TIMEBASE 0, its reset value, every setting fires at
-/// once (measured) - and there brio's clock writes TIMEBASE at every init
+/// 27.3.3.1) - at TIMEBASE 0, its reset value, a setting no longer means
+/// microseconds (the 200 us one measured at about 200 CLK_PER cycles from
+/// the last bus activity, docs/avrxt/twi.md) - and there brio's clock
+/// writes TIMEBASE at every init
 /// and rate change (avrxt/clock.hpp's ClockTimebase), so the names are
 /// microseconds on both.
 enum class TwiTimeout : uint8_t { disabled = 0, us50 = 1, us100 = 2, us200 = 3 };

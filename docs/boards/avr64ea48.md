@@ -20,7 +20,9 @@ this board.
   `Clock<ClockSource::crystal, 20'000'000, ClockDiv::div1, 20'000'000>`,
   the last argument OSCHF claimed at 20 MHz
   (the board file, `boards/ea48/board.hpp`). A
-  32.768 kHz crystal on PF0/PF1. Neither crystal's pins are ever driven
+  32.768 kHz crystal on PF0/PF1, fitted but not oscillating (below,
+  "Bench findings"): the board file states both, `board::xosc32k` true
+  and `board::xosc32k_runs` false. Neither crystal's pins are ever driven
   by a program on this board, started or not.
 - **Supply**: 5 V (the VDD jumper), measured 5.03 V by the probe. The
   EA's 20 MHz needs it: CLK_MAIN reaches 20 MHz only from 4.5 V (5 MHz
@@ -102,10 +104,17 @@ and so on ([README.md](README.md), "How a board joins the bench").
   forced on (RUNSTDBY, 64k cycles of start-up, LPMODE off) never sets
   XOSC32KS, and the RTC selected onto it never synchronizes its CTRLA
   (CTRLABUSY stuck), where the same RTC on OSC32K synchronizes at once:
-  a joint, a crystal not fitted, or its load. The Ticker runs from
-  OSC32K meanwhile (`preferred()`). It is the one red of the board: five
-  verdicts of `test_avr_clock` (the rulers timed against it) and two of
-  `test_avr_rtc` (letter 9, XOSC32K as CLK_RTC).
+  a joint, a crystal not fitted, or its load. The clock failure detector
+  watching XOSC32K stays silent on it too, with and without its test bit
+  (`test_avr_clock` letter 6). The Ticker runs from OSC32K meanwhile
+  (`preferred()`). The board file says so (`board::xosc32k_runs` false),
+  and every verdict that needs the crystal running declines on this board
+  with that reason: in `test_avr_clock` the rates timed against it (the
+  ladder's, OSCHF's, the tune curve, the auto-tune, the 32 kHz main
+  clocks, the detector's test bit on XOSC32K and the fallback's rate),
+  while TIMEBASE, the refusals, the TUNE clamp, the OSC32K init and the
+  detector's fallback on the main clock still run; in `test_avr_rtc`
+  letter 9, XOSC32K as CLK_RTC, whole.
 - **Every suite image of the board, each run in its final form.** The
   partner is the SAM C21 board on the I2C node and the four link wires,
   and the partner idle on its console for the single-board keys (a key
@@ -116,16 +125,16 @@ and so on ([README.md](README.md), "How a board joins the bench").
   |---|---|---|---|
   | `test_avr_platform` | `z` | - | 109 of 109 |
   | `test_avr_pin` | `a` | - | 30 of 30 |
-  | `test_avr_clock` | `a` | - | 22 of 27, the five the 32 kHz crystal's |
+  | `test_avr_clock` | `a` | - | 30 of 30, ten runs; the verdicts that need the 32 kHz crystal declined |
   | `test_avr_power` | `z` | - | 53 of 53 |
   | `test_avr_meter` | `z` | - | 38 of 38 |
-  | `test_avr_rtc` | `a` | - | 89 of 91, the two the 32 kHz crystal's |
+  | `test_avr_rtc` | `a` | - | 89 of 89, three runs; letter 9 declined (the 32 kHz crystal) |
   | `test_avr_nvm` | `z` | - | 110 of 110 |
   | `test_avr_analog` | `a` | - | 158 of 158 |
   | `test_avr_timer-1`, `-2` | `a` | - | 141 of 141, 67 of 67 |
   | `test_avr_sleep-1` | `z` | - | 56 of 56 |
   | `test_avr_sleep-2` | `y` | `sleep_peer` | 47 of 47, three runs |
-  | `test_avr_twi-1` | `z` | - | 226 of 226, ten runs |
+  | `test_avr_twi-1` | `z` | - | 226 of 226, three runs (letter v alone fifteen more) |
   | `test_avr_twi-2` | `y` | `twi_peer` | 136 of 136, ten runs |
   | `test_avr_spi-1` | `z` | - | 180 of 180 |
   | `test_avr_spi-2` | `y`, `z` | `spi_peer` | 51 of 51, 20 of 20 |
