@@ -426,7 +426,9 @@ horizon itself, one entry each.
   cores, the bus fabric's counters).
 - **The RP2350 stratum**: `in bring-up` on the WeAct RP2350B, written
   ONCE and run TWICE (M33 and Hazard3), every chapter green on both
-  halves, the power chapter included; two declared gaps above the lists:
+  halves, the power chapter included bar a power-down into P1.7, which
+  does not come back on the bench (docs/rp2350/powman.md); two declared
+  gaps above the lists:
   the HSTX (born with its first user) and the M33's coprocessors
   (declined: one architecture of two has them). The bench verb is
   state-independent (a rescue over the debug port) and does NOT reach a

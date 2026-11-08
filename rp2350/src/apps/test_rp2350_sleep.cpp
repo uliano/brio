@@ -81,7 +81,10 @@
 //                  --expect="letter done" --timeout 90
 //   r  (by name) P1.7: the deepest state this chip has - the switched
 //      core, the XIP cache and both SRAM domains unpowered. The same
-//      shape, and only after the rescue has been proven from a P1.m.
+//      shape. IT DOES NOT COME BACK ON THIS BENCH: the board stays
+//      powered down, beyond the debug port's rescue, until its supply is
+//      cycled (docs/rp2350/powman.md) - run it only with a hand on the
+//      board's USB-C.
 //   u  (by name) THE RESCUE NET, dormant: a dormant on the crystal with
 //      a SIXTY SECOND alarm under it, entered and announced, so that a
 //      rescue over the debug port can be tried against a chip whose

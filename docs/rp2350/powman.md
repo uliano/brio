@@ -49,7 +49,9 @@ the switched core does not return: what comes back is a boot, the
 eight scratch words and whatever memory domain the state left powered
 being all that survives, and `power_down()` refuses, writing nothing,
 unless a way back is armed (the alarm with `powerup_on_alarm(true)`, or
-a GPIO power-up slot). On this bench the debug port also blocks a
+a GPIO power-up slot). P1.0 is measured to come back by the alarm; P1.7
+is measured NOT to, on two boards, and the states between are untried
+(Bench findings). On this bench the debug port also blocks a
 power-down until `ignore_debug_powerup(true)` (the second block below).
 Every register of the block up to offset 0xac takes a write only with
 its password; the verbs carry it, and a program that writes the block
@@ -236,8 +238,9 @@ not a reset.
 ## Bench findings
 
 The reference suite is `test_rp2350_sleep`, green on both architectures
-on the WeAct RP2350B board (stepping A2), with the always-on timer as the
-only ruler that answers in every state.
+on the WeAct RP2350B board (stepping A2) but for its by-name letter `r`,
+the power-down into P1.7 below, with the always-on timer as the only
+ruler that answers in every state.
 
 - **AS FOUND, at rest under a program.** P0.0; no transition in flight
   and neither BAD_* flag standing. The sequencer
@@ -295,12 +298,28 @@ only ruler that answers in every state.
   `swcore_powerdown` and nothing else. THE ALWAYS-ON BLOCK'S EIGHT
   SCRATCH WORDS CROSS IT; the watchdog's four do not, living in the
   switched core. The `.noinit` SRAM crosses P1.0, which keeps both memory
-  domains powered, and does not cross P1.7, which does not.
-- **A POWER-DOWN INTO P1.7**, the deepest state this chip has - the
-  switched core, the XIP cache and both SRAM domains unpowered, the
-  always-on domain and its timer the only thing left - comes back the
-  same way and with the same record, and the `.noinit` SRAM does not
-  cross it.
+  domains powered.
+- **A POWER-DOWN INTO P1.7 DOES NOT COME BACK ON THIS BENCH.** P1.7 is
+  the deepest state this chip has: the switched core, the XIP cache and
+  both SRAM domains unpowered, the always-on domain and its timer the
+  only thing left. Asked for exactly as P1.0 is - the alarm three seconds
+  out and armed as the power-up request, the debug port's request masked,
+  the timer running on the low-power oscillator, which SEQ_CFG keeps
+  running through the power-down, state P0.0 before the store - the
+  request is accepted, the core stops, and the chip stays down until its
+  supply is cycled; the debug port's rescue reads DPIDR and no further,
+  the signature of a core with no power. Five tries on the WeAct RP2350B
+  ended so: after a P1.0 in the same boot; alone, from a power-on; with
+  the wires to the partner board removed; with a GPIO power-up slot armed
+  on GP20 beside the alarm and the partner's wave on that pad; and with
+  the suite built from the source as it stood when this state was last
+  recorded as returning. A second board of the same kind, running three
+  P1.0 power-downs and then P1.7 with no console, stayed down as well, at
+  a leg not established. That the pad's power-up did not end it either
+  fits a sequencer that never completes the power-down - 6.2.3.2 enables
+  the GPIO power-ups only once it has - but the pad's wake is not
+  measured from any state, and which domain holds the sequence is not
+  established.
 - **AND THE DEBUG PORT'S RESCUE DOES NOT REACH A POWERED-DOWN CORE.**
   3.5.8 says the rescue reset works "even when system clocks are stopped
   and the switched core power domain is powered down". The first half is
@@ -316,7 +335,7 @@ only ruler that answers in every state.
   hanging on the mem-APs that have no power; either way the practical
   fact is the same, and it is why `power_down()` REFUSES without an armed
   wake source. That guard is the only way back from a P1.m state on this
-  bench. A failure AFTER the wake is a different matter and a safe one:
+  bench, and it is not enough for P1.7 (the finding above). A failure AFTER the wake is a different matter and a safe one:
   the chip is then in P0.0 with the core powered, where the rescue works.
 - **THE DEBUG PORT BLOCKS EVERY POWER-DOWN ON THIS BENCH.** After
   `brio flash` has exited, CURRENT_PWRUP_REQ reads 0x20 - the debug
@@ -376,11 +395,16 @@ Implemented but not bench-verified, each with what would measure it:
 
 - **The four GPIO power-up slots as a wake from a P1.m state.** The slots
   are written, read back and refused for a pad the package has not got,
-  and the wake this chapter measures is the alarm's. A pad wake out of a
-  powered-down core needs an edge from outside while the core has no
-  supply - a peer board's output into one of the four, which the standing
-  wires of this desk do not provide (both ends of every one of them are
-  this chip's own pads, and this chip is off).
+  and the wake this chapter measures is the alarm's. The one try, a
+  rising edge on GP20 from the partner board, was made from P1.7, which
+  did not come back by the alarm either, so it measures nothing. What
+  would measure it: the same slot and the same wave from P1.0, the alarm
+  armed beside it as the net.
+- **A power-down into P1.1 to P1.6** (a memory domain or the XIP cache
+  off as well as the switched core). `power_down()` takes them as it
+  takes P1.0; none has been tried. They are what would locate the domain
+  that keeps P1.7 from coming back - one state at a time from P1.1, each
+  failure costing a cycle of the board's supply.
 - **STATE.BAD_SW_REQ and STATE.BAD_HW_REQ.** Both are decoded and neither
   has been raised: every request this driver will make is one 6.2.3's
   table allows, and it refuses the rest before the store. What would
