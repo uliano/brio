@@ -300,9 +300,10 @@ public:
     }
 
     /// Both channels off and the bus clock closed - no reset pulse:
-    /// init() starts from one (docs/design/dma.md, the release contract),
-    /// which is what withdraws a request DMAENx raised, clearing DMAENx not
-    /// doing so here (stop_dma(), ES0206 2.6.1).
+    /// init() starts from one (docs/design/dma.md, the release contract).
+    /// A request DMAENx already raised is not withdrawn by clearing DMAENx
+    /// (stop_dma(), ES0206 2.6.1); whether init()'s reset withdraws it is
+    /// not measured (docs/stm32f4/dac.md).
     static void release() {
         regs().CR = 0;
         bus_clock(false);

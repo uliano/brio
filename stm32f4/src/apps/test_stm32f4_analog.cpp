@@ -2086,14 +2086,14 @@ void tr_dac_dma() {
         (void)delay_us(clock, 20);
         Dac::clear_flags(0xFFFFFFFFu);
 
-        // ES0206 2.6.1 / ES0298 2.7.1 IS WHY THIS COUNT EXISTS. A request
-        // left pending when a DMA-to-DAC round is stopped survives both
-        // the DMAEN clear and the clock being closed, and is served the
-        // moment the converter comes back - so the stream can have taken
-        // a beat before any edge. It was seen once, after this letter
-        // followed the ADC's DMA letter, and it does not reproduce on
-        // demand; so the offset is COUNTED and the table compared from
-        // where the stream really is, rather than assumed to be zero.
+        // ES0206 2.6.1 / ES0298 2.7.1 IS WHY THIS COUNT EXISTS. They say a
+        // request left pending when a DMA-to-DAC round is stopped survives
+        // both the DMAEN clear and the clock being closed, and is served
+        // the moment the converter comes back - so the stream could take a
+        // beat before any edge. The one beat this bench has shown was the
+        // trigger set-up above, run after the enable; the erratum itself
+        // has not been seen. The offset is still COUNTED and the table
+        // compared from where the stream really is, not assumed zero.
         (void)delay_us(clock, 10);
         const uint16_t spurious = DacStream::progress().done;
 

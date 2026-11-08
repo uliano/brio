@@ -185,8 +185,9 @@ static, never instantiated) - a part has one DAC block or none.
 
 - **The block**: `bus_clock()`, `reset()`, `init()` (clock, reset, clock),
   `release()` (both channels off and the clock gated, no reset pulse;
-  `init()`'s reset is what withdraws a pending request - the release
-  contract, and this family's erratum besides: a cleared DMAEN does not), `claim_pad<Pin>()` / `release_pad<Pin>()` (analog mode,
+  `init()` starts from the block's reset - the release contract; whether
+  that reset withdraws a request already asserted is not measured, and
+  this family's erratum says a cleared DMAEN does not), `claim_pad<Pin>()` / `release_pad<Pin>()` (analog mode,
   which is not this family's reset state), `channels` and
   `channels_known`, `steps` (4096 always - the 8-bit format is a
   placement, not a resolution), `irq()`.
@@ -353,15 +354,23 @@ stream reported its own completion after its last beat, and no underrun
 happened while it was serving - nor on the ONE trigger past that last
 beat, because 14.3.7 wants a SECOND unserved request before it says so.
 
-**ES0206 2.6.1 / ES0298 2.7.1 SEEN ONCE.** A request left pending when a
-DMA-to-DAC round is stopped survives the DMAEN clear, the block's reset
-and its clock being closed, and is served the moment a stream is armed
-again - so a table can start playing one entry ahead of itself with no
-trigger having happened. It appeared once, with this letter following the
-ADC's DMA letter, and it does not reproduce on demand; the letter now
-COUNTS the beats taken before its first edge and compares the table from
-wherever the stream really is, which is both the measurement and the only
-defence a caller has.
+**The beat before the first edge was the letter's own set-up, not the
+erratum.** The letter counts the beats a stream takes before its first
+trigger, because ES0206 2.6.1 / ES0298 2.7.1 say a request asserted when
+a round is stopped survives the DMAEN clear and the clock being closed,
+and is served when the converter comes back. One such beat appeared in
+about half the runs where this letter followed the ADC's DMA letter.
+Read-backs of the holding register and the stream's count around each
+step placed it inside the letter's own set-up of the trigger path (the
+pad driven low, EXTI line 9 moved to port C, its edge and event enabled),
+which then ran after the channel was enabled: across those five calls
+the holding register went from 0 to 200 and the stream took a beat. Which
+of the five raises the trigger is not isolated. With the trigger path
+set up before the channel listens, the letter followed the ADC's DMA
+letter twelve times and ran in ten whole passes with no beat before the
+first edge. The erratum itself has not been seen on this bench; the
+count stays, and the table is compared from wherever the stream really
+is.
 
 **A SPENT STREAM IS AN UNDERRUN.** Three more edges after the stream's
 last beat: DMAUDR is up, and the pad still sits at 3738 - the channel
@@ -410,6 +419,13 @@ Implemented, not bench-verified:
 
 - **The dual left-aligned and dual 8-bit registers**: written and
   compiled; the right-aligned dual one is what the suite measures.
+- **ES0206 2.6.1 / ES0298 2.7.1** (a request asserted when a round is
+  stopped, served when the converter comes back): `stop_dma()` does the
+  DAC's half of the errata's sequence, and the case has never been
+  produced here. Whether `init()`'s reset withdraws such a request is not
+  measured either. What would measure both: a round stopped with a
+  trigger left unserved, then the channel enabled again with and without
+  `init()` in between, the stream's count read before any edge.
 - **ES0206 2.6.2 / ES0298 2.7.2** (the underrun flag lost when an
   internal trigger lands on the acknowledge cycle): it needs software and
   hardware triggers used together on one channel, which no letter here
