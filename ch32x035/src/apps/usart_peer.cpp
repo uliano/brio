@@ -123,6 +123,7 @@
 #include "ch32x035/tim.hpp"
 #include "ch32x035/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 
 #include "../../../avrxt/src/apps/usart_link.hpp"
 
@@ -350,10 +351,21 @@ bool apply_cfg(const link::Cfg& c) {
     return f && open_link(*f);
 }
 
+/// DATAR's turn (TXE), bounded on the kernel tick (util/test_wait.hpp):
+/// one load a turn beside TXE's, so a gapless blast at 3 Mbaud - a frame of
+/// 160 cycles, the write due inside the frame the shifter holds - keeps its
+/// pace. TXE comes within one frame at any rate the link runs; 10 tick
+/// periods (10 to 11 ms) are a 12-bit frame down to 1200 baud. False when
+/// it never came: the caller drops the byte and, where it counts frames,
+/// ends the action timed out.
+[[gnu::always_inline]] inline bool tx_turn() {
+    return brio::wait_ticks<P>([] { return L::tx_empty(); }, 10u);
+}
+
 void put_link(uint8_t b) {
-    while (!L::tx_empty()) {
+    if (tx_turn()) {
+        L::write_data(b);
     }
-    L::write_data(b);
 }
 
 void wait_line_idle() {
@@ -514,8 +526,14 @@ bool play(uint8_t ch, Edges& e) {
         (void)E::abandon();
         ++play_timeouts;
     }
-    // The tail: the list's last cell played out at the line's final level.
-    while (T1::count() < end) {
+    // The tail: the list's last cell played out at the line's final level -
+    // bounded on the kernel tick by the list's own budget (one load a turn
+    // beside the counter's, as the bare loop was); a counter that never
+    // gets there counts as a play that timed out, once.
+    const uint32_t tail_ticks = budget / (SysClock::hz / 1000u) + 2u;
+    if (!brio::wait_ticks<P>([end] { return T1::count() >= end; }, tail_ticks) && done) {
+        ++play_timeouts;
+        done = false;
     }
     return done;
 }
@@ -606,9 +624,7 @@ link::Report run_receive(const link::Params& a, bool echo, uint32_t& span_cycles
                 last = Ticker::cycles();
             }
             account(r, st, d, mask);
-            if (echo) {
-                while (!L::tx_empty()) {
-                }
+            if (echo && tx_turn()) {
                 L::write_word(d);
             }
             continue;
@@ -712,7 +728,9 @@ link::Report run_send(const link::Params& a, bool blast) {
         }
         for (uint16_t i = 0; i < a.count; ++i) {
             const uint16_t v = static_cast<uint16_t>(stream.next() & mask);
-            while (!L::tx_empty()) {
+            if (!tx_turn()) {
+                r.flags |= link::report_timed_out;
+                break;
             }
             L::write_word(v);
             r.sum = static_cast<uint16_t>(r.sum + v);
@@ -733,14 +751,18 @@ link::Report run_send_mpcm(const link::Params& a, const uint8_t* pairs) {
     uint8_t seq = a.value;
     for (uint8_t g = 0; g < a.groups; ++g) {
         const uint16_t addr = static_cast<uint16_t>(0x100u | pairs[2u * g]);
-        while (!L::tx_empty()) {
+        if (!tx_turn()) {
+            r.flags |= link::report_timed_out;
+            break;
         }
         L::write_word(addr);
         r.sum = static_cast<uint16_t>(r.sum + addr);
         ++r.count;
         for (uint8_t k = 0; k < pairs[2u * g + 1u]; ++k) {
             const uint16_t v = seq++;
-            while (!L::tx_empty()) {
+            if (!tx_turn()) {
+                r.flags |= link::report_timed_out;
+                break;
             }
             L::write_word(v);
             r.sum = static_cast<uint16_t>(r.sum + v);
@@ -835,7 +857,14 @@ link::Report run_glitch(const link::Params& a) {
     ok = ok && T1::output_mode(tx_ch, TimOutputMode::pwm1);
     for (uint16_t i = 0; ok && i < a.count; ++i) {
         T1::enable(true);
-        while (T1::enabled()) {
+        // One pulse: the counter stops itself at its update, delay_counts +
+        // counts of div cycles (at most width + delay_counts + div); bounded
+        // on the kernel tick at that plus two periods. A counter that never
+        // stopped ends the action timed out.
+        const uint32_t pulse_ticks = (width + delay_counts + div) / (SysClock::hz / 1000u) + 2u;
+        if (!brio::wait_ticks<P>([] { return !T1::enabled(); }, pulse_ticks)) {
+            r.flags |= link::report_timed_out;
+            break;
         }
         delay_us_now(a.aux8 != 0u ? a.aux8 : 1u);
         ++r.count;

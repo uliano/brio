@@ -212,9 +212,11 @@ constexpr uint32_t core_hz = SysClock::hz;
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
 
 /// The composed cycle count: monotone across the ticker's restart, a
-/// difference exact under 2^32 cycles (89 s at 48 MHz).
+/// difference exact under 2^32 cycles (89 s at 48 MHz). Its rate makes it
+/// the ruler util/test_wait.hpp's verbs take as well.
 struct Ruler {
     static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
 
 /// The STK counter's period: it counts HCLK and restarts at the ticker's

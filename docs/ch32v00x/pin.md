@@ -228,7 +228,9 @@ for the wire:
 - **The scanner, on the jumper**: util's InputScanner over PD4 with
   PD2 driving it is silent at start and on a held level, publishes
   one InputEdge per flip with the new state, and swallows a glitch
-  shorter than its debounce.
+  that one or two of its samples saw, under the three its debounce
+  asks for (the samples that saw the glitch are counted, so a glitch
+  no sample caught does not pass).
 
 ## Not covered yet
 

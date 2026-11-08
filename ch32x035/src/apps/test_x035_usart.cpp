@@ -25,8 +25,10 @@
 //    floating TX pad.
 //  - `y`, THE TWO-BOARD LETTERS, against the CH32V006 running usart_peer:
 //    driven in band over the link itself (usart_link.hpp), its rendezvous
-//    a letter, and every leg judged from what the far chip reports -
-//    FAILING loudly when nobody answers. A leg the peer REFUSES (a
+//    a letter, and every leg judged from what the far chip reports. A
+//    peer that never answered in this boot declines each letter with the
+//    reason (a skip); one that answered and falls silent FAILS it. A leg
+//    the peer REFUSES (a
 //    capability its silicon has not got) is SKIPPED with the reason and
 //    judges nothing. THE FAR CLOCK: the WeAct board fits no crystal, so the
 //    peer runs its HSI's PLL and its calibrate times this end against that
@@ -34,7 +36,7 @@
 //    clocks' ratio, a figure good to a few tenths of a per cent there, and
 //    is judged; the spans judged within 500 ppm of a reference leg taken
 //    back to back - the rates (k), the odd stops (l), the transmit engine's
-//    gaps (s) - are printed and not judged, because two RC oscillators
+//    gaps (s) - are printed and skipped, because two RC oscillators
 //    wander between two legs by more than that bound (judge_span() below
 //    has the figures); the HSI's absolute error and its trim (j) need a
 //    crystal and decline with the reason. Every byte-exact verdict of
@@ -139,6 +141,7 @@
 #include "ch32x035/usart.hpp"
 #include "util/placement.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #include "../../../avrxt/src/apps/usart_link.hpp"
@@ -192,17 +195,30 @@ using Debug3 = Uart<3, P, 16, 16, UartFormat{}, NoDmaEngine, NoDmaEngine, 1>;
 
 TwoKeyTestBench<Serial, 'y'> bench;
 
+/// The suite's ruler (util/test_wait.hpp): the kernel ticker's composed
+/// cycles(), the tick count and STK's position, for every wait with
+/// interrupts enabled.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// The bare STK count, for the spans letters d and e take with interrupts
+/// MASKED, where the tick count stops and the composed ruler cannot serve:
+/// one load, a difference exact under one period of the counter (48000
+/// cycles, the ticker's millisecond).
 uint32_t cycles_now() { return stk()->CNTL; }
 uint32_t cycles_between(uint32_t from, uint32_t to) {
     const uint32_t period = stk()->CMPLR + 1u;
     return to >= from ? to - from : to + period - from;
 }
+/// The longest masked wait on that count: half its period, so the fold
+/// stays exact with the late read's margin.
+constexpr uint32_t masked_bound = SysClock::hz / Ticker::ticks_per_second / 2u;
 
-void console_drain() {
-    while (!Serial::tx_idle()) {
-    }
-    (void)delay_us(clock, 200);
-}
+/// Every console byte off the wire, bounded (util/test_wait.hpp);
+/// false when the console did not go idle within 200 ms.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 
 // ---------------------------------------------------------------------------
 // a - the divisor
@@ -359,16 +375,20 @@ uint32_t wire_permille(uint32_t baud, uint32_t n) {
 bool on_the_wire(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
 
 void td_frame_time() {
-    console_drain();
+    if (!console_drain()) {
+        bench.skip("the console did not drain: the frame not timed");
+        return;
+    }
     uint32_t took = 0;
     {
         P::CriticalSection cs;   // nothing of ours lands inside the frame
         Usart<2>::clear_flags(usart_tc);
         const uint32_t c0 = cycles_now();
         Usart<2>::write_data('U');
-        uint32_t spin = 0;
-        while (!Usart<2>::tx_complete() && spin < 100'000u) {
-            ++spin;
+        // Masked: bounded on the bare count at half its period (24000
+        // cycles, nearly six frames of 4170); a frame that never ends
+        // reads as that span and fails the verdict below.
+        while (!Usart<2>::tx_complete() && cycles_between(c0, cycles_now()) < masked_bound) {
         }
         took = cycles_between(c0, cycles_now());
     }
@@ -383,7 +403,10 @@ void td_frame_time() {
     // rounding), and USART4 on PB0 - a wire into the far board's floating
     // input - at three rates of letter k's, 1024 frames each: 115200, 1
     // Mbaud (48, exact) and 3 Mbaud (16, exact).
-    console_drain();
+    if (!console_drain()) {
+        bench.skip("the console did not drain: the runs not timed");
+        return;
+    }
     const uint32_t console_pm = wire_permille<Usart<2>>(115200, 128);
     print(serial, crlf, "  the console: 128 frames in ", console_pm, " thousandths of their wire time at 115200",
           crlf);
@@ -425,17 +448,26 @@ void te_break() {
         P::CriticalSection cs;
         const uint32_t c0 = cycles_now();
         U4::send_break();
-        uint32_t spin = 0;
-        while (U4::break_pending() && spin < 100'000u) {
-            ++spin;
+        // Masked: bounded on the bare count at half its period (24000
+        // cycles, some 57 bit times of 417).
+        while (U4::break_pending() && cycles_between(c0, cycles_now()) < masked_bound) {
         }
         took = cycles_between(c0, cycles_now());
         cleared = !U4::break_pending();
     }
     const uint32_t bit = U4::brr();
     print(serial, "  SBK cleared after ", took, " cycles = ", took / bit, " bit times", crlf);
-    bench.verdict("SBK clears itself on the break frame's stop bit, within 20 bit times",
-                  cleared && took <= 20u * bit);
+    // THE LOWER BOUND: SBK is reset "on the stop bit of the break frame"
+    // (14.10.4), and a frame of eight data bits reaches its stop bit after
+    // its start bit and the eight: nine bit times after the break begins,
+    // which is no earlier than the SBK write. c0 is read before that write
+    // and the poll sees the clear after it happens, so the span read is
+    // never shorter: took >= 9 x BRR. A bit that cleared at once, or on a
+    // data bit, fails it. The upper bound, 20 bit times, is the letter's
+    // older one, chosen by eye: about twice the measured 10.4.
+    bench.verdict("SBK clears itself on the break frame's stop bit: after at least 9 bit times (the start bit "
+                  "and eight data bits), within 20",
+                  cleared && took >= 9u * bit && took <= 20u * bit);
     Loop::release();
 }
 
@@ -513,7 +545,7 @@ void raise_and_release4() {
     u4_owner = U4Owner::ring_only;
     (void)RingOnly::init(clock, 9600);
     Rx4::output(true);
-    wait_ms(2);
+    brio::spin_us<Ruler>(2'000);
     U4Rx8::stop();
     Pfic::disable(usart_irq_for(4));   // the idle line's clear would read DATAR, and take the frame
     drive4_frame(0xA5);
@@ -531,7 +563,7 @@ void ti_release_reinit() {
         u4_owner = U4Owner::ring_only;
         const bool up = RingOnly::init(clock, 9600);
         Rx4::output(true);
-        wait_ms(3);
+        brio::spin_us<Ruler>(3'000);
         uint8_t b = 0;
         uint32_t stray = 0;
         while (RingOnly::read_byte(b)) {
@@ -540,7 +572,7 @@ void ti_release_reinit() {
         for (uint32_t i = 0; i < 8u; ++i) {
             drive4_frame(static_cast<uint8_t>(0x31u + 7u * i));
         }
-        wait_ms(3);
+        brio::spin_us<Ruler>(3'000);
         uint32_t got = 0;
         bool in_order = true;
         while (RingOnly::read_byte(b)) {
@@ -551,7 +583,9 @@ void ti_release_reinit() {
         }
         RingOnly::release();
         u4_owner = U4Owner::irq;
-        (void)Rx4::input();
+        // Handed back as the line's idle: an input pulled up, as every
+        // letter that opens USART4 leaves its receive pad.
+        (void)Rx4::input(PinPull::up);
         print(serial, "  run ", run, ": init() again ", up ? "up" : "DOWN", ", ", stray,
               " byte(s) before any frame; a burst of 8: ", got, in_order ? " in order" : " NOT in order", crlf);
         if (up && stray == 0u) {
@@ -570,12 +604,12 @@ void ti_release_reinit() {
         raise_and_release4();
         U4::bus_clock(true);
         (void)U4Rx8::arm_ring<U4Rx>(&U4::regs().DATAR, ctl_ring);
-        wait_ms(3);
+        brio::spin_us<Ruler>(3'000);
         const uint16_t moved = static_cast<uint16_t>(sizeof ctl_ring - U4Rx8::remaining());
         U4Rx8::stop();
         U4::reset();
         U4::bus_clock(false);
-        (void)Rx4::input();
+        (void)Rx4::input(PinPull::up);   // the line's idle, as above
         print(serial, "  control run ", run, ": the gate opened with no reset, channel 8 armed: ", moved,
               " item(s) moved with nothing driven", crlf);
         if (moved == 1u) {
@@ -603,11 +637,13 @@ void th_half_duplex_self() {
     static constexpr uint8_t bytes[4] = {0x55, 0xA3, 0x0F, 0xF0};
     uint8_t heard = 0;
     uint8_t same = 0;
+    uint8_t sent = 0;
     for (const uint8_t b : bytes) {
         U4::write_data(b);
-        uint32_t spin = 0;
-        while (!U4::tx_complete() && spin < 100'000u) {
-            ++spin;
+        // One frame at 115200 is 87 us; 2 ms bounds TC, and a byte whose TC
+        // never came is a frame that never left - counted, and judged below.
+        if (brio::wait_until<Ruler>([] { return U4::tx_complete(); }, 2'000)) {
+            ++sent;
         }
         const uint16_t st = U4::status();
         if ((st & usart_rxne) != 0u) {
@@ -618,15 +654,21 @@ void th_half_duplex_self() {
     (void)U4::half_duplex(false);
     U4::enable(false);
     U4::bus_clock(false);
-    Tx4::release();
-    print(serial, "  HDSEL on PB0: ", heard, " of 4 own frames heard, ", same, " of them equal", crlf);
+    // Handed back as the line's idle: an input pulled up, so the far
+    // receiver this pad is wired to sees no edge.
+    (void)Tx4::input(PinPull::up);
+    print(serial, "  HDSEL on PB0: ", sent, " of 4 frames sent (TC), ", heard, " of them heard, ", same,
+          " of those equal", crlf);
     bench.verdict("half duplex opens on PB0", opened);
     // MEASURED: none. 14.5's "the TX and RX pins connected internally"
     // is the single wire's receive path, which hears another node
     // (letter p) and not the instance's own frames - the CH32V006's
     // answer too (its usart.hpp) - so this die has no jumperless loop.
-    bench.verdict("its receiver does not hear its own frames: no jumperless self-loop on this die",
-                  heard == 0u);
+    // Every frame must have LEFT (TC for each) for the silence to mean
+    // anything: a transmitter that sent nothing is heard by nobody.
+    bench.verdict("its receiver does not hear its own frames: all four sent (TC each), none heard - no "
+                  "jumperless self-loop on this die",
+                  sent == 4u && heard == 0u);
 }
 
 // ===========================================================================
@@ -636,14 +678,16 @@ void th_half_duplex_self() {
 /// A verdict, unless the peer refused the leg: then SKIP, counting nothing.
 void judge(const char* name, bool ok) {
     if (leg_refused) {
-        print(serial, "  SKIP  ", name, " (the peer refused the leg)", crlf);
+        bench.skip(name, " (the peer refused the leg)");
         return;
     }
     bench.verdict(name, ok);
 }
+/// The same for a two-piece name; the refusal itself is printed by
+/// peer_report() (x035_link_dut.hpp) when it comes.
 void judge(const char* name, const char* suffix, bool ok) {
     if (leg_refused) {
-        print(serial, "  SKIP  ", name, suffix, " (the peer refused the leg)", crlf);
+        bench.skip(name, suffix);
         return;
     }
     bench.verdict(name, suffix, ok);
@@ -679,7 +723,8 @@ bool far_clock_rc() {
 /// the leg is a measurement and no verdict is claimed.
 void judge_span(const char* name, const char* suffix, bool ok) {
     if (!leg_refused && far_rc_state == 1) {
-        print(serial, "  NO VERDICT  ", name, suffix, " (an RC far clock wanders more than the bound)", crlf);
+        print(serial, "  an RC far clock wanders more than the bound:", crlf);
+        bench.skip(name, suffix);
         return;
     }
     judge(name, suffix, ok);
@@ -766,9 +811,9 @@ int32_t hsi_error() {
 // j - the rendezvous, and the HSI against the crystal
 // ---------------------------------------------------------------------------
 void tj_link() {
-    const bool found = ensure_link();
-    bench.verdict("command mode on USART4 (8N1, 115200) and the peer answers a ping", found);
-    if (!found) {
+    // Command mode on USART4 (8N1, 115200) and a ping answered: an absent
+    // peer declines the letter, a silent one fails it (need_peer()).
+    if (!need_peer()) {
         return;
     }
     link::Ident d{};
@@ -788,8 +833,8 @@ void tj_link() {
     // measured against it are skipped below, no verdict claimed.
     const bool peer_crystal = got && d.xtal == 1u;
     if (got && d.xtal == 0u) {
-        print(serial, "  SKIPPED, no verdict claimed: the peer runs no crystal - its board fits none - so this "
-                      "letter's HSI against the crystal is not measured on this pair", crlf);
+        bench.skip("the peer runs no crystal (its board fits none): this letter's HSI against a crystal and its "
+                   "trim walk are not measured on this pair");
     } else {
         bench.verdict("its time base is crystal-referenced", peer_crystal);
     }
@@ -799,12 +844,15 @@ void tj_link() {
     put4(link::byte_of(link::Op::ping));
     put4(0);
     put4(0x00);   // not the checksum
-    wait_tc();
+    const bool bad_sent = wait_tc();
     link::Frame bad;
-    bench.verdict("a bad checksum comes back as a NAK", recv_frame(bad, 120) && bad.op == link::Op::nak);
+    bench.verdict("a bad checksum comes back as a NAK",
+                  bad_sent && recv_frame(bad, 120) && bad.op == link::Op::nak);
     for (uint8_t i = 0; i < 12u; ++i) put4(static_cast<uint8_t>(0x11u * i));
-    wait_tc();
-    wait_ms(120);
+    // The desync's bytes need only leave; the recovery's own verdict below
+    // judges the link after them.
+    (void)wait_tc();
+    brio::spin_us<Ruler>(120'000);
     (void)link_command_mode();
     bench.verdict("the link recovers after a desync", command(link::Op::ping));
 
@@ -831,7 +879,38 @@ void tj_link() {
     // pads floating - and back by itself when it runs out, which this end
     // finds by pinging every few milliseconds (one ping and its ack are
     // under a millisecond at 115200, the wait for the ack 8 ms).
+    //
+    // THE BOUNDS, from the far chip's code (ch32v00x/src/apps/usart_peer.cpp)
+    // and the two clocks' ratio. The peer acks, waits for its ack's last
+    // stop bit, then sets its deadline 300 of ITS milliseconds on; this end
+    // reads standby_at when the ack's last byte is decoded, a few
+    // microseconds earlier at most - so no ack time is subtracted. The
+    // peer's deadline falls 299 to 300 of its milliseconds after its start
+    // (its millisecond count read anywhere inside a period), and no ping
+    // whose frame completes before it is answered; in this end's
+    // milliseconds that is 299 to 300 times (1 + e), e this end's rate
+    // against the far clock (calibrate(), measured just before), held to e
+    // less or more the 1100 ppm two oscillators wander between two legs
+    // (judge_span()'s figure, 1051 measured, the larger case). This end's
+    // two millisecond reads lose up to one more. After the deadline the
+    // answer waits at most for the poll in flight: its 8 ms window, the
+    // ping's four characters and the ack's six at 87 us each, 9 ms, plus
+    // the peer's turn - 10 ms. So
+    //   lower = 299 x (1 + (e - 1100) / 10^6) - 1 ms
+    //   upper = 300 x (1 + (e + 1100) / 10^6) + 10 + 1 ms
+    // (e = -2600, a crystal peer's: 296.9 and 310.5; e = +5400, the WeAct
+    // pair's RC peer: 299.3 and 312.9).
     constexpr uint16_t standoff_ms = 300;
+    link::Cfg ratio_cfg{};
+    ratio_cfg.rate = calib_rate;
+    const Calib ratio = calibrate(ratio_cfg, calib_frames);
+    const bool ratio_known = ratio.ok;
+    const int32_t e = ratio.ppm;
+    // In microseconds: 299 ms x (e - 1100) ppm is 299 x (e - 1100) / 1000 us,
+    // inside 32 bits for any e an HSI can show (|e| < 70 000).
+    const int32_t lower_us = 299'000 + 299 * (e - 1100) / 1000 - 1000;
+    const int32_t upper_us = 300'000 + 300 * (e + 1100) / 1000 + 11'000;
+    (void)link_command_mode();
     link::Params so{};
     so.ms = standoff_ms;
     uint8_t sp[link::params_size] = {};
@@ -839,7 +918,7 @@ void tj_link() {
     const bool standby_acked = command(link::Op::standby, sp, link::params_size);
     const uint32_t standby_at = Ticker::millis();
     bench.verdict("a standby is acked before the peer lets go of the line", standby_acked);
-    wait_ms(20);
+    brio::spin_us<Ruler>(20'000);
     const bool mute = !command_once(link::Op::ping, no_payload, 0, 40);
     bench.verdict("inside the stand-off a ping goes unanswered", mute);
     uint32_t back_after = 0;
@@ -850,9 +929,18 @@ void tj_link() {
         }
     }
     print(serial, "  the stand-off of ", standoff_ms, " ms: the peer answers again ", back_after,
-          " ms after its ack (0 = never)", crlf);
-    bench.verdict("the peer answers again when the stand-off runs out, and not before",
-                  standby_acked && back_after >= standoff_ms && back_after <= standoff_ms + 20u);
+          " ms after its ack (0 = never); this end against the far clock ", e, " ppm, the window ",
+          lower_us / 1000, ".", (lower_us % 1000) / 100, " to ", upper_us / 1000, ".", (upper_us % 1000) / 100,
+          " ms", crlf);
+    if (ratio_known) {
+        const int32_t back_us = static_cast<int32_t>(back_after) * 1000;
+        bench.verdict("the peer answers again when the stand-off runs out, and not before (its 300 ms on the two "
+                      "clocks' ratio, the arithmetic beside it)",
+                      standby_acked && back_after != 0u && back_us >= lower_us && back_us <= upper_us);
+    } else {
+        bench.skip("the calibrate leg did not come back: the two clocks' ratio, the stand-off's premise, is "
+                   "unknown");
+    }
     (void)link_command_mode();
 
     if (got && d.xtal == 0u) {
@@ -904,13 +992,13 @@ void tj_link() {
     while (hi < 31u && near(hsi_ppm + (static_cast<int32_t>(hi) + 1 - centre) * step_guess, 0, 25'000)) ++hi;
     for (uint8_t t = lo; t <= hi; ++t) {
         Rcc::hsi_trim(t);
-        wait_ms(1);
+        brio::spin_us<Ruler>(1'000);
         const Calib x = calibrate(c, calib_frames);
         timed[t] = x.ok;
         ppm[t] = x.ppm;
     }
     Rcc::hsi_trim(centre);
-    wait_ms(1);
+    brio::spin_us<Ruler>(1'000);
     const Calib back = calibrate(c, calib_frames);
     print(serial, "  trim  ppm      Hz off 48 MHz   step Hz", crlf);
     bool monotonic = true;
@@ -1020,8 +1108,9 @@ Stream engined_stream(uint32_t rate, uint16_t n) {
         }
     }
     if constexpr (load) {
-        while (CopyLoad::busy()) {
-        }
+        // The last copy of 2 KB: some 3000 cycles (letter r), 63 us; 1 ms
+        // bounds it, and a copy that never ends marks the run not up.
+        st.up = brio::wait_until<Ruler>([] { return !CopyLoad::busy(); }, 1'000) && st.up;
     }
     st.ore = L::hw_overruns();
     st.overruns = L::rx_overruns();
@@ -1079,8 +1168,10 @@ Calib engined_calibrate(const link::Cfg& c, uint16_t n) {
         const uint32_t want = n - queued < 64u ? n - queued : 64u;
         queued += E::write_bulk(std::span<const uint8_t>(chunk, want));
     }
-    while (!E::tx_idle() && Ticker::ticks() - t0 < 300u) {
-    }
+    // The ring's last 256 frames at the slowest rate letter s blasts at
+    // (1 Mbaud) are 2.6 ms; 100 ms bounds the drain, and a ring that never
+    // drained fails the leg.
+    const bool drained = brio::wait_until<Ruler>([] { return E::tx_idle(); }, 100'000);
     const uint16_t faults = E::dma_faults();
     k.blocks = dma_entries;
     k.u4 = u4_entries - u4_before;
@@ -1090,7 +1181,7 @@ Calib engined_calibrate(const link::Cfg& c, uint16_t n) {
     if (!peer_report(r, 5) || leg_refused) {
         return k;
     }
-    k.ok = up && faults == 0u && r.count == n && r.span != 0u && r.ferr == 0u && r.ovf == 0u;
+    k.ok = up && drained && faults == 0u && r.count == n && r.span != 0u && r.ferr == 0u && r.ovf == 0u;
     if (!k.ok) {
         print(serial, "    engined calibrate at ", c.rate, ": the peer counted ", r.count, " of ", n, ", ferr ", r.ferr,
               " ovf ", r.ovf, " span ", r.span, ", faults ", faults, crlf);
@@ -1108,26 +1199,30 @@ uint16_t echo_mismatches(uint16_t n, uint16_t mask) {
     wait_for_peer_window();
     for (uint16_t i = 0; i < n; ++i) {
         const uint16_t v = static_cast<uint16_t>((0x5Au + i * 37u) & mask);
-        while (!U4::tx_empty()) {
+        // DATAR's turn within a frame (1.25 ms at 9600 with parity and two
+        // stops, the slowest frame echoed), 2 ms; a byte never sent is wrong.
+        if (!brio::wait_until<Ruler>([] { return U4::tx_empty(); }, 2'000)) {
+            ++bad;
+            continue;
         }
         U4::write_word(v);
-        bool ok = false;
-        const uint32_t t0 = Ticker::ticks();
-        while (Ticker::ticks() - t0 < 20u) {
-            const uint16_t st = U4::status();
-            if ((st & usart_rxne) != 0u) {
-                ok = (U4::read_word() & mask) == v && (st & (usart_fe | usart_pe | usart_ne)) == 0u;
-                break;
-            }
-        }
+        // The echo within two frames and the peer's turn-around; 20 ms, the
+        // old bound, many times over.
+        uint16_t st = 0;
+        const bool came = brio::wait_until<Ruler>(
+            [&st] {
+                st = U4::status();
+                return (st & usart_rxne) != 0u;
+            },
+            20'000);
+        const bool ok = came && (U4::read_word() & mask) == v && (st & (usart_fe | usart_pe | usart_ne)) == 0u;
         if (!ok) ++bad;
     }
     return bad;
 }
 
 void tk_rates() {
-    if (!ensure_link()) {
-        bench.verdict("the peer is reachable", false);
+    if (!need_peer()) {
         return;
     }
     (void)far_clock_rc();
@@ -1194,9 +1289,9 @@ void tk_rates() {
         }
         Loop::clear_errors();
         (void)Loop::write_bulk(pattern);
-        const uint32_t t0 = Ticker::ticks();
-        while (Loop::rx_pending() < 8u && Ticker::ticks() - t0 < 30u) {
-        }
+        // Eight frames out and back at 115200 are under 2 ms; 30 ms bounds
+        // them, and a short count fails on the bytes judged next.
+        (void)brio::wait_until<Ruler>([] { return Loop::rx_pending() >= 8u; }, 30'000);
         uint8_t got = 0;
         for (uint8_t i = 0; i < 8u; ++i) {
             uint8_t b = 0;
@@ -1233,9 +1328,9 @@ void tk_rates() {
             sum = static_cast<uint16_t>(sum + run[i]);
         }
         (void)Loop::write_bulk(run);
-        const uint32_t t0 = Ticker::ticks();
-        while (!Loop::tx_idle() && Ticker::ticks() - t0 < 30u) {
-        }
+        // 64 frames at 3 Mbaud are 213 us; 30 ms bounds them, and a run that
+        // did not leave fails on the far chip's count.
+        (void)brio::wait_until<Ruler>([] { return Loop::tx_idle(); }, 30'000);
         Loop::release();
         link::Report r{};
         const bool have = peer_report(r, 5);
@@ -1387,8 +1482,7 @@ struct FmtCase {
 };
 
 void tl_frames() {
-    if (!ensure_link()) {
-        bench.verdict("the peer is reachable", false);
+    if (!need_peer()) {
         return;
     }
     (void)far_clock_rc();
@@ -1447,8 +1541,7 @@ void tl_frames() {
 // m - the receiver's errors, from a foreign sender
 // ---------------------------------------------------------------------------
 void tm_errors() {
-    if (!ensure_link()) {
-        bench.verdict("the peer is reachable", false);
+    if (!need_peer()) {
         return;
     }
     const int32_t hsi = hsi_error();
@@ -1514,8 +1607,8 @@ void tm_errors() {
         if (hsi_known) {
             judge("every rate within 3 % of the receiver's own is clean (14.3)", inside_clean);
         } else {
-            print(serial, "  SKIPPED, no verdict claimed: the calibrate leg did not come back, so the two clocks' "
-                          "ratio is unknown and no rate is known within 3 % of this receiver's", crlf);
+            bench.skip("the calibrate leg did not come back: the two clocks' ratio is unknown, and no rate is "
+                       "known within 3 % of this receiver's");
         }
         judge("and a rate far enough off does raise FE", onset_pos != 0 || onset_neg != 0);
     }
@@ -1560,7 +1653,7 @@ void tm_errors() {
         a.value = 0xB0;
         const bool acted = peer_act(link::Op::blast, a);
         const bool up = acted && dut_link(pc);
-        wait_ms(6 + 2);   // the window, and the run, unread
+        brio::spin_us<Ruler>(8'000);   // the window (6 ms), and the run's 0.7 ms, unread
         const uint16_t st = U4::status();
         const uint16_t kept = U4::read_word();
         const Drain d = collect(5);
@@ -1619,8 +1712,7 @@ Drain bitbang_run(uint8_t value, uint16_t frames, int8_t cell, int8_t pct, uint1
 }
 
 void tn_shapes() {
-    if (!ensure_link()) {
-        bench.verdict("the peer is reachable", false);
+    if (!need_peer()) {
         return;
     }
     link::Cfg base{};
@@ -1653,8 +1745,7 @@ void tn_shapes() {
 // o - the modes on a wire
 // ---------------------------------------------------------------------------
 void to_modes() {
-    if (!ensure_link()) {
-        bench.verdict("the peer is reachable", false);
+    if (!need_peer()) {
         return;
     }
     // 1. Mute woken by an address mark: 9-bit words, this node 5.
@@ -1811,8 +1902,7 @@ void to_modes() {
 // p - half duplex hearing a second chip
 // ---------------------------------------------------------------------------
 void tp_half_duplex_wire() {
-    if (!ensure_link()) {
-        bench.verdict("the peer is reachable", false);
+    if (!need_peer()) {
         return;
     }
     // PB0 must not drive while the peer does: the TX pad is an INPUT here,
@@ -1901,14 +1991,14 @@ ClearCase clear_case(bool status_between) {
     Rx8::arm<U4Rx>(&U4::regs().DATAR, 0u);
     (void)Rx8::start(std::span<uint8_t>(got, 2));
     U4::dma_receive(true);
-    const uint32_t t0 = Ticker::ticks();
-    while (Rx8::remaining() > 1u && Ticker::ticks() - t0 < 100u) {
-    }
+    // The peer's two frames (12 bit times each at 115200, 0.2 ms) after
+    // its window opens settle_ms + 2 ms after the ack: 100 ms bounds each
+    // wait, and data_ok judges a channel that took fewer.
+    (void)brio::wait_until<Ruler>([] { return Rx8::remaining() <= 1u; }, 100'000);
     if (status_between) {
         cc.pe_after_first = (U4::status() & usart_pe) != 0u;
     }
-    while (Rx8::remaining() > 0u && Ticker::ticks() - t0 < 100u) {
-    }
+    (void)brio::wait_until<Ruler>([] { return Rx8::remaining() == 0u; }, 100'000);
     (void)delay_us(clock, 50);
     cc.pe_after_second = (U4::status() & usart_pe) != 0u;
     __asm__ volatile("" ::: "memory");   // the channel wrote got[] behind the compiler's back
@@ -1958,7 +2048,7 @@ ErroredRun errored_run() {
     (void)Rx4::input(PinPull::up);
     RingOnly::clear_errors();
     u4_entries = 0;
-    wait_ms(20);   // eight frames of 15 bit times at 115200: 1.1 ms
+    brio::spin_us<Ruler>(20'000);   // eight frames of 15 bit times at 115200: 1.1 ms
     e.all_0x35 = true;
     uint8_t b = 0;
     while (RingOnly::read_byte(b)) {
@@ -1977,8 +2067,7 @@ ErroredRun errored_run() {
 }
 
 void tq_clear_under_dma() {
-    if (!ensure_link()) {
-        bench.verdict("the peer is reachable", false);
+    if (!need_peer()) {
         return;
     }
     // THE COUNT A RUN OF ERRORED FRAMES GETS, the interrupt transmitter
@@ -2015,8 +2104,7 @@ void tq_clear_under_dma() {
 // r - the priority rule under load
 // ---------------------------------------------------------------------------
 void tr_priority_load() {
-    if (!ensure_link()) {
-        bench.verdict("the peer is reachable", false);
+    if (!need_peer()) {
         return;
     }
     for (uint16_t i = 0; i < 512u; ++i) {
@@ -2127,14 +2215,19 @@ GuardCase guard_case(bool masked) {
     GuardCase g{};
     g.up = guard_burst(0x40);
     const uint32_t k0 = Engined::rx_skips();
-    const uint32_t t0 = Ticker::ticks();
-    while (g.up && ring_frames() < 4u && Ticker::ticks() - t0 < 30u) {
-    }
+    // Four frames at 115200 after the peer's window opens: some 5 ms;
+    // 30 ms bounds them, and `staged` judges the count reached.
+    (void)(g.up && brio::wait_until<Ruler>([] { return ring_frames() >= 4u; }, 30'000));
     g.staged = ring_frames() == 4u;
     if (masked) {
         P::CriticalSection cs;
         // 4096 items: some 24 600 cycles (512 us), the burst's other four
-        // frames 350 us; then three frames of idle line for IDLE.
+        // frames 350 us; then three frames of idle line for IDLE. These two
+        // waits run MASKED, so they stay written out on Ticker::cycles():
+        // under a mask the tick count stops and the composed count adds one
+        // pending restart only (util/cycle_count.hpp), monotone for at
+        // least one period (48 000 cycles) from the mask - past the 37 200
+        // the two spend, and the 48 000 time-out still reached.
         starve_start(4096);
         const uint32_t c0 = Ticker::cycles();
         while (!starve_done() && Ticker::cycles() - c0 < 48'000u) {
@@ -2144,12 +2237,12 @@ GuardCase guard_case(bool masked) {
         }
     } else {
         starve_start(65535);
-        const uint32_t t1 = Ticker::ticks();
-        while (!starve_done() && Ticker::ticks() - t1 < 30u) {
-        }
-        wait_ms(2);
+        // 65535 items at six cycles each are 8.2 ms; 30 ms bounds the block,
+        // and the stall's own counts below judge what it did.
+        (void)brio::wait_until<Ruler>([] { return starve_done(); }, 30'000);
+        brio::spin_us<Ruler>(2'000);
     }
-    wait_ms(3);
+    brio::spin_us<Ruler>(3'000);
     g.entries = u4_entries;
     g.hw = Engined::hw_overruns();
     g.faults = Engined::dma_faults();
@@ -2163,7 +2256,7 @@ GuardCase guard_case(bool masked) {
     (void)peer_report(r, 5);
     // The next burst, whole.
     const bool up2 = guard_burst(0x60);
-    wait_ms(5);
+    brio::spin_us<Ruler>(5'000);
     g.next = up2 ? drain_ring(0x60, 8, g.next_in_order) : 0u;
     Engined::release();
     u4_owner = U4Owner::irq;
@@ -2172,8 +2265,7 @@ GuardCase guard_case(bool masked) {
 }
 
 void tt_guards() {
-    if (!ensure_link()) {
-        bench.verdict("the peer is reachable", false);
+    if (!need_peer()) {
         return;
     }
     const GuardCase probe = guard_case(true);
@@ -2181,8 +2273,12 @@ void tt_guards() {
           " delivered, the vector ", probe.entries, " entries, ", probe.hw, " overrun(s), ", probe.skips,
           " gap(s), ", probe.faults, " given up, ", probe.waiting_end ? "waiting for the end" : "NOT waiting for the end",
           "; the next burst ", probe.next, " of 8", probe.next_in_order ? " in order" : " NOT in order", crlf);
-    // The bound: the overrun's entry (EIE on ORE) and the probe's second
-    // unmoved one, IDLE's, a tick's: eight covers them; a storm is hundreds.
+    // The bound counts USART4's own entries (u4_entries is this vector's,
+    // and nothing else enters it): the overrun's (EIE on ORE), the wait's
+    // unmoved entries up to the probe's second, which clears it, and the
+    // idle line's at the burst's end - a handful; eight is the letter's
+    // margin over them (not derived source by source), and a storm, the
+    // wait re-entered back to back, is hundreds.
     judge("THE OVERRUN WITH NOTHING TO TAKE: a handful of entries, no channel given up, the overrun and the gap "
           "counted once each, the four frames before it in order, the vector back waiting for the end",
           probe.up && probe.staged && probe.entries <= 8u && probe.faults == 0u && probe.hw == 1u &&
@@ -2193,9 +2289,11 @@ void tt_guards() {
           " entries, ", stall.faults, " given up, ", stall.hw, " overrun(s), ", stall.got,
           " byte(s) after the restart; the next burst ", stall.next, " of 8",
           stall.next_in_order ? " in order" : " NOT in order", crlf);
-    // The bound: one entry on the overrun, then rx_stall_entries (255) of
-    // the wait for a frame, the 255th giving the channel up; 300 covers the
-    // ticks beside them over 8.2 ms.
+    // The bound counts USART4's own entries: one on the overrun, then
+    // rx_stall_entries (255) of the wait for a frame, the 255th giving the
+    // channel up; the 44 above them leave room for the burst's other
+    // entries on this vector (its idle line, the wait the consumer's
+    // restart arms), a margin not derived source by source.
     judge("THE STALL BOUND gives a starved LIVE channel up once, after some 256 entries - no storm - and the "
           "consumer's look binds it again",
           stall.up && stall.staged && stall.faults == 1u && stall.entries >= 255u && stall.entries <= 300u);
@@ -2260,14 +2358,13 @@ IdleGroups idle_groups(uint8_t per_group, uint8_t groups) {
     ig.up = true;
     for (uint8_t g = 0; g < groups; ++g) {
         const uint16_t want = static_cast<uint16_t>(12u - per_group * (g + 1u));
-        const uint32_t t0 = Ticker::ticks();
-        while (Rx8::count() > want && Ticker::ticks() - t0 < 40u) {
-        }
-        if (Rx8::count() > want) {
+        // A group lands 5 ms after the last (the peer's gap) plus its frames:
+        // 40 ms bounds it, and a group that did not land ends the walk.
+        if (!brio::wait_until<Ruler>([want] { return Rx8::count() <= want; }, 40'000)) {
             break;
         }
         ++ig.landed;
-        wait_us(3u * 87u);   // three frames of idle line at 115200
+        brio::spin_us<Ruler>(3u * 87u);   // three frames of idle line at 115200
         ig.idle[g] = (U4::status() & usart_idle) != 0u;   // the one status read: it arms the clear
     }
     __asm__ volatile("" ::: "memory");
@@ -2285,8 +2382,7 @@ IdleGroups idle_groups(uint8_t per_group, uint8_t groups) {
 }
 
 void tu_idle_under_clear() {
-    if (!ensure_link()) {
-        bench.verdict("the peer is reachable", false);
+    if (!need_peer()) {
         return;
     }
     const IdleGroups one = idle_groups(1, 5);
@@ -2312,8 +2408,7 @@ void tu_idle_under_clear() {
 // s - the transmit engine's blast
 // ---------------------------------------------------------------------------
 void ts_tx_engine() {
-    if (!ensure_link()) {
-        bench.verdict("the peer is reachable", false);
+    if (!need_peer()) {
         return;
     }
     (void)far_clock_rc();

@@ -258,10 +258,13 @@ letter `a`. What they measured:
   | 6 MHz | 7 (/8) | 0 | 52 | 115384 |
   | 3 MHz | 11 (/16) | 0 | 26 | 115384 |
 
-  At every rung, on the way down and on the way up, two hundred ticks
-  counted exactly two hundred, a 500 us wait was served and the rung's
-  line read clean - at 8 MHz with the divisor's own rate 0.64 per cent
-  fast. The switch writes nothing of the tree but HPRE and FLASH_ACTLR,
+  At every rung, on the way down and on the way up, a 500 us wait was
+  served and the rung's line read clean - at 8 MHz with the divisor's own
+  rate 0.64 per cent fast. The letter also times twenty 500 us waits
+  against the tick at each rung, the ticker and the delay's table both
+  rebased by the switch, and holds them to 10 to 12 ticks (the bound's
+  arithmetic is beside the letter); the tick's own period at every rung
+  is letter `h`'s, below. The switch writes nothing of the tree but HPRE and FLASH_ACTLR,
   so every divided rung ran with nothing turned on for the prefetch
   buffer 3.4.2 asks for and no register has. A rate no divider reaches,
   7 MHz, is refused with nothing changed.

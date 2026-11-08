@@ -159,7 +159,8 @@
  * buffer moved into the shifter) and then for BSY to fall (the shifter
  * idle) before it drops the bit, each wait bounded, and reports whether
  * a wait ran out; it does not wait for RXNE. Clearing MODF is a STATR
- * read followed by a CTLR1 write; clearing OVR takes STATR, DATAR, STATR
+ * read followed by a CTLR1 write with nothing between them
+ * (clear_mode_fault()); clearing OVR takes STATR, DATAR, STATR
  * here, 16.2.7's DATAR then STATR leaving it standing on the CH32V003
  * (flush_rx()) - two sequences the resource keeps.
  *
@@ -561,11 +562,19 @@ struct Spi {
     /// STATR, DATAR, STATR (flush_rx(), which says why).
     static void clear_overrun() { flush_rx(); }
     static bool mode_fault() { return (regs().STATR & spi_modf) != 0u; }
-    /// STATR then a CTLR1 write, in that order. MODF has also cleared
-    /// SPE and MSTR; the caller reconfigures.
-    static void clear_mode_fault() {
+    /// 16.2.7's two steps, a STATR read and then a CTLR1 write, done
+    /// strictly - no other access to the block between them: CTLR1 is
+    /// read FIRST and the value kept is what the write puts back (an
+    /// assignment `CTLR1 = CTLR1` would load CTLR1 between the steps,
+    /// which the chapter's sequence does not provide for). Answers whether
+    /// the flag went down rather than promising it (test_ch32_spi letter
+    /// u judges it). MODF has also cleared SPE and MSTR; the caller
+    /// reconfigures. From the block's owner; never waits, masks nothing.
+    static bool clear_mode_fault() {
+        const uint16_t ctlr1 = static_cast<uint16_t>(regs().CTLR1);
         (void)regs().STATR;
-        regs().CTLR1 = regs().CTLR1;
+        regs().CTLR1 = ctlr1;
+        return !mode_fault();
     }
     static bool crc_error() { return (regs().STATR & spi_crcerr) != 0u; }
     static void clear_crc_error() { regs().STATR = static_cast<uint16_t>(~spi_crcerr); }

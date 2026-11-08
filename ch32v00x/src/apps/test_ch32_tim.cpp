@@ -80,6 +80,7 @@
 #include "ch32v00x/usart.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "util/test_wait.hpp"
 
 #include "board.hpp"
 
@@ -110,28 +111,23 @@ volatile uint16_t last_width = 0;
 volatile uint32_t t1_breaks = 0;
 bool jumper_present = false;
 
-void settle_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
+/// The suite's ruler (util/test_wait.hpp): the kernel ticker's own
+/// cycles(), the tick count and the counter's position composed right
+/// across the reload (util/cycle_count.hpp); it wraps at 2^32, so only
+/// differences are used. The windows are spin_us() on it - EXACT windows:
+/// a wait on the millisecond count starts at a random point inside a
+/// millisecond and is short by up to one, which at 1000 events a window
+/// reads as five missing. Valid under a mask for a span under one tick
+/// period (cycles() folds the one reload STK's flag records).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
-/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
-/// tick count and the counter's position composed right across the reload
-/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
-uint32_t cycles_now() {
-    return Ticker::cycles();
-}
-
-/// An EXACT window, on the cycle counter: settle_ms() starts at a random
-/// point inside a millisecond and its window is short by up to one, which
-/// at 1000 events a window reads as five missing.
-void spin_cycles(uint32_t cycles) {
-    const uint32_t s0 = cycles_now();
-    while (cycles_now() - s0 < cycles) {
-    }
-}
-constexpr uint32_t cycles_100ms = 4'800'000UL;
+/// Every console byte off the wire, bounded (util/test_wait.hpp);
+/// false when the console did not go idle within 200 ms. Letter e, the
+/// CH32V006's alone, is its one caller.
+[[maybe_unused]] bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 
 /// The sensor's pull is set AGAINST the driven level, so a floating pad
 /// echoing its neighbour is not taken for the wire (a wire beats a pull).
@@ -155,8 +151,7 @@ bool need_jumper() {
     }
     jumper_present = probe_jumper();
     if (!jumper_present) {
-        print(serial, "  SKIPPED, no verdict claimed: no jumper between PD2 (TIM1_CH1) and PD4 "
-                      "(TIM2_CH1)", crlf);
+        bench.skip("no jumper between PD2 (TIM1_CH1) and PD4 (TIM2_CH1)");
     }
     return jumper_present;
 }
@@ -245,11 +240,10 @@ void tb_timebase() {
     (void)T2::configure({.prescaler = 47, .period = 0xFFFF});
     T2::enable(true);
     const uint16_t c0 = T2::count();
-    const uint32_t s0 = cycles_now();
-    while (cycles_now() - s0 < 4'800'000UL) {
-    }
+    const uint32_t s0 = Ruler::now();
+    brio::spin_us<Ruler>(100'000);
     const uint16_t c1 = T2::count();
-    const uint32_t s1 = cycles_now();
+    const uint32_t s1 = Ruler::now();
     T2::enable(false);
     const uint32_t stk_us = (s1 - s0) / 48u;
     const uint32_t tim_us = static_cast<uint16_t>(c1 - c0) + 65536UL;   // one wrap in 100 ms
@@ -261,7 +255,7 @@ void tb_timebase() {
     t1_updates = 0;
     Pfic::enable(T1::update_irq());
     (void)TimPeriodicTick<T1>::setup(47, 999);
-    settle_ms(200);
+    brio::spin_us<Ruler>(200'000);
     TimPeriodicTick<T1>::stop();
     Pfic::disable(T1::update_irq());
     print(serial, "  TIM1 ticking at 1 kHz for 200 ms: ", t1_updates, " update interrupts", crlf);
@@ -282,7 +276,7 @@ uint32_t updates_in_100ms(uint16_t prescaler, uint16_t period, TimAlignment alig
     T1::interrupts(T1::update_interrupt, true);
     Pfic::enable(T1::update_irq());
     T1::enable(true);
-    spin_cycles(cycles_100ms);
+    brio::spin_us<Ruler>(100'000);
     T1::enable(false);
     Pfic::disable(T1::update_irq());
     T1::interrupts(T1::update_interrupt, false);
@@ -328,11 +322,10 @@ void tc_periods() {
     {
         InterruptGuard guard;
         const uint16_t c0 = T1::count();
-        const uint32_t s0 = cycles_now();
-        while (cycles_now() - s0 < 4800u) {
-        }
+        const uint32_t s0 = Ruler::now();
+        brio::spin_us<Ruler>(100);   // under the mask, under one tick period
         const uint16_t c1 = T1::count();
-        window = cycles_now() - s0;
+        window = Ruler::now() - s0;
         counts = (c1 + 1000u - c0) % 1000u;
     }
     T1::enable(false);
@@ -353,15 +346,12 @@ void tc_periods() {
     (void)T1::configure({.prescaler = 47, .period = 999, .direction = TimDirection::down});
     const uint16_t start = T1::count();
     T1::clear_flags(T1::update_flag);
-    const uint32_t e0 = cycles_now();
+    const uint32_t e0 = Ruler::now();
     T1::enable(true);
-    uint32_t first = 0;
-    while (!T1::flag(T1::update_flag)) {
-        if (cycles_now() - e0 > 96'000u) {
-            break;
-        }
-    }
-    first = cycles_now() - e0;
+    // Two periods, 2 ms: the flag is due after one. A time-out reads as
+    // the budget, which the verdict's 49000 refuses.
+    const auto flagged = brio::cycles_until<Ruler>([] { return T1::flag(T1::update_flag); }, 2'000);
+    const uint32_t first = flagged ? Ruler::now() - e0 : 96'000u;
     T1::set_count(500);
     T1::update();
     const uint16_t running_ug = T1::count();
@@ -389,7 +379,7 @@ void td_cross() {
     (void)T1::master(TimMasterMode::update);
     (void)TimEventCounter<T2>::setup(TimTrigger::itr0);
     T1::enable(true);
-    spin_cycles(cycles_100ms);
+    brio::spin_us<Ruler>(100'000);
     const uint16_t counted = TimEventCounter<T2>::count();
     T1::enable(false);
     print(serial, "  TIM2 counting TIM1's update on ITR0: ", counted, " in 100 ms (1000 expected)", crlf);
@@ -402,7 +392,7 @@ void td_cross() {
     (void)T2::master(TimMasterMode::update);
     (void)TimEventCounter<T1>::setup(TimTrigger::itr1);
     T2::enable(true);
-    spin_cycles(cycles_100ms);
+    brio::spin_us<Ruler>(100'000);
     const uint16_t counted2 = TimEventCounter<T1>::count();
     T2::enable(false);
     print(serial, "  TIM1 counting TIM2's update on ITR1: ", counted2, " in 100 ms (500 expected)", crlf);
@@ -416,7 +406,7 @@ void td_cross() {
     (void)T1::master(TimMasterMode::oc1ref);
     (void)TimGatedCounter<T2>::setup(TimTrigger::itr0, 0);   // counts HCLK while gated open
     T1::enable(true);
-    spin_cycles(480'000UL);   // 10 ms
+    brio::spin_us<Ruler>(10'000);   // 10 ms
     T1::enable(false);
     T2::enable(false);
     const uint16_t gated = TimGatedCounter<T2>::count();
@@ -443,23 +433,37 @@ void te_tim3() {
     (void)Tim3::configure({.period = 0xFFFF, .clocked_by_tim1 = true});
     Tim3::enable(true);
     T1::enable(true);
-    spin_cycles(cycles_100ms);
+    brio::spin_us<Ruler>(100'000);
     const uint16_t counted = Tim3::count();
     T1::enable(false);
     Tim3::enable(false);
     print(serial, "  TIM3 clocked by TIM1's trigger: ", counted, " in 100 ms (1000 expected)", crlf);
     bench.verdict("TIM3 counts TIM1's trigger in external clock mode 1", counted >= 998u && counted <= 1002u);
 
-    // TIM3 on CK_INT (48 MHz, no prescaler): 0xFFFF + 1 counts a period.
+    // TIM3 on CK_INT (48 MHz, no prescaler), 48000 counts a period. The
+    // console silent first, then the window masked, so nothing but
+    // delay_us sits between the reads; delay_us works under the mask (it
+    // counts STK cycles, and 500 us is under its one-period cap). The
+    // counter wraps at 48000, so the difference is taken modulo it.
+    console_drain();
     (void)Tim3::configure({.period = 47999});   // 1 kHz updates
     Tim3::enable(true);
-    const uint16_t a = Tim3::count();
-    (void)delay_us(clock, 500);
-    const uint16_t b = Tim3::count();
+    uint16_t a = 0;
+    uint16_t b = 0;
+    {
+        InterruptGuard guard;
+        a = Tim3::count();
+        (void)delay_us(clock, 500);
+        b = Tim3::count();
+    }
     Tim3::enable(false);
-    print(serial, "  TIM3 on CK_INT: ", static_cast<uint16_t>(b - a), " counts in 500 us (24000 expected)", crlf);
-    bench.verdict("TIM3 counts HCLK undivided (13.2.3: no prescaler)",
-                  static_cast<uint16_t>(b - a) >= 23'900u && static_cast<uint16_t>(b - a) <= 24'200u);
+    const uint32_t on_ck_int = (b + 48'000UL - a) % 48'000UL;
+    print(serial, "  TIM3 on CK_INT: ", on_ck_int, " counts in 500 us (24000 expected)", crlf);
+    // The bound: delay_us is never early, so at least 24000 counts; late
+    // by its own entry, exit and last poll, which letter d of
+    // test_ch32_platform holds under 400 cycles for delay_us(100), plus
+    // the two count reads, a few cycles each.
+    bench.verdict("TIM3 counts HCLK undivided (13.2.3: no prescaler)", on_ck_int >= 24'000u && on_ck_int <= 24'400u);
 
     // Channel 3's match as a DMA request: DMA channel 1 (table 8-2) moves
     // one word per match from a source into a sink, no CPU in the path -
@@ -484,10 +488,10 @@ void te_tim3() {
                        .peripheral_increment = false, .memory_increment = false,
                        .peripheral_width = DmaWidth::word, .memory_width = DmaWidth::word}});
         Tim3::enable(true);
-        const uint32_t t0 = cycles_now();
-        while (!DmaChannel<1>::flag(DmaFlag::complete) && cycles_now() - t0 < 3u * cycles_100ms) {
-        }
-        const uint32_t took_us = (cycles_now() - t0) / 48u;
+        // 300 ms: three times the 100 ms a paced run of 1000 takes.
+        const auto took = brio::cycles_until<Ruler>([] { return DmaChannel<1>::flag(DmaFlag::complete); },
+                                                    300'000);
+        const uint32_t took_us = took.value_or(brio::us_cycles<Ruler>(300'000)) / 48u;
         const uint16_t left = DmaChannel<1>::count();
         Tim3::enable(false);
         (void)Tim3::dma_request(2, false);
@@ -540,9 +544,9 @@ void tf_capture() {
     uint8_t exact = 0;
     for (const uint16_t d : duties) {
         (void)T1::set_compare(0, d);
-        settle_ms(20);
+        brio::spin_us<Ruler>(20'000);
         t2_captures = 0;
-        settle_ms(20);
+        brio::spin_us<Ruler>(20'000);
         const uint16_t period = last_period;
         const uint16_t width = last_width;
         const bool ok = period >= 4799u && period <= 4801u && width >= d - 2u && width <= d + 2u;
@@ -562,7 +566,14 @@ void tf_capture() {
     // poller wait on the flag and take the value in one verb.
     (void)Edges::setup(0, 0);
     T2::clear_flags(Edges::capture_flag);
-    while (!T2::flag(Edges::capture_flag)) {
+    // An edge every 100 us at 10 kHz: ten periods, 1 ms, is the bound.
+    const auto edge_within_1ms = [] {
+        return brio::wait_until<Ruler>([] { return T2::flag(Edges::capture_flag); }, 1'000);
+    };
+    if (!edge_within_1ms()) {
+        bench.verdict("a capture comes within ten periods of the 10 kHz PWM", false);
+        all_off();
+        return;
     }
     (void)T2::compare(0);
     const bool read_cleared = !T2::flag(Edges::capture_flag);
@@ -575,7 +586,8 @@ void tf_capture() {
     uint16_t lo = 0xFFFFu;
     uint16_t hi = 0;
     for (uint8_t k = 0; k < 8u; ++k) {
-        while (!T2::flag(Edges::capture_flag)) {
+        if (!edge_within_1ms()) {
+            break;   // the missing intervals fail the verdict below
         }
         if (const auto d = Edges::interval()) {
             if (*d >= 4799u && *d <= 4801u) {
@@ -612,7 +624,7 @@ void tg_one_pulse() {
     T2::clear_flags(T2::compare_flag(0) | T2::compare_flag(1));
     T2::enable(true);
     TimOnePulse<T1, 0>::fire();
-    settle_ms(5);
+    brio::spin_us<Ruler>(5'000);
     const bool rose = T2::flag(T2::compare_flag(0));
     const bool fell = T2::flag(T2::compare_flag(1));
     const uint16_t up = T2::compare(0);
@@ -635,6 +647,16 @@ void ti_break() {
     // A PWM on TIM1 with MOE, the break input on PC2 active HIGH, the pad
     // pulled DOWN: no break.
     BreakPad::claim_input(PinPull::down);
+    // The pad's quiet level is its own pull-down: a pad pulled up from
+    // outside (on the WeAct CH32V006 board PC2 is the pair's SCL, which
+    // the far board's 1.5 kOhm pull-up holds high while its pull-up
+    // source is driven) cannot be made quiet, and the letter declines.
+    brio::spin_us<Ruler>(20);
+    if (BreakPad::pin::read()) {
+        bench.skip("the break pad (PC2) reads high on its pull-down: something outside pulls it up");
+        all_off();
+        return;
+    }
     (void)T1::configure({.prescaler = 47, .period = 999});
     (void)T1::output_channel(0, {.mode = TimOutputMode::pwm1, .compare = 500, .enable = false});
     (void)T1::break_dead_time({.main_output_enable = true, .automatic_output_enable = false, .break_enable = true,
@@ -643,12 +665,12 @@ void ti_break() {
     T1::interrupts(T1::break_interrupt, true);
     Pfic::enable(T1::break_irq());
     T1::enable(true);
-    settle_ms(5);
+    brio::spin_us<Ruler>(5'000);
     const bool moe_before = T1::main_output();
     const uint32_t breaks_before = t1_breaks;
     // Now pull the pad UP: the break input goes active.
     BreakPad::claim_input(PinPull::up);
-    settle_ms(5);
+    brio::spin_us<Ruler>(5'000);
     const bool moe_after = T1::main_output();
     const uint32_t breaks_after = t1_breaks;
     print(serial, "  BKIN pulled down: MOE=", moe_before, " breaks=", breaks_before, "; pulled up: MOE=",
@@ -665,7 +687,7 @@ void ti_break() {
     (void)T1::break_dead_time({.main_output_enable = false, .automatic_output_enable = true, .break_enable = true,
                                .break_active_high = true});
     BreakPad::claim_input(PinPull::down);
-    settle_ms(5);
+    brio::spin_us<Ruler>(5'000);
     print(serial, "  pulled down under AOE: MOE=", T1::main_output(), crlf);
     bench.verdict("under AOE the outputs come back by themselves once the break clears", T1::main_output());
     all_off();
@@ -713,7 +735,7 @@ void tx_tim3_dma_probe() {
                                        .peripheral_width = DmaWidth::word, .memory_width = DmaWidth::word}};
         if (v.ch == 2u) { Ch1::stop(); (void)Ch1::load(t); } else { Ch4::stop(); (void)Ch4::load(t); }
         Tim3::enable(true);
-        spin_cycles(cycles_100ms);
+        brio::spin_us<Ruler>(100'000);
         const uint16_t left = v.ch == 2u ? Ch1::count() : Ch4::count();
         const uint16_t dmaen = Tim3::regs().DMAINTENR;
         const uint16_t cnt = Tim3::count();
@@ -721,7 +743,7 @@ void tx_tim3_dma_probe() {
         // would serve one more.
         (void)Tim3::dma_request(v.ch, false);
         (void)Tim3::dma_request(v.ch, true);
-        spin_cycles(cycles_100ms);
+        brio::spin_us<Ruler>(100'000);
         const uint16_t left2 = v.ch == 2u ? Ch1::count() : Ch4::count();
         Tim3::enable(false);
         print(serial, "  ", v.name, ": ", 1000u - left, " served in 100 ms, DMAINTENR=", hex(dmaen), " CNT=", cnt,
@@ -753,7 +775,7 @@ void tx_tim3_dma_probe() {
                                                .peripheral_increment = false, .memory_increment = false,
                                                .peripheral_width = DmaWidth::half, .memory_width = DmaWidth::half}});
         if (which == 0u) { Tim3::enable(true); } else { T2::enable(true); }
-        spin_cycles(cycles_100ms);
+        brio::spin_us<Ruler>(100'000);
         const uint16_t left = Ch1::count();
         print(serial, "  ", which == 0u ? "TIM3 ch3" : "TIM2 ch3", " match -> DMA ch1 writing the timer's own CHxCVR: ",
               1000u - left, " served in 100 ms", crlf);
@@ -774,7 +796,7 @@ void tx_tim3_dma_probe() {
                                                .peripheral_increment = false, .memory_increment = false,
                                                .peripheral_width = DmaWidth::half, .memory_width = DmaWidth::half}});
         T2::enable(true);
-        spin_cycles(cycles_100ms);
+        brio::spin_us<Ruler>(100'000);
         const uint16_t left = Ch1::count();
         const bool cc3if = T2::flag(T2::compare_flag(2));
         print(serial, "  TIM2 ch3 match -> DMA ch1 writing a plain sink: ", 1000u - left, " served in 100 ms, CC3IF ",
@@ -783,7 +805,7 @@ void tx_tim3_dma_probe() {
         T2::clear_flags(T2::compare_flag(2));
         const uint16_t before = Ch1::count();
         for (uint8_t k = 0; k < 10u; ++k) {
-            spin_cycles(4800);   // one period
+            brio::spin_us<Ruler>(100);   // one period
             T2::clear_flags(T2::compare_flag(2));
         }
         const uint16_t after = Ch1::count();
@@ -807,44 +829,44 @@ void tx_tim3_dma_probe() {
                                                .peripheral_increment = false, .memory_increment = false,
                                                .peripheral_width = DmaWidth::word, .memory_width = DmaWidth::word}});
         Tim3::enable(true);
-        spin_cycles(48'000);
+        brio::spin_us<Ruler>(1'000);
         const uint16_t a0 = Ch1::count();
         for (uint8_t k = 0; k < 10u; ++k) {
-            spin_cycles(4800);
+            brio::spin_us<Ruler>(100);
             (void)Tim3::set_compare(2, 100);
         }
         const uint16_t a1 = Ch1::count();
         for (uint8_t k = 0; k < 10u; ++k) {
-            spin_cycles(4800);
+            brio::spin_us<Ruler>(100);
             (void)Tim3::dma_request(2, false);
             (void)Tim3::dma_request(2, true);
         }
         const uint16_t a2 = Ch1::count();
         for (uint8_t k = 0; k < 10u; ++k) {
-            spin_cycles(4800);
+            brio::spin_us<Ruler>(100);
             Tim3::enable(false);
             Tim3::enable(true);
         }
         const uint16_t a3 = Ch1::count();
         for (uint8_t k = 0; k < 10u; ++k) {
-            spin_cycles(4800);
+            brio::spin_us<Ruler>(100);
             Tim3::set_count(0);
         }
         const uint16_t a4 = Ch1::count();
         volatile uint16_t sinkr = 0;
         for (uint8_t k = 0; k < 10u; ++k) {
-            spin_cycles(4800);
+            brio::spin_us<Ruler>(100);
             sinkr = Tim3::compare(2);   // a READ of the compare register
         }
         const uint16_t a5 = Ch1::count();
         for (uint8_t k = 0; k < 10u; ++k) {
-            spin_cycles(4800);
+            brio::spin_us<Ruler>(100);
             Tim3::regs().DMAINTENR = Tim3::regs().DMAINTENR;   // a write of the enable register as it stands
             Tim3::regs().CTLR1 = Tim3::regs().CTLR1;
         }
         const uint16_t a6 = Ch1::count();
         for (uint8_t k = 0; k < 10u; ++k) {
-            spin_cycles(4800);
+            brio::spin_us<Ruler>(100);
             Tim3::reset();   // the RCC pulse, then the same configuration again
             (void)Tim3::configure({.period = 4799});
             (void)Tim3::set_compare(2, 100);
@@ -873,12 +895,12 @@ void tx_tim3_dma_probe() {
                                        .peripheral_increment = false, .memory_increment = false,
                                        .peripheral_width = DmaWidth::word, .memory_width = DmaWidth::word}};
         (void)Ch1::load(t);
-        spin_cycles(48'000);
+        brio::spin_us<Ruler>(1'000);
         const uint16_t l1 = Ch1::count();
         Ch1::stop();
         sink4 = 0;
         (void)Ch4::load(t);
-        spin_cycles(48'000);
+        brio::spin_us<Ruler>(1'000);
         const uint16_t l4 = Ch4::count();
         Ch4::stop();
         print(serial, "  CONTROL, no request enabled anywhere: DMA ch1 served ", 1000u - l1, ", ch4 served ", 1000u - l4,

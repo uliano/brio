@@ -109,6 +109,7 @@
 #include "kernel/time_event.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "util/test_wait.hpp"
 #include "rt/selftest.hpp"
 
 using P = brio::Ch32v00xPlatform<>;
@@ -156,18 +157,26 @@ bool boot_after_fault_leg = false;
 
 // The STK counter as a cycle counter: it runs at HCLK and reloads every
 // tick, so two readings less than a tick apart are a cycle count with
-// the reload folded in.
+// the reload folded in. It is these letters' instrument, not a wait: a
+// single load, cheap enough to stamp inside a handler and to sit in the
+// measured cycles of e, u, k and w, and it keeps counting under a mask,
+// where the tick count - and Ruler below - stops (b's masked window).
 uint32_t cycles_now() { return stk()->CNT; }
 uint32_t cycles_between(uint32_t from, uint32_t to) {
     const uint32_t period = stk()->CMP + 1u;
     return to >= from ? to - from : to + period - from;
 }
 
-void console_drain() {
-    while (!Serial::tx_idle()) {
-    }
-    (void)delay_us(clock, 200);   // the last byte's own time on the wire
-}
+// The ruler of the suite's time-outs (util/test_wait.hpp): the ticker's
+// composed cycle count, valid while the tick runs.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// Every console byte off the wire, bounded (util/test_wait.hpp);
+/// false when the console did not go idle within 200 ms.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 
 // ---------------------------------------------------------------------------
 // a - the boot story
@@ -269,9 +278,12 @@ void tb_critical() {
     const uint32_t through_mask = Ticker::ticks() - t0;
     print(serial, "  5 ms with interrupts masked advanced the tick by ",
           through_mask, " ms, the tick in within ", settle, " cycles of the unmask", crlf);
+    // A tick that lost nothing would advance 5 here. With one pending
+    // bit: the tick delivered at the unmask, plus at most one landing in
+    // the few cycles between t0's read and the mask - so 1 or 2.
     bench.verdict("a masked window LOSES ticks (the STK interrupt is a "
                   "pending bit: one tick is delivered, the rest coalesce)",
-                  through_mask >= 1u && through_mask <= 5u);
+                  through_mask >= 1u && through_mask <= 2u);
 
     // idle(): a WFE on this core, then unmask. Any enabled interrupt
     // wakes it, so the console must be silent first or the USART's own
@@ -603,14 +615,21 @@ Trip round_trip(Irq line, const volatile uint32_t& hits, volatile uint32_t& entr
         entry_at = 0;
         exit_at = 0;
         const uint32_t tick = Ticker::ticks();
-        while (Ticker::ticks() == tick) {
+        // A fresh tick: one period, 1 ms, and a period of margin. A tick
+        // that never comes leaves the round unseen, which the letter's
+        // "every raise taken" verdict counts.
+        if (!brio::wait_until<Ruler>([&] { return Ticker::ticks() != tick; }, 2'000)) {
+            continue;
         }
         const uint32_t c0 = cycles_now();
         Pfic::set_pending(line);
         // The pending write is posted and the core runs on until the line
         // is taken: the raiser WAITS for the handler - bounded by a
         // thousand turns, far beyond the few hundred cycles a trip is -
-        // and the reading after the wait carries one spin iteration.
+        // and the reading after the wait carries one spin iteration. The
+        // loop is part of the measured exit, so it stays the bare compare
+        // and not a ruler wait, whose turn (a composed cycles() read)
+        // would land in the figure the letter judges.
         for (uint32_t k = 0; k < 1000u && hits == before; ++k) {
         }
         const uint32_t c1 = cycles_now();

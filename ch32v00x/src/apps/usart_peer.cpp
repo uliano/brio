@@ -111,6 +111,7 @@
 #include "ch32v00x/tim.hpp"
 #include "ch32v00x/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 
 #include "../../../avrxt/src/apps/usart_link.hpp"
 
@@ -134,6 +135,13 @@ using link::Op;
 
 using Console = Uart<1, P>;
 constexpr Console console;
+
+/// The ruler of this program's time-outs (util/test_wait.hpp): the kernel
+/// ticker's own cycles(), composed across the reload.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
 constexpr uint8_t link_column = ch32pair::serial_column;   ///< the pair's (ch32_pair.hpp)
 constexpr uint8_t parked_column = 6;        ///< USART2: TX PA6, RX PA5 - pads left inputs, or not bonded
@@ -339,9 +347,29 @@ bool apply_cfg(const link::Cfg& c) {
 
 uint32_t cycles_per_bit(uint32_t rate) { return rate == 0u ? 5000u : SysClock::hz / rate; }
 
-void put_link(uint8_t b) {
-    while (!L::tx_empty()) {
+/// TXE now, or within one frame: the frame in the shifter ends and the
+/// one in DATAR moves in. 20 ms is a frame at the divisor's floor (BRR 0xFFFF,
+/// 732 baud at 48 MHz) of twelve bits, 16.4 ms, the longest this link
+/// takes. The fast path is the bare flag poll the loops always made, for
+/// 256 turns - longer than a frame at 3 Mbaud (160 cycles) - so a stream
+/// at the link's top rates never reaches the ruler, whose read in every
+/// turn left the echo too late at 3 Mbaud (measured: 208 of 256 echoed
+/// equal with the ruler wait entered on each byte). Past that, the bounded
+/// wait; its poll asks flag(), so tx_empty() stays as inlined as it was.
+[[gnu::always_inline]] inline bool txe_ready() {
+    for (uint16_t k = 0; k < 256u; ++k) {
+        if (L::tx_empty()) {
+            return true;
+        }
     }
+    return brio::wait_until<Ruler>([] { return L::flag(usart_txe); }, 20'000);
+}
+
+/// One byte of an answer (link::write_frame()'s sink). A TXE that never
+/// comes leaves the byte unsent: the DUT's decoder then refuses the frame
+/// and retries, which is the protocol's own recovery.
+void put_link(uint8_t b) {
+    (void)txe_ready();
     L::write_data(b);
 }
 
@@ -508,11 +536,13 @@ bool play(uint8_t ch, Edges& e) {
         (void)E::abandon();
         ++play_timeouts;
     }
-    // The tail: the list's last cell played out at the line's final level.
-    while (T1::count() < end) {
-    }
+    // The tail: the list's last cell played out at the line's final level,
+    // within the completion's own bound (the list twice and a millisecond,
+    // in microseconds at 48 cycles each). A counter that never gets there
+    // fails the play, as a completion that never comes does.
+    const bool tail = brio::wait_until<Ruler>([end] { return T1::count() >= end; }, budget / 48u);
     T1::enable(false);
-    return done;
+    return done && tail;
 }
 
 /// The width of bit cell `idx` (0 = start, 1..8 = data, 9 = stop) in
@@ -595,7 +625,9 @@ link::Report run_receive(const link::Params& a, bool echo) {
             }
             account(r, st, d, mask);
             if (echo) {
-                while (!L::tx_empty()) {
+                if (!txe_ready()) {
+                    r.flags |= link::report_timed_out;
+                    break;
                 }
                 L::write_word(d);
             }
@@ -646,7 +678,9 @@ link::Report run_send(const link::Params& a, bool blast) {
         }
         for (uint16_t i = 0; i < a.count; ++i) {
             const uint16_t v = static_cast<uint16_t>(stream.next() & mask);
-            while (!L::tx_empty()) {
+            if (!txe_ready()) {
+                r.flags |= link::report_timed_out;
+                break;
             }
             L::write_word(v);
             r.sum = static_cast<uint16_t>(r.sum + v);
@@ -654,6 +688,9 @@ link::Report run_send(const link::Params& a, bool blast) {
             if (gap_us != 0u) {
                 delay_us_now(gap_us);
             }
+        }
+        if ((r.flags & link::report_timed_out) != 0u) {
+            break;
         }
     }
     wait_line_idle();
@@ -666,18 +703,25 @@ link::Report run_send_mpcm(const link::Params& a, const uint8_t* pairs) {
     uint8_t seq = a.value;
     for (uint8_t g = 0; g < a.groups; ++g) {
         const uint16_t addr = static_cast<uint16_t>(0x100u | pairs[2u * g]);
-        while (!L::tx_empty()) {
+        if (!txe_ready()) {
+            r.flags |= link::report_timed_out;
+            break;
         }
         L::write_word(addr);
         r.sum = static_cast<uint16_t>(r.sum + addr);
         ++r.count;
         for (uint8_t k = 0; k < pairs[2u * g + 1u]; ++k) {
             const uint16_t v = seq++;
-            while (!L::tx_empty()) {
+            if (!txe_ready()) {
+                r.flags |= link::report_timed_out;
+                break;
             }
             L::write_word(v);
             r.sum = static_cast<uint16_t>(r.sum + v);
             ++r.count;
+        }
+        if ((r.flags & link::report_timed_out) != 0u) {
+            break;
         }
     }
     wait_line_idle();
@@ -764,7 +808,12 @@ link::Report run_glitch(const link::Params& a) {
                                                           .preload = false, .enable = true});
     for (uint16_t i = 0; ok && i < a.count; ++i) {
         T1::enable(true);
-        while (T1::enabled()) {
+        // One pulse stops the counter itself: the longest, a whole period
+        // of 65536 counts at 24 MHz, is 2.7 ms, and 5 ms bounds it.
+        if (!brio::wait_until<Ruler>([] { return !T1::enabled(); }, 5'000)) {
+            T1::enable(false);
+            r.flags |= link::report_timed_out;
+            break;
         }
         delay_us_now(a.aux8 != 0u ? a.aux8 : 1u);
         ++r.count;

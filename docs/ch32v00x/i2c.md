@@ -448,8 +448,8 @@ dead-channel, the n, the u, the t or the y letters ("Not covered yet").
 
 - **The reset values are table 15-1's**, and both speeds resolve exactly
   at 48 MHz (CCR 240 and 40).
-- **Against the CH32X035** the whole suite holds: 54 verdicts in the
-  first image, 43 in the second, 31 in the third and 10 in the fourth, the four receive
+- **Against the CH32X035** the whole suite holds: 53 verdicts in the
+  first image, 42 in the second, 31 in the third and 10 in the fourth, the four receive
   procedures, the vocabulary, the repeated START acknowledged and
   refused (by a device's NACK), the engines, the kernel letter, the two
   hosts and the raw sequences, each on the first `z` after its flash. Letter `d` there: a write to 0x7A and one to
@@ -772,8 +772,9 @@ never earlier.
 **Before the ticker runs** nothing moves the counter, so the wait also spends a
 budget, the time asked at eight cycles a poll, which a running counter always beats
 (the loop is more than eight instructions, on a core that retires one a cycle at
-most). With STE cleared by hand, timed on TIM2 at 1 us a count: `bus_free_us` ends
-after its 600 polls in 797 or 798 us with SCL low and 802 or 803 us over an idle wire, and
+most). With STE cleared by hand, timed on TIM2 at 2 us a count: `bus_free_us` ends
+after its 600 polls in 722 or 724 us with SCL low and 726 or 728 us over an idle wire
+(on the CH32V006F8U6, thirteen runs), and
 `stop_drain_us` after 30 000 polls in 26.3 ms. The wait ends in every case. A program
 that calls `start()` before `Ticker::init()` has bounds that long.
 
@@ -1078,7 +1079,7 @@ Implemented but not bench-verified, each with what would measure it:
   channel's guards are proven on the CH32V006, and that run stands for
   both parts by decision - the peripheral, the host and the arbiter are the
   same code on the same registers. On the CH32V003 only the letters that
-  need no peer run green (`a` and `i`, 11 verdicts); its wire letters decline.
+  need no peer run green (`a` and `i`, 10 verdicts); its wire letters decline.
 - What a START into a live tenure puts on the wire: at 100 kHz the flags and
   the peer's report measure it (held until the STOP, the peer undisturbed);
   the edges themselves want a logic analyser on the two lines.

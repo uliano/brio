@@ -682,7 +682,7 @@ over a WCH-LinkE - at 48 MHz from the HSI with the flash at two wait
 states, the board's rail supplied (with none, fed through the pads'
 protection diodes, it restarts under load at 48 MHz:
 [../boards/ch32x035-evt-f8u6.md](../boards/ch32x035-evt-f8u6.md)).
-`test_x035_platform` (209 verdicts in `z`, nothing wired) ran ten times
+`test_x035_platform` (206 verdicts in `z`, nothing wired) ran ten times
 in the image built with the hardware prologue and three times in an
 image built without it; each figure of this section says which, and over
 how many runs.
@@ -798,9 +798,10 @@ suite measured:
 - **corecfgr's 0x1F makes a data-dependent loop slower** (letter `f`).
   The crt left 0x1F in the register; 2000 iterations of a loop with a
   load and a data-dependent branch over a 64-byte pseudo-random table
-  took 24200 HCLK cycles with it in all ten runs, and 22544 in every run
-  with the register cleared - 7.3 per cent more with the vendor's bits
-  at that placement of the loop - the register reading back zero for the
+  took 23956 to 23960 HCLK cycles with it, and 22552 in every run with
+  the register cleared (6.2 per cent more with the vendor's bits at that
+  placement of the loop; 24200 and 22544 in an earlier image), each run
+  opened on a fresh tick edge and masked, so inside one tick period - the register reading back zero for the
   cleared loop and 0x1F after it. The figure moves with the loop's
   address modulo four: at another placement of the same loop the gap
   read 25 per cent, in an earlier image. In the image without the
@@ -1251,9 +1252,9 @@ preemptive kernel"). What it established:
   against the far crystal: measured before every echo letter by the far
   chip timing 3999 gapless frames of this end at 1 Mbaud, -2958 to -2312
   ppm over the twelve runs - this end slow, the echo never backing up.
-  A lead under 38 ppm is what the letters accept (two characters over a
-  leg's 14400, less the HSI's 100 ppm of wander between runs a second
-  apart).
+  A lead under -316 ppm is what the letters accept (two characters over a
+  leg's 14400, 138 ppm, less the HSI's wander between two legs back to
+  back, -454 to +314 ppm in [usart.md](usart.md), the larger side taken).
 - **The DMA release contract holds at every leg.** Each leg moves
   USART4 from the polled command channel to the Uart task and back
   through the block's reset line, the channels staying USART4's for the

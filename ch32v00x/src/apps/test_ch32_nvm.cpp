@@ -218,13 +218,34 @@ void tb_page() {
     const uint32_t page = MainFlashPartition::storage_base;   // the partition's first page
 
     watch_start(1);
-    const uint32_t t0 = Ticker::ticks();
+    // The erase verb alone between the readings, the lock opened before
+    // and shut after: the unstalled code inside the window is the verb's
+    // register writes and its completion poll. The STK position at the
+    // start (read with the tick count under the mask, so the two agree)
+    // and the span give the tick EDGES that passed in the window.
+    uint32_t err = Flash::unlock() ? 0u : 0xFFFF'FFFFu;
+    uint32_t t0 = 0;
+    uint32_t position0 = 0;
+    {
+        P::CriticalSection cs;
+        position0 = stk()->CNT;
+        t0 = Ticker::ticks();
+    }
     uint16_t c0 = us_now();
-    uint32_t err = engine_erase(page);
+    if (err == 0u) {
+        err = Flash::erase_page(page);
+    }
     const uint32_t erase_us = us_since(c0);
     const uint32_t ticks_seen = Ticker::ticks() - t0;
-    print(serial, "  fast page erase: err=", hex(err), " in ", erase_us, " us; the kernel tick advanced ",
-          ticks_seen, crlf);
+    Flash::lock();
+    // The edges that passed, a lower bound: the position at the start
+    // plus the span less a microsecond (the stopwatch's resolution), in
+    // periods. A tick that lost nothing advances by exactly that many.
+    const uint32_t period = stk()->CMP + 1u;
+    const uint32_t edges_passed =
+        (position0 + (erase_us > 1u ? erase_us - 1u : 0u) * (SysClock::hz / 1'000'000u)) / period;
+    print(serial, "  fast page erase: err=", hex(err), " in ", erase_us, " us; ", edges_passed,
+          " tick edges passed, the kernel tick advanced ", ticks_seen, crlf);
     bench.verdict("the fast page erase completes without error", err == 0u);
     bench.verdict("and the page reads all 0xFF", page_is(page, 0xFF));
 
@@ -257,9 +278,15 @@ void tb_page() {
           " us against the datasheet's maximum of ", erase_max_us, " us",
           erase_us <= erase_max_us ? " (inside it)" : " (OVER it)", crlf);
     bench.verdict("a page program no longer than its maximum", program_us <= program_max_us);
-    bench.verdict("and the kernel tick, held off through the stall, advances by ONE across an erase of "
-                  "two to three of its periods",
-                  ticks_seen == 1u && erase_us > 2000u);
+    // Held off: the edges inside the stall raise one pending bit, so the
+    // tick advances by fewer than the edges that passed. An edge in the
+    // verb's unstalled tens of cycles at either end is served at once
+    // and still leaves the stall's two or three coalesced into one; the
+    // one run that cannot show the hold-off is a window of two edges with
+    // one of them in those cycles, about 1 in 10^4 runs.
+    bench.verdict("and the kernel tick, held off through the stall, advances by fewer than the tick edges "
+                  "that passed across an erase of two to three of its periods",
+                  ticks_seen >= 1u && ticks_seen < edges_passed && erase_us > 2000u);
 
     err = engine_erase(page);
     bench.verdict("erased again, all 0xFF", err == 0u && page_is(page, 0xFF));

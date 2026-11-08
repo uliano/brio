@@ -82,6 +82,7 @@
 #include "kernel/time_event.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "util/test_wait.hpp"
 
 using P = brio::Ch32v00xPlatform<>;
 using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;
@@ -111,35 +112,29 @@ struct Sleeper {
 
 volatile bool net_armed = false;   ///< letter w's IWDG: fed by every try and by the tick
 
-uint32_t cycles_now() { return stk()->CNT; }
+// The ruler of the suite's waits and windows (util/test_wait.hpp): the
+// ticker's composed cycle count, valid while the tick runs - never under
+// letter w's mask or with the ticker paused.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
-void console_drain() {
-    while (!Serial::tx_idle()) {
-    }
-    (void)delay_us(clock, 300);
-}
+/// Every console byte off the wire, bounded (util/test_wait.hpp);
+/// false when the console did not go idle within 200 ms.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 
-// Time one AWU window on the STK, awake. Returns cycles, 0 on a timeout.
+// Time one AWU window on the ruler, awake. Returns cycles, 0 on a
+// timeout. The budget, 50 ms: the longest window timed here is 1024 LSI
+// counts (letter b's /128 x 8), 13.3 ms at the 77 kHz the LSI verdict
+// still accepts. The reading is late by at most one turn of the poll,
+// one flag read and one cycles() read - under a hundred cycles against
+// the 25000 of the shortest window.
 uint32_t time_window(uint8_t prescaler, uint8_t window) {
     Awu::arm(prescaler, window);
-    const uint32_t c0 = cycles_now();
-    const uint32_t t0 = Ticker::ticks();
-    uint32_t polls = 0;
-    while (!Awu::fired() && polls < 20'000'000u) {
-        ++polls;
-    }
-    const uint32_t ticks = Ticker::ticks() - t0;
-    const uint32_t c1 = cycles_now();
+    const std::optional<uint32_t> took = brio::cycles_until<Ruler>([] { return Awu::fired(); }, 50'000);
     Awu::disarm();
-    if (polls >= 20'000'000u) {
-        return 0;
-    }
-    // Whole ticks plus the phase: the STK reloads every ms, so the
-    // elapsed cycles are the reloads counted by the tick and the signed
-    // difference of the two phases.
-    const int64_t total = static_cast<int64_t>(ticks) * (stk()->CMP + 1u) +
-                          static_cast<int64_t>(c1) - static_cast<int64_t>(c0);
-    return total > 0 ? static_cast<uint32_t>(total) : 0u;
+    return took.value_or(0u);
 }
 
 // ---------------------------------------------------------------------------
@@ -317,16 +312,15 @@ void td_standby() {
 // l - the AWU's long windows, against the STK and the host
 // ---------------------------------------------------------------------------
 /// One AWU window awake, timed on the ticker's composed cycle count
-/// (wrapping at 2^32 cycles, 89 s at 48 MHz), bounded in milliseconds.
-/// Returns cycles, 0 when the window never fired.
+/// (wrapping at 2^32 cycles, 89 s at 48 MHz), bounded in milliseconds on
+/// the kernel tick (the longest bound, 60 s, is past the half wrap a
+/// ruler wait takes). Returns cycles, 0 when the window never fired.
 uint32_t time_long_window(uint8_t prescaler, uint8_t window, uint32_t bound_ms) {
+    static_assert(P::ticks_per_second == 1000u, "the bound's milliseconds are ticks");
     Awu::arm(prescaler, window);
     const uint32_t c0 = Ticker::cycles();
-    const uint32_t t0 = Ticker::millis();
-    while (!Awu::fired() && Ticker::millis() - t0 < bound_ms) {
-    }
+    const bool fired = brio::wait_ticks<P>([] { return Awu::fired(); }, bound_ms);
     const uint32_t c1 = Ticker::cycles();
-    const bool fired = Awu::fired();
     Awu::disarm();
     return fired ? c1 - c0 : 0u;
 }
@@ -497,6 +491,12 @@ SweepResult awu_sweep(AwuPath path, bool standby, uint32_t awu_period, uint32_t 
             uint32_t took_us = 0;
             uint32_t calls = 0;
             {
+                // The lock is a bare flag poll: masked, with the ticker
+                // paused, no ruler wait can run, and a bound read in the
+                // loop lengthens the turn that is the lock's grain (a
+                // bounded version measured the AWU period's spread wider
+                // than the 2 % letter w judges). The letter's IWDG net
+                // bounds it: a match that never came reboots the board.
                 P::CriticalSection cs;
                 Awu::clear();
                 while (!Awu::fired()) {

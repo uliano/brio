@@ -76,6 +76,7 @@
 #include "util/analog_sampler.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "util/test_wait.hpp"
 
 #include "board.hpp"
 
@@ -137,31 +138,19 @@ constexpr int16_t scaled_tolerance(uint16_t counts12) {
     return scaled(counts12) < 4u ? 4 : static_cast<int16_t>(scaled(counts12));
 }
 
+/// The suite's ruler (util/test_wait.hpp): the kernel ticker's composed
+/// cycle count.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
 /// The console's transmitter perturbs the readings (measured: spikes of
 /// 40..60 counts on VREFINT while a line leaves the ring), so every
-/// measurement waits for the ring to empty and the last byte to go.
-void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    (void)delay_us(clock, 500);
-}
-
-void settle_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
-
-uint32_t cycles_now() {
-    return Ticker::cycles();
-}
-
-void spin_cycles(uint32_t cycles) {
-    const uint32_t s0 = cycles_now();
-    while (cycles_now() - s0 < cycles) {
-    }
-}
-constexpr uint32_t cycles_100ms = 4'800'000UL;
+/// measurement waits for the ring to empty and the last byte to go -
+/// bounded (util/test_wait.hpp); false when the console did not go idle
+/// within 200 ms.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 
 void all_off() {
     Pfic::disable(Adc::irq());
@@ -205,17 +194,11 @@ uint32_t dma_block(uint16_t n, AdcSampleTime t) {
                    .memory_increment = true, .peripheral_width = DmaWidth::half, .memory_width = DmaWidth::half}});
     Adc::clear_flags(AdcFlag::all);
     console_drain();
-    const uint32_t t0 = cycles_now();
     Adc::start();
-    uint32_t took = 0;
-    while (!Reader::flag(DmaFlag::complete)) {
-        if (cycles_now() - t0 > 48'000'000UL) {
-            break;
-        }
-    }
-    if (Reader::flag(DmaFlag::complete)) {
-        took = cycles_now() - t0;
-    }
+    // One second: the slowest block here, 256 conversions at the longest
+    // sample of ADCCLK /8, is some 10 ms.
+    const uint32_t took =
+        brio::cycles_until<Ruler>([] { return Reader::flag(DmaFlag::complete); }, 1'000'000).value_or(0u);
     Adc::continuous(false);
     Adc::dma(false);
     Reader::stop();
@@ -355,7 +338,10 @@ void tb_vrefint() {
           Adc::supply_mv(led_on), " mV)", crlf);
     if constexpr (device::adc_has_calibration) {
         Adc::regs().CTLR2 |= adc_rstcal;
-        for (uint32_t i = 0; i < 100'000u && (Adc::regs().CTLR2 & adc_rstcal) != 0u; ++i) {
+        // RSTCAL clears in a few ADC clocks; 1 ms is far past that, and a
+        // register that never cleared is printed.
+        if (!brio::wait_until<Ruler>([] { return (Adc::regs().CTLR2 & adc_rstcal) == 0u; }, 1'000)) {
+            print(serial, "  RSTCAL did NOT clear within 1 ms", crlf);
         }
         console_drain();
         const uint16_t uncalibrated = Adc::read_settled(4);
@@ -401,9 +387,14 @@ void tb_vrefint() {
                           three_quarters <= adc_steps * 3u / 4u + adc_steps * 3u / 100u);
     } else {
         Adc::select_channel(9);
-        const uint16_t opa = Adc::read_settled(2);
+        // Two conversions, each answering whether its result came: the
+        // OPA off may read 0 counts, which a stalled read_settled() would
+        // return too.
+        uint16_t opa = 0;
+        const bool first = Adc::read(opa);
+        const bool second = Adc::read(opa);
         print(serial, "  channel 9 (the OPA's output, off): ", opa, " counts", crlf);
-        bench.verdict("channel 9 converts (the OPA off: a number, not a hang)", true);
+        bench.verdict("channel 9 converts (the OPA off: a result each time, not a stall)", first && second);
     }
     all_off();
 }
@@ -481,10 +472,8 @@ uint32_t triggered_block(uint16_t n) {
         .peripheral = Adc::data_address(), .memory = block, .count = n,
         .config = {.direction = DmaDirection::peripheral_to_memory, .peripheral_increment = false,
                    .memory_increment = false, .peripheral_width = DmaWidth::half, .memory_width = DmaWidth::half}});
-    const uint32_t t0 = cycles_now();
-    while (!Reader::flag(DmaFlag::complete) && cycles_now() - t0 < 3u * cycles_100ms) {
-    }
-    const uint32_t took = Reader::flag(DmaFlag::complete) ? cycles_now() - t0 : 0u;
+    const uint32_t took =
+        brio::cycles_until<Ruler>([] { return Reader::flag(DmaFlag::complete); }, 300'000).value_or(0u);
     if (took == 0u) {
         print(serial, "    stall: DMA left ", Reader::count(), ", ADC STATR=", hex(Adc::regs().STATR & 0x1Fu), crlf);
     }
@@ -588,11 +577,11 @@ void td_triggers() {
     Pfic::enable(Adc::irq());
 #if BRIO_CH32_HAS_TIM3
     Tim3::enable(true);
-    spin_cycles(cycles_100ms);
+    brio::spin_us<Ruler>(100'000);
     Tim3::enable(false);
 #else
     T2::enable(true);
-    spin_cycles(cycles_100ms);
+    brio::spin_us<Ruler>(100'000);
     T2::enable(false);
 #endif
     Pfic::disable(Adc::irq());
@@ -910,7 +899,7 @@ void tr_watchdog_reset() {
                           .channel = Adc::vrefint_channel, .reset_on_fault = true});
     Adc::clear_flags(AdcFlag::all);
     Adc::start();
-    settle_ms(100);
+    brio::spin_us<Ruler>(100'000);
     print(serial, "  NO RESET after 100 ms - the watchdog did not reset the board", crlf);
     token.leg = 0;
     Adc::watchdog0_off();
@@ -1073,14 +1062,15 @@ bool one_triggered_run(uint16_t n, bool dma_first, bool power_cycle, AdcSampleTi
         T2::enable(true);
         arm();
     }
-    const uint32_t t0 = cycles_now();
-    while (!Reader::flag(DmaFlag::complete) && cycles_now() - t0 < static_cast<uint32_t>(n) * 4800u * 3u) {
+    // Three times the run: a trigger every 100 us. Each turn of the wait
+    // makes the bus access under study.
+    const bool done = brio::wait_until<Ruler>([] {
         if (bus_poll_kind == 1u) { bus_poll_sink = Port<'C'>::regs().INDR; }
         else if (bus_poll_kind == 2u) { bus_poll_sink = T2::count(); }
         else if (bus_poll_kind == 3u) { bus_poll_sink = block[0]; }
         else if (bus_poll_kind == 4u) { bus_poll_sink = Adc::regs().STATR; }
-    }
-    const bool done = Reader::flag(DmaFlag::complete);
+        return Reader::flag(DmaFlag::complete);
+    }, static_cast<uint32_t>(n) * 300u);
     if (!done) {
         const uint16_t left = Reader::count();
         const uint32_t statr = Adc::regs().STATR & 0x1Fu;
@@ -1117,11 +1107,10 @@ bool one_interrupt_run(uint16_t n) {
     Adc::interrupts(Adc::converted_interrupt, true);
     Pfic::enable(Adc::irq());
     T2::enable(true);
-    const uint32_t t0 = cycles_now();
-    while (eoc_reads < n && cycles_now() - t0 < static_cast<uint32_t>(n) * 4800u * 3u) {
+    const bool done = brio::wait_until<Ruler>([n] {
         if (bus_poll_kind == 1u) { bus_poll_sink = Port<'C'>::regs().INDR; }
-    }
-    const bool done = eoc_reads >= n;
+        return eoc_reads >= n;
+    }, static_cast<uint32_t>(n) * 300u);
     if (!done) {
         print(serial, "    stall (interrupt reader): ", eoc_reads, " results, STATR=", hex(Adc::regs().STATR & 0x1Fu), crlf);
     }

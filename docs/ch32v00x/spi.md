@@ -242,8 +242,9 @@ own key).
   polynomial, SSOE on a client), `enable()`, `disable()` - the drain
   procedure, TXE then not BSY, bounded -, `data()` both ways,
   `rxne()`/`txe()`/`busy()`, `flush_rx()`, the three errors with their
-  clearing sequences (OVR: STATR, DATAR, STATR; MODF: STATR then a CTLR1
-  write), the CRC verbs (`crc_next()`, `tx_crc()`, `rx_crc()`),
+  clearing sequences (OVR: STATR, DATAR, STATR; MODF: a STATR read then
+  a CTLR1 write with nothing between them, `clear_mode_fault()` answering
+  whether the flag went down), the CRC verbs (`crc_next()`, `tx_crc()`, `rx_crc()`),
   `software_select()`, `high_speed_read()`, `dma_requests()`, the
   three interrupt enables and `isr()`, the raised-and-enabled sources.
 - `SpiHost<1, pins, TxEngine, RxEngine, Placement>` is the
@@ -889,20 +890,21 @@ five images - whole it passes the 40 KB of program flash -
 `test_ch32_spi-1` (the block, the engine a request names, the engines against
 the peer, the polled path, the engines, the stalled exit: letters a, i, b, c, d,
 h), `-2` (the rate on the wire with the host's costs, the CRC, the kernel, OVR's
-clear: g, e, f, v), `-3` (the handler beside the polled loop, the command
+clear and MODF's: g, e, f, v, u), `-3` (the handler beside the polled loop, the command
 channel, the matrix, the ladder, the kernel against the peer, the client, MODF:
 k, n, o, p, q, r, m), `-4` (the next request after a failure, the end of the
 wire and the same host released with a request standing, then initialized: t,
 w, l) and `-5` (the engines of bytes, in an image where theirs is the only
-binding armed: j): `z` is 47, 22, 28, 13 and 1 verdicts, green in three runs of
-each, letters g, h, i, j, k, l, t and w in ten runs or more: a, c, f, g, h, i, j, l,
-v and w with the peer deselected (their select is PC3, a pad with no wire, PC1
+binding armed: j): `z` is 46, 24, 28, 13 and 1 verdicts, green in three runs of
+each, letters g, h, i, j, k, l, t, u and w in ten runs or more: a, c, f, g, h, i, j,
+l, u, v and w with the peer deselected (their select is PC3, a pad with no wire, PC1
 held high), the other letters against it; s (the pair's ceiling) and x (the
 slips) run by name. On the CH32V003F4P6 the suite is twenty-three group images,
-one letter each - the part's 15 KB with no multiplier decide the cut
+one letter each but `-18`, which carries v and u - the part's 15 KB with no
+multiplier decide the cut
 (design/overview.md) - and with no peer wired to that board the letters that
-need none ran: a, c, f and v green in three runs each, g, h, i, j, l and w in
-ten runs or more. A letter that needs the peer asks for it first: when no ping
+need none ran: a, c, f and v green in three runs each, g, h, i, j, l, u and w
+in ten runs or more. A letter that needs the peer asks for it first: when no ping
 of the boot has been answered it declines with the reason and claims no
 verdict, and a peer that answered once and then goes quiet fails it.
 
@@ -1029,8 +1031,17 @@ verdict, and a peer that answered once and then goes quiet fails it.
   in modes 0 and 1 refused by `SpiClient` before anything is commanded.
 - **MODF from a second chip** (letter m): the peer's PA4 held low 2 ms
   demotes a host whose NSS is a hardware input 24 ms after the enable,
-  MSTR and SPE cleared, four of four; STATR 0x22 before 16.2.7's clearing
-  sequence and 0x02 after it, once the pad has been high a millisecond.
+  MSTR and SPE cleared, four of four; STATR 0x22 before
+  `clear_mode_fault()` and 0x02 after it, the verb answering the flag down
+  at its first call, once the pad has been high a millisecond.
+- **MODF raised in software, and 16.2.7's clearing sequence** (letter u,
+  wireless): SSI dropped on a software-NSS host raises MODF and demotes it;
+  the STATR read followed by the CTLR1 write with nothing between them clears
+  the flag, and a write raising SPE takes after it; `clear_mode_fault()`
+  clears it and says so - ten runs of ten on the CH32V006F8U6 and on the
+  CH32V003F4P6. Measured, not judged: on both parts a CTLR1 read, a CTLR2
+  read or a second STATR read between the two steps leaves the sequence
+  working all the same.
 - **THE PAIR'S CEILING, reading an answer at 24 MHz** (letter s, frames on
   this host's engines against the client's DMA serve): to /4 every shape
   is exact both ways - a PRBS each way, MISO quiet low, quiet high,

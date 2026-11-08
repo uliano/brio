@@ -111,7 +111,6 @@
 #include "ch32v00x/adc.hpp"
 #include "ch32v00x/afio.hpp"
 #include "ch32v00x/clock.hpp"
-#include "ch32v00x/delay.hpp"
 #include "ch32v00x/i2c.hpp"
 #include "ch32v00x/pfic.hpp"
 #include "ch32v00x/pin.hpp"
@@ -120,6 +119,7 @@
 #include "ch32v00x/usart.hpp"
 #include "kernel/borrowed.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
 // register, and every architecture on this link compiles the same file.
@@ -193,26 +193,16 @@ volatile uint32_t stray_vectors = 0;
 
 // ---- waits ----------------------------------------------------------------------
 
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
-
-/// A microsecond hold of any length: delay_us() is capped below one tick
-/// period BY DESIGN, and this instrument's commanded stretches
-/// (milliseconds per byte) are exactly the blocking waits that cap keeps
-/// out of KERNEL programs - this is not one, so the hold is spent in
-/// chunks the cap admits.
-void hold_us(uint32_t us) {
-    while (us >= 500u) {
-        (void)delay_us(clock, 500u);
-        us -= 500u;
-    }
-    if (us != 0u) {
-        (void)delay_us(clock, us);
-    }
-}
+/// The ruler of the waits and of the commanded holds (util/test_wait.hpp's
+/// spin_us(), a hold of any length - milliseconds a byte - spent in the
+/// loop where it stands): the STK's cycle count composed across the tick,
+/// at SysClock's rate, which the HSI fallback shares (the static_assert
+/// above).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(P::ticks_per_second == 1000u, "the action deadlines count milliseconds as ticks");
 
 /// The low byte of STAR1 - SB, ADDR, BTF, ADD10, STOPF, RxNE and TxE -
 /// which is what fits the protocol's one-byte status fields.
@@ -236,24 +226,16 @@ bool wait_wire(uint32_t t0, uint32_t ms, bool stop) {
     }
 }
 
+bool wire_rests(uint32_t us);
+
 /// THE WIRE AT REST: both lines high without a break for `quiet_us`
-/// microseconds, within `ms` of `t0`. The quiet span is longer than any
-/// SCL high half a controller on this bus makes (five microseconds at
-/// 100 kHz), so a tenure in flight never passes for an idle bus.
+/// microseconds (wire_rests(), the span on the ruler), within `ms` of `t0`
+/// on the tick. The quiet span is longer than any SCL high half a
+/// controller on this bus makes (five microseconds at 100 kHz), so a
+/// tenure in flight never passes for an idle bus.
 bool wait_wire_quiet(uint32_t t0, uint32_t ms, uint16_t quiet_us) {
-    uint16_t quiet = 0;
-    while (Ticker::millis() - t0 < ms) {
-        if (SclPin::read() && SdaPin::read()) {
-            (void)delay_us(clock, 1);
-            ++quiet;
-            if (quiet >= quiet_us) {
-                return true;
-            }
-        } else {
-            quiet = 0;
-        }
-    }
-    return false;
+    const uint32_t spent = Ticker::millis() - t0;
+    return spent < ms && brio::wait_ticks<P>([quiet_us] { return wire_rests(quiet_us); }, ms - spent);
 }
 
 /// THE WIRE AT REST, WATCHED THROUGHOUT: both lines high at every look for
@@ -480,7 +462,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
         }
         if (Client::data_ready()) {
             if (a.hold_us != 0u) {
-                hold_us(a.hold_us);
+                brio::spin_us<Ruler>(a.hold_us);
             }
             const uint8_t v = Client::take();
             if (!first_taken) {
@@ -497,7 +479,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
             // THE ADDRESS MATCH IS A STRETCH TOO - ADDR holds SCL exactly as
             // BTF does - and the commanded hold is spent here as well.
             if (a.hold_us != 0u) {
-                hold_us(a.hold_us);
+                brio::spin_us<Ruler>(a.hold_us);
             }
             const bool reads = Client::answer_address();
             serving_ = reads;
@@ -515,7 +497,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
         }
         if (serving_ && Client::data_wanted()) {
             if (a.hold_us != 0u) {
-                hold_us(a.hold_us);
+                brio::spin_us<Ruler>(a.hold_us);
             }
             Client::give(fixed_byte ? a.seed : twilink::pattern_value(a.pattern, a.seed, tx));
             ++tx;
@@ -611,7 +593,7 @@ twilink::Report run_host(const twilink::Params& a, bool read) {
     }
     if (window) {
         if (a.aux16 != 0u) {
-            hold_us(a.aux16);
+            brio::spin_us<Ruler>(a.aux16);
         }
         stop_seen = wait_wire(t0, a.ms, true);
     }
@@ -653,11 +635,11 @@ twilink::Report run_host(const twilink::Params& a, bool read) {
         if (sync_done) {
             host_status = Host::status();
             host_done = true;
-        } else {
-            while (!host_done && Ticker::millis() - t0 < a.ms) {
-            }
+            return true;
         }
-        return host_done;
+        // The rest of the action's deadline, on the tick.
+        const uint32_t spent = Ticker::millis() - t0;
+        return brio::wait_ticks<P>([] { return host_done; }, spent < a.ms ? a.ms - spent : 0u);
     };
     // host_read's `aux8` reads, back to back (twi_link.hpp); arb writes once.
     const uint8_t tenures = read ? (a.aux8 == 0u ? uint8_t{1} : (a.aux8 > 4u ? uint8_t{4} : a.aux8))
@@ -746,7 +728,9 @@ twilink::Report run_hold_sda(const twilink::Params& a) {
 twilink::Report run_quiet(const twilink::Params& a) {
     twilink::Report r{};
     Client::release();
-    wait_ms(a.ms);
+    // The whole deadline, on the tick (up to 65 s, past what the ruler holds):
+    // nothing ends it early, so the wait's answer says nothing.
+    (void)brio::wait_ticks<P>([] { return false; }, a.ms);
     r.count = 1;
     return r;
 }

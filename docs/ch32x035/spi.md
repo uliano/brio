@@ -209,9 +209,14 @@ own `spi_peer` is that board's suite's instrument (below).
   low level raises MODF and demotes a host). SSOE drives NSS low "when the
   SPI host sends output" - measured: low from the host's first frame and
   not at SPE, held low between frames, high again only when SPE clears.
-  MODF from a second chip's pulse clears MSTR and SPE (measured), and
-  16.2.7's clearing sequence - a STATR access, then a CTLR1 write - takes
-  once the pad is back high.
+  MODF - from a second chip's pulse on a hardware select, or from SSI
+  cleared on a host whose select is software's, both causes 16.2.7 lists -
+  clears MSTR and SPE (measured). 16.2.7's way down is two steps, "a read
+  or write operation to R16_SPI1_STATR, and then write R16_SPI1_CTLR1";
+  the chapter does not say whether another access to the block between
+  them breaks the sequence, so `clear_mode_fault()` puts nothing there: it
+  reads CTLR1 first, then STATR, then writes back the value it kept, and
+  answers whether the flag went down (letters `m` and `u`, below).
 - **ODEN** (16.3.2) makes NSS, SCK and MOSI open drain - the only open
   drain this series has outside the I2C (RM 8.3.1.1 gives the GPIO none)
   - and not a client's MISO. Measured: on a wire with no pull-up SCK never
@@ -474,7 +479,7 @@ PC6, PC7). The suite is three images - whole it came within 5 % of the
 (the two-board letters and the slip statistics) and `-3` (the engines of bytes,
 letter `j`, in an image where theirs is the only binding armed). `z` on the
 first - the block, the engine a request names, the ladder and the costs, the
-refusals, OVR's clear, the fault exits, the end of the wire - runs with the far
+refusals, OVR's clear, MODF's clear, the fault exits, the end of the wire - runs with the far
 board's client deselected: 56 verdicts, three runs green, letters `f` and `i`
 ten runs each, `j` ten on its image. `y` on the second against the CH32V006
 running `spi_peer` on its crystal, commanded in band through spi_link: 49
@@ -619,8 +624,18 @@ what the silicon does at a frame's end, above.
   four.
 - **MODF from a second chip** (letter m): the peer's PC1 held low 2 ms
   demotes a host whose NSS is a hardware input 24 ms after the enable,
-  MSTR and SPE cleared, four of four; STATR 0x22 before the clearing
-  sequence, 0x02 after it, once the pad has been high a millisecond.
+  MSTR and SPE cleared, four of four; STATR 0x22 before
+  `clear_mode_fault()`, 0x02 after it, the verb answering the flag down at
+  its first call, once the pad has been high a millisecond.
+- **MODF raised in software, and its clear** (letter u, wireless): the
+  block reset, a host on software NSS at /64, SSI cleared - the fault and
+  the demotion with nothing on any wire - and from that fresh fault, with
+  interrupts masked, 16.2.7's STATR read then CTLR1 write with nothing
+  between them clears the flag, and a write raising SPE takes after it;
+  `clear_mode_fault()` clears it too and says so. What a CTLR1 read, a
+  CTLR2 read or a second STATR read between the two steps does is printed,
+  each from a fresh fault, and judged nowhere: the verb does not depend on
+  it.
 - **OVR and its clear on the resource** (letter e, wireless, ten runs): two
   frames clocked with nothing read raise OVR with RXNE, and what clears it is
   above (What the silicon does); `flush_rx()` leaves neither flag.

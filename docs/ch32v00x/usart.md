@@ -477,8 +477,9 @@ U::mute();                                        // asleep until a 9-bit frame 
 
 The reference suite is `test_ch32_serial` (73 verdicts in `z` with the
 jumper PD2 to PD4 fitted, which lends TIM2's channel 1 as the ruler to
-five of its letters - 59 without it, those letters then skipping and
-claiming nothing -, one host-assisted letter outside `z` driven by `brio
+six of its letters (b, c, e, g, r, t) - 58 without it, those letters
+then reporting the checks they could not run as skipped and claiming
+nothing -, one host-assisted letter outside `z` driven by `brio
 stress`) on the CH32V006K8U6 at 48 MHz, with USART2 on column 3 as the
 instrument and the console untouched on USART1; and its TWO-BOARD KEY
 `w` (letters 1 to 8, 60 verdicts) on column 4 against the CH32X035's

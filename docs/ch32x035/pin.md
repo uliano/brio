@@ -274,8 +274,10 @@ in letter `w` with its jumper PB11-PB12 in place) on a CH32X035F8U6 -
 WCH's evaluation board in its QFN20 edition, over a WCH-LinkE - beside
 one read over the debug port. PA5, PA6 and PA7 are wires to the desk's
 CH32V006K8U6, whose dark console leaves its ends floating inputs: the
-letters that drive and pull them ran green across those wires. What
-they measured:
+letters that drive and pull them ran green across those wires. Letters
+`b` and `c` check that first - each link pad they rest on must read high
+on this end's pull-up and low on its pull-down - and decline, judging
+nothing, when the far board drives one. What they measured:
 
 - **CFGHR reads back what its copy wrote** (letter `a`): PB11 taken
   through the five nibbles of the series, the copy and the register
@@ -349,9 +351,12 @@ Implemented but not bench-verified, each with what would measure it:
   reads back right (letter `a`); a die with zero in the chip-identifier
   word's bits 7:4 - another part or another lot - is what would show the
   case WCH's library keeps the copy for.
-- **The lock**: PB12's configuration frozen, a reconfiguration left
-  without effect, the copy unchanged: letter `l`, by name only, because
-  nothing but a reset undoes it.
+- **The lock**: letter `l`, by name only, because nothing but a reset
+  undoes it. It locks PB12, then stores CFGHR raw, past the driver, with
+  PB12's field and PB11's rewritten in one word, and judges the register:
+  PB12's field as it was, PB11's (not locked) changed; then that
+  `configure()` leaves the locked pin and its copy alone. One run would
+  measure the silicon's lock.
 - **The shorted pads' refusal** is the compiler's, proven by the family
   check's negative tests on every part that has such a pair; what the
   silicon does with an output on one is what the datasheet forbids and

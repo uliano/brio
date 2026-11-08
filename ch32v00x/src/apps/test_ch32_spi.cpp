@@ -97,6 +97,10 @@
 //   v  OVR AND ITS CLEAR, wireless, measured against 16.2.7 on the resource:
 //      what raises the flag, which reads clear it, flush_rx(), the polled
 //      write's tail
+//   u  MODF RAISED IN SOFTWARE, wireless: a host on software NSS with SSI
+//      dropped, 16.2.7's STATR read then CTLR1 write with nothing between
+//      them judged, an access between the two steps measured three ways,
+//      clear_mode_fault()'s answer judged
 //   k  A HANDLER BESIDE THE POLLED LOOP IS A GAP ON THE BUS, against the
 //      peer: the tick's handler dragged past a frame, ten windows of 128
 //      frames at /64 exact both ways, spi_ok, OVR never standing, the
@@ -126,13 +130,13 @@
 //   x  (outside z) the slip statistics: each mode ten times
 //
 // build: boards = v006k8,v006f8,v003f4
-// build: groups = a,b,c,d,g,e,f,h,k,n,o,p,q,r,m,x,s,v,t,w,i,j,l
-// build: groups.v006k8 = abcdhi,gefv,knopqrmxs,twl,j
-// build: groups.v006f8 = abcdhi,gefv,knopqrmxs,twl,j
+// build: groups = a,b,c,d,g,e,f,h,k,n,o,p,q,r,m,x,s,vu,t,w,i,j,l
+// build: groups.v006k8 = abcdhi,gefvu,knopqrmxs,twl,j
+// build: groups.v006f8 = abcdhi,gefvu,knopqrmxs,twl,j
 // (on the CH32V006 the suite whole passes the 40 KB of program flash, so it
 // builds as five images there: the block, the engines against the peer, the
 // polled path and the stalled exit; the rate on the wire with the host's
-// costs, the CRC, the kernel and OVR's clear; the command channel, the matrix,
+// costs, the CRC, the kernel, OVR's clear and MODF's; the command channel, the matrix,
 // the ladder, the handler beside the polled loop, the kernel against the
 // peer, the client, MODF and the two statistics letters; the next request
 // after a failure with the end of the wire and the release contract on the
@@ -162,6 +166,7 @@
 #include "util/print.hpp"
 #include "util/spi_bus.hpp"
 #include "util/testbench.hpp"
+#include "util/test_wait.hpp"
 
 #include "../../../avrxt/src/apps/spi_link.hpp"
 
@@ -254,17 +259,40 @@ uint8_t cmd_buf[4];
 /// A transaction that never answered: the suite's own word.
 constexpr uint8_t no_answer = 200;
 
-void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    (void)delay_us(clock, 500);
-}
-
-/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
-/// tick count and the counter's position composed right across the reload
+/// The suite's ruler (util/test_wait.hpp), and the clock of its timed
+/// spans: the kernel ticker's own cycles(), the tick count and the
+/// counter's position composed right across the reload
 /// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
-uint32_t cycles_now() {
-    return Ticker::cycles();
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// Every console byte off the wire, bounded (util/test_wait.hpp);
+/// false when the console did not go idle within 200 ms.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
+
+/// The bound on a completion the vector signals: 400 ms, far past the
+/// longest block these letters start (256 frames at /256, some 11 ms). A
+/// caller that drops the answer reads host_done right after, or judges only
+/// what comes next (a request whose own end is not the letter's subject).
+/// The flag is looked at in tight runs of 1024 bare reads and the budget
+/// read between runs, not on every turn: letter g times blocks from the
+/// request to this wait's return, and a ruler read in every turn (a
+/// composed cycles() call, some hundred cycles on the CH32V003) put a turn's
+/// length into a 224-frame difference - 1.7 % under the wire, measured.
+[[gnu::noinline]] bool await_done() {
+    const uint32_t t0 = Ruler::now();
+    for (;;) {
+        for (uint32_t k = 0; k < 1024u; ++k) {
+            if (host_done) {
+                return true;
+            }
+        }
+        if (Ruler::now() - t0 >= brio::us_cycles<Ruler>(400'000)) {
+            return host_done;
+        }
+    }
 }
 
 void fill_pattern(uint8_t* p, uint16_t n, uint8_t seed) {
@@ -329,8 +357,7 @@ uint8_t host_xfer(PinRef cs, const uint8_t* cmd, uint8_t cmd_len, const uint8_t*
     if (Host::start(r)) {
         return Host::status();
     }
-    for (uint32_t i = 0; i < 2'000'000UL && !host_done; ++i) {
-    }
+    (void)await_done();
     if (!host_done) {
         print(serial, "    STALL: STATR=", hex(S::status()), " CTLR1=", hex(S::regs().CTLR1),
               " CTLR2=", hex(S::regs().CTLR2), " isr entries ", spi_isr_entries, crlf);
@@ -361,8 +388,7 @@ uint8_t dma_xfer(PinRef cs, const uint8_t* cmd, uint8_t cmd_len, const uint8_t* 
     if (D::start(r)) {
         return D::status();
     }
-    for (uint32_t i = 0; i < 2'000'000UL && !host_done; ++i) {
-    }
+    (void)await_done();
     if (!host_done) {
         print(serial, "    STALL (dma): STATR=", hex(S::status()), " ch2 flags=",
               hex(DmaChannel<2>::flags()), " ch3 flags=", hex(DmaChannel<3>::flags()), crlf);
@@ -392,8 +418,7 @@ bool went_to_engines(uint16_t n, SpiClock rate, bool read, uint8_t& status) {
         status = D::status();
         return false;
     }
-    for (uint32_t i = 0; i < 2'000'000UL && !host_done; ++i) {
-    }
+    (void)await_done();
     status = host_done ? D::status() : no_answer;
     if (!host_done) {
         (void)D::recover();
@@ -455,6 +480,9 @@ bool busy_refused(bool polled) {
     return done && D::status() == spi_rejected && untouched && S::regs().CTLR1 == word;
 }
 
+/// A fixed settle on the kernel tick, in milliseconds: not a time-out (a
+/// span that cannot run out), and a tick read where a ruler spin would
+/// pull the composed cycle count into the CH32V003's fullest images.
 void settle_ms(uint32_t ms) {
     const uint32_t t0 = Ticker::millis();
     while (Ticker::millis() - t0 < ms) {
@@ -480,9 +508,9 @@ uint32_t frame_permille(SpiClock rate, SpiMode mode, SpiDataSize bits, const uin
     auto best = [&](uint16_t n) {
         uint32_t least = 0xFFFFFFFFu;
         for (uint8_t k = 0; k < 3u; ++k) {
-            const uint32_t t0 = cycles_now();
+            const uint32_t t0 = Ruler::now();
             (void)dma_xfer(LoneCs::ref(), nullptr, 0, tx, rx, n, rate, bits, false, mode);
-            const uint32_t took = cycles_now() - t0;
+            const uint32_t took = Ruler::now() - t0;
             least = took < least ? took : least;
         }
         return least;
@@ -719,9 +747,7 @@ bool need_peer() {
         return true;
     }
     if (!peer_seen) {
-        print(serial, "  SKIPPED, no verdict claimed: peer absent - no ping of this boot was answered, so no "
-                      "board running spi_peer is on the wire.",
-              crlf);
+        bench.skip("peer absent: no ping answered in this boot (spi_peer)");
         return false;
     }
     bench.verdict("the peer, which answered earlier in this boot, still answers a ping (the CH32X035 running "
@@ -809,10 +835,10 @@ uint8_t window(const Exchange& e, const uint8_t* cmd, const uint8_t* tx, uint8_t
         }
     }
     if (!engines) {
-        const uint32_t t0 = cycles_now();
+        const uint32_t t0 = Ruler::now();
         st = host_xfer({}, cmd, e.cmd_len, tx, rx, len, e.host_mode, e.rate, bits, true);
         if constexpr (carries('k')) {
-            window_cycles = cycles_now() - t0;
+            window_cycles = Ruler::now() - t0;
             window_ovr = (S::status() & spi_ovr) != 0u;
         } else {
             (void)t0;
@@ -1011,8 +1037,6 @@ void ta_block() {
     }
     print(serial, crlf, "  -> ", taken, " of 7 fields take a write under SPE; the driver's refusals "
           "are the protection where the silicon has none", crlf);
-    bench.verdict("the enable protection was measured field by field (a finding either way)",
-                  true);
     (void)S::disable();
     bench.verdict("disable() drains and drops SPE", !S::enabled());
     S::reset();
@@ -1142,8 +1166,7 @@ void ti_engine_rules() {
     const uint32_t entries_in_loop = dma_isr_entries;
     dc_low_ticks = 0;
     dc_high_ticks = 0;
-    for (uint32_t i = 0; i < 2'000'000UL && !host_done; ++i) {
-    }
+    (void)await_done();
     const bool both_done = host_done;
     const uint32_t low_on_engines = dc_low_ticks;
     const uint32_t high_on_engines = dc_high_ticks;
@@ -1170,8 +1193,7 @@ void ti_engine_rules() {
     const bool alone_inside = DmaHost::start(command_request(0));
     const uint32_t alone_entries_at_return = dma_isr_entries;
     const bool alone_low_at_return = !DcPin::read_out();
-    for (uint32_t i = 0; i < 2'000'000UL && !host_done; ++i) {
-    }
+    (void)await_done();
     dc_watch = false;
     const bool alone_done = host_done;
     const uint32_t alone_low = dc_low_ticks;
@@ -1212,8 +1234,7 @@ void ti_engine_rules() {
     const bool flight_inside = DmaHost::start(flight);
     const bool busy_polled = busy_refused<DmaHost>(true);
     const bool busy_dma = busy_refused<DmaHost>(false);
-    for (uint32_t i = 0; i < 2'000'000UL && !host_done; ++i) {
-    }
+    (void)await_done();
     const bool flight_done = host_done;
     const uint8_t flight_status = DmaHost::status();
     const uint32_t flight_entries = dma_isr_entries;
@@ -1482,10 +1503,10 @@ void tc_rates() {
         const SpiClock rate = static_cast<SpiClock>(code);
         fill_pattern(tx_buf, 64, static_cast<uint8_t>(0xA0u + code));
         console_drain();
-        const uint32_t t0 = cycles_now();
+        const uint32_t t0 = Ruler::now();
         const uint8_t st = host_xfer(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 64, SpiMode::mode0, rate,
                                      SpiDataSize::bits8, true);
-        const uint32_t cycles = cycles_now() - t0;
+        const uint32_t cycles = Ruler::now() - t0;
         // The wire's own time for 64 frames of 8 bits at the SCK ASKED.
         const uint32_t sck = SysClock::hz / asked_divisor(rate);
         const uint32_t wire_cycles = 64UL * 8UL * asked_divisor(rate);
@@ -1517,10 +1538,10 @@ void tc_rates() {
         auto best = [rate](uint16_t n) {
             uint32_t least = 0xFFFFFFFFu;
             for (uint8_t k = 0; k < 3u; ++k) {
-                const uint32_t t0 = cycles_now();
+                const uint32_t t0 = Ruler::now();
                 (void)host_xfer(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, n, SpiMode::mode0, rate,
                                 SpiDataSize::bits8, true);
-                const uint32_t took = cycles_now() - t0;
+                const uint32_t took = Ruler::now() - t0;
                 least = took < least ? took : least;
             }
             return least;
@@ -1529,7 +1550,10 @@ void tc_rates() {
         const uint32_t big = best(256);
         return big > small ? (big - small) * 10u / 224u : 0u;
     };
-    console_drain();
+    if (!console_drain()) {
+        bench.skip("the console did not drain: the receive loop's frame not timed");
+        return;
+    }
     const uint32_t f64 = frame_x10(SpiClock::div64);
     const uint32_t f128 = frame_x10(SpiClock::div128);
     print(serial, "  the receive loop: /64 ", f64 / 10u, ".", f64 % 10u, " cycles a frame (the wire 512), /128 ",
@@ -1584,10 +1608,10 @@ struct HoldGaps {
 /// The gaps a main-context loop of ruler reads sees over three ticks.
 HoldGaps hold_gaps(uint32_t over) {
     HoldGaps g{};
-    const uint32_t from = cycles_now();
+    const uint32_t from = Ruler::now();
     uint32_t last = from;
     for (;;) {
-        const uint32_t now = cycles_now();
+        const uint32_t now = Ruler::now();
         const uint32_t gap = now - last;
         last = now;
         g.own_turn = gap < g.own_turn ? gap : g.own_turn;
@@ -1646,7 +1670,10 @@ void tk_handler_gap() {
     if (!need_peer()) {
         return;
     }
-    console_drain();
+    if (!console_drain()) {
+        bench.skip("the console did not drain: the timed windows not opened");
+        return;
+    }
     const HoldGaps plain = hold_gaps(0xFFFFFFFFu);
     tick_drag = hold_drag;
     const HoldGaps dragged = hold_gaps(hold_wire_frame);
@@ -1811,9 +1838,9 @@ PathCosts measure_costs() {
     auto block = [](uint16_t n) {
         uint32_t least = 0xFFFFFFFFu;
         for (uint8_t k = 0; k < 5u; ++k) {
-            const uint32_t t0 = cycles_now();
+            const uint32_t t0 = Ruler::now();
             (void)dma_xfer<D>({}, nullptr, 0, tx_buf, rx_buf, n, SpiClock::div4, SpiDataSize::bits8, false);
-            const uint32_t took = cycles_now() - t0;
+            const uint32_t took = Ruler::now() - t0;
             least = took < least ? took : least;
         }
         return least;
@@ -1826,9 +1853,9 @@ PathCosts measure_costs() {
     auto polled_same = [](uint16_t n, SpiClock rate, bool read) {
         uint32_t least = 0xFFFFFFFFu;
         for (uint8_t j = 0; j < 5u; ++j) {
-            const uint32_t t0 = cycles_now();
+            const uint32_t t0 = Ruler::now();
             (void)dma_xfer<D>({}, nullptr, 0, tx_buf, read ? rx_buf : nullptr, n, rate, SpiDataSize::bits8, true);
-            const uint32_t took = cycles_now() - t0;
+            const uint32_t took = Ruler::now() - t0;
             least = took < least ? took : least;
         }
         return least;
@@ -1905,7 +1932,11 @@ void tg_wire() {
     // difference of a 256- and a 32-frame block (128 and 16 at 16 bits,
     // the buffer's half-words).
     dma_ready();
-    console_drain();
+    if (!console_drain()) {
+        bench.skip("the console did not drain: the wire not timed");
+        dma_done();
+        return;
+    }
     const uint32_t m0_div2 = frame_permille(SpiClock::div2, SpiMode::mode0, SpiDataSize::bits8, tx_buf, rx_buf, 256, 32);
     const uint32_t m0_div4 = frame_permille(SpiClock::div4, SpiMode::mode0, SpiDataSize::bits8, tx_buf, rx_buf, 256, 32);
     const uint32_t m0_div16 = frame_permille(SpiClock::div16, SpiMode::mode0, SpiDataSize::bits8, tx_buf, rx_buf, 256, 32);
@@ -2047,10 +2078,9 @@ CrcRun crc_exchange(bool wide, uint16_t poly, uint16_t peer_poly, uint8_t seed_a
         if (i == n - 1u) {
             S::crc_next();
         }
-        uint32_t spins = 200'000u;
-        while (!S::rxne() && spins-- != 0u) {
-        }
-        frames = frames && spins != 0u;
+        // A frame at /256 is 256 cycles a bit: under 100 us for 16 bits;
+        // 10 ms is the bound, and a frame that never came fails the run.
+        frames = brio::wait_until<Ruler>([] { return S::rxne(); }, 10'000) && frames;
         const uint16_t r = S::data(bits);
         got[w * i] = static_cast<uint8_t>(r);
         if (wide) {
@@ -2058,14 +2088,11 @@ CrcRun crc_exchange(bool wide, uint16_t poly, uint16_t peer_poly, uint8_t seed_a
         }
         (void)delay_us(clock, spilink::gap_us);
     }
-    uint32_t spins = 200'000u;
-    while (!S::rxne() && spins-- != 0u) {
-    }
-    frames = frames && spins != 0u;
+    frames = brio::wait_until<Ruler>([] { return S::rxne(); }, 10'000) && frames;
     c.frame = S::data(bits);
-    spins = 200'000u;
-    while (S::busy() && spins-- != 0u) {
-    }
+    // The shifter idle after the CRC frame: the same bound; a block still
+    // busy shows in the CRC registers read next.
+    (void)brio::wait_until<Ruler>([] { return !S::busy(); }, 10'000);
     link_hold();
     CsPin::set();
     c.tx_crc = S::tx_crc();
@@ -2359,23 +2386,23 @@ uint8_t stall_stage(Stage s, SpiMode mode, uint32_t& took) {
     switch (s) {
         case Stage::held_in_reset:
             rcc()->PB2PRSTR |= rcc_pb2_spi1;
-            t0 = cycles_now();
+            t0 = Ruler::now();
             st = dma_xfer<H>(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, SpiClock::div16, bits, true, mode);
             break;
         case Stage::spe_down_write:
             S::regs().CTLR1 = static_cast<uint16_t>(S::regs().CTLR1 & ~spi_spe);
-            t0 = cycles_now();
+            t0 = Ruler::now();
             st = dma_xfer<H>(LoneCs::ref(), nullptr, 0, tx_buf, nullptr, 16, SpiClock::div16, bits, true, mode);
             break;
         default:
             // Sixty-four frames for the engines; the one command frame runs in
             // the loop in front of them.
             S::regs().CTLR1 = static_cast<uint16_t>(S::regs().CTLR1 & ~spi_spe);
-            t0 = cycles_now();
+            t0 = Ruler::now();
             st = dma_xfer<H>(LoneCs::ref(), cmd_buf, 1, tx_buf, rx_buf, 64, SpiClock::div16, bits, false, mode);
             break;
     }
-    took = cycles_now() - t0;
+    took = Ruler::now() - t0;
     return st;
 }
 
@@ -2413,12 +2440,6 @@ typename H::Request fault_request(Stage s, SpiMode mode) {
     return r;
 }
 
-/// The bound on a completion the vector signals: the suite's own spin.
-bool await_done() {
-    for (uint32_t i = 0; i < 2'000'000UL && !host_done; ++i) {
-    }
-    return host_done;
-}
 
 /// A refusal with no prime of its own: 16-bit frames off the half-word boundary.
 template <typename H>
@@ -2481,13 +2502,13 @@ void real_faults(uint8_t& good_faults, uint8_t& good_next) {
     S::error_interrupt(true);
     const bool still_refused = refused_after_fault<H>();
     const bool errie_through = (S::regs().CTLR2 & spi_errie) != 0u;
-    uint32_t t0 = cycles_now();
+    uint32_t t0 = Ruler::now();
     H::prime(mode, link_clock);
-    const uint32_t owed = cycles_now() - t0;
+    const uint32_t owed = Ruler::now() - t0;
     const bool errie_gone = (S::regs().CTLR2 & spi_errie) == 0u;
-    t0 = cycles_now();
+    t0 = Ruler::now();
     H::prime(mode, link_clock);
-    const uint32_t paid = cycles_now() - t0;
+    const uint32_t paid = Ruler::now() - t0;
     H::release();
     print(serial, "  ", H::placed_in_ram ? "SRAM: " : "flash: ", "a refused request after a fault ",
           still_refused ? "refused" : "NOT REFUSED", ", the block ", errie_through ? "untouched" : "TOUCHED", ", prime() "
@@ -2522,10 +2543,10 @@ void th_stalled() {
 
     // 1. The host with no engines, a polled read of sixteen at /16.
     rcc()->PB2PRSTR |= rcc_pb2_spi1;
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     const uint8_t st = host_xfer(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0,
                                  SpiClock::div16, SpiDataSize::bits8, true);
-    const uint32_t took = cycles_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     const bool released = LoneCs::read_out() && DcPin::read_out();
     const uint16_t ctlr1 = S::regs().CTLR1;
     const uint16_t statr = S::status();
@@ -2591,17 +2612,17 @@ void th_stalled() {
     S::bus_clock(false);
     const uint16_t closed_ctlr1 = S::regs().CTLR1;
     const uint16_t closed_statr = S::status();
-    uint32_t tg = cycles_now();
+    uint32_t tg = Ruler::now();
     const uint8_t gate_1 = host_xfer(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0, SpiClock::div16,
                                      SpiDataSize::bits8, true);
-    const uint32_t gate_1_took = cycles_now() - tg;
-    tg = cycles_now();
+    const uint32_t gate_1_took = Ruler::now() - tg;
+    tg = Ruler::now();
     const uint8_t gate_2 = host_xfer(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0, SpiClock::div16,
                                      SpiDataSize::bits8, true);
-    const uint32_t gate_2_took = cycles_now() - tg;
-    tg = cycles_now();
+    const uint32_t gate_2_took = Ruler::now() - tg;
+    tg = Ruler::now();
     const bool drained = S::disable();
-    const uint32_t drain_took = cycles_now() - tg;
+    const uint32_t drain_took = Ruler::now() - tg;
     S::bus_clock(true);
     const uint8_t open_1 = host_xfer(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0, SpiClock::div16,
                                      SpiDataSize::bits8, true);
@@ -2768,6 +2789,101 @@ void tv_overrun() {
 }
 
 // ===========================================================================
+// u - MODF raised in software, and 16.2.7's clearing sequence
+// ===========================================================================
+//
+// 16.2.7 names two steps to clear MODF: "a read or write of STATR, then a write
+// of CTLR1". Each attempt below starts from a fresh fault - the block reset, a
+// host on software NSS, SSI dropped: the internal select low on a host raises
+// MODF and demotes it, MSTR and SPE cleared, with nothing on any wire - and
+// runs the two steps with interrupts masked, so that what sits between them is
+// exactly what the attempt names: nothing (the chapter's sequence done
+// strictly, the one judged), then a CTLR1 read, a CTLR2 read and a second
+// STATR read, each printed as a measurement. The chapter does not say whether
+// such an access breaks the sequence, and brio depends on neither answer once
+// clear_mode_fault() keeps the two steps adjacent; the verb is judged last.
+
+/// The block reset, a host on software NSS at /64, enabled, SSI dropped:
+/// whether MODF stood after it.
+bool raise_mode_fault() {
+    S::reset();
+    (void)S::configure({.role = SpiRole::host, .clock = SpiClock::div64, .nss = SpiNss::software});
+    S::enable();
+    S::software_select(true);
+    (void)delay_us(clock, 5);
+    return S::mode_fault();
+}
+
+/// One attempt from a fresh fault. between: 0 nothing, 1 a CTLR1 read, 2 a
+/// CTLR2 read, 3 a second STATR read - a template argument, so each attempt
+/// is straight-line code with nothing but what it names between the two
+/// steps, not even a compare of its own argument. Answers whether MODF went
+/// down; `raised` whether the fault stood first, `took` whether a write
+/// raising SSI, MSTR and SPE took after the attempt (SPE does not take while
+/// the flag stands).
+template <uint8_t between>
+bool mode_fault_attempt(bool& raised, bool& took) {
+    raised = raise_mode_fault();
+    bool down = false;
+    {
+        P::CriticalSection cs;
+        SpiRegs& r = S::regs();
+        const uint16_t c = r.CTLR1;
+        (void)r.STATR;
+        if constexpr (between == 1u) {
+            (void)r.CTLR1;
+        } else if constexpr (between == 2u) {
+            (void)r.CTLR2;
+        } else if constexpr (between == 3u) {
+            (void)r.STATR;
+        }
+        r.CTLR1 = c;
+        down = (r.STATR & spi_modf) == 0u;
+    }
+    S::regs().CTLR1 = static_cast<uint16_t>(S::regs().CTLR1 | spi_ssi | spi_mstr | spi_spe);
+    took = (S::regs().CTLR1 & spi_spe) != 0u;
+    return down;
+}
+
+void tu_mode_fault() {
+    host_ready();   // the pads the host's, the peer's select held high
+    bool strict_raised = false;
+    bool strict_took = false;
+    const bool strict_down = mode_fault_attempt<0>(strict_raised, strict_took);
+    print(serial, "  MODF ", strict_raised ? "raised" : "NOT RAISED",
+          " by SSI low on a software-NSS host; a STATR read and the CTLR1 write with nothing between: ",
+          strict_down ? "cleared" : "LEFT STANDING", ", and a write raising SPE ",
+          strict_took ? "took" : "did not take", " after it", crlf);
+    const char* between_names[] = {"", "a CTLR1 read", "a CTLR2 read", "a second STATR read"};
+    for (uint8_t k = 1; k <= 3u; ++k) {
+        bool raised = false;
+        bool took = false;
+        bool down = false;
+        if (k == 1u) {
+            down = mode_fault_attempt<1>(raised, took);
+        } else if (k == 2u) {
+            down = mode_fault_attempt<2>(raised, took);
+        } else {
+            down = mode_fault_attempt<3>(raised, took);
+        }
+        print(serial, "  measured: with ", between_names[k], " between the two steps, MODF ",
+              !raised ? "was not raised" : down ? "cleared" : "stood", ", SPE ", took ? "took" : "did not take",
+              crlf);
+    }
+    const bool verb_raised = raise_mode_fault();
+    const bool verb_down = S::clear_mode_fault();
+    print(serial, "  clear_mode_fault(): ",
+          !verb_raised ? "found no fault" : verb_down ? "cleared it" : "LEFT IT STANDING", crlf);
+    S::reset();
+    host_ready();
+    bench.verdict("MODF HAS A WAY DOWN IN SOFTWARE: 16.2.7's STATR read followed by the CTLR1 write, with no "
+                  "other access to the block between them, clears the flag, and a write raising SPE takes after it",
+                  strict_raised && strict_down && strict_took);
+    bench.verdict("and clear_mode_fault(), which keeps the two steps adjacent, clears it too and says so",
+                  verb_raised && verb_down);
+}
+
+// ===========================================================================
 // w - when a request ends, the wire has ended
 // ===========================================================================
 //
@@ -2868,10 +2984,9 @@ FlagPass channel_pass(SpiMode m, SpiClock c) {
         while (SckPin::read() != idle && f.polls_to_idle < 1000u) {
             ++f.polls_to_idle;
         }
-        t0 = cycles_now();
+        t0 = Ruler::now();
     }
-    for (uint32_t i = 0; i < 2'000'000UL && !host_done; ++i) {
-    }
+    (void)await_done();
     vector_read_after = end_stamp - t0;
     return f;
 }
@@ -2903,8 +3018,7 @@ void end_of_request(SpiClock c, uint16_t& asked, uint16_t& off_polled, uint16_t&
                 r.engine = SpiEngine::dma;
                 host_done = false;
                 const bool inside = H::start(r);
-                for (uint32_t i = 0; i < 2'000'000UL && !host_done; ++i) {
-                }
+                (void)await_done();
                 ++asked;
                 if (polled_level != idle) {
                     ++off_polled;
@@ -3638,9 +3752,10 @@ ClientBurst client_burst(uint8_t mode, bool lsb, bool wide, uint8_t seed_a, uint
         ++out.frames;
     }
     out.ran = true;
-    // The far host closes its select, then this end lets the pads go.
-    while (!CsPin::read() && Ticker::millis() - t0 < 600u) {
-    }
+    // The far host closes its select, then this end lets the pads go;
+    // 300 ms more for it. A select still low then is dropped here: the
+    // frames counted above are what the letter judges.
+    (void)brio::wait_until<Ruler>([] { return CsPin::read(); }, 300'000);
     (void)LinkClient::disable();
     LinkClient::release();
     for (uint16_t i = 0; i < out.frames * w; ++i) {
@@ -3796,11 +3911,11 @@ Demotion demote_once() {
     d.t_high = Ticker::millis() - t0;
     d.st_before = S::status();
     for (uint8_t k = 1; k <= 4u; ++k) {
-        S::clear_mode_fault();
+        const bool down = S::clear_mode_fault();
         if (k == 1u) {
             d.st_after = S::status();
         }
-        if (!S::mode_fault()) {
+        if (down) {
             d.sequences = k;
             break;
         }
@@ -3820,7 +3935,7 @@ void tm_peer_modf() {
         print(serial, "  pulse ", k, ": MODF ", d.at_enable ? "ALREADY SET" : "clear", " at the enable, ",
               d.modf ? "SET" : "never", " ", d.t_modf, " ms later, CTLR1 ", hex(d.ctlr1),
               ", the pad high again from ", d.t_high, " ms; STATR ", hex(d.st_before),
-              " before the clearing sequence, ", hex(d.st_after), " after it; cleared by sequence ", d.sequences,
+              " before the clearing sequence, ", hex(d.st_after), " after it; clear_mode_fault() answered down at call ", d.sequences,
               crlf);
         accepted = static_cast<uint8_t>(accepted + (d.accepted ? 1u : 0u));
         raised = static_cast<uint8_t>(raised + (d.modf && !d.at_enable && d.t_modf >= 20u ? 1u : 0u));
@@ -3832,8 +3947,8 @@ void tm_peer_modf() {
                   "four",
                   raised == 4u);
     bench.verdict("and it demotes the host: MSTR and SPE cleared by the hardware, four of four", demoted == 4u);
-    bench.verdict("16.2.7's sequence, a STATR read then a CTLR1 write, clears MODF once the pad is back high, four "
-                  "of four",
+    bench.verdict("clear_mode_fault() - 16.2.7's STATR read then CTLR1 write - clears MODF at its first call once "
+                  "the pad is back high, and says so, four of four",
                   first == 4u);
     bench.verdict("the command channel is back after the demotions", command(Op::ping));
 }
@@ -4004,7 +4119,7 @@ BRIO_CH32_VECTOR(spi1_handler) {
 [[gnu::always_inline]] inline void read_the_end() {
     if constexpr (carries('w')) {
         sck_at_end = SckPin::read();
-        end_stamp = cycles_now();
+        end_stamp = Ruler::now();
     }
 }
 
@@ -4069,6 +4184,8 @@ int main() {
                       "closed gate, the rest of the map",
                  th_stalled);
     bench.letter('v', "OVR AND ITS CLEAR on the resource: what raises it, which reads clear it, flush_rx()", tv_overrun);
+    bench.letter('u', "MODF RAISED IN SOFTWARE, wireless: 16.2.7's clearing sequence done strictly, and the verb",
+                 tu_mode_fault);
     bench.letter('w', "WHEN A REQUEST ENDS THE WIRE HAS ENDED, wireless: SCK against its idle level at the flag and "
                       "after the request, both engines", tw_wire_end);
     bench.letter('k', "A HANDLER BESIDE THE POLLED LOOP IS A GAP ON THE BUS: ten windows exact under a dragged tick",

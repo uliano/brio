@@ -48,6 +48,7 @@
 #include "ch32v00x/usart.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "util/test_wait.hpp"
 
 using P = brio::Ch32v00xPlatform<>;
 using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;
@@ -80,11 +81,16 @@ TestBench<Serial> bench;
 /// the same boot meets the block its first run unlocked.
 bool opa_locked_at_boot = false;
 
-void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    (void)delay_us(clock, 500);
-}
+/// The suite's ruler (util/test_wait.hpp): the kernel ticker's composed
+/// cycle count.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// Every console byte off the wire, bounded (util/test_wait.hpp);
+/// false when the console did not go idle within 200 ms.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 
 /// The ADC on the OPA's channel at a slow sample, settled.
 uint16_t read_opa() {
@@ -301,8 +307,9 @@ void tc_bias() {
     // pin with PD7) cannot tell a working PGA from an output stuck at that
     // row's rail. Then the letter declines with the reason.
     if (rails_judged < 2u) {
-        print(serial, "  SKIPPED, no verdict claimed: only ", rails_judged,
-              " of the two rail rows had its stimulus take, and one row cannot show a sign", crlf);
+        bench.skip(rails_judged == 0u ? "neither rail row had its stimulus take, and no row can show a sign"
+                                      : "only one of the two rail rows had its stimulus take, and one row cannot "
+                                        "show a sign");
     } else {
         bench.verdict("the differential PGA's sign: P above N saturates high, N above P saturates low, on channel 9",
                       rails_right == rails_judged);

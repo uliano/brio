@@ -404,7 +404,7 @@ PB6), the bus pulled up by a 1.5 kOhm resistor from each line to this
 board's PB3, which the suite drives high from its boot. The suite is two images, `test_x035_i2c-1` (the
 single-host wire letters) and `-2` (the kernel, the two hosts, the dead
 channel, the stuck BUSY, the vectors' client, the cost, the bounds, the live
-tenure): `z` is 69 and 67 verdicts, green.
+tenure): `z` is 67 and 67 verdicts, green.
 
 - **The lot probe** answered present: FREQ, CKCFGR and OADDR1 hold what
   they are given, PE sets, and a START on the idle bus raises SB with MSL
@@ -629,7 +629,9 @@ counter read and no call; the poll is out of line and cold.
 
 **Before the ticker runs** nothing moves the counter, so the wait also spends a
 budget, the time asked at eight cycles a poll, which a running counter always beats.
-With STE cleared by hand, timed on TIM2 at 1 us a count: `bus_free_us` ends after its
+With STE cleared by hand, timed on TIM2 (the letter counts it at 2 us, which keeps the
+longest span its verdict admits, 60 ms, inside the 16-bit counter's half-wrap; the
+figures here were read at 1 us a count): `bus_free_us` ends after its
 600 polls in 962 or 963 us with SCL low and 1016 or 1017 us over an idle wire, a poll 76 or 77 and 81 cycles, and `stop_drain_us` after 30 000 polls in 30.0 ms, a poll
 48 cycles. A program that calls `start()` before `Ticker::init()` has bounds that long.
 

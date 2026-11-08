@@ -186,11 +186,13 @@
 //      judged first: a lead of L ppm builds L x N / 10^6 characters over N,
 //      and a leg is at most 200 lines of 72 = 14400 characters, so the echo
 //      holds any lead under 2 / 14400 = 138 ppm, less the lead's wander
-//      between its measurement and the leg: about 100 ppm against a crystal
-//      peer (this end's HSI alone, test_x035_usart letter j's three runs), so
-//      a lead under 38 ppm - the HSI measured some 3000 ppm SLOW of a crystal,
-//      the echo never backing up - and up to 1100 ppm against an RC peer (two
-//      oscillators wandering), so a lead under -962 ppm there. A lead over
+//      between its measurement and the leg: up to 454 ppm against a crystal
+//      peer (this end's HSI alone: two blasts back to back -454 to +314 ppm
+//      apart, docs/ch32x035/usart.md and test_x035_usart's judge_span()), so
+//      a lead under -316 ppm - the HSI measured some 2300 to 3000 ppm SLOW
+//      of a crystal, the echo never backing up - and up to 1100 ppm against
+//      an RC peer (two oscillators wandering), so a lead under -962 ppm
+//      there. A lead over
 //      the bound is the pair's, not the stack's: the echo legs decline with
 //      it printed. On the WeAct pair this end runs 0.35 to 0.54 % FAST of
 //      the far HSI, and t and v decline.
@@ -246,6 +248,7 @@
 #include "util/line_reader.hpp"
 #include "util/print.hpp"
 #include "util/spi_bus.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // THE PROTOCOL HEADERS ARE SHARED, NOT COPIED: the far board's two
@@ -266,9 +269,11 @@ constexpr uint32_t core_hz = SysClock::hz;
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
 
 /// The composed cycle count: monotone across the ticker's restart, a
-/// difference exact under 2^32 cycles (89 s at 48 MHz).
+/// difference exact under 2^32 cycles (89 s at 48 MHz) - the shared
+/// body's ruler, and util/test_wait.hpp's for the link helpers' waits.
 struct Ruler {
     static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
 
 /// The STK counter's period: it counts HCLK and restarts at the ticker's
@@ -355,7 +360,8 @@ constexpr const char* pressure_name = "TIM2";
 constexpr const char* peer_name = "the CH32V006F8U6";
 
 // THE LINK'S REVIEWED HELPERS (the UART key's command channel), in their
-// own namespace: the shared body below has a wait_ms() of the kernel's.
+// own namespace, every call qualified: the shared body below has helpers of
+// its own (a wait_until() and a wait_ms() of the kernel's among them).
 #include "x035_link_dut.hpp"
 
 /// Letter w's rate and Pressure's length on this host (the file header):
@@ -445,14 +451,9 @@ void print_port(const PortCounters& c) {
 
 namespace ul {
 
-/// Find the peer: a named failure, never a hang.
-bool ensure() {
-    if (!x035link::ensure_link()) {
-        bench.verdict("the peer answers a ping (the peer board running usart_peer)", false);
-        return false;
-    }
-    return true;
-}
+/// Find the peer: never a hang. A peer never heard in this boot declines
+/// the letter (a skip), one gone silent fails it (x035link::need_peer()).
+bool ensure() { return x035link::need_peer(); }
 
 /// USART4 let go: reset, gated off, both pads floating.
 void release() { x035link::u4_release(); }
@@ -921,16 +922,17 @@ constexpr uint16_t sink_lines = 300;
 
 /// The echo's slack over a leg (the file header): two characters over 200
 /// lines of 72, less the lead's wander between the premise's measurement
-/// and the leg. Against a crystal peer that wander is this end's HSI alone,
-/// about 100 ppm between runs a second apart (test_x035_usart letter j's
-/// three runs). Against an RC peer it is two oscillators: on the WeAct pair
-/// two legs back to back read up to 1051 ppm apart (test_x035_usart's
-/// judge_span()), taken here as 1100 - so only a lead well under zero, this
-/// end the slower, is held by the echo there.
+/// and the leg. Against a crystal peer that wander is this end's HSI alone:
+/// two blasts back to back read -454 to +314 ppm apart over 252 legs
+/// (test_x035_usart's judge_span(), docs/ch32x035/usart.md), the larger
+/// side taken. Against an RC peer it is two oscillators: on the WeAct pair
+/// two legs back to back read up to 1051 ppm apart (the same comment),
+/// taken here as 1100. So only a lead under zero, this end the slower, is
+/// held by the echo on either peer.
 constexpr int32_t echo_slack_ppm = static_cast<int32_t>(2u * 1'000'000u / (echo_lines * 72u));
-constexpr int32_t lead_bound_ppm = echo_slack_ppm - 100;
+constexpr int32_t lead_bound_ppm = echo_slack_ppm - 454;
 constexpr int32_t lead_bound_rc_ppm = echo_slack_ppm - 1100;
-static_assert(lead_bound_ppm == 38 && lead_bound_rc_ppm == -962, "the file header's arithmetic");
+static_assert(lead_bound_ppm == -316 && lead_bound_rc_ppm == -962, "the file header's arithmetic");
 
 /// THE PREMISE of the echo legs: this end's rate against the far chip's
 /// clock, timed by the peer (x035_link_dut.hpp's calibrate leg at 1 Mbaud,
@@ -940,7 +942,7 @@ static_assert(lead_bound_ppm == 38 && lead_bound_rc_ppm == -962, "the file heade
 /// way, which is what calibrate answers. A peer that does not answer, or a
 /// calibrate that does not come back, is a failure (judged); a lead the
 /// echo cannot hold is the pair's and not the stack's, so the echo legs
-/// decline with the lead printed, no verdict claimed.
+/// decline with the lead printed (a skip).
 bool echo_premise() {
     link::Ident d{};
     const bool got = x035link::peer_ident(d);
@@ -960,8 +962,7 @@ bool echo_premise() {
     bench.verdict("the far chip timed this end's lead (the calibrate leg came back)", got && k.ok);
     const bool ok = got && k.ok && static_cast<int32_t>(k.ppm) < bound;
     if (got && k.ok && !ok) {
-        print(serial, "  SKIPPED, no verdict claimed: a lead of ", static_cast<int32_t>(k.ppm), " ppm would outrun the "
-                      "far echo's two characters of slack on this pair (", bound, " ppm at most)", crlf);
+        bench.skip("the lead printed above would outrun the far echo's two characters of slack on this pair");
     }
     (void)x035link::link_command_mode();
     return ok;

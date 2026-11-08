@@ -29,8 +29,9 @@
 //      console opened, and RCC_AHBPCENR's own reset-value gates (the USB
 //      blocks' clocks are ON out of reset)
 //   b  the HPRE ladder, 48 -> 24 -> 16 -> 12 -> 9.6 -> 8 -> 6 -> 3 MHz and
-//      back up: at each rung the code, the wait states the rate needs, two
-//      hundred ticks exact, a 500 us wait served, and a console line
+//      back up: at each rung the code, the wait states the rate needs,
+//      twenty 500 us waits served in 10 to 12 ticks - the tick and the
+//      delay's table rebased together - and a console line
 //   c  the HSI trim: one step each way, the console still reading, the
 //      centre restored
 //   d  the rate against the HOST's clock: a bracket of 3000 ticks at
@@ -72,6 +73,7 @@
 #include "ch32x035/usart.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "util/test_wait.hpp"
 
 namespace {
 
@@ -108,10 +110,31 @@ enum : uint32_t {
 uint32_t boot_flags = 0;
 uint32_t boot_armed = armed_none;
 
-void console_drain() {
-    while (!Serial::tx_idle()) {
-    }
-    (void)delay_us(clock, 300);   // the last byte's own time on the wire
+// The ruler of the suite's waits (util/test_wait.hpp): the ticker's
+// composed cycle count at the boot rate. The rate is the DynamicClock's,
+// so the ruler is exact only at the root's rate; at a lower rung its
+// budgets last longer in real time by the divider (a drain's 200 ms
+// becomes up to 3.2 s at 3 MHz), which only ever makes a time-out more
+// generous. No wait spans a switch: cycles() multiplies the tick count by
+// the period of the moment, so a rebase moves it by a jump. Nothing timed
+// here is read on it.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return Boot::hz; }
+};
+
+/// Every console byte off the wire, bounded (util/test_wait.hpp);
+/// false when the console did not go idle within 200 ms. In this suite
+/// the console is the subject (the file header): where a drain guards a
+/// verdict's premise, a console that does not drain fails that verdict.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
+
+/// Wait for the tick count to move: one period at the rung's rate and a
+/// period of margin, 2 ms (longer on the ruler below the root's rate);
+/// false when no tick came.
+bool fresh_tick() {
+    const uint32_t t = Ticker::ticks();
+    return brio::wait_until<Ruler>([t] { return Ticker::ticks() != t; }, 2'000);
 }
 
 bool wait_states_follow(uint32_t hz) {
@@ -148,19 +171,32 @@ constexpr uint32_t ladder[] = {48'000'000, 24'000'000, 16'000'000, 12'000'000,
 constexpr uint8_t rungs = sizeof(ladder) / sizeof(ladder[0]);
 
 bool rung(uint32_t hz, const char* way) {
-    console_drain();
+    const bool quiet = console_drain();
     const bool set = SysClock::set(hz);
     const bool code = Rcc::hpre_code() == hpre_for(hsi_hz, hz);
     const bool waits = wait_states_follow(hz);
+    // Twenty 500 us waits against the tick: the ticker and the delay's
+    // table, both rebased by set(), must agree. The bound, 10 to 12 ticks:
+    // the waits are never early, and at 9.6 MHz the table rounds up to 10
+    // cycles a microsecond, so they span at least 10 ms and at most 10.42
+    // ms, plus each wait's lateness - 108 to 140 cycles at 48 MHz behind
+    // two wait states (docs/ch32x035/platform.md, letter d), 160 allowed
+    // for the rate table's lookup, no more at a lower rung, whose flash
+    // waits less: 20 x 160 cycles = 1.07 ms at 3 MHz - plus at most one
+    // tick's handler at a wait's end per tick, 167 cycles from the edge to
+    // the code it interrupted (the same page, letter w): 12 x 56 us = 0.67
+    // ms at 3 MHz. At most 11.74 ms (10.9 at 9.6 MHz), so a count begun
+    // anywhere in a period reads 10 to 12.
     const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() - t0 < 200u) {
+    bool served = true;
+    for (uint8_t i = 0; i < 20u; ++i) {
+        served = delay_us(clock, 500) && served;
     }
-    const bool ticks = Ticker::ticks() - t0 == 200u;
-    const bool delay = delay_us(clock, 500);
+    const uint32_t took = Ticker::ticks() - t0;
     print(serial, "  ", way, " ", hz, " Hz: HPRE ", Rcc::hpre_code(), ", ",
           flash_ctl()->ACTLR & flash_latency_mask, " wait state(s), BRR ", Usart<2>::brr(),
-          " -> ", Serial::actual_baud(hz), " baud", crlf);
-    return set && code && waits && ticks && delay;
+          " -> ", Serial::actual_baud(hz), " baud; 20 x 500 us = ", took, " ticks", crlf);
+    return quiet && set && code && waits && served && took >= 10u && took <= 12u;
 }
 
 void tb_ladder() {
@@ -168,8 +204,8 @@ void tb_ladder() {
     for (uint8_t i = 0; i < rungs; ++i) {
         down = rung(ladder[i], "down") && down;
     }
-    bench.verdict("down the ladder: every rung set, its code and its wait states, 200 "
-                  "ticks exact and a 500 us wait served - and this line read clean",
+    bench.verdict("down the ladder: every rung set, its code and its wait states, twenty "
+                  "500 us waits served in 10 to 12 ticks - and this line read clean",
                   down);
     bool up = true;
     for (uint8_t i = rungs; i > 0; --i) {
@@ -209,14 +245,16 @@ void tc_trim() {
 /// the same time after its edge, at whatever rate the divisor gives, and
 /// the interval between the two newlines is the span of ticks itself; the
 /// host's stamps (its USB polling) are the instrument's grain.
-void bracket(uint32_t span, bool asleep = false) {
+/// False when the console did not drain or no tick edge came to open it.
+/// The span is the tick count the host times, so it stays the bare loop
+/// on it, with idle() entered masked as the kernel enters it.
+bool bracket(uint32_t span, bool asleep = false) {
     print(serial, "  bracket ", span, " ticks at ", SysClock::hz(), " Hz, the core ",
           asleep ? "asleep between ticks (idle())" : "spinning", crlf);
-    console_drain();
-    uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() == t0) {
+    if (!console_drain() || !fresh_tick()) {
+        return false;
     }
-    t0 = Ticker::ticks();
+    const uint32_t t0 = Ticker::ticks();
     print(serial, "  open ", SysClock::hz(), asleep ? " z" : " s", crlf);
     while (Ticker::ticks() - t0 < span) {
         if (asleep) {
@@ -225,7 +263,7 @@ void bracket(uint32_t span, bool asleep = false) {
         }
     }
     print(serial, "  done ", SysClock::hz(), asleep ? " z" : " s", crlf);
-    console_drain();
+    return console_drain();
 }
 
 void td_bracket() {
@@ -234,19 +272,19 @@ void td_bracket() {
     bool all = true;
     for (uint8_t i = 0; i < 2u * rungs; ++i) {
         const uint8_t r = i < rungs ? i : static_cast<uint8_t>(2u * rungs - 1u - i);
-        console_drain();
+        all = console_drain() && all;
         all = SysClock::set(ladder[r]) && all;
-        bracket(3000);
+        all = bracket(3000) && all;
     }
     // The same oscillator at one rate, the core spinning and the core
     // asleep between ticks: what the core does is the only difference.
     for (const uint32_t hz : {48'000'000UL, 3'000'000UL}) {
-        console_drain();
+        all = console_drain() && all;
         all = SysClock::set(hz) && all;
-        bracket(3000, false);
-        bracket(3000, true);
+        all = bracket(3000, false) && all;
+        all = bracket(3000, true) && all;
     }
-    console_drain();
+    all = console_drain() && all;
     const bool back = SysClock::set(48'000'000);
     bench.verdict("the brackets ran at every rung of the ladder and asleep, and the tree is back",
                   all && back && SysClock::hz() == 48'000'000);
@@ -257,31 +295,30 @@ void td_bracket() {
 // ---------------------------------------------------------------------------
 /// TIM1 at PSC 0 counts HCLK, as the STK does: over 200 ticks it must
 /// count 200 x HCLK / 1000 exactly - the STK's period, CMPLR + 1, against
-/// another counter of the same clock. The ticks are seen by polling
-/// ticks(), TIM1 read at the first and the last edge: each read is late by
-/// one turn of the poll and the tick's own vector, the same at both ends
-/// to within a turn (some 150 cycles at 48 MHz, fewer at a lower rate,
-/// where the flash has no wait states) - the bound, 200 counts, holds a
-/// period error of one cycle a tick (200 counts) out at 48 MHz and four
-/// times over at the slower rungs.
+/// another counter of the same clock. The ticks are seen by fresh_tick()'s
+/// poll, TIM1 read at the first and the last edge: each read is late by
+/// the tick's own vector and up to one turn of the poll, the same at both
+/// ends to within that turn - a tick read and the ruler's composed read,
+/// about 110 cycles at 48 MHz (test_x035_tim's letter f measures the same
+/// turn over a timer's flag) and fewer at a lower rate, where the flash
+/// has no wait states. The bound, 200 counts, holds a period error of one
+/// cycle a tick (200 counts) out at 48 MHz and four times over at the
+/// slower rungs. Zero when an edge did not come, which the bound refuses.
 uint32_t tim_counts_over_ticks(uint32_t n) {
     using T1 = Tim<1>;
     T1::init();
     (void)T1::configure({.prescaler = 0, .period = 0xFFFF});
     T1::enable(true);
-    uint32_t t = Ticker::ticks();
-    while (Ticker::ticks() == t) {
-    }
-    t = Ticker::ticks();
-    uint16_t last = T1::count();
     uint32_t total = 0;
-    for (uint32_t k = 0; k < n; ++k) {
-        while (Ticker::ticks() == t) {
+    if (fresh_tick()) {
+        uint16_t last = T1::count();
+        uint32_t k = 0;
+        for (; k < n && fresh_tick(); ++k) {
+            const uint16_t now = T1::count();
+            total += static_cast<uint16_t>(now - last);
+            last = now;
         }
-        t = Ticker::ticks();
-        const uint16_t now = T1::count();
-        total += static_cast<uint16_t>(now - last);
-        last = now;
+        total = k == n ? total : 0u;
     }
     T1::release();
     return total;
@@ -290,7 +327,7 @@ uint32_t tim_counts_over_ticks(uint32_t n) {
 void th_tick_period() {
     bool all = true;
     for (uint8_t i = 0; i < rungs; ++i) {
-        console_drain();
+        all = console_drain() && all;
         const bool set = SysClock::set(ladder[i]);
         const uint32_t got = tim_counts_over_ticks(200);
         const uint32_t want = 200u * (ladder[i] / 1000u);
@@ -299,7 +336,7 @@ void th_tick_period() {
               got >= want ? "+" : "-", off, "); CMPLR ", stk()->CMPLR, crlf);
         all = all && set && off <= 200u;
     }
-    console_drain();
+    all = console_drain() && all;
     const bool back = SysClock::set(48'000'000);
     bench.verdict("at every rung the tick's period is HCLK / 1000 exactly, counted by TIM1 over 200 ticks to "
                   "within 200 counts", all && back);
@@ -372,9 +409,8 @@ void tf_gates() {
     // drained and nothing printed until both are open again - the next line
     // is the proof that a gate closed and opened leaves the port and its
     // pads as they were.
-    console_drain();
-    bool console_gates = true;
-    {
+    bool console_gates = console_drain();
+    if (console_gates) {
         InterruptGuard guard;
         for (const Gate& g : {Gate{Bus::pb1, rcc_pb1_usart2, "USART2"}, Gate{Bus::pb2, rcc_pb2_gpioa, "IOPA"}}) {
             Rcc::disable(g.bus, g.mask);

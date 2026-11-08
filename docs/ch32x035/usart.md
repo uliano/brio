@@ -395,7 +395,7 @@ column, PB0 and PB1, which are the desk's link: crossed to a CH32V006K8U6
 (its USART2 on column 4) running `usart_peer` on its 24 MHz crystal
 doubled. `z` (26 verdicts) is the single-board set, run with the far
 board dark - on its console or with its peer still searching, both
-leaving their link pads floating inputs; `y` (98 verdicts) is the
+leaving their link pads floating inputs; `y` (97 verdicts) is the
 two-board set against that peer, every leg judged from what the far chip
 reports.
 
@@ -408,11 +408,11 @@ and its calibrate times this end against that HSI (IDENT's `xtal` reads
 to back that should read alike up to 1051 ppm apart (twelve runs of `y`,
 letter `k`'s legs against their 1 Mbaud reference and letter `s`'s SRAM
 blasts against the polled one), twice the 500 ppm the span verdicts
-allow. There `y` judges 71 verdicts, green in twelve runs of twelve:
-the bytes of every letter, and letter `m`'s rate tolerance, which needs
-only the ratio; the spans of letters `k`, `l` and `s` are printed and
-not judged, and letter `j`'s HSI against a crystal and its trim walk
-decline. The Rubato link suite's echo letters decline on that pair too,
+allow. There `y` judges 70 verdicts and skips 20: it judges the bytes
+of every letter, letter `m`'s rate tolerance and letter `j`'s stand-off,
+which need only the ratio; the spans of letters `k`, `l` and `s` are
+printed and skipped (19), and letter `j`'s HSI against a crystal and its
+trim walk are one skip. The Rubato link suite's echo letters decline on that pair too,
 this end being the faster writer (the lead a polled echo can hold is
 under -962 ppm against an RC peer, the suite's header has the
 arithmetic). What the suite measured against the crystal peer:
@@ -460,7 +460,9 @@ arithmetic). What the suite measured against the crystal peer:
   floating input, and with it floating the 3 Mbaud run took 2054
   thousandths, the receiver's invented frames taking the core.
 - **The break** (letter `e`): SBK set on USART4 at 115200 cleared itself
-  4347 HCLK cycles later, 10.4 bit times of the 417-cycle divisor.
+  4347 HCLK cycles later, 10.4 bit times of the 417-cycle divisor - judged
+  no earlier than 9 bit times, the start bit and the eight data bits that
+  precede the stop bit the manual names (14.10.4), and within 20.
 - **The debug port's column is refused** (letter `f`): with SW_CFG at 0,
   `init()` of USART3 on its code 1 - PC18 and PC19 - answers false,
   USART3's gate is as it was and its remap field at the reset code.
@@ -487,7 +489,11 @@ arithmetic). What the suite measured against the crystal peer:
   110KHz" (3.4.1), and back at 16 within one step of the first reading.
   The same letter's rendezvous holds the peer's stand-off: a standby of
   300 ms acked while the line is still the peer's, a ping inside it
-  unanswered, and the first ping answered 304 ms after the ack.
+  unanswered, and the first ping answered 304 ms after the ack - judged
+  inside the window the peer's 300 ms make on this end's clock (the two
+  clocks' ratio measured just before, give or take 1100 ppm of wander),
+  less a millisecond for each end's count and plus 10 ms for the poll in
+  flight; the letter's comment has the arithmetic.
 - **The rates on the wire, timed by the foreign receiver** (letter `k`):
   at 115200, 921600, 1, 1.5, 2, 2.4 and 3 Mbaud sixteen bytes echoed
   equal and counted clean by the far chip, and 2000 gapless frames timed

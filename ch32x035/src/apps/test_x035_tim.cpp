@@ -13,7 +13,9 @@
 // pin and nothing else - and its complementary outputs C2N and C3N on PB0
 // and PB1: on the desk those two are the UART wires to the CH32V006, so
 // the suite runs with that board DARK (its console, or its usart_peer
-// searching: both leave PB0 and PB1 floating inputs there). A pad driven
+// searching: both leave PB0 and PB1 floating inputs there). Letters b, c
+// and d check it before they drive either pad - each must keep a charge
+// of either level - and decline when one does not. A pad driven
 // by its alternate function reads its own level on INDR, which is the
 // instrument: a level is read, and an edge is stamped on the core's STK
 // counter (HCLK) by a loop polling the port, interrupts masked.
@@ -78,6 +80,7 @@
 #include "ch32x035/usart.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "util/test_wait.hpp"
 
 using P = brio::Ch32x035Platform<>;
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -132,14 +135,59 @@ void all_off() {
 
 void settle() { (void)delay_us(clock, 5); }
 
+/// Whether PB0 and PB1 float, the far board dark (the file header): each
+/// pad charged to a level through its GPIO output, let go, and read 20 us
+/// later - the pad's own capacitance holds a floating pad's charge (letter
+/// b's MOE verdict rests on the same), while a pad the far board drives or
+/// pulls is back at that board's level. Either level is tried, since these
+/// pads have no pull-down to try a level with (RM ch. 8's opening). The
+/// output phase is the letters' own pre-charge, 5 us long.
+bool link_pads_float() {
+    bool floating = true;
+    for (const bool level : {false, true}) {
+        Pin<'B', 0>::output(level);
+        Pin<'B', 1>::output(level);
+        settle();
+        Pin<'B', 0>::release();
+        Pin<'B', 1>::release();
+        (void)delay_us(clock, 20);
+        floating = floating && pad(pb0) == level && pad(pb1) == level;
+    }
+    return floating;
+}
+
+/// The far board's check for a letter that drives PB0 or PB1: false, with
+/// the letter's skip, when a pad does not float.
+bool need_link_dark() {
+    if (link_pads_float()) {
+        return true;
+    }
+    bench.skip("PB0 or PB1 does not keep a charge: something outside holds it - the far board is not dark");
+    return false;
+}
+
 // ---- time ----------------------------------------------------------------------
 
 /// STK's raw count: HCLK cycles, reloading at the tick's compare (every
-/// millisecond), so a difference under a millisecond unwraps exactly.
+/// millisecond), so a difference under a millisecond unwraps exactly. The
+/// sampler's and rate_x100()'s instrument, read with interrupts masked,
+/// where the tick count - and Ruler below - stops.
 uint32_t stk_now() { return stk()->CNTL; }
 uint32_t stk_since(uint32_t from, uint32_t to) {
     return to >= from ? to - from : to + stk()->CMPLR + 1u - from;
 }
+
+/// The suite's ruler (util/test_wait.hpp): the kernel ticker's own
+/// cycles(), the tick count and the counter's position composed right
+/// across the reload, valid while the tick runs - with interrupts enabled.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// Every console byte off the wire, bounded (util/test_wait.hpp);
+/// false when the console did not go idle within 200 ms.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 
 bool near(int32_t a, int32_t b, int32_t tol) { return a - b <= tol && b - a <= tol; }
 
@@ -223,15 +271,27 @@ bool reset_values() {
     return zero && r.ATRLR == 0xFFFFu && r.CTLR1 == tim_ctlr1_reserved13 && r.DMAADR == r.CTLR1;
 }
 
-/// HCLK cycles a count, timed on STK over about 100 us.
-uint32_t cycles_per_count_x100() {
-    const uint16_t c0 = T1::count();
+/// HCLK cycles a count x100, over about 100 us on the STK with interrupts
+/// masked - so no handler lands between a count read and its STK read -,
+/// the counter counting either way and wrapping at its period: the counts
+/// in the window are taken modulo ATRLR + 1, so a window must hold fewer
+/// counts than a period (letter a's run at PSC 0 holds 4800 in a period of
+/// 65536; every other caller's period is 1000 counts or more, the window
+/// 200 at most). Good to one count in the window - 1 % at 48 cycles a
+/// count, the bound the verdicts take (x100: 48 at PSC 47, 24 at PSC 23;
+/// at PSC 0 one count in 4800, inside letter a's 2). The window's wait is
+/// the bare STK loop: a ruler's tick count stands still under the mask.
+template <typename T>
+uint32_t rate_x100() {
+    InterruptGuard guard;
+    const uint32_t wrap = static_cast<uint32_t>(T::period()) + 1u;
+    const uint16_t c0 = T::count();
     const uint32_t s0 = stk_now();
     while (stk_since(s0, stk_now()) < 4800u) {
     }
-    const uint16_t c1 = T1::count();
+    const uint16_t c1 = T::count();
     const uint32_t s1 = stk_now();
-    const uint16_t d = static_cast<uint16_t>(c1 - c0);
+    const uint32_t d = T::direction() == TimDirection::down ? (c0 + wrap - c1) % wrap : (c1 + wrap - c0) % wrap;
     return d == 0u ? 0u : (100u * stk_since(s0, s1)) / d;
 }
 
@@ -258,11 +318,11 @@ void ta_block() {
     // the count goes on at 48 cycles a count - then an update takes it.
     (void)T1::configure({.prescaler = 47, .period = 0xFFFF});
     T1::enable(true);
-    const uint32_t at_47 = cycles_per_count_x100();
+    const uint32_t at_47 = rate_x100<T1>();
     T1::set_prescaler(0);
-    const uint32_t before_update = cycles_per_count_x100();
+    const uint32_t before_update = rate_x100<T1>();
     T1::update();
-    const uint32_t after_update = cycles_per_count_x100();
+    const uint32_t after_update = rate_x100<T1>();
     T1::enable(false);
     print(serial, "  HCLK cycles a count x100: PSC 47 ", at_47, ", PSC 0 written ", before_update, ", after UG ",
           after_update, crlf);
@@ -312,6 +372,9 @@ void ta_block() {
 // ---------------------------------------------------------------------------
 void tb_levels() {
     all_off();
+    if (!need_link_dark()) {
+        return;
+    }
     T1::init();
     (void)T1::remap(code);
     // THE NEVER-RUN TIMER: CH2 forced active, C2NE alone, MOE, the pad
@@ -480,6 +543,9 @@ int32_t judge_list(const Sampled& r, uint16_t mask, const uint32_t* list, uint8_
 
 void tc_toggle() {
     all_off();
+    if (!need_link_dark()) {
+        return;
+    }
     T1::init();
     (void)T1::remap(code);
     Dma::open();
@@ -536,8 +602,11 @@ void tc_toggle() {
             tight[i] = 200u + static_cast<uint32_t>(i) * gap;
         }
         start_list<Ch2Edges>(1, tight, 8, 0);
-        while (T1::count() < 2000u) {
-        }
+        // The list ends by count 256 and the counter at PSC 0 reaches 2000
+        // in 2000 cycles, 42 us; 1 ms is the budget. Not acted on: a
+        // counter that never got there leaves values untaken, and the
+        // verdict below counts the values.
+        (void)brio::wait_until<Ruler>([] { return T1::count() >= 2000u; }, 1'000);
         const uint16_t left = DmaChannel<Ch2Edges::channel>::count();
         stop_list<Ch2Edges>(1);
         print(serial, "  intervals of ", gap, " cycles: ", 8u - left, " of 8 values taken", crlf);
@@ -556,6 +625,9 @@ void tc_toggle() {
 // ---------------------------------------------------------------------------
 void td_one_pulse() {
     all_off();
+    if (!need_link_dark()) {
+        return;
+    }
     T1::init();
     (void)T1::remap(code);
     (void)T1::output_channel(1, {.mode = TimOutputMode::force_active, .preload = false, .enable = false,
@@ -609,26 +681,38 @@ void td_one_pulse() {
         (void)T1::set_compare(1, at_count);
         (void)T1::output_mode(1, mc.mode);
         const bool pre_match = pad(pb0);
-        while (static_cast<uint16_t>(T1::count() - at_count) > 0x8000u) {
-        }
+        // The match is 100 counts ahead at PSC 47, 100 us; 1 ms is the
+        // budget, and a match never reached fails the case.
+        const bool reached = brio::wait_until<Ruler>(
+            [at_count] { return static_cast<uint16_t>(T1::count() - at_count) <= 0x8000u; }, 1'000);
         settle();
         const bool after = pad(pb0);
         T1::enable(false);
-        bench.verdict(mc.name, before == mc.from && pre_match == mc.from && after == mc.expect);
+        bench.verdict(mc.name, reached && before == mc.from && pre_match == mc.from && after == mc.expect);
     }
     // PWM mode 2: low while the count is under the compare, high from it.
     (void)T1::configure({.prescaler = 47, .period = 999});
     (void)T1::set_compare(1, 400);
     (void)T1::output_mode(1, TimOutputMode::pwm2);
     T1::enable(true);
-    while (T1::count() < 100u || T1::count() > 300u) {
-    }
+    // Each window comes round once a period, 1 ms at PSC 47 and ATRLR
+    // 999; two periods are the budget, and a window never seen fails.
+    const bool seen_under = brio::wait_until<Ruler>(
+        [] {
+            const uint16_t c = T1::count();
+            return c >= 100u && c <= 300u;
+        },
+        2'000);
     const bool under = pad(pb0);
-    while (T1::count() < 500u || T1::count() > 900u) {
-    }
+    const bool seen_over = brio::wait_until<Ruler>(
+        [] {
+            const uint16_t c = T1::count();
+            return c >= 500u && c <= 900u;
+        },
+        2'000);
     const bool over = pad(pb0);
     T1::enable(false);
-    bench.verdict("PWM mode 2: low under the compare, high from it", !under && over);
+    bench.verdict("PWM mode 2: low under the compare, high from it", seen_under && seen_over && !under && over);
     all_off();
 }
 
@@ -731,56 +815,52 @@ void te_dma() {
 /// HCLK, so an interval between two flags is an exact number of counter
 /// clocks and what a stamp adds is its poll's LATENESS - from the flag's
 /// rise to the stamp after the poll saw it: at most one whole turn of
-/// wait_flag()'s loop (an INTFR read across the bus and Ticker::cycles()'s
-/// five reads, from a flash behind two wait states) with whatever vector
-/// lands in it - the tick's, the console being drained first - and then
-/// the stamp's own read, under one plain turn. An interval is the
-/// difference of two latenesses, so it is good to the largest turn plus
-/// the smallest. Both are MEASURED in this image, on this very loop
-/// waiting for a flag that never rises over three tick periods (a tick's
-/// vector lands in at least one turn of it), not assumed: a turn's cost
-/// is the layout's (docs/ch32x035/platform.md, a flash loop costs by its
-/// address mod 4).
+/// wait_flag()'s loop (brio::wait_until's: an INTFR read across the bus
+/// and Ruler::now(), Ticker::cycles()'s five reads, from a flash behind
+/// two wait states) with whatever vector lands in it - the tick's, the
+/// console being drained first - and then the stamp's own read, under one
+/// plain turn. An interval is the difference of two latenesses, so it is
+/// good to the largest turn plus the smallest. Both are MEASURED in this
+/// image, on the same verb waiting for a flag that never rises over three
+/// tick periods (a tick's vector lands in at least one turn of it), not
+/// assumed: a turn's cost is the layout's (docs/ch32x035/platform.md, a
+/// flash loop costs by its address mod 4). The measured turn carries one
+/// more Ruler::now() than a waiting turn - the stamp it takes of itself -,
+/// which stands for the stamp's own read after the wait.
 uint32_t stamp_slack_cycles = 0;
 
 bool near_cycles(uint32_t got, uint32_t want) {
     return got + stamp_slack_cycles >= want && got <= want + stamp_slack_cycles;
 }
 
-void console_drain() {
-    while (!Serial::tx_idle()) {
-    }
-    (void)delay_us(clock, 200);   // the last byte's own time on the wire
-}
-
-/// Wait for a flag, bounded on the STK.
+/// Wait for a flag of timer T, at most `limit_us` (util/test_wait.hpp).
 template <typename T>
 bool wait_flag(uint16_t flag, uint32_t limit_us) {
-    const uint32_t c0 = Ticker::cycles();
-    while (!T::flag(flag)) {
-        if (Ticker::cycles() - c0 > limit_us * (SysClock::hz / 1'000'000u)) {
-            return false;
-        }
-    }
-    return true;
+    return brio::wait_until<Ruler>([flag] { return T::flag(flag); }, limit_us);
 }
 
-/// n intervals between rises of a flag, in HCLK cycles on the STK, and the
-/// counter's direction read at each rise (dir[0] at the first).
+/// n intervals between rises of a flag, in HCLK cycles on the ruler, and
+/// the counter's direction read at each rise (dir[0] at the first). The
+/// console is drained first, so the only vector a turn can carry is the
+/// tick's, the one the slack holds; false when it did not drain, as when a
+/// flag did not come (the caller's line says both).
 template <typename T, uint8_t n>
 bool flag_intervals(uint16_t flag, uint32_t (&gaps)[n], TimDirection (&dir)[n + 1u], uint32_t limit_us) {
+    if (!console_drain()) {
+        return false;
+    }
     T::clear_flags(flag);
     if (!wait_flag<T>(flag, limit_us)) {
         return false;
     }
-    uint32_t last = Ticker::cycles();
+    uint32_t last = Ruler::now();
     dir[0] = T::direction();
     T::clear_flags(flag);
     for (uint8_t i = 0; i < n; ++i) {
         if (!wait_flag<T>(flag, limit_us)) {
             return false;
         }
-        const uint32_t now = Ticker::cycles();
+        const uint32_t now = Ruler::now();
         dir[i + 1u] = T::direction();
         T::clear_flags(flag);
         gaps[i] = now - last;
@@ -789,28 +869,29 @@ bool flag_intervals(uint16_t flag, uint32_t (&gaps)[n], TimDirection (&dir)[n + 
     return true;
 }
 
-constexpr uint32_t us_cycles = SysClock::hz / 1'000'000u;
+/// HCLK cycles in a microsecond.
+constexpr uint32_t per_us = SysClock::hz / 1'000'000u;
 
 /// The largest and the smallest turn of wait_flag()'s loop over three tick
 /// periods, TIM1's CC4IF - a channel no letter sets - its flag: the
-/// timeout's own reads are the stamps.
+/// condition stamps each turn on the ruler, and the wait runs out on its
+/// budget (the flag never rising is the point, so the answer is dropped).
 void measure_slack() {
     T1::init();
     T1::clear_flags(0xFFFFu);
     uint32_t most = 0;
     uint32_t least = 0xFFFF'FFFFu;
-    const uint32_t c0 = Ticker::cycles();
-    uint32_t last = c0;
-    while (!T1::flag(T1::compare_flag(3))) {
-        const uint32_t now = Ticker::cycles();
-        const uint32_t step = now - last;
-        last = now;
-        most = step > most ? step : most;
-        least = step != 0u && step < least ? step : least;
-        if (now - c0 > 3u * (SysClock::hz / 1000u)) {
-            break;
-        }
-    }
+    uint32_t last = Ruler::now();
+    (void)brio::wait_until<Ruler>(
+        [&] {
+            const uint32_t now = Ruler::now();
+            const uint32_t step = now - last;
+            last = now;
+            most = step > most ? step : most;
+            least = step != 0u && step < least ? step : least;
+            return T1::flag(T1::compare_flag(3));
+        },
+        3'000);
     down<T1>();
     stamp_slack_cycles = most + least;
     print(serial, "  the poll's turn: ", least, " cycles, ", most, " with the tick's vector in it - every interval "
@@ -850,7 +931,7 @@ uint8_t repetition_round(uint8_t& cases) {
         T::enable(false);
         bool ok = got && T::repetition() == c.rep;
         for (const uint32_t g : gaps) {
-            ok = ok && near_cycles(g, per_event * us_cycles);
+            ok = ok && near_cycles(g, per_event * per_us);
         }
         bool alternating = true;
         bool same = true;
@@ -868,13 +949,13 @@ uint8_t repetition_round(uint8_t& cases) {
         }
         print(serial, "  TIM", T::instance, c.align == TimAlignment::edge ? " edge-aligned" : " centre-aligned",
               ", RPTCR ", c.rep, ": updates ", gaps[0], " ", gaps[1], " ", gaps[2], " ", gaps[3],
-              " cycles apart against ", per_event * us_cycles,
+              " cycles apart against ", per_event * per_us,
               c.align == TimAlignment::edge ? ""
               : alternating                 ? ", directions alternating"
               : same ? (dir[0] == TimDirection::down ? ", every one counting down (an overflow's)"
                                                      : ", every one counting up (an underflow's)")
                      : ", DIRECTIONS MIXED",
-              got ? "" : " (A FLAG DID NOT COME)", crlf);
+              got ? "" : " (A FLAG DID NOT COME, OR THE CONSOLE DID NOT DRAIN)", crlf);
         down<T>();
     }
     return exact;
@@ -908,54 +989,36 @@ bool centre_flags(TimAlignment mode, const char* name) {
         // Which half the first gap is depends on where the poll began: the
         // gaps alternate, each the one its starting direction says.
         for (uint8_t i = 0; i < 6u; ++i) {
-            const uint32_t want = dir[i] == TimDirection::up ? 600u * us_cycles : 400u * us_cycles;
+            const uint32_t want = dir[i] == TimDirection::up ? 600u * per_us : 400u * per_us;
             ok = ok && near_cycles(gaps[i], want) && dir[i + 1u] != dir[i];
         }
     } else {
         const TimDirection want_dir = mode == TimAlignment::center_down ? TimDirection::down : TimDirection::up;
         for (uint8_t i = 0; i < 6u; ++i) {
-            ok = ok && near_cycles(gaps[i], 1000u * us_cycles);
+            ok = ok && near_cycles(gaps[i], 1000u * per_us);
         }
         for (const TimDirection d : dir) {
             ok = ok && d == want_dir;
         }
     }
-    print(serial, "  ", name, ": CC1IF ", gaps[0] / us_cycles, " ", gaps[1] / us_cycles, " ", gaps[2] / us_cycles,
-          " ", gaps[3] / us_cycles, " ", gaps[4] / us_cycles, " ", gaps[5] / us_cycles, " us apart, ", ups,
-          " of 7 rises counting up", got ? "" : " (A FLAG DID NOT COME)", crlf);
+    print(serial, "  ", name, ": CC1IF ", gaps[0] / per_us, " ", gaps[1] / per_us, " ", gaps[2] / per_us,
+          " ", gaps[3] / per_us, " ", gaps[4] / per_us, " ", gaps[5] / per_us, " us apart, ", ups,
+          " of 7 rises counting up", got ? "" : " (A FLAG DID NOT COME, OR THE CONSOLE DID NOT DRAIN)", crlf);
     down<T1>();
     return ok;
 }
 
-/// HCLK cycles a count x100, over about 100 us on the STK with interrupts
-/// masked, the counter counting either way and wrapping at its period: the
-/// counts in the window are taken modulo ATRLR + 1, so a window must hold
-/// fewer counts than a period (every caller's period is 1000 counts or
-/// more, the window 200 at most). Good to one count in the window - 1 %
-/// at 48 cycles a count, the bound the verdicts take (x100: 48 at PSC 47,
-/// 24 at PSC 23).
-template <typename T>
-uint32_t rate_x100() {
-    InterruptGuard guard;
-    const uint32_t wrap = static_cast<uint32_t>(T::period()) + 1u;
-    const uint16_t c0 = T::count();
-    const uint32_t s0 = stk_now();
-    while (stk_since(s0, stk_now()) < 4800u) {
-    }
-    const uint16_t c1 = T::count();
-    const uint32_t s1 = stk_now();
-    const uint32_t d = T::direction() == TimDirection::down ? (c0 + wrap - c1) % wrap : (c1 + wrap - c0) % wrap;
-    return d == 0u ? 0u : (100u * stk_since(s0, s1)) / d;
-}
-
 void tf_time_base() {
     all_off();
-    console_drain();
+    // The slack is measured with the console quiet; every stamped run
+    // after it drains again first (flag_intervals()).
+    if (!console_drain()) {
+        bench.skip("the console did not drain: no interval stamped");
+        return;
+    }
     measure_slack();
-    console_drain();
     uint8_t cases = 0;
     const uint8_t exact1 = repetition_round<T1>(cases);
-    console_drain();
     const uint8_t exact2 = repetition_round<T2>(cases);
     bench.verdict("THE REPETITION COUNTER, TIM1: one update in RPTCR + 1 periods - edge-aligned at 0, 1, 4 and 255, "
                   "centre-aligned at 0, 1 and 3 with an overflow and an underflow counting one each, the "
@@ -964,7 +1027,6 @@ void tf_time_base() {
                   exact1 == cases);
     bench.verdict("TIM2's, the same seven settings, the same bound", exact2 == cases);
 
-    console_drain();
     const bool m1 = centre_flags(TimAlignment::center_down, "mode 1 (CMS 01)");
     const bool m2 = centre_flags(TimAlignment::center_up, "mode 2 (CMS 10)");
     const bool m3 = centre_flags(TimAlignment::center_both, "mode 3 (CMS 11)");
@@ -989,10 +1051,13 @@ void tf_time_base() {
     (void)T1::configure({.prescaler = 47, .period = 999, .direction = TimDirection::down});
     const uint16_t loaded = T1::count();
     T1::clear_flags(T1::update_flag);
-    const uint32_t enabled_at = Ticker::cycles();
+    // A stamped span after the lines above: the console quiet first, or
+    // the verdict on the span fails with it.
+    const bool first_quiet = console_drain();
+    const uint32_t enabled_at = Ruler::now();
     T1::enable(true);
     const bool first_came = wait_flag<T1>(T1::update_flag, 1100);
-    const uint32_t first_after = Ticker::cycles() - enabled_at;
+    const uint32_t first_after = Ruler::now() - enabled_at;
     T1::set_count(500);
     T1::update();
     const uint16_t ug_running = T1::count();
@@ -1003,7 +1068,6 @@ void tf_time_base() {
     (void)T1::output_channel(0, {.mode = TimOutputMode::frozen, .compare = 30, .preload = false, .enable = false});
     T1::enable(true);
     const uint32_t down_rate = rate_x100<T1>();
-    console_drain();
     uint32_t ugaps[4] = {};
     TimDirection udir[5] = {};
     const bool ugot = flag_intervals<T1, 4>(T1::update_flag, ugaps, udir, 1100);
@@ -1013,7 +1077,7 @@ void tf_time_base() {
     T1::enable(false);
     bool down_ok = ugot && cgot;
     for (uint8_t i = 0; i < 4u; ++i) {
-        down_ok = down_ok && near_cycles(ugaps[i], 1000u * us_cycles) && near_cycles(cgaps[i], 1000u * us_cycles);
+        down_ok = down_ok && near_cycles(ugaps[i], 1000u * per_us) && near_cycles(cgaps[i], 1000u * per_us);
     }
     for (uint8_t i = 0; i < 5u; ++i) {
         down_ok = down_ok && udir[i] == TimDirection::down && cdir[i] == TimDirection::down;
@@ -1024,13 +1088,13 @@ void tf_time_base() {
           " cycles after the enable; ", down_rate,
           " hundredths of a cycle a count downwards; updates ", ugaps[0], " ", ugaps[1], " ", ugaps[2], " ",
           ugaps[3], " and CC1IF ", cgaps[0], " ", cgaps[1], " ", cgaps[2], " ", cgaps[3], " cycles apart against ",
-          1000u * us_cycles, crlf);
+          1000u * per_us, crlf);
     bench.verdict("A UG reloads a running down counter with ATRLR, and leaves a stopped counter's count alone "
                   "counting either way",
                   ug_running >= 990u && ug_running <= 999u && ug_stopped == 500u && ug_up_stopped == 500u);
     bench.verdict("THE DOWN COUNTER: configure() starts it at ATRLR, the first underflow a whole period after "
                   "the enable (within the slack and a count), the count falling at the prescaled rate",
-                  loaded == 999u && first_came &&
+                  loaded == 999u && first_came && first_quiet &&
                       near(static_cast<int32_t>(first_after), 48000, static_cast<int32_t>(stamp_slack_cycles + 48u)) &&
                       near(static_cast<int32_t>(down_rate), 4800, 48));
     bench.verdict("an underflow every ATRLR + 1 counts, a compare's flag once a period, the direction reading "
@@ -1090,7 +1154,7 @@ void tf_time_base() {
     bench.verdict("URS set: UG raises no UIF but loads the shadows (PSC 23 taken: one count every 24 cycles)",
                   !urs_ug_flag && near(static_cast<int32_t>(urs_rate), 2400, 24));
     bench.verdict("and an overflow still raises UIF, a period of 1000 counts apart",
-                  rgot && near_cycles(rgaps[0], 500u * us_cycles) && near_cycles(rgaps[1], 500u * us_cycles));
+                  rgot && near_cycles(rgaps[0], 500u * per_us) && near_cycles(rgaps[1], 500u * per_us));
     all_off();
 }
 

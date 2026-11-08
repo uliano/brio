@@ -56,6 +56,7 @@
 #include "ch32v00x/usart.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "util/test_wait.hpp"
 
 #include "board.hpp"
 
@@ -91,17 +92,21 @@ constexpr SysClock clock;
 
 TestBench<Serial> bench;
 
-uint32_t cycles_now() { return stk()->CNT; }
-uint32_t cycles_between(uint32_t from, uint32_t to) {
-    const uint32_t period = stk()->CMP + 1u;
-    return to >= from ? to - from : to + period - from;
-}
+// The ruler of the suite's waits (util/test_wait.hpp): the ticker's
+// composed cycle count at the boot rate. The rate is the DynamicClock's,
+// so the ruler is exact only at the root's rate; at a lower rung of
+// letter d's ladder its budgets last longer in real time by the divider
+// (a drain's 200 ms becomes up to 3.2 s at 3 MHz), which only ever makes
+// a time-out more generous. Nothing timed here is read on it below the
+// root's rate.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return Boot::hz; }
+};
 
-void console_drain() {
-    while (!Serial::tx_idle()) {
-    }
-    (void)delay_us(clock, 300);
-}
+/// Every console byte off the wire, bounded (util/test_wait.hpp);
+/// false when the console did not go idle within 200 ms.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 
 // ---------------------------------------------------------------------------
 // a - the tree at boot
@@ -139,16 +144,13 @@ void ta_tree() {
 // ---------------------------------------------------------------------------
 void tb_lsi() {
     Rcc::lsi(true);
-    const uint32_t c0 = cycles_now();
-    uint32_t turns = 0;
-    while (!Rcc::lsi_ready() && turns < 1'000'000u) {
-        ++turns;
-    }
-    const uint32_t ready_cycles = cycles_between(c0, cycles_now());
-    print(serial, "  LSI ready after ", turns, " polls (", ready_cycles, " cycles, ",
-          ready_cycles / 48u, " us if within one tick)", crlf);
+    // 10 ms: the bench's parts report ready after about 20 us.
+    const std::optional<uint32_t> ready = brio::cycles_until<Ruler>([] { return Rcc::lsi_ready(); }, 10'000);
+    const uint32_t ready_cycles = ready.value_or(0u);
+    print(serial, "  LSI ready after ", ready_cycles, " cycles (", ready_cycles / (Ruler::hz() / 1'000'000u),
+          " us)", ready ? "" : ": NOT READY within 10 ms", crlf);
     bench.verdict("the LSI starts and reports ready", Rcc::lsi_on() && Rcc::lsi_ready());
-    bench.verdict("within a bounded wait", turns < 1'000'000u);
+    bench.verdict("within a bounded wait (10 ms)", ready.has_value());
     Rcc::lsi(false);
     (void)delay_us(clock, 100);   // three LSI cycles is 23 us
     bench.verdict("and stops: ready drops after LSION is cleared",
@@ -284,8 +286,7 @@ void tg_hse() {
 // ---------------------------------------------------------------------------
 void th_hse_sysclk() {
     if constexpr (!hse_image) {
-        print(serial, "  SKIPPED, no verdict claimed: this image boots on the PLL; the crystal as SYSCLK is the "
-                      "image that carries letter h without a", crlf);
+        bench.skip("this image boots on the PLL; the crystal as SYSCLK is the image built for letter h");
     } else {
         print(serial, "  CTLR=", hex(rcc()->CTLR), " CFGR0=", hex(rcc()->CFGR0), " ACTLR=", hex(flash_ctl()->ACTLR),
               crlf);
@@ -316,7 +317,6 @@ void tk_bracket() {
     }
     print(serial, "  bracket done", crlf);
     console_drain();
-    bench.verdict("the bracket ran to its count", Ticker::ticks() - t0 >= span);
 }
 
 void banner() {

@@ -273,6 +273,7 @@
 #include "util/bench.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "util/test_wait.hpp"
 
 #include "board.hpp"
 
@@ -291,6 +292,14 @@ struct Ruler {
     static constexpr uint32_t hz() { return SysClock::hz; }
 };
 static_assert(CycleRuler<Ruler>);
+
+/// The ruler of the time-outs (util/test_wait.hpp): the same count read
+/// through a plain call, so a wait carries a call where Ruler would carry
+/// the whole composed read.
+struct WaitRuler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
 using Plat = BenchIdle<Ch32v00xPlatform<>, Ruler>;
 using Meter = IsrMeter<Ruler, Plat>;
@@ -316,21 +325,17 @@ BenchCounters counters() {
     return bench_counters<Plat>(tick_meter, usart_meter, copy_meter, spi_meter, paced_meter);
 }
 
-/// The console silent: the ring empty, then the last frame out of the
-/// shifter (the resource's TC; the transport has no verb for that half).
-void console_drain() {
-    while (!Serial::tx_idle()) {
-    }
-    while (!Serial::Resource::tx_complete()) {
-    }
-}
+/// The console silent, bounded (util/test_wait.hpp): the ring empty and
+/// the last frame out of the shifter - the transport's tx_idle() reads
+/// the resource's TC too. False when it did not go idle within 200 ms.
+bool console_drain() { return brio::console_drain<WaitRuler, Serial>(); }
 
 /// Spin to the start of a tick period: a whole millisecond of quiet
-/// follows, in which no interrupt is pending.
+/// follows, in which no interrupt is pending. Bounded by two periods; a
+/// tick that never came leaves the measurement after it to show it.
 void fresh_tick() {
     const uint32_t t = Ticker::ticks();
-    while (Ticker::ticks() == t) {
-    }
+    (void)brio::wait_until<WaitRuler>([t] { return Ticker::ticks() != t; }, 2'000);
 }
 
 /// Every field over `units`: letter r's averaged lines.
@@ -1177,9 +1182,7 @@ uint32_t frame_best(SpiClock c, SpiDataSize bits, SpiMode m, uint16_t frames) {
     r.mode = m;
     uint32_t best = 0xFFFF'FFFFu;
     for (uint8_t run = 0; run < 6u; ++run) {
-        const uint32_t tick = Ticker::millis();
-        while (Ticker::millis() == tick) {
-        }
+        fresh_tick();
         uint32_t wall = 0;
         {
             typename Plat::CriticalSection guard;

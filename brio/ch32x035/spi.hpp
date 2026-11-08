@@ -196,8 +196,9 @@
  * The disable procedure: clearing SPE while a frame shifts cuts it on the
  * wire. `Spi::disable()` waits TXE and then not BSY, each bounded, before
  * it drops the bit. MODF is cleared by a STATR access followed by a CTLR1
- * write (16.2.7). OVR, which 16.2.7 says falls to a DATAR read followed by a
- * STATR read, falls here at a DATAR read after a STATR load that showed it,
+ * write with nothing between them (16.2.7, clear_mode_fault()). OVR,
+ * which 16.2.7 says falls to a DATAR read followed by a STATR read,
+ * falls here at a DATAR read after a STATR load that showed it,
  * the buffer full or empty; a load after the read alone, a zero written to
  * the bit (16.3.3 calls it RW0) and SPE clearing do not clear it (measured,
  * test_x035_spi letter e). The resource keeps both sequences.
@@ -585,12 +586,32 @@ struct Spi {
     /// A load that shows the flag, then a DATAR read (flush_rx()).
     static void clear_overrun() { flush_rx(); }
     static bool mode_fault() { return (regs().STATR & spi_modf) != 0u; }
-    /// "First perform a read or write operation to R16_SPI1_STATR, and then
-    /// write R16_SPI1_CTLR1." MODF has also cleared SPE and MSTR; the
-    /// caller reconfigures.
-    static void clear_mode_fault() {
+    /// 16.2.7's two steps, "First perform a read or write operation to
+    /// R16_SPI1_STATR, and then write R16_SPI1_CTLR1", done strictly - no
+    /// other access to the block between them: CTLR1 is read FIRST and the
+    /// value kept is what the write puts back (an assignment `CTLR1 =
+    /// CTLR1` would load CTLR1 between the steps, which the chapter's
+    /// sequence does not provide for). Answers whether the flag went down
+    /// rather than promising it (test_x035_spi letter u judges it): this
+    /// core posts a store to a peripheral and runs on (qingke/schedule.hpp
+    /// measures the same for the PFIC), so a STATR load right behind the
+    /// CTLR1 write can complete before the write lands - measured on the
+    /// CH32X035F8U6, a read in the next instruction showing the flag
+    /// standing in some builds while a write raising SPE, which does not
+    /// take while it stands, took right after. So the flag is read up to
+    /// eight times, some tens of cycles, past any store still in flight.
+    /// MODF has also cleared SPE and MSTR; the caller reconfigures. From
+    /// the block's owner; masks nothing, and waits only those reads.
+    static bool clear_mode_fault() {
+        const uint16_t ctlr1 = static_cast<uint16_t>(regs().CTLR1);
         (void)regs().STATR;
-        regs().CTLR1 = regs().CTLR1;
+        regs().CTLR1 = ctlr1;
+        for (uint8_t k = 0; k < 8u; ++k) {
+            if (!mode_fault()) {
+                return true;
+            }
+        }
+        return false;
     }
     static bool crc_error() { return (regs().STATR & spi_crcerr) != 0u; }
     /// CRCERR is RW0 (16.3.3): a zero written clears it, a one keeps.

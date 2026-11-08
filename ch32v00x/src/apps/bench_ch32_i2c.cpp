@@ -12,8 +12,11 @@
 // there; letter r prints the instrument's cost for this image.
 //
 // NOT A TEST: every letter's one verdict is "ran", and letter i's "ran"
-// is false when the peer did not answer or its count of the bytes moved
-// disagrees with this side's.
+// is false when the peer did not answer, a tenure failed or read a byte
+// off the peer's pattern, a wall fell under the wire, the console did not
+// drain before an op was timed, or the peer's count of the bytes moved
+// disagrees with this side's. With no pull-ups on the wire the letter is
+// skipped.
 //
 // THE BOARD AND THE WIRE. The CH32V006 at 48 MHz (the HSI doubled by
 // the PLL), the console USART1 on PD5/PD6 through the WCH-Link at 115200.
@@ -43,9 +46,10 @@
 //      (0x23, nobody), i2c.write.nack (1 and 2 bytes to 0x23: the NACK
 //      named from the address). Each the best of 8 runs, every byte read
 //      judged against the peer's pattern - a run whose tenure failed is
-//      not taken, nor one whose wall is under the wire, which no tenure
-//      can be: such a wall is a fault of the instrument, counted, printed
-//      and failing the letter; the line's irq and isr are
+//      not taken, and fails the letter, as a byte read wrong does; nor is
+//      one whose wall is under the wire, which no tenure can be: such a
+//      wall is a fault of the instrument, counted, printed and failing the
+//      letter; the line's irq and isr are
 //      I2C1's two vectors, channels 6 and 7 and the tick; a second line
 //      gives the wire in cycles, "the rest" above it (the fixed cost of
 //      the tenure) and start() alone (the best of 8, the completion
@@ -84,6 +88,7 @@
 #include "ch32v00x/usart.hpp"
 #include "util/bench.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // The peer protocol: the wire format every twi_peer speaks, shared by
@@ -100,12 +105,21 @@ namespace {
 
 using namespace brio;
 
-/// The STK's cycle count, bench_ch32's ruler.
+/// The STK's cycle count, bench_ch32's ruler: inlined, for the spans the
+/// letters time and the meters stamp.
 struct Ruler {
     [[gnu::always_inline, gnu::flatten]] static uint32_t now() { return Ticker::cycles(); }
     static constexpr uint32_t hz() { return SysClock::hz; }
 };
 static_assert(CycleRuler<Ruler>);
+
+/// The same count as a plain call, for the waits (util/test_wait.hpp): a
+/// time-out needs no inlined read, and each wait over the inlined ruler
+/// would carry the composition twice.
+struct WaitRuler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
 using Plat = BenchIdle<Ch32v00xPlatform<>, Ruler>;
 using Meter = IsrMeter<Ruler, Plat>;
@@ -121,23 +135,16 @@ Meter usart_meter;   // USART1's vector
 Meter i2c_meter;     // I2C1's two vectors and DMA channels 6 and 7
 Meter probe_meter;   // bound to nothing: letter r's stamp line
 
-void console_drain() {
-    while (!Serial::tx_idle()) {
-    }
-    while (!Serial::Resource::tx_complete()) {
-    }
-}
+/// Every console byte off the wire, bounded (util/test_wait.hpp);
+/// false when the console did not go idle within 200 ms.
+bool console_drain() { return brio::console_drain<WaitRuler, Serial>(); }
 
-void loop_wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 <= ms) {
-    }
-}
-
+/// A run started right behind a tick edge, so that 100 reads hold none: a
+/// tick period is 1 ms, the wait bounded at two. A tick that never came
+/// leaves the run where it stands, its lines printed as measured.
 void fresh_tick() {
     const uint32_t t = Ticker::ticks();
-    while (Ticker::ticks() == t) {
-    }
+    (void)brio::wait_until<WaitRuler>([t] { return Ticker::ticks() != t; }, 2'000);
 }
 
 // ---------------------------------------------------------------------------
@@ -146,7 +153,10 @@ void fresh_tick() {
 volatile uint32_t ruler_sink = 0;
 
 void tr_costs() {
-    console_drain();
+    if (!console_drain()) {
+        bench.skip("the console did not drain: the instrument's cost not timed");
+        return;
+    }
     fresh_tick();
     Stopwatch<Ruler> sw;
     sw.start();
@@ -208,7 +218,12 @@ void i2c_bring_up(I2cMode mode) {
 }
 
 /// One tenure through `Host`, waited out on the idle path; false when it
-/// never answered (the host then recover()ed).
+/// never answered (the host then recover()ed). THE BOUND: the longest tenure
+/// here, a write or a read of 255 bytes at 100 kHz, is 256 x 9 + 1 = 2305 SCL
+/// periods, 30.7 ms at the slowest rate test_ch32_i2c letter f passes (13.3
+/// us); 40 ms of ticks is over it. The wait stays on the tick and the idle
+/// path, not on util/test_wait.hpp's spin: it sleeps in Plat::idle() under the
+/// platform's mask, which is what the bench line's busy column counts.
 template <typename Host>
 bool i2c_run(const typename Host::Request& r) {
     i2c_done = false;
@@ -250,21 +265,21 @@ bool peer_command(twilink::Op op, const uint8_t* p, uint8_t len) {
         uint8_t n = 0;
         twilink::write_frame([&](uint8_t b) { frame[n++] = b; }, op, p, len);
         if (link_tenure(twilink::command_addr, frame, n, nullptr, 0) == i2c_ok) {
-            loop_wait_ms(2);
+            brio::spin_us<WaitRuler>(2'000);
             if (link_tenure(twilink::command_addr, nullptr, 0, resp, sizeof resp) == i2c_ok) {
                 twilink::Decoder dec;
                 for (const uint8_t b : resp) {
                     if (dec.feed(b) == twilink::Decoder::Result::frame) {
                         const twilink::Frame& f = dec.frame();
                         if (f.op == twilink::Op::ack && f.data[0] == twilink::byte_of(op)) {
-                            loop_wait_ms(twilink::arm_ms);
+                            brio::spin_us<WaitRuler>(twilink::arm_ms * 1000u);
                             return true;
                         }
                     }
                 }
             }
         }
-        loop_wait_ms(400);
+        brio::spin_us<WaitRuler>(400'000);
     }
     return false;
 }
@@ -275,7 +290,7 @@ bool peer_report(twilink::Report& out) {
     if (!peer_command(twilink::Op::report, nullptr, 0)) {
         return false;
     }
-    loop_wait_ms(2);
+    brio::spin_us<WaitRuler>(2'000);
     uint8_t resp[twilink::response_bytes];
     if (link_tenure(twilink::command_addr, nullptr, 0, resp, sizeof resp) != i2c_ok) {
         return false;
@@ -313,6 +328,12 @@ uint32_t i2c_period_x16[2] = {};
 /// with one in it.
 uint32_t impossible_walls = 0;
 
+/// Ops whose runs held a failed tenure or a byte read off the peer's
+/// pattern, and ops timed behind a console that did not drain: each fails
+/// the letter as an impossible wall does.
+uint32_t failed_ops = 0;
+uint32_t undrained_ops = 0;
+
 uint8_t* i2c_tx() { return ram; }
 uint8_t* i2c_rx() { return ram + 256; }
 
@@ -345,7 +366,9 @@ BenchSample run_i2c(const char* op, I2cShape k, uint8_t n, I2cSpeed speed) {
     // The bus's own time for this tenure: a wall below it is impossible,
     // and the best of the runs takes no such wall and no failed tenure.
     const uint32_t wire = i2c_periods(k, n) * i2c_period_x16[s_ix] / 16u;
-    console_drain();
+    const bool nobody = k == I2cShape::probe_nack || k == I2cShape::write_nack;
+    // A console still sending would put its vector inside the timed runs.
+    const bool drained = console_drain();
     BenchSample best{0xFFFF'FFFFu, 0, 0, 0};
     bool ok = true;
     bool data = true;
@@ -361,7 +384,6 @@ BenchSample run_i2c(const char* op, I2cShape k, uint8_t n, I2cSpeed speed) {
         const bool done = i2c_run<Host>(r);
         const uint32_t wall = sw.elapsed();
         const BenchSample s = bench_sample(wall, before, i2c_counters());
-        const bool nobody = k == I2cShape::probe_nack || k == I2cShape::write_nack;
         const bool st = done && Host::status() == (nobody ? i2c_nack_addr : i2c_ok);
         ok = ok && st;
         if (st && !nobody) {
@@ -396,6 +418,7 @@ BenchSample run_i2c(const char* op, I2cShape k, uint8_t n, I2cSpeed speed) {
             d = Ruler::now() - t0;
         }
         if (!sync) {
+            // i2c_run()'s bound and idle path, the start() above timed alone.
             const uint32_t t0 = Ticker::millis();
             for (;;) {
                 Plat::CriticalSection cs;
@@ -408,7 +431,9 @@ BenchSample run_i2c(const char* op, I2cShape k, uint8_t n, I2cSpeed speed) {
                 (void)Host::recover();
             }
         }
-        if (i2c_done && Host::status() == i2c_ok) {
+        const bool st = (sync || i2c_done) && Host::status() == (nobody ? i2c_nack_addr : i2c_ok);
+        ok = ok && st;
+        if (st && !nobody) {
             for (uint8_t i = 0; i < r.tx_len; ++i) {
                 peer_sum = static_cast<uint16_t>(peer_sum + i2c_tx()[i]);
             }
@@ -425,9 +450,16 @@ BenchSample run_i2c(const char* op, I2cShape k, uint8_t n, I2cSpeed speed) {
             ? 0u
             : static_cast<uint32_t>(static_cast<uint64_t>(bytes) * Ruler::hz() / wire);
     bench_line(serial, op, bytes, best, Ruler::hz(), wire_bps);
+    if (!ok || !data) {
+        ++failed_ops;
+    }
+    if (!drained) {
+        ++undrained_ops;
+    }
     print(serial, "  the wire ", wire, " cycles (", i2c_periods(k, n), " periods), the rest ",
           best.wall > wire ? best.wall - wire : 0u, ", start() ", launch,
-          data ? ", data exact" : ", DATA WRONG", ok ? "" : ", A TENURE FAILED");
+          data ? ", data exact" : ", DATA WRONG", ok ? "" : ", A TENURE FAILED",
+          drained ? "" : ", THE CONSOLE DID NOT DRAIN");
     if (below != 0u) {
         print(serial, ", ", below, " WALLS BELOW THE WIRE REFUSED (the lowest ", lowest, ")");
     }
@@ -457,6 +489,8 @@ void measure_period(I2cSpeed speed) {
                     peer_sum = static_cast<uint16_t>(peer_sum + i2c_tx()[i]);
                 }
                 peer_took += n;
+            } else {
+                ++failed_ops;
             }
             if (wall < floor) {
                 ++impossible_walls;
@@ -538,11 +572,9 @@ void ti_i2c() {
           crlf);
     I2cSclPin::input();
     I2cSdaPin::input();
-    loop_wait_ms(1);
+    brio::spin_us<WaitRuler>(1'000);
     if (!I2cSclPin::read() || !I2cSdaPin::read()) {
-        print(serial, "  SKIPPED: SCL/SDA read low at rest - no pull-ups, no peer on the wire",
-              crlf);
-        bench.verdict("ran", false);
+        bench.skip("SCL/SDA read low at rest - no pull-ups, no peer on the wire");
         return;
     }
     static const char* const pump_names[6] = {"i2c.write",      "i2c.read",
@@ -553,6 +585,8 @@ void ti_i2c() {
                                              "i2c.probe.nack.dma", "i2c.write.nack.dma"};
     bool all = true;
     impossible_walls = 0;
+    failed_ops = 0;
+    undrained_ops = 0;
     for (const I2cSpeed speed : {I2cSpeed::standard_100k, I2cSpeed::fast_400k}) {
         // The peer serves at 0x2C for a bounded window, counting what it
         // takes and what it gives; the window is waited out after the
@@ -589,7 +623,10 @@ void ti_i2c() {
         engine_arithmetic("read ", pump.read, dma.read);
         const uint32_t used = Ticker::millis() - served_at;
         i2c_bring_up<I2cPump>(I2cMode::pump);
-        while (Ticker::millis() - served_at < window_ms + 300u) {
+        // The serve's window out, and 300 ms more, before its report is asked
+        // for; ops that ran past it disagree with the count below.
+        if (used < window_ms + 300u) {
+            brio::spin_us<WaitRuler>((window_ms + 300u - used) * 1000u);
         }
         twilink::Report rep{};
         const bool got = peer_report(rep);
@@ -609,7 +646,11 @@ void ti_i2c() {
                       "harness misread a tenure",
               crlf);
     }
-    bench.verdict("ran", all && impossible_walls == 0u);
+    if (failed_ops != 0u || undrained_ops != 0u) {
+        print(serial, "  ", failed_ops, " op(s) with a failed tenure or a byte read wrong, ", undrained_ops,
+              " timed behind a console that did not drain", crlf);
+    }
+    bench.verdict("ran", all && impossible_walls == 0u && failed_ops == 0u && undrained_ops == 0u);
 }
 
 void banner() {

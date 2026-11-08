@@ -198,6 +198,7 @@
 #include "ch32v00x/usart.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "util/test_wait.hpp"
 
 #include "../../../avrxt/src/apps/usart_link.hpp"
 #include "held_request.hpp"
@@ -230,6 +231,22 @@ constexpr Serial serial;
 
 TwoKeyTestBench<Serial, 'w', 26> bench;
 bool crystal_ok = false;
+
+/// The suite's ruler (util/test_wait.hpp), and the clock of the bit-banger
+/// and of every timed run: the kernel ticker's own cycles(), the tick count
+/// and the counter's position composed right across the reload
+/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
+/// Valid under a mask for two tick periods after the last tick counted
+/// (after_a_tick()): STK's flag records the one reload cycles() folds.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// Every console byte off the wire, bounded (util/test_wait.hpp);
+/// false when the console did not go idle within 200 ms. tx_idle() is
+/// STATR.TC, the last stop bit included: nothing more to wait after it.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 
 #if BRIO_CH32_HAS_USART2
 // The instrument: USART2 on column 3.
@@ -277,39 +294,21 @@ constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000UL;
 
 // ---- time -----------------------------------------------------------------
 
-/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
-/// tick count and the counter's position composed right across the reload
-/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
-uint32_t cycles_now() {
-    return Ticker::cycles();
-}
+/// A fixed span on the ruler, in milliseconds.
+void settle_ms(uint32_t ms) { brio::spin_us<Ruler>(ms * 1000u); }
 
+/// The bit-banger's pacing: spin to an ABSOLUTE point on the ruler, so a
+/// late store never accumulates across a frame's edges (spin_us() counts
+/// from its own call, which this cannot).
 void spin_until(uint32_t deadline) {
-    while (static_cast<int32_t>(cycles_now() - deadline) < 0) {
+    while (static_cast<int32_t>(Ruler::now() - deadline) < 0) {
     }
 }
 
-void settle_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
-
-/// Wait for a flag on the instrument, bounded.
+/// Wait for a flag on the instrument, bounded: true when it rose within
+/// `us` (util/test_wait.hpp's wait_until()).
 bool wait_flag(uint16_t mask, uint32_t us = 200'000) {
-    const uint32_t t0 = cycles_now();
-    while (!U2::flag(mask)) {
-        if (cycles_now() - t0 > us * cycles_per_us) {
-            return false;
-        }
-    }
-    return true;
-}
-
-void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    (void)delay_us(clock, 500);
+    return brio::wait_until<Ruler>([mask] { return U2::flag(mask); }, us);
 }
 
 // ---- the instrument's life cycle -------------------------------------------
@@ -434,15 +433,15 @@ bool on_the_wire(uint32_t permille) { return permille >= 990u && permille <= 103
 uint32_t resource_permille(uint32_t baud, uint32_t halves, uint32_t n) {
     U2::clear_flags(usart_tc);
     const uint32_t budget = 4u * wire_cycles(n, halves, baud);
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     for (uint32_t i = 0; i < n; ++i) {
-        while (!U2::tx_empty() && cycles_now() - t0 < budget) {
+        while (!U2::tx_empty() && Ruler::now() - t0 < budget) {
         }
         U2::write_word(static_cast<uint16_t>(0x55u + i));
     }
-    while (!U2::tx_complete() && cycles_now() - t0 < budget) {
+    while (!U2::tx_complete() && Ruler::now() - t0 < budget) {
     }
-    return permille_of(cycles_now() - t0, n, halves, baud);
+    return permille_of(Ruler::now() - t0, n, halves, baud);
 }
 
 /// The same through a transport: `n` 8N1 frames handed to write_bulk()
@@ -454,16 +453,16 @@ uint32_t transport_permille(uint32_t baud, uint32_t n) {
         frames[i] = static_cast<uint8_t>(0x30u + i);
     }
     const uint32_t budget = 4u * wire_cycles(n, 20u, baud);
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     uint32_t q = 0;
-    while (q < n && cycles_now() - t0 < budget) {
+    while (q < n && Ruler::now() - t0 < budget) {
         const uint32_t at = q % sizeof(frames);
         const uint32_t len = sizeof(frames) - at < n - q ? sizeof(frames) - at : n - q;
         q += T::write_bulk(std::span<const uint8_t>(frames + at, len));
     }
-    while (!T::tx_idle() && cycles_now() - t0 < budget) {
+    while (!T::tx_idle() && Ruler::now() - t0 < budget) {
     }
-    return permille_of(cycles_now() - t0, n, 20u, baud);
+    return permille_of(Ruler::now() - t0, n, 20u, baud);
 }
 
 // ---- the bit-banged line ----------------------------------------------------
@@ -496,7 +495,7 @@ struct Frame {
 
 void bang_frame(const Frame& fr) {
     const uint32_t bit = SysClock::hz / fr.baud;
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     uint32_t n = 0;
     line(false);   // start
     ++n;
@@ -553,7 +552,7 @@ bool even_parity(uint16_t v, uint8_t bits) {
 /// A break: the line low for `bit_times` bits, then high.
 void bang_break(uint32_t baud, uint32_t bit_times) {
     const uint32_t bit = SysClock::hz / baud;
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     line(false);
     spin_until(t0 + bit_times * bit);
     line(true);
@@ -561,7 +560,7 @@ void bang_break(uint32_t baud, uint32_t bit_times) {
 
 void bang_idle(uint32_t baud, uint32_t bit_times) {
     const uint32_t bit = SysClock::hz / baud;
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     line(true);
     spin_until(t0 + bit_times * bit);
 }
@@ -587,7 +586,7 @@ bool need_jumper() {
     }
     jumper_present = probe_jumper();
     if (!jumper_present) {
-        print(serial, "  SKIPPED, no verdict claimed: no jumper between PD2 (USART2_TX) and PD4 (TIM2_CH1)", crlf);
+        bench.skip("no jumper between PD2 (USART2_TX) and PD4 (TIM2_CH1)");
     }
     return jumper_present;
 }
@@ -608,11 +607,9 @@ void ruler_arm(bool opens_low) {
 }
 
 std::optional<uint32_t> ruler_read(uint32_t timeout_us) {
-    const uint32_t t0 = cycles_now();
-    while (!(T2::flag(T2::compare_flag(0)) && T2::flag(T2::compare_flag(1)))) {
-        if (cycles_now() - t0 > timeout_us * cycles_per_us) {
-            return std::nullopt;
-        }
+    if (!brio::wait_until<Ruler>([] { return T2::flag(T2::compare_flag(0)) && T2::flag(T2::compare_flag(1)); },
+                                 timeout_us)) {
+        return std::nullopt;
     }
     const uint16_t open = T2::compare(0);
     const uint16_t close = T2::compare(1);
@@ -765,15 +762,16 @@ void tb_formats() {
             U2::write_word(0);
             (void)wait_flag(usart_txe, 20'000);
             U2::write_word(0);   // queued behind the first: back to back
+            // Each edge within 50 ms, some forty frame times at 9600 (a
+            // frame is at most 1.25 ms here); a missing one leaves no gap.
             std::optional<uint32_t> gap;
             {
-                const uint32_t t0 = cycles_now();
-                while (!T2::flag(T2::compare_flag(0)) && cycles_now() - t0 < 50'000u * cycles_per_us) {
-                }
+                const bool opened =
+                    brio::wait_until<Ruler>([] { return T2::flag(T2::compare_flag(0)); }, 50'000);
                 T2::clear_flags(T2::compare_flag(1));
-                while (!T2::flag(T2::compare_flag(1)) && cycles_now() - t0 < 50'000u * cycles_per_us) {
-                }
-                if (T2::flag(T2::compare_flag(0)) && T2::flag(T2::compare_flag(1))) {
+                const bool closed =
+                    opened && brio::wait_until<Ruler>([] { return T2::flag(T2::compare_flag(1)); }, 50'000);
+                if (opened && closed) {
                     gap = static_cast<uint16_t>(T2::compare(1) - T2::compare(0));
                 }
             }
@@ -853,7 +851,7 @@ void tb_formats() {
         settle_ms(3);
         {
             const uint32_t bit = SysClock::hz / 9600u;
-            const uint32_t t0 = cycles_now();
+            const uint32_t t0 = Ruler::now();
             uint32_t n = 0;
             RulerPad::clear();
             ++n;
@@ -1017,44 +1015,48 @@ void td_banged() {
     // disagree, NE, and the bit is the majority's - and one over the three's
     // whole span (40th to 84th) flips the bit with no NE. The console is
     // drained first: its vector entered under a banged edge moves it.
-    while (!Serial::tx_idle()) {
+    if (!console_drain()) {
+        bench.skip("the console did not drain: no glitch banged over one or two samples");
+        bench.skip("the console did not drain: no glitch banged over all three samples");
+    } else {
+        Received noisy[2];
+        for (uint8_t k = 0; k < 2u; ++k) {
+            all_off();
+            (void)resource_up({}, 2400);
+            bang_idle(2400, 4);
+            bang_frame({.data = 0x0F, .glitch_bit = static_cast<uint8_t>(k == 0u ? 2u : 2u | glitch_all)});
+            noisy[k] = receive_one();
+        }
+        print(serial, "  noise on bit 2 of 0x0F, one or two samples: ", hex(noisy[0].word), " STATR ",
+              hex(noisy[0].status), "; all three: ", hex(noisy[1].word), " STATR ", hex(noisy[1].status), crlf);
+        bench.verdict("a glitch over one or two of the three samples raises NE, the bit the majority's",
+                      noisy[0].came && (noisy[0].status & (usart_ne | usart_fe)) == usart_ne &&
+                          (noisy[0].word == 0x0Fu || noisy[0].word == 0x0Bu));
+        bench.verdict("a glitch over all three flips the bit with no NE",
+                      noisy[1].came && (noisy[1].status & (usart_ne | usart_fe)) == 0u && noisy[1].word == 0x0Bu);
     }
-    Received noisy[2];
-    for (uint8_t k = 0; k < 2u; ++k) {
-        all_off();
-        (void)resource_up({}, 2400);
-        bang_idle(2400, 4);
-        bang_frame({.data = 0x0F, .glitch_bit = static_cast<uint8_t>(k == 0u ? 2u : 2u | glitch_all)});
-        noisy[k] = receive_one();
-    }
-    print(serial, "  noise on bit 2 of 0x0F, one or two samples: ", hex(noisy[0].word), " STATR ", hex(noisy[0].status),
-          "; all three: ", hex(noisy[1].word), " STATR ", hex(noisy[1].status), crlf);
-    bench.verdict("a glitch over one or two of the three samples raises NE, the bit the majority's",
-                  noisy[0].came && (noisy[0].status & (usart_ne | usart_fe)) == usart_ne &&
-                      (noisy[0].word == 0x0Fu || noisy[0].word == 0x0Bu));
-    bench.verdict("a glitch over all three flips the bit with no NE",
-                  noisy[1].came && (noisy[1].status & (usart_ne | usart_fe)) == 0u && noisy[1].word == 0x0Bu);
 
-    // The tolerance: frames at rates off by +3%, +6% and -6% (14.3: not
-    // less than 3% for the module's own share).
+    // The tolerance: frames at rates off by +3 %, -3 %, +6 % and -6 %
+    // (14.3: not less than 3 % for the module's own share). The verdict is
+    // the two 3 % frames by name, both of them; the 6 % frames are past
+    // the floor the chapter promises and are printed, a finding.
     all_off();
     (void)resource_up({}, 2400);
     bang_idle(2400, 4);
     const int8_t offs[] = {3, -3, 6, -6};
-    uint8_t taken = 0;
-    for (const int8_t off : offs) {
+    bool off_clean[4] = {};
+    for (uint8_t k = 0; k < 4u; ++k) {
+        const int8_t off = offs[k];
         const uint32_t baud = static_cast<uint32_t>(2400 + (2400 * off) / 100);
         bang_frame({.data = 0x69, .baud = baud});
         const Received r = receive_one();
         bang_idle(2400, 4);
-        const bool ok = r.came && r.word == 0x69u && (r.status & (usart_fe | usart_ne)) == 0u;
-        if (ok) {
-            ++taken;
-        }
-        print(serial, "  a frame at ", static_cast<int32_t>(off), "%: ", ok ? "taken clean" : "not clean", " (word ",
-              hex(r.word), " STATR ", hex(r.status), ")", crlf);
+        off_clean[k] = r.came && r.word == 0x69u && (r.status & (usart_fe | usart_ne)) == 0u;
+        print(serial, "  a frame at ", static_cast<int32_t>(off), "%: ", off_clean[k] ? "taken clean" : "not clean",
+              " (word ", hex(r.word), " STATR ", hex(r.status), ")", crlf);
     }
-    bench.verdict("frames 3% off the rate are taken clean (the chapter's floor)", taken >= 2u);
+    bench.verdict("a frame 3 % fast and a frame 3 % slow are each taken clean (the chapter's floor)",
+                  off_clean[0] && off_clean[1]);
     all_off();
 }
 
@@ -1237,7 +1239,7 @@ void tg_irda() {
             const uint32_t bit = SysClock::hz / 2400u;
             const uint32_t pulse = bit * w16 / 16u;
             const uint16_t data = 0x5A;
-            const uint32_t t0 = cycles_now();
+            const uint32_t t0 = Ruler::now();
             auto cell = [&](uint32_t n, bool zero) {
                 spin_until(t0 + n * bit + bit / 2u - pulse / 2u);
                 if (zero) {
@@ -1276,8 +1278,7 @@ void tg_irda() {
 void th_flow() {
     all_off();
     if (crystal_ok) {
-        print(serial, "  SKIPPED, no verdict claimed: RTS is PA1, the 24 MHz crystal's pad, and the crystal runs "
-                      "HCLK in this image", crlf);
+        bench.skip("RTS is PA1, the 24 MHz crystal's pad, and the crystal runs HCLK in this image");
         return;
     }
     // CTS: the pad pulled high (not clear to send) - a byte written
@@ -1395,22 +1396,22 @@ void ti_dma() {
                   up && got == 16u && good == 16u && DmaUart::dma_faults() == 0u);
     // The transmit engine: 256 bytes queued at once, the run timed on the
     // cycle count - 2560 bits at 9600 is 266.7 ms - against the wire at the
-    // rate asked, and the ring empty at the end.
-    const uint32_t t0 = cycles_now();
+    // rate asked, and the ring empty at the end. The wait's budget, a
+    // second, is nearly four runs; a run that never idles fails the verdict.
+    const uint32_t t0 = Ruler::now();
     uint32_t queued = 0;
     for (uint16_t i = 0; i < 256u; ++i) {
         if (DmaUart::write_byte(static_cast<uint8_t>(i))) {
             ++queued;
         }
     }
-    while (!DmaUart::tx_idle() && cycles_now() - t0 < SysClock::hz) {
-    }
-    const uint32_t pm = permille_of(cycles_now() - t0, 256u, 20u, 9600u);
+    const bool engine_idle = brio::wait_until<Ruler>([] { return DmaUart::tx_idle(); }, 1'000'000);
+    const uint32_t pm = permille_of(Ruler::now() - t0, 256u, 20u, 9600u);
     print(serial, "  the transmit engine on channel 6: ", queued, " bytes queued, the run in ", pm,
           " thousandths of its wire time at 9600, faults ", DmaUart::dma_faults(), crlf);
     bench.verdict("USART2's transmit engine on channel 6 moves a 256-byte ring in one run at the wire's pace: "
                   "2560 bits at 9600 within -1 % to +3 %",
-                  queued == 256u && on_the_wire(pm) && DmaUart::dma_faults() == 0u);
+                  queued == 256u && engine_idle && on_the_wire(pm) && DmaUart::dma_faults() == 0u);
     // And at the rates the engine is for: the port moved live, 1024 frames
     // through the 256-byte ring - four laps, a block restarted from the
     // channel's vector at each - at 115200 and at 3 Mbaud.
@@ -1435,17 +1436,16 @@ void tj_flags() {
     all_off();
     (void)resource_up({}, 9600);
     // TXE comes when the byte moves to the shift register, TC when its
-    // stop bit is out: at 9600 a frame is 1042 us.
+    // stop bit is out: at 9600 a frame is 1042 us. Each wait is bounded
+    // past the verdict's own limit (110 us, 1200 us), so a flag that never
+    // comes reads as a time the verdict refuses.
     U2::clear_flags(usart_tc);
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     U2::write_data(0x55);
-    uint32_t txe_at = 0;
-    while (!U2::tx_empty()) {
-    }
-    txe_at = cycles_now() - t0;
-    while (!U2::tx_complete()) {
-    }
-    const uint32_t tc_at = cycles_now() - t0;
+    (void)brio::wait_until<Ruler>([] { return U2::tx_empty(); }, 2'000);   // a late TXE fails txe_at's bound
+    const uint32_t txe_at = Ruler::now() - t0;
+    (void)brio::wait_until<Ruler>([] { return U2::tx_complete(); }, 2'000);   // a late TC fails tc_at's bound
+    const uint32_t tc_at = Ruler::now() - t0;
     print(serial, "  TXE after ", txe_at / cycles_per_us, " us, TC after ", tc_at / cycles_per_us, " us (a frame is 1042)",
           crlf);
     bench.verdict("TXE returns within a bit time and TC at the end of the frame", txe_at < 110u * cycles_per_us &&
@@ -1497,7 +1497,7 @@ volatile uint32_t u2_edge_at = 0;
 bool dma_edge_isr() {
     const bool e = DmaUart::isr();
     if (e) {
-        u2_edge_at = cycles_now();
+        u2_edge_at = Ruler::now();
         u2_edges = u2_edges + 1u;
     }
     return e;
@@ -1658,7 +1658,11 @@ void tq_errors() {
 /// Four 0x55 frames through `T` (bit 7 low: the stop bit starts with a
 /// rising edge), TIM2's channel 1 latching PD4's last rising edge off the
 /// jumper; the timer counts from it to tx_idle()'s first true, the count
-/// read after the answer (never early, a poll's few cycles late).
+/// read after the answer (never early, a poll's few cycles late). The
+/// answer and the count are read as one pair under the mask, so no
+/// interrupt handler lands between them; between two turns of the poll the
+/// interrupts run, as the transport's own transmitter needs. -1 when
+/// tx_idle() never came, which the caller's bound refuses.
 template <typename T>
 int32_t idle_after_stop(IsrFn fn, uint32_t baud) {
     static const uint8_t frames[4] = {0x55, 0x55, 0x55, 0x55};
@@ -1670,33 +1674,40 @@ int32_t idle_after_stop(IsrFn fn, uint32_t baud) {
     T2::clear_flags(T2::compare_flag(0));
     T2::enable(true);
     (void)T::write_bulk(std::span<const uint8_t>(frames, sizeof(frames)));
+    // Four frames are 347 us at 115200 and 160 us at 250000: 20 ms bounds
+    // them many times over.
     uint32_t t_idle = 0;
-    const uint32_t t0 = cycles_now();
-    for (;;) {
-        if (T::tx_idle()) {
+    const bool idle = brio::wait_until<Ruler>(
+        [&t_idle] {
+            P::CriticalSection cs;
+            if (!T::tx_idle()) {
+                return false;
+            }
             t_idle = T2::count();
-            break;
-        }
-        if (cycles_now() - t0 > 20'000u * cycles_per_us) {
-            break;
-        }
-    }
+            return true;
+        },
+        20'000);
     const uint32_t edge = T2::compare(0);
     all_off();
-    return static_cast<int32_t>((t_idle - edge) & 0xFFFFu);
+    return idle ? static_cast<int32_t>((t_idle - edge) & 0xFFFFu) : -1;
 }
 
 void tr_tx_idle() {
     if (!need_jumper()) {
-        print(serial, "  the jumper PD2-PD4 is ABSENT: tx_idle() on the pad measures nothing", crlf);
-        bench.verdict("the letter declines without its jumper, and says so", true);
-        return;
+        return;   // need_jumper() reported the skip
     }
     // 250000 and not a megabaud: at 48 MHz a bit of 1 Mbaud is 48 cycles,
     // less than one turn of the poll with a tick landing in it, so the
     // instrument could not say "within a bit" there.
     static constexpr uint32_t rates[] = {115200, 250'000};
     for (const uint32_t baud : rates) {
+        const char* rate_name = baud == 115200 ? "115200" : "250000";
+        // The console quiet first: its transmit handler between the stop
+        // bit's edge and tx_idle()'s answer would lengthen the reading.
+        if (!console_drain()) {
+            bench.skip("the console did not drain: tx_idle() not timed at ", rate_name);
+            continue;
+        }
         const uint32_t bit = SysClock::hz / baud;
         const int32_t d_plain = idle_after_stop<PlainUart>(&plain_edge_isr, baud);
         const int32_t d_dma = idle_after_stop<DmaUart>(&dma_edge_isr, baud);
@@ -1705,8 +1716,7 @@ void tr_tx_idle() {
               " (transmit engine)", crlf);
         const int32_t lo = static_cast<int32_t>(bit);
         const int32_t hi = static_cast<int32_t>(2u * bit);
-        bench.verdict("tx_idle() never before the last stop bit is out, within a bit after it: ",
-                      baud == 115200 ? "115200" : "250000",
+        bench.verdict("tx_idle() never before the last stop bit is out, within a bit after it: ", rate_name,
                       d_plain >= lo && d_plain <= hi && d_dma >= lo && d_dma <= hi);
     }
 }
@@ -1766,10 +1776,10 @@ void ts_edge() {
             got += dma_read(got, ok);
         }
     }
-    const uint32_t t_end = cycles_now();
+    const uint32_t t_end = Ruler::now();
     const uint32_t before = u2_edges;
-    while (u2_edges == before && cycles_now() - t_end < 5u * frame) {
-    }
+    // Five frames at 9600, 5 x 1041.7 us: past the verdict's two.
+    const bool told = brio::wait_until<Ruler>([before] { return u2_edges != before; }, 5'209);
     const uint32_t late = u2_edge_at - t_end;
     settle_ms(2);
     got += dma_read(got, ok);
@@ -1778,7 +1788,7 @@ void ts_edge() {
           " USART interrupt(s); ", got, " read", crlf);
     bench.verdict("the burst read whole, nothing polled", got == 16u && ok);
     bench.verdict("its edge within two frame times of the last stop bit",
-                  u2_edges != before && late <= 2u * frame);
+                  told && late <= 2u * frame);
     bench.verdict("at most two USART interrupts a burst, none a byte",
                   u2_interrupts >= 1u && u2_interrupts <= 2u);
 
@@ -1828,8 +1838,9 @@ void tt_rate_verbs() {
     ruler_arm(true);
     (void)PlainUart::write_bulk(std::span<const uint8_t>(ff, 1));
     const auto before = ruler_read(50'000);
-    while (!PlainUart::tx_idle()) {
-    }
+    // The one frame out, 87 us at 115200: 5 ms bounds it. A port that
+    // never idles skews the run behind it, and the rate verdict refuses.
+    const bool idle_before = brio::wait_until<Ruler>([] { return PlainUart::tx_idle(); }, 5'000);
     // The run at the rate init() set, through the interrupt transmitter.
     const uint32_t pm_before = transport_permille<PlainUart>(115200, run_frames(115200));
     const bool moved = PlainUart::set_baud(hz, 9600);
@@ -1837,8 +1848,8 @@ void tt_rate_verbs() {
     ruler_arm(true);
     (void)PlainUart::write_bulk(std::span<const uint8_t>(ff, 1));
     const auto after = ruler_read(50'000);
-    while (!PlainUart::tx_idle()) {
-    }
+    // The one frame out, 1.04 ms at 9600: 5 ms bounds it, as above.
+    const bool idle_after = brio::wait_until<Ruler>([] { return PlainUart::tx_idle(); }, 5'000);
     const uint32_t pm_after = transport_permille<PlainUart>(9600, run_frames(9600));
     print(serial, "  the start bit at 115200: ", before ? *before : 0u, " cycles; after set_baud(9600): ",
           after ? *after : 0u, " cycles (BRR ", usart_divisor(hz, 9600), ")", crlf);
@@ -1849,7 +1860,7 @@ void tt_rate_verbs() {
                       *after == usart_divisor(hz, 9600));
     bench.verdict("and the line runs at each rate asked: a run at 115200 before the move and at 9600 after it, "
                   "each within -1 % to +3 % of its wire time",
-                  on_the_wire(pm_before) && on_the_wire(pm_after));
+                  idle_before && idle_after && on_the_wire(pm_before) && on_the_wire(pm_after));
     bench.verdict("and refuses an unreachable rate, the divisor left as it was",
                   refused && U2::brr() == usart_divisor(hz, 9600));
     PlainUart::release();
@@ -1878,13 +1889,16 @@ using Starver = DmaCopyEngine<1, uint8_t>;
 constexpr uint32_t storm_baud = 115200;
 
 /// A masked stretch begins right after a tick: the bit-banger's clock,
-/// cycles_now(), composes the tick count with STK's position, and with the
+/// Ruler::now(), composes the tick count with STK's position, and with the
 /// tick's handler held off it stays right for two periods after the last
 /// tick counted and no longer - every masked stretch here is under 1.2 ms.
 void after_a_tick() {
     const uint32_t m = Ticker::millis();
-    while (Ticker::millis() == m) {
-    }
+    // A tick a millisecond, interrupts enabled here: 2 ms is two periods,
+    // the bound on a tick some handler held off. A tick that never comes
+    // stops this ruler too (it is built on the tick, util/test_wait.hpp),
+    // and then nothing in the suite keeps time.
+    (void)brio::wait_until<Ruler>([m] { return Ticker::millis() != m; }, 2'000);
 }
 
 /// What the starving fills write: letters u and n.
@@ -1913,8 +1927,12 @@ void tu_overrun_tail() {
         for (uint32_t i = 4; i < 7u; ++i) {
             bang_frame({.data = stream_byte(i), .baud = storm_baud});
         }
-        while (Starver::busy()) {
-        }
+        // The fill's whole length is 2048 bytes at six cycles, 256 us, and
+        // it began before the three frames' 260 us: 300 us bounds it. Under
+        // the mask the ruler holds for two tick periods after the last one
+        // (after_a_tick()), and this stretch is under 1.3 ms even at the
+        // budget's end. A fill still running fails `filled`.
+        filled = filled && brio::wait_until<Ruler>([] { return !Starver::busy(); }, 300);
         bang_idle(storm_baud, 20);   // the line idle, IDLE up
         u2_interrupts = 0;
     }
@@ -2138,11 +2156,19 @@ void tm_released_request() {
           " given up in all; TIM2 reset: ", got_after, " byte(s) (", hex(first_after), "), ", skips,
           " skip(s) counted; then a burst of 8: ", burst, in_order ? " in order" : " NOT in order", crlf);
     bench.verdict("the held request moves one stray item into the ring at its arming", up && stray == 1u);
-    // The bound: the idle line's entry, then rx_stall_entries (255) entries
-    // of the wait for a frame, the 255th giving the channel up - 256 - and
-    // a second give-up of the same size after the consumer's look binds the
-    // ring again over the same dead channel; 300 each covers a tick's entry
-    // or two beside them.
+    // The bound. u2_interrupts counts USART2's vector alone (usart2_handler),
+    // so the tick, on its own vector, never adds to it. Its sources in this
+    // state, from ch32v00x/usart.hpp: the idle line's entry, which arms
+    // RXNEIE over the frame the dead channel never takes, then
+    // rx_stall_entries (255) entries of the wait for a frame, the 255th
+    // giving the channel up - 256 - and a second walk of the same length
+    // after the consumer's look puts the vector back to the wait for the
+    // end over the same standing frame (restart_if_stopped()). Nothing else
+    // is enabled: DmaUart's transmitter is the engine on channel 6, so
+    // TXEIE and TCIE stay down, and PEIE and EIE are down in the wait for a
+    // frame. So 300 is a ceiling over the 256, not room for another source;
+    // what it refuses is a storm, the vector re-entered for as long as RXNE
+    // stands - an entry is tens of cycles, thousands of them in the 5 ms.
     bench.verdict("THE STALL BOUND: the vector gives the dead channel up (a DMA fault counted) after some 256 "
                   "entries and the thread runs on - no storm",
                   faults1 == 1u && entries1 >= 255u && entries1 <= 300u && entries2 <= 300u && faults2 <= 2u);
@@ -2324,26 +2350,35 @@ WindowCase clear_window(bool cpu_reads) {
             // flag - a STATR read takes nothing away - for at most one bit
             // before it reads, and the question is asked of a frame that
             // has arrived.
-            const uint32_t t0 = cycles_now();
-            while (!U2::flag(usart_rxne) && cycles_now() - t0 < SysClock::hz / storm_baud) {
-            }
+            // One bit at 115200 is 8.7 us: 9 us, under the mask (the
+            // ruler holds two tick periods after after_a_tick()). The
+            // status read below shows whether RXNE came; the verdict
+            // judges it.
+            (void)brio::wait_until<Ruler>([] { return U2::flag(usart_rxne); }, 9);
             w.status = U2::status();
             w.cpu_byte = static_cast<uint8_t>(U2::read_word());
         } else {
             // The control watches STATR, which reads nothing away: how long
             // after the banger's return RXNE shows, the fill still running.
-            const uint32_t t0 = cycles_now();
-            w.rxne_wait = 0xFFFFFFFFu;
-            while (Starver::busy()) {
-                if (U2::flag(usart_rxne)) {
-                    w.rxne_wait = cycles_now() - t0;
-                    break;
-                }
-            }
+            // Bounded by the fill's whole length (2048 bytes at six cycles,
+            // 256 us) and a margin, 300 us, under the mask as above; the
+            // reading is late by one turn of the poll.
+            bool rxne_seen = false;
+            const auto at = brio::cycles_until<Ruler>(
+                [&rxne_seen] {
+                    if (!Starver::busy()) {
+                        return true;
+                    }
+                    rxne_seen = U2::flag(usart_rxne);
+                    return rxne_seen;
+                },
+                300);
+            w.rxne_wait = rxne_seen && at ? *at : 0xFFFFFFFFu;
         }
         w.fill_ran_over = Starver::busy();
-        for (uint32_t i = 0; i < 100'000u && Starver::busy(); ++i) {
-        }
+        // The fill's end, 300 us as above: a fill still running when
+        // channel 7's count is read fails the control's moved == 1.
+        (void)brio::wait_until<Ruler>([] { return !Starver::busy(); }, 300);
         bang_idle(storm_baud, 4);
     }
     __asm__ volatile("" ::: "memory");
@@ -2389,8 +2424,7 @@ void tn_clear_window() {
 void to_flow_port() {
     all_off();
     if (crystal_ok) {
-        print(serial, "  SKIPPED, no verdict claimed: RTS is PA1, the 24 MHz crystal's pad, and the crystal runs "
-                      "HCLK in this image", crlf);
+        bench.skip("RTS is PA1, the 24 MHz crystal's pad, and the crystal runs HCLK in this image");
         return;
     }
     u2_isr = &FlowUart::isr;
@@ -2410,10 +2444,8 @@ void to_flow_port() {
     settle_ms(2);
     const bool held_back = !FlowUart::tx_idle();
     CtsPad::clear();
-    const uint32_t t_go = Ticker::millis();
-    while (!FlowUart::tx_idle() && Ticker::millis() - t_go < 5u) {
-    }
-    const bool let_out = FlowUart::tx_idle();
+    // The four frames' 347 us, let out: 5 ms is some fourteen times that.
+    const bool let_out = brio::wait_until<Ruler>([] { return FlowUart::tx_idle(); }, 5'000);
     // RTS: a frame banged in with the vector held off - the byte waits in
     // DATAR and RTS stands high; the vector, once let in, reads it and RTS
     // falls.
@@ -2478,33 +2510,23 @@ const uint8_t no_payload[1] = {0};
 bool leg_refused = false;
 bool link_quiet = false;
 
-/// A wait of whole milliseconds on the tick count: delay_us serves less
-/// than one tick period and refuses the rest (delay.hpp).
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms + 1u) {
-    }
-}
+/// TXE waited for, bounded: TXE comes when the frame in the shifter ends,
+/// at most a frame away - 1.25 ms at 9600, this key's slowest rate, with
+/// a parity bit and two stops - and 2 ms bounds it.
+bool w_txe() { return brio::wait_until<Ruler>([] { return U2::tx_empty(); }, 2'000); }
 
-/// Exactly `us` microseconds on the cycle count: the rendezvous's window.
-void wait_us(uint32_t us) {
-    const uint32_t c0 = cycles_now();
-    const uint32_t n = us * cycles_per_us;
-    while (cycles_now() - c0 < n) {
-    }
-}
-
+/// One byte of a command frame (link::write_frame()'s sink). A TXE that
+/// never comes leaves the byte unsent: the frame then fails its checksum
+/// or goes missing, and the command's missing ack reports it.
 void put_w(uint8_t b) {
-    while (!U2::tx_empty()) {
-    }
+    (void)w_txe();
     U2::write_data(b);
 }
 
-void wait_tc() {
-    const uint32_t t0 = Ticker::ticks();
-    while (!U2::tx_complete() && Ticker::ticks() - t0 < 50u) {
-    }
-}
+/// The last frame off the wire, bounded at 50 ms, far past the two frames
+/// DATAR and the shifter hold (2.5 ms at 9600): a TC that never comes
+/// reads as the missing answer the caller waits for next.
+void wait_tc() { (void)brio::wait_until<Ruler>([] { return U2::tx_complete(); }, 50'000); }
 
 void w_flush() {
     for (uint8_t i = 0; i < 4u; ++i) {
@@ -2621,7 +2643,7 @@ bool command(link::Op op, const uint8_t* p = no_payload, uint8_t len = 0, uint16
             return true;
         }
         (void)link_command_mode();
-        wait_ms(70);
+        settle_ms(70);
     }
     if (!link_quiet) {
         print(serial, "    LINK FAILURE op ", hex(link::byte_of(op)),
@@ -2663,7 +2685,7 @@ bool peer_ident(link::Ident& d) {
 bool peer_report(link::Report& r, uint16_t after_ms) {
     (void)link_command_mode();
     if (after_ms != 0u) {
-        wait_ms(after_ms);
+        settle_ms(after_ms);
     }
     for (uint8_t k = 0; k < 4u; ++k) {
         link::Frame f;
@@ -2682,7 +2704,7 @@ bool peer_report(link::Report& r, uint16_t after_ms) {
             }
             return true;
         }
-        wait_ms(40);
+        settle_ms(40);
     }
     return false;
 }
@@ -2700,21 +2722,22 @@ bool peer_act(link::Op op, const link::Params& a, const uint8_t* extra = nullptr
     if (!command(op, p, static_cast<uint8_t>(link::params_size + n))) {
         return false;
     }
-    wait_us(static_cast<uint32_t>(link::settle_ms) * 1000u);
+    brio::spin_us<Ruler>(static_cast<uint32_t>(link::settle_ms) * 1000u);
     return true;
 }
 
-/// A verdict, unless the peer refused the leg: then SKIP, counting nothing.
+/// A verdict, unless the peer refused the leg: then a skip (peer_report()
+/// has printed the refusal and its op).
 void judge(const char* name, bool ok) {
     if (leg_refused) {
-        print(serial, "  SKIP  ", name, " (the peer refused the leg)", crlf);
+        bench.skip(name, " (the peer refused the leg)");
         return;
     }
     bench.verdict(name, ok);
 }
 void judge(const char* name, const char* suffix, bool ok) {
     if (leg_refused) {
-        print(serial, "  SKIP  ", name, suffix, " (the peer refused the leg)", crlf);
+        bench.skip(name, suffix);
         return;
     }
     bench.verdict(name, suffix, ok);
@@ -2728,13 +2751,15 @@ uint16_t bound_ms(uint32_t rate, uint32_t frames) {
 
 /// The peer opens its window link::settle_ms + 2 ms after its ack and
 /// flushes what this end's reconfiguration left on the line.
-void wait_for_peer_window() { wait_ms(6); }
+void wait_for_peer_window() { settle_ms(7); }
 
 /// `n` frames back to back: DATAR written on TXE, a frame ahead of the
-/// shifter, so the line never idles.
+/// shifter, so the line never idles. A TXE that never comes ends the run
+/// short, and the peer's count of it fails the leg.
 void dut_blast(uint16_t n, uint16_t mask) {
     for (uint16_t i = 0; i < n; ++i) {
-        while (!U2::tx_empty()) {
+        if (!U2::tx_empty() && !w_txe()) {
+            break;
         }
         U2::write_word(static_cast<uint16_t>((0x55u + i) & mask));
     }
@@ -2918,7 +2943,7 @@ void t1_link() {
     bench.verdict("a bad checksum comes back as a NAK", recv_frame(bad, 120) && bad.op == link::Op::nak);
     for (uint8_t i = 0; i < 12u; ++i) put_w(static_cast<uint8_t>(0x11u * i));
     wait_tc();
-    wait_ms(120);
+    settle_ms(120);
     (void)link_command_mode();
     bench.verdict("the link recovers after a desync", command(link::Op::ping));
 
@@ -3002,18 +3027,21 @@ uint16_t echo_mismatches(uint16_t n, uint16_t mask) {
     wait_for_peer_window();
     for (uint16_t i = 0; i < n; ++i) {
         const uint16_t v = static_cast<uint16_t>((0x5Au + i * 37u) & mask);
-        while (!U2::tx_empty()) {
+        if (!w_txe()) {
+            ++bad;
+            continue;
         }
         U2::write_word(v);
-        bool ok = false;
-        const uint32_t t0 = Ticker::ticks();
-        while (Ticker::ticks() - t0 < 20u) {
-            const uint16_t st = U2::status();
-            if ((st & usart_rxne) != 0u) {
-                ok = (U2::read_word() & mask) == v && (st & (usart_fe | usart_pe | usart_ne)) == 0u;
-                break;
-            }
-        }
+        // The echo within 20 ms: the frame out and back is two frames,
+        // 2.1 ms at 9600, plus the peer's turn.
+        uint16_t st = 0;
+        const bool came = brio::wait_until<Ruler>(
+            [&st] {
+                st = U2::status();
+                return (st & usart_rxne) != 0u;
+            },
+            20'000);
+        const bool ok = came && (U2::read_word() & mask) == v && (st & (usart_fe | usart_pe | usart_ne)) == 0u;
         if (!ok) ++bad;
     }
     return bad;
@@ -3293,7 +3321,7 @@ void t4_errors() {
         a.value = 0xB0;
         const bool acted = peer_act(link::Op::blast, a);
         const bool up = acted && dut_link(pc);
-        wait_ms(6 + 2);   // the window, and the run, unread
+        settle_ms(6 + 2);   // the window, and the run, unread
         const uint16_t st = U2::status();
         const uint16_t kept = U2::read_word();
         const Drain d = collect(5);
@@ -3377,7 +3405,7 @@ Drain bitbang_run(uint8_t value, uint16_t frames, int8_t cell, int8_t pct, uint1
 void pull_bang(uint8_t value, int8_t cell, int8_t pct) {
     const uint32_t bit = SysClock::hz / 9600u;
     uint32_t at = 0;
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     for (int8_t k = 0; k < 10; ++k) {
         const bool high = k == 0 ? false : (k == 9 ? true : ((value >> (k - 1)) & 1u) != 0u);
         if (high) { WRx::set(); } else { WRx::clear(); }
@@ -3422,7 +3450,7 @@ void t5_shapes() {
         if (!off) break;
         (void)w_open(UartFormat{}, 9600);
         WRx::input(PinPull::up);
-        wait_ms(1);
+        settle_ms(1);
         w_flush();
         // DATAR holds one frame: each is read before the next is banged.
         uint8_t frames = 0, fe = 0;
@@ -3435,7 +3463,7 @@ void t5_shapes() {
         if ((fe != 0u || frames != 4u) && onset_pull == 0) onset_pull = p;
     }
     WRx::release();
-    wait_ms(2000);   // the stand-off runs out; the peer's search resumes
+    settle_ms(2000);   // the stand-off runs out; the peer's search resumes
     print(serial, "  one stretched cell breaks the frame from +", onset_engine, " % (the peer's engine), +",
           onset_pull, " % (this end's pull-banger)", crlf);
     judge("one stretched cell survives far past the rate tolerance (30 % and more) from the peer's engine",
@@ -3554,7 +3582,7 @@ void t6_engine() {
         WRx::input(PinPull::up);
         Pfic::enable(dma_channel_irq(7));
         u2_interrupts = 0;
-        wait_ms(20);   // eight frames of 15 bit times at 115200: 1.1 ms
+        settle_ms(20);   // eight frames of 15 bit times at 115200: 1.1 ms
         uint16_t got = 0;
         bool all_0x35 = true;
         uint8_t b = 0;
@@ -3820,16 +3848,10 @@ using CkPad = Pin<'D', 4>;
 using CkTimer = Tim<2>;
 using CkCounter = TimEventCounter<CkTimer>;
 
-void console_quiet() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    (void)delay_us(clock, 200);
-}
-
 /// The console's transmitter and receiver paused around the verb (12.4:
 /// CPOL, CPHA and LBCL are set with TE and RE clear), then both back.
 bool console_sync(bool on, const UsartSyncConfig& c = {}) {
-    console_quiet();
+    console_drain();
     U1::transmitter(false);
     U1::receiver(false);
     const bool ok = on ? U1::synchronous(c) : U1::synchronous_off();
@@ -3848,11 +3870,11 @@ bool console_sync(bool on, const UsartSyncConfig& c = {}) {
 /// keeps RE clear while it transmits alone.
 constexpr uint8_t clocked_count = 16;
 uint16_t clocked_bytes() {
-    console_quiet();
+    console_drain();
     U1::receiver(false);
     CkCounter::restart();
     print(serial, "  0123456789abcd");   // sixteen bytes exactly
-    console_quiet();
+    console_drain();
     U1::receiver(true);
     return CkCounter::count();
 }
@@ -3896,10 +3918,10 @@ void tk_synchronous() {
                       took8 && edges8 == clocked_count * 16u);
 
         // CPOL: the clock's idle level, read on the pad between frames.
-        console_quiet();
+        console_drain();
         const bool idle_low = !CkPad::read();
         (void)console_sync(true, {.clock_idle_high = true});
-        console_quiet();
+        console_drain();
         const bool idle_high = CkPad::read();
         const uint16_t edges_pol = clocked_bytes();
         print(serial, crlf, "  CPOL clear: CK idles ", idle_low ? "low" : "HIGH", "; CPOL set: idles ",
@@ -4000,7 +4022,7 @@ BRIO_CH32_VECTOR(dma1_channel7_handler) {
         return;
     }
     if (DmaUart::dma_isr()) {   // the receive ring's lap marks: an edge, as the USART's
-        u2_edge_at = cycles_now();
+        u2_edge_at = Ruler::now();
         u2_edges = u2_edges + 1u;
     }
 }

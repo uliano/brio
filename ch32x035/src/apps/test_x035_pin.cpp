@@ -15,13 +15,16 @@
 // console (or a peer still searching) leaves floating inputs, so a driven
 // pad reads its own level and a pull moves the wire with it (a wire and a
 // floating pad add some tens of picofarads, under a microsecond on the
-// weakest pull here). PB3, the desk's I2C pull-up rail, is never touched:
-// it stays floating from every reset. The one pad the suite only reads,
+// weakest pull here). Letters b and c CHECK that first: each link pad they
+// rest on must follow this end's pull-up and its pull-down, and a pad that
+// does not - the far board driving or pulling it - declines the letter.
+// PB3, the desk's I2C pull-up rail, is never touched: it stays floating
+// from every reset. The one pad the suite only reads,
 // PC14, is the board's CC1 line, which the board ties to ground through
 // 5.1 kOhm at the USB-C connector: it is configured as an input and never
 // driven. The USB pads PC16/PC17 (the desk's I2C wires) and the debug
 // port's PC18/PC19 are not touched. Letter `w` wants a jumper PB11-PB12
-// and DETECTS it first; without it the letter says so and judges nothing.
+// and DETECTS it first; without it the letter declines (a skip).
 // The LED on PA0 is left undriven, so it stays dark.
 //
 // THE SUPPLY at boot: the voltage detector at 3.0 V (pwr.hpp); an image
@@ -47,8 +50,10 @@
 //   w  (a jumper PB11-PB12, detected first) the levels across a wire both
 //      ways, and a pull against a driver
 //   l  (by name only) THE LOCK: PB12's configuration frozen until the next
-//      reset, a reconfiguration left without effect, the copy unchanged -
-//      not in `z`, because nothing but a reset undoes it
+//      reset - a raw CFGHR store rewriting PB12's field and PB11's leaves
+//      PB12's in the register as it was while PB11's takes, and configure()
+//      leaves the locked pin and the copy alone - not in `z`, because
+//      nothing but a reset undoes it
 //
 // build: boards = x035f8
 // build: monitor_speed = 115200
@@ -90,6 +95,23 @@ using Locked = Pin<'B', 12>;
 TestBench<Serial> bench;
 
 void settle() { (void)delay_us(clock, 20); }
+
+/// Whether a pad is free: it reads high on this end's pull-up and low on
+/// its pull-down, so nothing on the far end of its wire drives it or pulls
+/// it hard enough to matter. Left released (a floating input). Only for a
+/// pad with both pulls (PA0..PA15 on this series).
+template <typename Pad>
+bool pad_free() {
+    static_assert(Pad::has_pull_down, "pad_free: the check needs both pulls");
+    (void)Pad::input(PinPull::up);
+    settle();
+    const bool up = Pad::read();
+    (void)Pad::input(PinPull::down);
+    settle();
+    const bool down = !Pad::read();
+    Pad::release();
+    return up && down;
+}
 
 // ---------------------------------------------------------------------------
 // a - the nibbles
@@ -139,6 +161,11 @@ void ta_nibbles() {
 // b - the levels
 // ---------------------------------------------------------------------------
 void tb_levels() {
+    // The far board dark: the three link pads this letter drives free.
+    if (!pad_free<Pin<'A', 5>>() || !pad_free<Low>() || !pad_free<Pulled>()) {
+        bench.skip("a link pad (PA5..PA7) does not follow this end's pulls: the far board drives it");
+        return;
+    }
     Low::output(true);
     settle();
     const bool high = Low::read() && Low::read_out();
@@ -182,6 +209,13 @@ void tb_levels() {
 // c - the pulls
 // ---------------------------------------------------------------------------
 void tc_pulls() {
+    // The far board dark, read on the link's two other pads: PA7's own pulls
+    // are this letter's verdict, so its neighbours tell a driven link from a
+    // pull that does not move the pad.
+    if (!pad_free<Pin<'A', 5>>() || !pad_free<Low>()) {
+        bench.skip("a link pad (PA5, PA6) does not follow this end's pulls: the far board drives the link");
+        return;
+    }
     const bool up_set = Pulled::input(PinPull::up);
     settle();
     const bool up = Pulled::read();
@@ -270,7 +304,7 @@ bool wire_present() {
 
 void tw_wire() {
     if (!wire_present()) {
-        print(serial, "  no wire: PB11-PB12 is not strapped, nothing judged", crlf);
+        bench.skip("no jumper between PB11 and PB12");
         return;
     }
     (void)WireIn::input();
@@ -293,19 +327,44 @@ void tw_wire() {
 // ---------------------------------------------------------------------------
 // l - the lock
 // ---------------------------------------------------------------------------
+// configure() skips a pin the lock holds in software, so a verdict on what
+// it leaves proves the driver and not the silicon. The silicon is asked with
+// a RAW store into CFGHR, past the driver, that rewrites PB12's field (locked)
+// and PB11's (not locked, a released pad: analog moves nothing on it) in one
+// word; the register is then read (letter a measures that CFGHR reads back
+// on this die) and put back from the copy, so the copy and the register
+// agree again.
+
+/// PB11's and PB12's fields in a CFGHR word (pins 11 and 12: bits 15:12 and
+/// 19:16).
+constexpr uint32_t pb11_field(uint32_t cfghr) { return (cfghr >> 12) & 0xFu; }
+constexpr uint32_t pb12_field(uint32_t cfghr) { return (cfghr >> 16) & 0xFu; }
+
 void tl_lock() {
+    High::release();
     Locked::output(false);
     const uint32_t before = Locked::nibble();
     const bool took = Locked::lock();
+    // The silicon: PB12 to a pulled input and PB11 to analog in one raw store.
+    const uint32_t copy = Port<'B'>::cfghr_copy();
+    const uint32_t asked = (copy & ~((0xFUL << 12) | (0xFUL << 16))) | (pin_nibble_analog << 12) |
+                           (pin_nibble_pulled << 16);
+    Port<'B'>::regs().CFGHR = asked;
+    const uint32_t reg = Port<'B'>::cfghr_register();
+    Port<'B'>::regs().CFGHR = copy;   // the copy is the truth again
+    // The driver: configure() on the locked pin.
     Port<'B'>::configure(12, pin_nibble_pulled);
     const uint32_t after = Locked::nibble();
-    const uint32_t reg = (Port<'B'>::cfghr_register() >> 16) & 0xFu;
-    print(serial, "  LCKR=", hex(Port<'B'>::regs().LCKR),
-          " PB12 nibble before ", before, ", after a reconfiguration ", after,
-          ", CFGHR's field reads ", reg, crlf);
+    const bool agrees = Port<'B'>::cfghr_register() == Port<'B'>::cfghr_copy();
+    print(serial, "  LCKR=", hex(Port<'B'>::regs().LCKR), "; a raw CFGHR store of ", hex(asked), " reads back ",
+          hex(reg), ": PB12 ", pb12_field(reg), " (was ", before, ", asked ", pin_nibble_pulled, "), PB11 ",
+          pb11_field(reg), " (asked ", pin_nibble_analog, "); configure() then left PB12 at ", after, crlf);
     bench.verdict("the key sequence took (LCKK set, PB12's bit set)", took && Locked::locked());
-    bench.verdict("a reconfiguration of the locked pin changed nothing, the copy included",
-                  after == before);
+    bench.verdict("THE SILICON HOLDS THE LOCK: a raw CFGHR store leaves PB12's field as it was in the register, "
+                  "while PB11's, in the same store and not locked, takes",
+                  pb12_field(reg) == before && pb11_field(reg) == pin_nibble_analog);
+    bench.verdict("and configure() leaves the locked pin and its copy alone, the copy agreeing with the register",
+                  after == before && agrees);
 }
 
 /// The supply as the voltage detector read it at boot (main()).

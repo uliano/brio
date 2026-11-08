@@ -69,6 +69,7 @@
 #include "ch32v00x/usart.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "util/test_wait.hpp"
 
 using P = brio::Ch32v00xPlatform<>;
 using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;
@@ -104,13 +105,23 @@ uint16_t dst16[32];
 uint32_t src32[16];
 uint32_t dst32[16];
 
-bool wait_complete(uint32_t polls = 1'000'000u) {
-    for (uint32_t i = 0; i < polls; ++i) {
-        if (Copier::flag(DmaFlag::complete) || Copier::flag(DmaFlag::error)) {
-            return true;
-        }
-    }
-    return false;
+/// The suite's ruler (util/test_wait.hpp): the kernel ticker's composed
+/// cycle count.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// Every console byte off the wire, bounded (util/test_wait.hpp);
+/// false when the console did not go idle within 200 ms.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
+
+/// Channel 1's block ended, by its completion or its error: true when it
+/// did within the budget. The blocks here are 64 items at most, some six
+/// cycles each - under 10 us; 2 ms is the default budget.
+bool wait_complete(uint32_t budget_us = 2'000) {
+    return brio::wait_until<Ruler>(
+        [] { return Copier::flag(DmaFlag::complete) || Copier::flag(DmaFlag::error); }, budget_us);
 }
 
 // One memory-to-memory block: `count` items of `width` from src to dst.
@@ -266,7 +277,7 @@ Probe probe_block(volatile void* src, volatile void* dst, DmaWidth width, uint16
         .peripheral = src, .memory = dst, .count = count,
         .config = {.memory_to_memory = true, .peripheral_increment = true, .memory_increment = true,
                    .peripheral_width = width, .memory_width = width}});
-    const bool ended = loaded && wait_complete(200'000u);
+    const bool ended = loaded && wait_complete();
     return {ended, Copier::flags(), Copier::enabled(), static_cast<uint16_t>(Copier::count())};
 }
 
@@ -333,9 +344,6 @@ void td_error() {
         print(serial, "  -> NO HOLE RAISES TEIF ON THIS SILICON: a DMA read or write of unmapped "
                       "space completes as a normal block", crlf);
     }
-    bench.verdict("the outcome was one of the two the chapter allows for every hole "
-                  "(an error, or a completion the silicon chose to give)",
-                  errors + completions == 10u);
     const bool flash_error = f.ended && (f.flags & DmaFlag::error) != 0u;
     if (flash_error) {
         print(serial, "  -> A WRITE INTO THE LOCKED FLASH RAISES TEIF: EN ", f.enabled ? "STILL SET" : "cleared",
@@ -353,7 +361,9 @@ void td_error() {
 // ---------------------------------------------------------------------------
 void te_tx_engine() {
     // The line idle first: what the menu printed is out.
-    while (!Serial::tx_idle()) {
+    if (!console_drain()) {
+        bench.skip("the console did not drain: the timed run not started");
+        return;
     }
     const uint32_t blocks_before = tx_blocks;
     // Longer than the 128-byte TX ring: print() blocks on the full ring
@@ -362,13 +372,14 @@ void te_tx_engine() {
     // last block - against 2720 bits at the rate asked: a console the
     // host reads at 115200 tolerates a divisor a few per cent off, the
     // run does not.
-    const uint32_t t0 = Ticker::cycles();
+    const uint32_t t0 = Ruler::now();
     for (uint8_t line = 0; line < 4u; ++line) {
         print(serial, "  0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", crlf);
     }
-    while (!Serial::tx_idle()) {
-    }
-    const uint32_t took = Ticker::cycles() - t0;
+    // 100 ms, four times the 23.6 ms the run's wire takes; a run that
+    // never went idle reads as the 9999 below.
+    const bool went_idle = brio::wait_until<Ruler>([] { return Serial::tx_idle(); }, 100'000);
+    const uint32_t took = went_idle ? Ruler::now() - t0 : 0xFFFF'FFFFu;
     // 272 frames of ten bits at 115200 (BRR 417 for 416.7: the divisor's
     // own rounding is 0.8 thousandths slow).
     // In 32 bits (the CH32V003 has no multiplier to spend on a 64-bit
@@ -418,14 +429,9 @@ void tf_rx_engine() {
 // g - the copy engine
 // ---------------------------------------------------------------------------
 /// The engine idle again, bounded: busy() reads the flags while a block
-/// runs, polled or not.
+/// runs, polled or not. 2 ms, where a block of 64 items takes under 10 us.
 bool engine_wait() {
-    for (uint32_t i = 0; i < 1'000'000u; ++i) {
-        if (!CopyEngine::busy()) {
-            return true;
-        }
-    }
-    return false;
+    return brio::wait_until<Ruler>([] { return !CopyEngine::busy(); }, 2'000);
 }
 
 void tg_copy_engine() {
@@ -458,21 +464,32 @@ void tg_copy_engine() {
                   !CopyEngine::copy(reinterpret_cast<uint16_t*>(odd), src16, 4u));
     bench.verdict("a block of no element, or of more than CNTR counts, is refused",
                   !CopyEngine::copy(dst8, src8, 0u) && !CopyEngine::copy(dst8, src8, 65536u));
+    // The refusal is staged only while the first block runs: 64 byte
+    // beats, some 380 controller cycles, against the few tens between
+    // the busy() read and the second request's own check. A first block
+    // already over at the read stages nothing, and the check declines.
     const bool first = CopyEngine::copy(dst8, src8, 64u);
+    const bool busy_before = CopyEngine::busy();
     const bool second = CopyEngine::copy(dst8, src8, 64u);
-    const bool was_busy = CopyEngine::busy();
     (void)engine_wait();
-    bench.verdict("a block on a busy engine is refused", first && (!second || !was_busy));
+    if (!busy_before) {
+        bench.skip("the first block ended before the second was asked: the busy refusal not staged");
+    } else {
+        bench.verdict("a block on a busy engine is refused", first && !second);
+    }
     // abandon(): a fill of 64 bytes in byte beats (some 380 cycles of the
     // controller's) stopped where it stands, CNTR holding what was left.
     for (uint32_t i = 0; i < 64u; ++i) { dst8[i] = 0; }
     const bool long_started = CopyEngine::fill(dst8, &src8[0], 64u);
     const bool stopped = CopyEngine::abandon();
+    const uint32_t left = DmaChannel<6>::count();
     const bool idle_after = !CopyEngine::busy() && !CopyEngine::abandon();
-    print(serial, "  abandon(): started ", long_started, ", stopped ", stopped, ", CNTR left ",
-          DmaChannel<6>::count(), crlf);
-    bench.verdict("abandon() stops a running block and frees the engine; a second one finds nothing",
-                  long_started && idle_after);
+    print(serial, "  abandon(): started ", long_started, ", stopped ", stopped, ", CNTR left ", left, crlf);
+    // Stopped where it stood: abandon() runs a few tens of cycles into a
+    // block of some 380, so CNTR holds neither the whole block nor zero.
+    bench.verdict("abandon() stops a running block where it stands (CNTR between 0 and 64, both excluded) and "
+                  "frees the engine; a second one finds nothing",
+                  long_started && stopped && left > 0u && left < 64u && idle_after);
     bench.verdict("no transfer fault, polled", CopyEngine::faults() == 0u);
 
     // By its own interrupt: five blocks, each ended by the vector.

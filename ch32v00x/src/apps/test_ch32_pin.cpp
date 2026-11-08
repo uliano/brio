@@ -68,6 +68,7 @@
 #include "util/input_scanner.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "util/test_wait.hpp"
 
 #include "board.hpp"
 
@@ -87,6 +88,17 @@ using Sensor = board::JumperSense;
 using Line = ExtInt<Sensor::port_letter, Sensor::pin_number>;
 
 TestBench<Serial> bench;
+
+// The ruler of the suite's waits (util/test_wait.hpp): the ticker's
+// composed cycle count, valid while the tick runs.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// Every console byte off the wire, bounded (util/test_wait.hpp);
+/// false when the console did not go idle within 200 ms.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 
 volatile uint32_t line_interrupts = 0;
 volatile uint32_t line_flags_seen = 0;
@@ -114,9 +126,7 @@ bool need_jumper() {
     }
     jumper_present = probe_jumper();
     if (!jumper_present) {
-        print(serial, board::is("v006f8") ? "  SKIPPED, no verdict claimed: no jumper between PA2 and PA1"
-                                       : "  SKIPPED, no verdict claimed: no jumper between PD2 and PD4",
-              crlf);
+        bench.skip(board::is("v006f8") ? "no jumper between PA2 and PA1" : "no jumper between PD2 and PD4");
     }
     return jumper_present;
 }
@@ -474,6 +484,9 @@ void te_soft_and_event() {
     Line::interrupt(false);
     Line::event(true);
     Line::clear();
+    // The console silent first: its transmit interrupt would end the WFE
+    // and let a dead event mode pass.
+    console_drain();
     Ticker::pause();
     Pfic::clear_pending(Irq::systick);
     // A trigger BEFORE the wait: the event is latched and the WFE
@@ -484,12 +497,16 @@ void te_soft_and_event() {
     asm volatile("wfi");
     const uint32_t t1 = stk()->CNT;
     const bool flag_after = Line::flag();
+    // STK keeps counting and reloading at CMP while paused (only its
+    // interrupt is off), so a span under one period is the difference
+    // with at most one reload folded in.
+    const uint32_t wfe_cycles = t1 >= t0 ? t1 - t0 : t1 + (stk()->CMP + 1u) - t0;
     Ticker::resume();
     Line::event(false);
     print(serial, "  a line in event mode, triggered before a WFE: the WFE returned after ",
-          static_cast<uint32_t>(t1 - t0) & 0xFFFFFFu, " cycles, the flag ", flag_after ? "UP" : "down", crlf);
+          wfe_cycles, " cycles, the flag ", flag_after ? "UP" : "down", crlf);
     bench.verdict("a line in EVENT mode ends a WFE with no handler and no flag (6.4.2)",
-                  !flag_after && (static_cast<uint32_t>(t1 - t0) & 0xFFFFFFu) < 1000u);
+                  !flag_after && wfe_cycles < 1000u);
     all_off();
 }
 
@@ -499,8 +516,17 @@ void te_soft_and_event() {
 
 namespace ks {
 
+/// The scanner's sample, counting the samples that saw the pad high:
+/// letter f's glitch is judged on the samples that really saw it.
 struct SensorInput {
-    static bool read() { return Sensor::read(); }
+    static inline uint8_t highs = 0;
+    static bool read() {
+        const bool level = Sensor::read();
+        if (level) {
+            highs = static_cast<uint8_t>(highs + 1u);
+        }
+        return level;
+    }
 };
 
 class Probe {
@@ -555,20 +581,28 @@ void tf_scanner() {
     ks::pump_ms(20);
     const uint8_t after_fall = ks::Probe::edges;
     const bool fall_active = ks::Probe::last_active;
-    // A glitch shorter than the debounce: one sample wide.
+    // A glitch shorter than the debounce, SAMPLED: the scanner samples
+    // only while the loop is pumped, so the pad is held high while the
+    // loop runs. pump_ms(4) returns at the fourth tick edge after it
+    // starts, having processed the three before it: a sample falls on
+    // every second edge, so one or two samples see the glitch - under
+    // the three the debounce asks for. The samples that saw it are
+    // counted, so a glitch no sample saw cannot pass the verdict.
+    ks::SensorInput::highs = 0;
     Driver::set();
-    (void)delay_us(clock, 500);
+    ks::pump_ms(4);
     Driver::clear();
+    const uint8_t glitch_seen = ks::SensorInput::highs;
     ks::pump_ms(20);
     const uint8_t after_glitch = ks::Probe::edges;
     ks::Scanner::stop();
     print(serial, "  scanner edges: at start ", at_start, ", after a rise ", after_rise, " (active ", rise_active,
-          "), held 40 ms ", held, ", after a fall ", after_fall, " (active ", fall_active, "), after a 0.5 ms glitch ",
-          after_glitch, crlf);
+          "), held 40 ms ", held, ", after a fall ", after_fall, " (active ", fall_active, "), after a glitch seen by ",
+          glitch_seen, " sample(s) ", after_glitch, crlf);
     bench.verdict("the InputScanner is silent at start and on a held level, publishes one InputEdge per flip "
                   "with the new state, and swallows a glitch shorter than its debounce",
                   at_start == 0u && after_rise == 1u && rise_active && held == 1u && after_fall == 2u &&
-                      !fall_active && after_glitch == 2u);
+                      !fall_active && glitch_seen >= 1u && glitch_seen <= 2u && after_glitch == 2u);
     all_off();
 }
 
@@ -608,14 +642,6 @@ RemapReading drive_and_read(uint8_t code) {
     T1::release();
     (void)T1::remap(0);
     return r;
-}
-
-/// Let every byte the console holds leave the wire: the ring empty,
-/// then the two frames still in DATAR and the shifter.
-void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-    }
-    (void)delay_us(clock, 250);
 }
 
 void tg_remaps() {

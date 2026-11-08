@@ -447,8 +447,8 @@ while (!Copier::flag(brio::DmaFlag::complete)) { }
 
 ## Bench findings
 
-The reference suite is `test_ch32_dma` on the CH32V006K8U6 (39 verdicts
-in `z`) and on the CH32V003F4P6 (two group images there, 32 and 7 verdicts,
+The reference suite is `test_ch32_dma` on the CH32V006K8U6 (38 verdicts
+in `z`) and on the CH32V003F4P6 (two group images there, 32 and 6 verdicts,
 letters d, h and i in the second), both at 48 MHz, ITS OWN CONSOLE ON THE
 TWO ENGINES. Its letters a to d, h and i drive the channel's one-shot
 verbs, on both parts:

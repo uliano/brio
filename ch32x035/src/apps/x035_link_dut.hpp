@@ -22,19 +22,22 @@
 //
 // HOW A SUITE INCLUDES IT: inside its own anonymous namespace, with `using
 // namespace brio` in force, after it names its console (`Serial` and its
-// tag `serial`), its clock (`SysClock` and `clock`) and the link's
-// resource and pads (`U4` = Usart<4>, `Tx4` = Pin<'B', 0>, `Rx4` =
-// Pin<'B', 1>), having included ch32x035/delay.hpp, pin.hpp, ticker.hpp,
-// usart.hpp, util/print.hpp and usart_link.hpp at file scope. Everything
-// here is in namespace `x035link`: a Tenuto suite that is its only user
-// says `using namespace x035link;` after the include; a suite whose own
-// names would collide (the link suites' shared body has a wait_ms() of
-// the kernel's) qualifies each call. Every helper is a polled loop run
-// from main context or from a dispatch - none is an interrupt body, none
-// masks interrupts. Every wait on the far chip, on the tick count and on
-// the transmitter's last frame is bounded; the wait for the data
-// register's turn (put4(), dut_blast()) is not, and a port this path
-// opened always gives it within a frame.
+// tag `serial`), its bench (`bench`, a TestBench or TwoKeyTestBench), its
+// clock (`SysClock` and `clock`), its kernel platform (`P`), its ruler
+// (`Ruler`, util/test_wait.hpp's: now() the ticker's composed cycles(),
+// a constexpr hz()) and the link's resource and pads (`U4` = Usart<4>,
+// `Tx4` = Pin<'B', 0>, `Rx4` = Pin<'B', 1>), having included
+// ch32x035/delay.hpp, pin.hpp, ticker.hpp, usart.hpp, util/print.hpp,
+// util/testbench.hpp, util/test_wait.hpp and usart_link.hpp at file
+// scope. Everything here is in namespace `x035link`: a Tenuto suite that
+// is its only user says `using namespace x035link;` after the include; a
+// suite whose own names could collide (the Rubato link suite, beside the
+// link suites' shared body and its helpers) qualifies each call. Every helper is a
+// polled loop run from main context or from a dispatch, with interrupts
+// enabled (the ruler and the tick count stand on the kernel tick) - none
+// is an interrupt body, none masks interrupts. Every wait is bounded, on
+// the ruler (util/test_wait.hpp) or, where a gapless blast cannot afford
+// the ruler's read, on the tick count.
 
 #pragma once
 
@@ -90,33 +93,35 @@ const uint8_t no_payload[1] = {0};
 bool leg_refused = false;
 bool link_quiet = false;
 
-/// A wait of whole milliseconds on the tick count: delay_us serves less
-/// than one tick period and refuses the rest (delay.hpp).
+/// A wait of whole milliseconds on the tick count, from `ms` to `ms` + 1
+/// of them (the wait starts inside a tick period): the protocol's waits on
+/// the far chip, which counts its own milliseconds the same way, were
+/// timed so. A wait whose condition never holds, so it lasts the whole
+/// budget (util/test_wait.hpp); its answer is always false, and dropped.
 void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms + 1u) {
-    }
+    (void)brio::wait_ticks<P>([] { return false; }, ms);
 }
 
-/// Exactly `us` microseconds on the cycle count: what the rendezvous
-/// needs, where wait_ms()'s tick granularity would add up to one.
-void wait_us(uint32_t us) {
-    const uint32_t c0 = Ticker::cycles();
-    const uint32_t n = us * (SysClock::hz / 1'000'000u);
-    while (Ticker::cycles() - c0 < n) {
-    }
-}
+/// Set by ensure_link() once the peer has answered in this boot: what
+/// tells an absent peer (a skip) from one gone silent (a failure).
+bool peer_seen = false;
 
+/// One byte into DATAR at its turn. TXE comes within one frame at any rate
+/// the command path runs (115200: 87 us), so two to three ticks bound it
+/// (on the tick count, one load a turn); a byte whose
+/// turn never came is dropped, and the frame it belonged to then fails its
+/// checksum or its answer's time-out - the command path's retry.
 void put4(uint8_t b) {
-    while (!U4::tx_empty()) {
+    if (brio::wait_ticks<P>([] { return U4::tx_empty(); }, 2)) {
+        U4::write_data(b);
     }
-    U4::write_data(b);
 }
 
-void wait_tc() {
-    const uint32_t t0 = Ticker::ticks();
-    while (!U4::tx_complete() && Ticker::ticks() - t0 < 50u) {
-    }
+/// The transmitter's last frame off the wire (TC). One frame at the
+/// slowest rate a caller transmits at (9600: 1.04 ms) many times over:
+/// 50 ms. False when TC never came.
+[[nodiscard]] bool wait_tc() {
+    return brio::wait_until<Ruler>([] { return U4::tx_complete(); }, 50'000);
 }
 
 /// The DUT's end in a commanded configuration: the link pads the
@@ -159,31 +164,40 @@ bool link_command_mode() {
     return dut_link(link::Cfg{});
 }
 
+/// A whole frame from the peer within `ms` milliseconds: each turn of the
+/// wait takes the byte RXNE holds, if any, into the decoder (an errored
+/// byte resets it).
 bool recv_frame(link::Frame& out, uint16_t ms) {
-    const uint32_t t0 = Ticker::ticks();
     dec.reset();
-    while (Ticker::ticks() - t0 < ms) {
+    auto heard = [&out] {
         const uint16_t st = U4::status();
         if ((st & usart_rxne) == 0u) {
-            continue;
+            return false;
         }
         const uint8_t b = U4::read_data();
         if ((st & (usart_fe | usart_pe | usart_ne)) != 0u) {
             dec.reset();
-            continue;
+            return false;
         }
         if (dec.feed(b) == link::Decoder::Result::frame) {
             out = dec.frame();
             return true;
         }
-    }
-    return false;
+        return false;
+    };
+    // On the tick count, one load a turn as the loop always was: the frame
+    // arrives at 115200 under the Rubato suites' pressure, and a ruler read
+    // in every turn (a composed cycles() call) lengthened the turn that has
+    // to catch each byte before the next one lands.
+    return brio::wait_ticks<P>(heard, ms);
 }
 
 bool command_once(link::Op op, const uint8_t* p, uint8_t len, uint16_t ms) {
     u4_flush();
     link::write_frame(put4, op, p, len);
-    wait_tc();
+    if (!wait_tc()) {
+        return false;
+    }
     link::Frame f;
     if (!recv_frame(f, ms)) {
         return false;
@@ -224,7 +238,26 @@ bool ensure_link() {
     if (!found) {
         print(serial, "  the peer did not answer: the CH32V006 runs usart_peer on the pair's USART2 column?", crlf);
     }
+    peer_seen = peer_seen || found;
     return found;
+}
+
+/// Every letter that needs the peer asks first. A peer never heard in this
+/// boot is absent: the letter declines with the reason and claims no
+/// verdict. A peer that answered earlier in this boot and is silent now
+/// FAILS the letter.
+bool need_peer() {
+    if (ensure_link()) {
+        return true;
+    }
+    if (!peer_seen) {
+        bench.skip("peer absent: no ping answered in this boot (usart_peer)");
+        return false;
+    }
+    bench.verdict("the peer, which answered earlier in this boot, still answers a ping (the CH32V006 running "
+                  "usart_peer)",
+                  false);
+    return false;
 }
 
 bool peer_ident(link::Ident& d) {
@@ -281,7 +314,7 @@ bool peer_act(link::Op op, const link::Params& a, const uint8_t* extra = nullptr
     // after its ack in its ticks, as early as 4 ms, and this end's
     // reconfiguration must be done by then (a frame lost to the race was
     // measured with a tick-granular wait here).
-    wait_us(static_cast<uint32_t>(link::settle_ms) * 1000u);
+    brio::spin_us<Ruler>(static_cast<uint32_t>(link::settle_ms) * 1000u);
     return true;
 }
 
@@ -292,18 +325,26 @@ uint16_t bound_ms(uint32_t rate, uint32_t frames) {
 }
 
 /// The peer opens its window link::settle_ms + 2 ms after its ack and
-/// flushes what the DUT's reconfiguration left on the line.
+/// flushes what the DUT's reconfiguration left on the line; peer_act()
+/// returned settle_ms after the ack, so 6 ms more leave 4 ms of margin.
 void wait_for_peer_window() { wait_ms(6); }
 
 /// `n` frames back to back: DATAR written on TXE, a frame ahead of the
-/// shifter, so the line never idles.
-void dut_blast(uint16_t n, uint16_t mask) {
+/// shifter, so the line never idles. Each frame's turn is bounded on the
+/// tick count, not the ruler: at 3 Mbaud a frame is 160 cycles, and the
+/// write must follow TXE inside the frame the shifter holds; a turn of the
+/// tick wait is one load beside TXE's, where the ruler's composed read is
+/// tens of cycles. Two whole tick periods (2 to 3 ms) are past a frame at
+/// any rate the suites blast at (115200 and up: 87 us at most). False when a turn never
+/// came or the last frame did not leave.
+[[nodiscard]] bool dut_blast(uint16_t n, uint16_t mask) {
     for (uint16_t i = 0; i < n; ++i) {
-        while (!U4::tx_empty()) {
+        if (!brio::wait_ticks<P>([] { return U4::tx_empty(); }, 2u)) {
+            return false;
         }
         U4::write_word(static_cast<uint16_t>((0x55u + i) & mask));
     }
-    wait_tc();
+    return wait_tc();
 }
 
 // ---------------------------------------------------------------------------
@@ -337,12 +378,12 @@ Calib calibrate(const link::Cfg& c, uint16_t n) {
         return k;
     }
     wait_for_peer_window();
-    dut_blast(n, c.bits >= link::bits9_low ? 0x1FFu : c.bits == 7u ? 0x7Fu : 0xFFu);
+    const bool sent = dut_blast(n, c.bits >= link::bits9_low ? 0x1FFu : c.bits == 7u ? 0x7Fu : 0xFFu);
     link::Report r{};
     if (!peer_report(r, 5) || leg_refused) {
         return k;
     }
-    k.ok = r.count == n && r.span != 0u && r.ferr == 0u && r.ovf == 0u;
+    k.ok = sent && r.count == n && r.span != 0u && r.ferr == 0u && r.ovf == 0u;
     if (!k.ok) {
         print(serial, "    calibrate at ", c.rate, ": the peer counted ", r.count, " of ", n, ", ferr ", r.ferr,
               " ovf ", r.ovf, " span ", r.span, " flags ", hex(r.flags), crlf);

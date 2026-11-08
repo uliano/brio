@@ -206,12 +206,15 @@ again with the counter stopped by the update.
 
 `test_x035_tim` on the CH32X035F8U6, 47 verdicts with no wire of its own:
 CH3 on PB11, C2N and C3N on PB0 and PB1 - the desk's UART wires, the far
-CH32V006 dark - and TIM2's C2N on PB12, each pad's level read off INDR,
-each edge placed by a sampler reading port B into a buffer with
-interrupts masked, a sample every 9.01 HCLK cycles; the intervals
-between flags stamped on the STK's cycle count, good to the poll's
-lateness, which letter `f` measures in its own image (a turn of 108 to
-112 cycles, 204 to 232 with the tick's vector in it: 316 to 344).
+CH32V006 dark, which letters `b`, `c` and `d` check first (each pad
+charged to either level and let go must keep it; a pad that does not is
+held from outside, and the letter declines) - and TIM2's C2N on PB12,
+each pad's level read off INDR, each edge placed by a sampler reading
+port B into a buffer with interrupts masked, a sample every 9.01 HCLK
+cycles; the intervals between flags stamped on the STK's cycle count,
+good to the poll's lateness, which letter `f` measures in its own image
+and prints: the largest turn of its wait, the tick's vector in it, plus
+the smallest.
 
 - **The reset values** are tables 12-3 and 12-4's but for CTLR1, 0x2000
   on both timers, and DMAADR, which reads CTLR1 (above).

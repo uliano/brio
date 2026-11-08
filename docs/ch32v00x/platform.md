@@ -384,7 +384,7 @@ built with `CH32V00X_HPE=OFF` (its `z` green too). What it measured:
   a kernel_fault record carrying 0x51. The `.noinit` section does what
   the linker script and the crt promise.
 
-The watchdogs' suite is `test_ch32_watchdog` (15 verdicts in `z` on
+The watchdogs' suite is `test_ch32_watchdog` (13 verdicts in `z` on
 either part, two
 letters ending in real resets):
 

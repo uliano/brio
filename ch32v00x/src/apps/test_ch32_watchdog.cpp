@@ -51,6 +51,7 @@
 #include "ch32v00x/usart.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "util/test_wait.hpp"
 
 using P = brio::Ch32v00xPlatform<>;
 using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;
@@ -101,25 +102,31 @@ void feed() {
     }
 }
 
+/// The suite's ruler (util/test_wait.hpp): the kernel ticker's own
+/// cycles(), the tick count and the counter's position composed right
+/// across the reload (util/cycle_count.hpp); it wraps at 2^32, so only
+/// differences are used.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// A fixed span with the running dog fed through it: a wait whose
+/// condition never holds, so it lasts the whole budget - its answer is
+/// always false, and dropped.
 void settle_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-        feed();
-    }
+    (void)brio::wait_until<Ruler>([] { feed(); return false; }, ms * 1000u);
 }
 
-void console_drain() {
-    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
-        feed();
-    }
-    (void)delay_us(clock, 500);
-}
-
-/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
-/// tick count and the counter's position composed right across the reload
-/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
-uint32_t cycles_now() {
-    return Ticker::cycles();
+/// Every console byte off the wire, bounded (util/test_wait.hpp), the
+/// dog fed on either side: the drain's 200 ms budget is under the
+/// shortest IWDG period this suite arms (213 ms at the datasheet's
+/// fastest LSI). False when the console did not go idle.
+bool console_drain() {
+    feed();
+    const bool idle = brio::console_drain<Ruler, Serial>();
+    feed();
+    return idle;
 }
 
 /// The LSI's rate on THIS die, measured where it is used: one die's figure
@@ -135,15 +142,13 @@ uint32_t measure_lsi_hz() {
         return 0u;
     }
     Awu::arm(8, 7);
-    const uint32_t c0 = cycles_now();
-    const uint32_t t0 = Ticker::millis();
-    while (!Awu::fired() && Ticker::millis() - t0 < 50u) {
+    const std::optional<uint32_t> took = brio::cycles_until<Ruler>([] {
         feed();
-    }
-    const uint32_t cycles = cycles_now() - c0;
-    const bool fired = Awu::fired();
+        return Awu::fired();
+    }, 50'000);
     Awu::disarm();
-    if (!fired || cycles == 0u) {
+    const uint32_t cycles = took.value_or(0u);
+    if (cycles == 0u) {
         return 0u;
     }
     return static_cast<uint32_t>((static_cast<uint64_t>(SysClock::hz) * 1024u) / cycles);
@@ -190,7 +195,6 @@ void ta_wwdg() {
                                  "5.2.1's 'free operation regardless'"
                                : "the counter runs unarmed, as 5.2.1 says",
           crlf);
-    bench.verdict("what the unarmed counter does was measured (a finding either way)", true);
 
     // THE STEP TIMED, ARMED: WDGA up with EWI, the handler feeding at
     // every warning, the first fall from 0x7F to 0x40 timed on the STK.
@@ -199,11 +203,12 @@ void ta_wwdg() {
     (void)Wwdg::configure({.prescaler = WwdgPrescaler::div8, .window = 0x7F, .early_wakeup = true});
     Wwdg::clear_flag();
     Pfic::enable(Wwdg::irq());
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     Wwdg::start(0x7F);
-    while (early_warnings == 0u && cycles_now() - t0 < 48'000'000UL) {
-    }
-    const uint32_t cycles = cycles_now() - t0;
+    // 100 ms: the fall is 63 steps of 32768 cycles, 43 ms. A time-out
+    // reads as zero cycles, which the verdict refuses.
+    const bool warned = brio::wait_until<Ruler>([] { return early_warnings != 0u; }, 100'000);
+    const uint32_t cycles = warned ? Ruler::now() - t0 : 0u;
     const uint32_t expected = wwdg_step_cycles(WwdgPrescaler::div8) * (0x7Fu - 0x40u);
     print(serial, "  armed at /8: the first early warning after ", cycles, " cycles (63 steps of 32768 = ",
           expected, ")", crlf);
@@ -280,10 +285,10 @@ void tj_iwdg_alive() {
     Iwdg::start();
     Iwdg::unlock();
     iwdg()->PSCR = static_cast<uint16_t>(cfg.prescaler);
-    const uint32_t t0 = cycles_now();
+    const uint32_t t0 = Ruler::now();
     const bool pvu_up = Iwdg::busy(iwdg_pvu);
     const bool synced = Iwdg::sync(iwdg_pvu);
-    const uint32_t pvu_cycles = cycles_now() - t0;
+    const uint32_t pvu_cycles = Ruler::now() - t0;
     Iwdg::unlock();
     iwdg()->RLDR = cfg.reload;
     const bool rvu_up = Iwdg::busy(iwdg_rvu);
@@ -313,9 +318,7 @@ void tj_iwdg_alive() {
     while (Ticker::millis() - t1 < 1000u) {
         Iwdg::refresh();
         (void)delay_us(clock, 900);
-        const uint32_t t2 = Ticker::millis();
-        while (Ticker::millis() - t2 < 60u) {
-        }
+        brio::spin_us<Ruler>(60'000);
     }
     bench.verdict("fed every 60 ms, under a quarter of the shortest period the datasheet's LSI allows (213 ms at "
                   "150 kHz), the board is still here after a second",

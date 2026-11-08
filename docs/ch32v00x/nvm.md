@@ -185,10 +185,11 @@ so the STK - whose reloads inside one stall raise its pending bit once
   in erase units and a smaller unit wastes less; a media that erased by
   sector would be some four times faster per byte, and is a choice the
   suite's numbers make available.
-- **The stall holds the kernel's tick off**: across a page erase of
-  three tick periods the tick advanced ONE (fifteen runs of fifteen) -
-  the STK's reloads inside a stall raise its one pending bit once, and
-  kernel time loses the periods between.
+- **The stall holds the kernel's tick off**: across a page erase the
+  tick advanced ONE where two or three tick edges passed (the edges
+  counted from STK's position at the start and the erase's span; ten
+  runs on each part) - the STK's reloads inside a stall raise its one
+  pending bit once, and kernel time loses the periods between.
 - **The journal's saves, timed** (letter `f`, sixteen saves through a
   collection or two, eighteen runs): an ordinary save 1950 to 1970 us -
   one page program and some 80 us of the journal's own work; a save

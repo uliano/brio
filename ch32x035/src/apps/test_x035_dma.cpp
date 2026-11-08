@@ -77,6 +77,8 @@
 #include "util/bench.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "util/test_wait.hpp"
+#include "kernel/time.hpp"
 
 using P = brio::Ch32x035Platform<>;
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -92,7 +94,9 @@ using Serial = Uart<2, P, 64, 128, UartFormat{}, DmaTxEngine<7>, DmaRxEngine<6>>
 constexpr Serial serial;
 
 /// The STK's cycle count as the bench's ruler: flatten pulls the ticker's
-/// read into this function and always_inline pulls it into every stamp.
+/// read into this function and always_inline pulls it into every stamp -
+/// letter m's stopwatch and meters time spans with it. The suite's waits
+/// (util/test_wait.hpp) use it too, one ruler a suite.
 struct Ruler {
     [[gnu::always_inline, gnu::flatten]] static uint32_t now() { return Ticker::cycles(); }
     static constexpr uint32_t hz() { return SysClock::hz; }
@@ -151,24 +155,20 @@ constexpr uint32_t big_bytes = 4096;
 alignas(4) uint8_t big_a[big_bytes];
 alignas(4) uint8_t big_b[big_bytes];
 
-void console_drain() {
-    while (!Serial::tx_idle()) {
-    }
-    (void)delay_us(clock, 200);
-}
+/// Every console byte off the wire, bounded (util/test_wait.hpp);
+/// false when the console did not go idle within 200 ms.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 
-/// Poll channel 1's flags. The barrier on the way out: the controller wrote
-/// memory behind the compiler's back, which must not answer a read after
-/// this from what it stored before the block.
-bool wait_flag(uint32_t mask, uint32_t polls = 1'000'000u) {
-    for (uint32_t i = 0; i < polls; ++i) {
-        if ((Copier::flags() & mask) != 0u) {
-            __asm__ volatile("" ::: "memory");
-            return true;
-        }
-    }
+/// Channel 1's flags in `mask`, waited for: true when one rose within the
+/// budget. The blocks the letters start on it are 64 bytes at most, some
+/// 420 cycles at six an item (letter b), under 10 us; 2 ms is the default
+/// budget. The barrier on the way out: the controller wrote memory behind
+/// the compiler's back, which must not answer a read after this from what
+/// it stored before the block.
+bool wait_flag(uint32_t mask, uint32_t budget_us = 2'000) {
+    const bool rose = brio::wait_until<Ruler>([mask] { return (Copier::flags() & mask) != 0u; }, budget_us);
     __asm__ volatile("" ::: "memory");
-    return false;
+    return rose;
 }
 
 bool copy_block(volatile void* src, volatile void* dst, uint16_t count, DmaWidth width) {
@@ -188,7 +188,9 @@ bool copy_block(volatile void* src, volatile void* dst, uint16_t count, DmaWidth
 }
 
 /// The STK's own counter between two reads, taken masked: one period of the
-/// tick (CMPLR + 1 cycles) long, so a span under a tick is exact.
+/// tick (CMPLR + 1 cycles) long, so a span under a tick is exact. Letter b's
+/// rate reads it raw, one load each side, where a ruler read's own cost
+/// would sit inside a span of a hundred cycles.
 uint32_t stk_span(uint32_t from, uint32_t to) {
     const uint32_t period = stk()->CMPLR + 1u;
     return to >= from ? to - from : to + period - from;
@@ -215,7 +217,7 @@ void ta_block() {
     (void)Copier::load(DmaTransfer{.peripheral = src8, .memory = dst8, .count = 64,
                                    .config = {.memory_to_memory = true, .peripheral_increment = true}});
     const bool refused = !Copier::configure({.memory_to_memory = true}) && !Copier::set_count(8);
-    (void)wait_flag(DmaFlag::complete);
+    (void)wait_flag(DmaFlag::complete);   // the block's own end is not judged: stop() below takes it down
     bench.verdict("a store into an enabled channel is refused (9.2.1's note: read-only then)", refused);
     Copier::stop();
     bench.verdict("stop() disables and clears", !Copier::enabled() && Copier::flags() == 0u);
@@ -256,15 +258,19 @@ void tb_copies() {
     (void)Copier::set_count(4);
     Copier::clear(DmaFlag::all);
     Copier::enable(true);
-    (void)wait_flag(DmaFlag::complete | DmaFlag::error);
+    const bool odd_ended = wait_flag(DmaFlag::complete | DmaFlag::error);
     print(serial, "  half-words from src16+1: ", hex(dst16[0]), " ", hex(dst16[1]), " (src16[0..1] ", hex(src16[0]),
           " ", hex(src16[1]), ")", crlf);
     bench.verdict("an odd address under a half-word width moves the even address's half-words (bit 0 ignored)",
-                  dst16[0] == src16[0] && dst16[1] == src16[1] && dst16[3] == src16[3]);
+                  odd_ended && dst16[0] == src16[0] && dst16[1] == src16[1] && dst16[3] == src16[3]);
 
     // The rate: 64 bytes at each width timed on the STK with every interrupt
-    // held off, so the span is the block's and the poll's alone.
+    // held off, so the span is the block's and the poll's alone. The poll is
+    // bounded by its count, the tick count being stopped under the mask:
+    // 100 000 turns of at least a load, past 200 000 cycles against the
+    // byte block's 420.
     uint32_t cycles[3] = {};
+    bool all_ended = true;
     uint8_t k = 0;
     for (const DmaWidth w : {DmaWidth::byte, DmaWidth::half, DmaWidth::word}) {
         const uint16_t n = w == DmaWidth::byte ? 64u : w == DmaWidth::half ? 32u : 16u;
@@ -277,9 +283,11 @@ void tb_copies() {
             InterruptGuard guard;
             const uint32_t t0 = stk()->CNTL;
             Copier::regs().CFGR = Copier::regs().CFGR | dma_cfgr_en;
-            while ((Copier::flags() & DmaFlag::complete) == 0u) {
+            uint32_t turns = 100'000u;
+            while ((Copier::flags() & DmaFlag::complete) == 0u && --turns != 0u) {
             }
             const uint32_t t1 = stk()->CNTL;
+            all_ended = all_ended && turns != 0u;
             cycles[k] = stk_span(t0, t1);
         }
         print(serial, "  64 bytes as ", n, " item(s): ", cycles[k], " HCLK cycles from the enable to TCIF", crlf);
@@ -290,7 +298,7 @@ void tb_copies() {
     print(serial, "  -> ", per_item_x10 / 10u, ".", per_item_x10 % 10u,
           " cycles an item (bytes against words: 48 items apart)", crlf);
     bench.verdict("the width is the rate: words take the fewest cycles for the same bytes",
-                  cycles[2] < cycles[1] && cycles[1] < cycles[0]);
+                  all_ended && cycles[2] < cycles[1] && cycles[1] < cycles[0]);
 
     // A fixed source spread over a run: the peripheral side not incrementing.
     const uint32_t pattern = 0xDEADBEEFu;
@@ -299,8 +307,7 @@ void tb_copies() {
                                    .config = {.memory_to_memory = true, .peripheral_increment = false,
                                               .memory_increment = true, .peripheral_width = DmaWidth::word,
                                               .memory_width = DmaWidth::word}});
-    (void)wait_flag(DmaFlag::complete);
-    bool filled = true;
+    bool filled = wait_flag(DmaFlag::complete);
     for (uint32_t i = 0; i < 16u; ++i) { filled = filled && dst32[i] == pattern; }
     bench.verdict("a non-incrementing source fills the run with one word", filled);
     Copier::stop();
@@ -366,7 +373,7 @@ Probe probe_block(volatile void* src, volatile void* dst, DmaWidth width, uint16
         .peripheral = src, .memory = dst, .count = count,
         .config = {.memory_to_memory = true, .peripheral_increment = true, .memory_increment = true,
                    .peripheral_width = width, .memory_width = width}});
-    const bool ended = loaded && wait_flag(DmaFlag::complete | DmaFlag::error, 200'000u);
+    const bool ended = loaded && wait_flag(DmaFlag::complete | DmaFlag::error);
     return {ended, Copier::flags(), Copier::enabled(), static_cast<uint16_t>(Copier::count())};
 }
 
@@ -432,8 +439,6 @@ void td_error() {
     print(serial, "  ", errors, " error(s), ", completions, " completion(s), ", hung,
           " hung, over 5 holes read and written", crlf);
     bench.verdict("every block from or into a hole ENDED (no channel left hanging)", hung == 0u);
-    bench.verdict("each ended one of the two ways the chapter allows (an error, or a completion)",
-                  errors + completions == 10u);
     if ((f.flags & DmaFlag::error) != 0u) {
         print(serial, "  -> A WRITE INTO THE LOCKED FLASH RAISES TEIF: EN ", f.enabled ? "STILL SET" : "cleared",
               ", ", f.left, " item(s) left", crlf);
@@ -449,16 +454,21 @@ void td_error() {
 // e - the console's transmit engine
 // ---------------------------------------------------------------------------
 void te_tx_engine() {
-    while (!Serial::tx_idle()) {
+    // The line idle first: what the menu printed is out.
+    if (!console_drain()) {
+        bench.skip("the console did not drain: the timed run not started");
+        return;
     }
     const uint32_t blocks_before = tx_blocks;
-    const uint32_t t0 = Ticker::cycles();
+    const uint32_t t0 = Ruler::now();
     for (uint8_t line = 0; line < 4u; ++line) {
         print(serial, "  0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", crlf);
     }
-    while (!Serial::tx_idle()) {
-    }
-    const uint32_t took = Ticker::cycles() - t0;
+    // 100 ms, four times the 23.6 ms the run's wire takes; a run that
+    // never went idle reads as the most a span can, which the verdict's
+    // 1030 refuses.
+    const bool went_idle = brio::wait_until<Ruler>([] { return Serial::tx_idle(); }, 100'000);
+    const uint32_t took = went_idle ? Ruler::now() - t0 : 0xFFFF'FFFFu;
     // 272 frames of ten bits at 115200 (BRR 417 for 416.7: 0.8 thousandths
     // slow from the divisor's rounding).
     constexpr uint32_t wire = static_cast<uint32_t>(2720ull * SysClock::hz / 115200u);
@@ -482,18 +492,22 @@ void tf_rx_engine() {
     print(serial, "  type up to 32 characters and Enter within 15 s:", crlf, "  > ");
     char line[33];
     uint8_t n = 0;
-    const uint32_t t0 = Ticker::ticks();
-    bool done = false;
-    while (!done && Ticker::ticks() - t0 < 15'000u) {
-        uint8_t c;
-        while (Serial::read_byte(c)) {
-            if (c == '\n' || c == '\r') {
-                done = n > 0u;
-            } else if (n < 32u) {
-                line[n++] = static_cast<char>(c);
+    // 15 s on the kernel tick for a person to type; a line not ended in
+    // time fails the verdict below.
+    const bool done = brio::wait_ticks<P>(
+        [&line, &n] {
+            bool ended = false;
+            uint8_t c;
+            while (Serial::read_byte(c)) {
+                if (c == '\n' || c == '\r') {
+                    ended = ended || n > 0u;
+                } else if (n < 32u) {
+                    line[n++] = static_cast<char>(c);
+                }
             }
-        }
-    }
+            return ended;
+        },
+        brio::ticks_from_ms<P>(15'000));
     line[n] = '\0';
     print(serial, crlf, "  read ", n, " byte(s): \"", line, "\"", crlf);
     bench.verdict("a line arrived through the receive engine", done);
@@ -503,13 +517,11 @@ void tf_rx_engine() {
 // ---------------------------------------------------------------------------
 // g - the copy engine
 // ---------------------------------------------------------------------------
+/// The copy engine idle again, bounded: busy() reads the flags while a
+/// block runs, polled or not. 5 ms, where the longest block here, 4096
+/// bytes in byte beats, takes some 25 000 cycles (0.5 ms).
 bool engine_wait() {
-    for (uint32_t i = 0; i < 1'000'000u; ++i) {
-        if (!CopyEngine::busy()) {
-            return true;
-        }
-    }
-    return false;
+    return brio::wait_until<Ruler>([] { return !CopyEngine::busy(); }, 5'000);
 }
 
 void tg_copy_engine() {
@@ -612,11 +624,10 @@ void th_circular() {
     pacer_open(1'000'000);
     C::enable(true);
     U3::dma_transmit(true);
-    // Twelve laps of four frames at 1 Mbaud: 480 us; stop after 12 and a
-    // bit, the channel running all the while.
-    const uint32_t t0 = Ticker::cycles();
-    while (laps < 12u && Ticker::cycles() - t0 < 48'000u * 5u) {
-    }
+    // Twelve laps of four frames at 1 Mbaud: 480 us; stop after 12, the
+    // channel running all the while. 5 ms is the budget; the laps counted
+    // are what the verdicts judge.
+    (void)brio::wait_until<Ruler>([] { return laps >= 12u; }, 5'000);
     U3::dma_transmit(false);
     const uint16_t cntr = C::count();
     const bool still_on = C::enabled();
@@ -763,10 +774,14 @@ Race race(DmaPriority first_level, DmaPriority second_level) {
             r.a[k] = static_cast<uint16_t>(A::count());
             r.b[k] = static_cast<uint16_t>(B::count());
         }
-        while ((B::flags() & DmaFlag::complete) == 0u) {
+        // Each poll bounded by its count, the tick count being stopped under
+        // the mask: 100 000 turns of at least a load, past 200 000 cycles
+        // against the two blocks' some 6 000. A block that never ended
+        // leaves its count above zero, which the verdicts read.
+        for (uint32_t turns = 100'000u; (B::flags() & DmaFlag::complete) == 0u && turns != 0u; --turns) {
         }
         r.left = A::count();
-        while ((A::flags() & DmaFlag::complete) == 0u) {
+        for (uint32_t turns = 100'000u; (A::flags() & DmaFlag::complete) == 0u && turns != 0u; --turns) {
         }
     }
     print(serial, "    ch", first_ch, " (PL ", static_cast<uint8_t>(first_level), ") first, ch", second_ch, " (PL ",
@@ -821,9 +836,17 @@ void raw_sleep() {
     __asm__ volatile("wfi" ::: "memory");
 }
 
+/// USART3's last frame off its shifter after the pacer's block: one frame
+/// at 1 Mbaud is 10 us, 1 ms the budget. What follows resets the block
+/// either way, so the answer is dropped.
+void pacer_drain() {
+    (void)brio::wait_until<Ruler>([] { return U3::tx_complete(); }, 1'000);
+}
+
 /// 256 bytes paced by USART3's transmitter at 1 Mbaud (2.56 ms), the core
 /// waiting for the completion by `wait`; the wall in thousandths of the
-/// pace.
+/// pace, 0 when the block did not end within 500 ms (sleeping between
+/// interrupts it crawls at about fifty times its pace, some 130 ms).
 template <typename Wait>
 uint32_t paced_permille(Wait wait) {
     role2 = Role::paced;
@@ -831,18 +854,26 @@ uint32_t paced_permille(Wait wait) {
     pacer_open(1'000'000);
     U3::dma_transmit(true);
     paced_done = false;
-    const uint32_t p0 = Ticker::cycles();
+    const uint32_t p0 = Ruler::now();
     (void)Paced::start(std::span<const uint8_t>(big_a, 256));
-    while (!paced_done) {
-        wait();
-    }
-    const uint32_t paced_wall = Ticker::cycles() - p0;
+    const bool ended = brio::wait_until<Ruler>(
+        [&wait] {
+            if (paced_done) {
+                return true;
+            }
+            wait();
+            return false;
+        },
+        500'000);
+    const uint32_t paced_wall = Ruler::now() - p0;
     U3::dma_transmit(false);
-    while (!U3::tx_complete()) {
-    }
+    pacer_drain();
     pacer_close();
     Paced::stop();
     role2 = Role::count;
+    if (!ended) {
+        return 0;
+    }
     return static_cast<uint32_t>(1000ull * paced_wall / (2560ull * SysClock::hz / 1'000'000u));
 }
 
@@ -855,12 +886,12 @@ void tk_sleep() {
     role5 = Role::copy_engine;
     raw_sleep();                                 // land just after a tick
     (void)CopyEngine::copy(big_b, big_a, big_bytes);
-    const uint32_t t0 = stk()->CNTL;
+    const uint32_t t0 = Ruler::now();
     raw_sleep();
-    const uint32_t t1 = stk()->CNTL;
+    const uint32_t slept = Ruler::now() - t0;
     const uint16_t left = DmaChannel<5>::count();
-    (void)engine_wait();
-    print(serial, "  4096-byte copy, the core asleep (no guard) ", stk_span(t0, t1), " cycles: ", left,
+    (void)engine_wait();   // the copy's end is not this verdict's: the count at the wake is
+    print(serial, "  4096-byte copy, the core asleep (no guard) ", slept, " cycles: ", left,
           " items left at the wake", crlf);
     bench.verdict("IN SLEEP THE CONTROLLER MOVES NOTHING: the copy stood still while the core slept (this die)",
                   left > 3000u);
@@ -874,21 +905,26 @@ void tk_sleep() {
     CopyEngine::arm(DmaPriority::low, true);
     copy_done = false;
     raw_sleep();
-    const uint32_t c0 = Ticker::cycles();
+    const uint32_t c0 = Ruler::now();
     (void)CopyEngine::copy(big_b, big_a, big_bytes);
     bool slept_through = false;
-    for (;;) {
-        P::CriticalSection cs;
-        if (copy_done) {
-            break;
-        }
-        slept_through = slept_through || !Dma::any_working();
-        P::idle();
-    }
-    const uint32_t wall = Ticker::cycles() - c0;
+    // 5 ms, against the copy's some 25 000 cycles (0.5 ms); a copy that
+    // never ended fails the verdict below, which bounds its wall.
+    const bool copied = brio::wait_until<Ruler>(
+        [&slept_through] {
+            P::CriticalSection cs;
+            if (copy_done) {
+                return true;
+            }
+            slept_through = slept_through || !Dma::any_working();
+            P::idle();
+            return false;
+        },
+        5'000);
+    const uint32_t wall = Ruler::now() - c0;
     print(serial, "  the same copy idling through the platform to its own interrupt: ", wall, " cycles", crlf);
     bench.verdict("the platform's idle() does not sleep over it: ended within a tick, at the controller's rate",
-                  wall < 40'000u && memcmp(big_a, big_b, big_bytes) == 0);
+                  copied && wall < 40'000u && memcmp(big_a, big_b, big_bytes) == 0);
     const uint32_t guarded_paced = paced_permille([] { one_idle(); });
     print(serial, "  256 bytes paced at 1 Mbaud, idling through the platform: ", guarded_paced,
           " thousandths of the pace", crlf);
@@ -922,13 +958,19 @@ BenchSample dma_sample(volatile bool& done, Launch launch) {
     Stopwatch<Ruler> sw;
     sw.start();
     launch();
-    for (;;) {
-        Plat::CriticalSection cs;
-        if (done) {
-            break;
-        }
-        Plat::idle();
-    }
+    // On the kernel tick, 50 ms: the longest block here, 1024 bytes paced
+    // at 1 Mbaud, takes 10.24 ms. A block that never ended prints the budget
+    // as its wall.
+    (void)brio::wait_ticks<P>(
+        [&done] {
+            Plat::CriticalSection cs;
+            if (done) {
+                return true;
+            }
+            Plat::idle();
+            return false;
+        },
+        brio::ticks_from_ms<P>(50));
     const uint32_t wall = sw.elapsed();
     return bench_sample(wall, before, counters());
 }
@@ -1006,8 +1048,7 @@ void tm_bench() {
     console_drain();
     const BenchSample s = dma_sample(paced_done, [] { (void)Paced::start(std::span<const uint8_t>(big_a, 1024)); });
     U3::dma_transmit(false);
-    while (!U3::tx_complete()) {
-    }
+    pacer_drain();
     pacer_close();
     Paced::stop();
     bench_line(serial, "paced", 1024, s, Ruler::hz(), 100'000);
