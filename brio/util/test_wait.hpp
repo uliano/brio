@@ -44,6 +44,11 @@
  *    bound computed from the code's cost describes the code alone; a run
  *    that a kernel tick (or another interrupt) lengthened is reported
  *    with its figure and left out of the judgement (TickWitness below).
+ *  - A wait inside a measured path adds its poll turn to the figure.
+ *    Where a letter times the path a wait guards (a transfer's cost, a
+ *    period's spread), the turn - one condition call and one ruler read
+ *    - is part of what it measures: poll the flag bare and check the
+ *    budget every so many turns, or state the turn in the bound.
  *
  * Who calls what. Every verb runs in main context - setup, a letter, the
  * handler of an active object - and never in an interrupt handler. None
