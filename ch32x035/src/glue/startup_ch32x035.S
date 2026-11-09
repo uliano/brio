@@ -56,7 +56,7 @@
  * SRAM and leave its paths from the flash at or under the cleared
  * figures at their best and at most 28 cycles over at their worst, an
  * unattributed event at depth 2 aside, while a data-dependent loop pays
- * them 7 to 25 per cent (docs/ch32x035/platform.md, the bench findings:
+ * them 1.8 to 2.6 per cent (docs/ch32x035/platform.md, the bench findings:
  * the scheduler's figures from copies of the preemptive suite's images
  * with this crt's value cleared, ten runs each; the loop's from the
  * platform suite's letters f, i and j, which measure the bits both ways

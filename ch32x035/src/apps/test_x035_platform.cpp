@@ -585,11 +585,15 @@ struct WorkRun {
     uint32_t cfg_seen = 0;   ///< corecfgr read back during the run
 };
 
-/// The run opens on a fresh tick edge, so its half a period of loop meets
-/// no reload; `span`, read on Ticker::cycles() - whose pending flag folds
-/// the one reload a mask can hide, so a span past a period reads past a
-/// period - is what proves it: under one period, `spent`, a difference
-/// taken modulo the period, is exact.
+/// The run opens on a fresh tick edge and is masked. `spent` is a
+/// difference of two STK positions, taken modulo the period, so it is
+/// exact only for a run that meets no reload; `span`, read on
+/// Ticker::cycles() around it, folds the one reload a mask can hide
+/// through the pending flag, so a run that met a reload reads a span
+/// past a period. The letter judges `span` under a period before it
+/// believes `spent`. The two compiler barriers keep the loop between the
+/// two STK reads: the loop is a call to a function gcc knows has no
+/// side effect, which it may otherwise move across a volatile read.
 WorkRun time_work(uint32_t n, uint32_t cfg) {
     WorkRun r;
     if (!fresh_tick()) {
@@ -604,7 +608,9 @@ WorkRun time_work(uint32_t n, uint32_t cfg) {
     r.cfg_seen = read_corecfgr();
     const uint32_t s0 = Ticker::cycles();
     const uint32_t c0 = cycles_now();
-    const uint32_t acc = work_loop(n);
+    __asm__ volatile("" ::: "memory");
+    uint32_t acc = work_loop(n);
+    __asm__ volatile("" : "+r"(acc)::"memory");
     const uint32_t c1 = cycles_now();
     const uint32_t s1 = Ticker::cycles();
     if (cfg != kept) {
@@ -624,7 +630,11 @@ void tf_corecfgr() {
         seed ^= seed << 5;
         work_data[i] = static_cast<uint8_t>(seed);
     }
-    const uint32_t n = 2000;
+    // About 48 cycles an iteration from the flash (measured: 250
+    // iterations 12104 cycles, 500 iterations 24132), so 400 iterations
+    // stay near 19300 cycles, well inside the 48000-cycle period even at
+    // a placement that costs a fifth more; the verdicts below check it.
+    const uint32_t n = 400;
     const uint32_t period = stk()->CMPLR + 1u;
 
     const uint32_t as_found = read_corecfgr();
@@ -637,14 +647,16 @@ void tf_corecfgr() {
     print(serial, "  ", n, " iterations of a loop with a branch and a load: ", with_bits.spent,
           " cycles at ", hex(with_bits.cfg_seen), ", ", without_bits.spent, " cycles at ",
           hex(without_bits.cfg_seen), crlf);
-    // Each run opens on a fresh tick edge and is masked, so it lies inside
-    // one tick period whenever it is shorter than one (48000 cycles), which
-    // the figures above show; the span on the ticker's composed count is
-    // printed beside them, not judged: on this part, read around a masked
-    // run, it comes out one period above the bare figure (72044 against
-    // 23956, three runs of three), an instrument question still open.
     print(serial, "  the same runs on the ticker's composed count: ", with_bits.span, " and ",
           without_bits.span, " cycles (a tick period is ", period, ")", crlf);
+    // A run that met a reload reads a composed span past a period, so a
+    // span under one says the bare figure, taken modulo the period, lost
+    // nothing; the bare figure is read inside the span, so it is the
+    // smaller of the two.
+    bench.verdict("both runs fit inside one tick period, so the bare figures are exact",
+                  with_bits.span < period && without_bits.span < period);
+    bench.verdict("and each bare figure lies inside its composed span",
+                  with_bits.spent <= with_bits.span && without_bits.spent <= without_bits.span);
     bench.verdict("the register takes a zero: the second run really ran without the bits",
                   without_bits.cfg_seen == 0u);
     bench.verdict("and it is back to what the crt wrote", restored == as_found);

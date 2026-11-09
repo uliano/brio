@@ -260,9 +260,8 @@ question.
   CH32V203's V4B the five bits bought two cycles in 36811 of a timed
   loop; on the CH32V303's V4F that loop ran slightly slower with them
   ([../ch32vx03/platform.md](../ch32vx03/platform.md)). On this core a
-  loop of the platform suite's own runs 7.3 per cent slower with them
-  than with the register cleared at one placement of the loop (25 per
-  cent at another placement, read in an earlier image), while from the
+  loop of the platform suite's own runs 1.8 to 2.6 per cent slower with
+  them than with the register cleared, while from the
   flash a taken branch or a jump through a register that shares its
   fetch word with a load or a store before it costs 4 cycles less with
   them, the predictor they turn on sending the fetch ahead (both
@@ -682,7 +681,7 @@ over a WCH-LinkE - at 48 MHz from the HSI with the flash at two wait
 states, the board's rail supplied (with none, fed through the pads'
 protection diodes, it restarts under load at 48 MHz:
 [../boards/ch32x035-evt-f8u6.md](../boards/ch32x035-evt-f8u6.md)).
-`test_x035_platform` (206 verdicts in `z`, nothing wired) ran ten times
+`test_x035_platform` (208 verdicts in `z`, nothing wired) ran ten times
 in the image built with the hardware prologue and three times in an
 image built without it; each figure of this section says which, and over
 how many runs.
@@ -795,18 +794,19 @@ suite measured:
   measured at -0.25 per cent ([clock.md](clock.md), "The HSI against a
   crystal"). Letter `g` brackets 5000 ticks between two console lines
   for a host to time; no host-timed figure of it stands here.
-- **corecfgr's 0x1F makes a data-dependent loop slower** (letter `f`).
-  The crt left 0x1F in the register; 2000 iterations of a loop with a
-  load and a data-dependent branch over a 64-byte pseudo-random table
-  took 23956 to 23960 HCLK cycles with it, and 22552 in every run with
-  the register cleared (6.2 per cent more with the vendor's bits at that
-  placement of the loop; 24200 and 22544 in an earlier image), each run
-  opened on a fresh tick edge and masked, so inside one tick period - the register reading back zero for the
-  cleared loop and 0x1F after it. The figure moves with the loop's
-  address modulo four: at another placement of the same loop the gap
-  read 25 per cent, in an earlier image. In the image without the
-  prologue the loop took 23960 to 24208 cycles with the bits (three
-  runs), 22544 without.
+- **corecfgr's 0x1F makes a data-dependent loop slower** (letter `f`,
+  thirteen runs). The crt left 0x1F in the register; 400 iterations of
+  a loop with a load and a data-dependent branch over a 64-byte
+  pseudo-random table took 14408 to 14520 HCLK cycles with it, and
+  14152 in every run with the register cleared (1.8 to 2.6 per cent
+  more with the vendor's bits), the register reading back zero for the
+  cleared loop and 0x1F after it. Each run opens on a fresh tick edge
+  and is masked, and the letter judges it inside one tick period by the
+  ticker's composed count around it, which reads past a period for a
+  run that met a reload; the bare figure is a difference of two STK
+  positions modulo the period and is believed only then. The loop's
+  own cost moves with where it is placed: about 36 cycles an iteration
+  in this image, about 48 in a diagnostic image that moved it.
 - **What the crt left in the core** (letter `h`, ten runs): INTSYSCR =
   0x1, the hardware stack on and nesting off (0x0 in the image built
   without the prologue); mtvec = 0x3, the table at the image's base
