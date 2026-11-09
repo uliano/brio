@@ -441,7 +441,7 @@ board's PC16 and PC17, with a 1.5 kOhm resistor from each line to its
 PB3, which its I2C images drive high. On this part the suite is four
 images (`test_ch32_i2c-1`, the single-host wire letters and letter v; `-2`, the
 kernel, the two-host, the dead-channel and the raw letters; `-3`, letters
-n, l, u and t; `-4`, letter y), the whole being over the 40 KB of program flash. On the
+n, l and u; `-4`, letters t and y), the whole being over the 40 KB of program flash. On the
 CH32V003F4P6 it builds as nine group images under the part's 15 KB, and no
 group holds the kernel, the two-host, the client-from-its-vectors, the
 dead-channel, the n, the u, the t or the y letters ("Not covered yet").
@@ -449,7 +449,7 @@ dead-channel, the n, the u, the t or the y letters ("Not covered yet").
 - **The reset values are table 15-1's**, and both speeds resolve exactly
   at 48 MHz (CCR 240 and 40).
 - **Against the CH32X035** the whole suite holds: 53 verdicts in the
-  first image, 42 in the second, 31 in the third and 10 in the fourth, the four receive
+  first image, 39 in the second, 22 in the third and 19 in the fourth, the four receive
   procedures, the vocabulary, the repeated START acknowledged and
   refused (by a device's NACK), the engines, the kernel letter, the two
   hosts and the raw sequences, each on the first `z` after its flash. Letter `d` there: a write to 0x7A and one to
@@ -465,11 +465,19 @@ dead-channel, the n, the u, the t or the y letters ("Not covered yet").
   the address phase.
 - **The rate asked, on the wire** (a tenure timed on the ticker's
   cycle count from `start()` to its completion, nine SCL periods a
-  byte with the address's, START, STOP and the software inside; the
-  bracket: never above the rate asked by more than 2 %, within a
-  quarter below it): an 8-byte write on the pump at about 95 kHz for 100
-  asked and 347 kHz for 400, on the engines a 16-byte write and read at
-  about 97 kHz each and a 16-byte read at 368 or 369 kHz for 400. Each
+  byte with the address's, START, STOP and the software inside, on the
+  same HCLK that drives SCL): an 8-byte write on the pump at about 95 kHz
+  for 100 asked and 347 kHz for 400, on the engines a 16-byte write and
+  read at about 97 kHz each and a 16-byte read at 368 or 369 kHz for
+  400. The bracket the letters judge is derived, not chosen: never above
+  the divisor's rate, which CCR makes exactly at 48 MHz, but for half a
+  period (a read's completion may come as its last clock rises); never
+  below the same periods at their longest - each lengthened by the rise to
+  the pad's guaranteed high, inside the I2C specification's largest rise
+  time (1000 ns in Standard mode, 300 ns in Fast mode, UM10204), and the
+  input's sampling - with the tenure's two ends and the peer's stretch at
+  its address: 86.8 and 300.5 kHz for the 8-byte write, 88.4 and 320.0 kHz
+  for the 16-byte tenures. Each
   line's rise from the pad reads SCL 97 cycles and SDA 109 in every run,
   an upper bound: the count starts before the call that releases the pad.
 - **A port read through its shut gate answers zero** (RM 3.4.7's PB2
@@ -518,7 +526,10 @@ dead-channel, the n, the u, the t or the y letters ("Not covered yet").
   match with no channel enabled, the timer's gate then closed with no
   reset - TIM1's channel 3 on DMA channel 6, TIM2's channel 2 on channel
   7 (table 8-2) - is held on this die: the channel takes one stray item at
-  its next enable and serves nothing after it ([dma.md](dma.md)). A write
+  its next enable and serves nothing after it ([dma.md](dma.md)). The
+  manual does not say so, so the letter prints what a next owner takes
+  behind each timer's hold and judges the dead channel's write or read
+  only where the hold staged one, declining it otherwise. A write
   of 32 on the engines over the dead channel 6 and a read of 16 over
   the dead channel 7 never complete, the far end holding one byte of the write, the event vector entered twice (SB,
   ADDR) and never stormed - the event line is down for the DMA block - and no `i2c_ok` claimed, so
@@ -548,7 +559,9 @@ dead-channel, the n, the u, the t or the y letters ("Not covered yet").
   read stalled over that dead channel, RxNE and BTF standing under DMAEN,
   gave channel 7's next enable four items while the peripheral stayed
   live, and none once its gate was closed - with PE up or cleared - or
-  after `release()`, which closes the gate. So `init()`'s reset pulse
+  after `release()`, which closes the gate. The letter prints the four
+  ways and judges `release()`'s alone, the release contract, behind the
+  live way's item, which proves the stall raised a request. So `init()`'s reset pulse
   finds nothing of this peripheral's to clear after these ways of letting
   go. The pulse stays because the release contract asks it of every DMA
   request on the chip, and a timer's request does outlive its gate.
@@ -709,8 +722,12 @@ of 562 at its shortest.
   running in the vectors, and the probe is `i2c_ok` at most 224 us after the call at
   100 kHz and 152 at 400, one reset counted, two event entries, BUSY down behind it:
   224 of 224 at each speed over each of the two stagings. The derived bound beside the
-  letter is 255 and 165. Through the arbiter, at 100 kHz, one reply, `i2c_ok`, 261
-  us after the post, no timeout spent, and the next request `i2c_ok` in 151 to 154.
+  letter is 245 and 172: the watch's 100 us, its last poll, the call and the reset's
+  stores under 10, and the probe's nine clocks at their longest with its two ends and
+  the peer's stretch at the address. Through the arbiter, at 100 kHz, one reply, `i2c_ok`, 261
+  us after the post, no timeout spent, and the next request `i2c_ok` in 151 to 154; the
+  bound there is the raw one and the kernel's turn twice, the turn read in the same
+  round on a request `start()` refuses with nothing on the wire.
 - **A line seen low in the bound: no reset, and the START goes in anyway.** Behind
   that, "What the silicon does" decides. Under the peer's 24 bytes at 100 and 400 kHz,
   this board's client half addressed, every request ended on the wire: its probe's
@@ -741,12 +758,17 @@ PE cycle, so a program changing speed does nothing.
 
 ### The two bounds of `start()` against their names (`test_ch32_i2c` letter t)
 
-Eighteen runs of the letter, all green. The time is the ticker's cycle count around
-the call, 20.8 ns a count, a read of it 57 cycles inside each figure, so a figure
-reads high by that and never low. Each verdict takes the name as its floor and, as
-its ceiling, the name plus the free bus's 273 cycles, one poll, a tick's entry and the
-ruler. A floor on a figure that holds those 273 cycles would pass a wait up to 5.7 us
-short; what keeps the wait from being short is the sum read below.
+The figures below are eighteen runs of the letter. The time is the ticker's cycle
+count around the call, 20.8 ns a count, a read of it 57 cycles inside each figure, so a
+figure reads high by that and never low. Each verdict takes the name as its floor and,
+as its ceiling, the wait's poll budget: the letter first times each wait with the STK
+stopped, where it ends on its count of polls, and since a poll costs the same with the
+counter running a wait never outlasts that reading, one count of TIM2 above it and a
+tick's entry for each millisecond it spans. How far past its name a wait ends is
+printed, not judged: `start()`'s cost around it, the call into the cold watch and its
+last poll have no bound in cycles anything written gives. A floor on a figure that
+holds the free bus's 273 cycles would pass a wait up to 5.7 us short; what keeps the
+wait from being short is the sum read below.
 
 | wait | named | measured at 48 MHz | how it was staged |
 |---|---|---|---|
@@ -801,9 +823,11 @@ client lets go. Nothing of the request reached the wire, so it can be posted aga
 
 Eighteen runs, 12 rounds a run, all sound: CTLR1's STOP up, START down and BUSY up at the
 reply, no reset, no vector, and behind the hold STOP and BUSY down with nothing done.
-The ceiling beside the letter is `stop_drain_us`, what `start()` costs around the wait,
-a poll, a tick's entry, the ruler and the kernel's own turn, read in the same round as
-the post-to-reply of a request refused with nothing on the wire (29 us).
+The ceiling beside the letter is `stop_drain_us`, how far past it `start()`'s own
+run-out ended in the same letter's raw rows, one poll more for the phase its last poll
+falls at, a tick's entry, and the kernel's own turn, read in the same round as the
+post-to-reply of a request refused with nothing on the wire (29 us). The next request
+on the wire is bounded as a request over a standing BUSY through the arbiter.
 
 What a program sees of it: a client that stretches past 5 ms after a write loses the
 request behind it to `i2c_timeout` however long the per-bus timeout is, and that
@@ -945,7 +969,10 @@ the pump and through the engines (every request naming
 `I2cEngine::dma`), at both speeds, and at each speed a slope estimate
 ("Which engine to name" above). `wire` is the bus's own
 time at the SCL period measured as the slope of two engined writes (482
-cycles at 100 kHz, 99.6 kHz; 122 at 400 kHz, 393 kHz). `the rest` = wall
+cycles at 100 kHz, 99.6 kHz; 122 at 400 kHz, 393 kHz). A wall under the
+floor the configured timing sets - the tenure's clocks at the register's own
+SCL period, less half a period - is refused as a fault of the instrument and
+fails the letter. `the rest` = wall
 - wire is the tenure's fixed cost. It holds the far end's own answer (a
 polled target stretches the clock until its loop has taken each step), and in
 the pump's column the instrument's share as well: a stamp pair an entry (42 to

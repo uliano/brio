@@ -13,7 +13,8 @@
 //
 // NOT A TEST: every letter's one verdict is "ran", and letter i's "ran"
 // is false when the peer did not answer, a tenure failed or read a byte
-// off the peer's pattern, a wall fell under the wire, the console did not
+// off the peer's pattern, a wall fell under the floor the configured timing
+// sets (the tenure's clocks at the register's own SCL rate), the console did not
 // drain before an op was timed, or the peer's count of the bytes moved
 // disagrees with this side's. With no pull-ups on the wire the letter is
 // skipped.
@@ -47,9 +48,9 @@
 //      named from the address). Each the best of 8 runs, every byte read
 //      judged against the peer's pattern - a run whose tenure failed is
 //      not taken, and fails the letter, as a byte read wrong does; nor is
-//      one whose wall is under the wire, which no tenure can be: such a
-//      wall is a fault of the instrument, counted, printed and failing the
-//      letter; the line's irq and isr are
+//      one whose wall is under the floor the configured timing sets, which
+//      no tenure can be: such a wall is a fault of the instrument, counted,
+//      printed and failing the letter; the line's irq and isr are
 //      I2C1's two vectors, channels 6 and 7 and the tick; a second line
 //      gives the wire in cycles, "the rest" above it (the fixed cost of
 //      the tenure) and start() alone (the best of 8, the completion
@@ -323,6 +324,21 @@ constexpr uint32_t i2c_periods(I2cShape k, uint8_t n) {
 /// The measured SCL period of each speed, in sixteenths of a cycle.
 uint32_t i2c_period_x16[2] = {};
 
+/// THE WALL NO TENURE CAN BEAT, from the configured timing and not from the
+/// slope measured on the same instrument: the clocks of the tenure's bytes (nine
+/// a byte with its acknowledge, the addresses included, the START, the STOP and
+/// a repeated START left out) at the register's own SCL period, HCLK over the
+/// rate CCR makes - the fastest the bus can run, CCR rounded up and the high
+/// phase counted from SCL seen high, so the rise only adds - less half a period,
+/// for a completion that comes as the last clock rises (a NACK, a read's last
+/// byte). The ruler and the I2C block share HCLK: no clock error enters.
+template <typename Host>
+uint32_t i2c_floor(I2cShape k, uint8_t n, I2cSpeed speed) {
+    const uint32_t clocks = i2c_periods(k, n) - (k == I2cShape::wr ? 2u : 1u);
+    const uint32_t period = Ruler::hz() / Host::scl_hz(speed);
+    return clocks * period - period / 2u;
+}
+
 /// Walls the best-of filters refused for being under the bus's own time:
 /// an instrument fault, never a measurement, so the letter does not pass
 /// with one in it.
@@ -363,9 +379,11 @@ template <typename Host>
 BenchSample run_i2c(const char* op, I2cShape k, uint8_t n, I2cSpeed speed) {
     const typename Host::Request r = i2c_request<Host>(k, n, speed);
     const uint8_t s_ix = static_cast<uint8_t>(speed);
-    // The bus's own time for this tenure: a wall below it is impossible,
-    // and the best of the runs takes no such wall and no failed tenure.
+    // The bus's own time for this tenure at the measured period, the line's wire;
+    // a wall below the configured timing's floor is impossible, and the best of
+    // the runs takes no such wall and no failed tenure.
     const uint32_t wire = i2c_periods(k, n) * i2c_period_x16[s_ix] / 16u;
+    const uint32_t floor = i2c_floor<Host>(k, n, speed);
     const bool nobody = k == I2cShape::probe_nack || k == I2cShape::write_nack;
     // A console still sending would put its vector inside the timed runs.
     const bool drained = console_drain();
@@ -398,7 +416,7 @@ BenchSample run_i2c(const char* op, I2cShape k, uint8_t n, I2cSpeed speed) {
             }
             peer_gave += r.rx_len;
         }
-        if (s.wall < wire) {
+        if (s.wall < floor) {
             ++below;
             lowest = s.wall < lowest ? s.wall : lowest;
         } else if (st && s.wall < best.wall) {
@@ -461,7 +479,7 @@ BenchSample run_i2c(const char* op, I2cShape k, uint8_t n, I2cSpeed speed) {
           data ? ", data exact" : ", DATA WRONG", ok ? "" : ", A TENURE FAILED",
           drained ? "" : ", THE CONSOLE DID NOT DRAIN");
     if (below != 0u) {
-        print(serial, ", ", below, " WALLS BELOW THE WIRE REFUSED (the lowest ", lowest, ")");
+        print(serial, ", ", below, " WALLS BELOW THE FLOOR REFUSED (the lowest ", lowest, ", the floor ", floor, ")");
     }
     print(serial, crlf);
     return best;
@@ -474,10 +492,9 @@ void measure_period(I2cSpeed speed) {
     uint8_t j = 0;
     for (const uint8_t n : {uint8_t{16}, uint8_t{255}}) {
         const I2cDma::Request r = i2c_request<I2cDma>(I2cShape::write, n, speed);
-        // The register's own SCL rate is the fastest the bus can run (CCR
-        // rounded up, the rise time only adding): a wall under that wire
-        // is impossible and refused like a failed tenure.
-        const uint32_t floor = i2c_periods(I2cShape::write, n) * (Ruler::hz() / I2cDma::scl_hz(speed));
+        // A wall under the configured timing's floor is impossible and refused
+        // like a failed tenure.
+        const uint32_t floor = i2c_floor<I2cDma>(I2cShape::write, n, speed);
         uint32_t best = 0xFFFF'FFFFu;
         for (uint8_t run = 0; run < 4u; ++run) {
             Stopwatch<Ruler> sw;
@@ -642,7 +659,7 @@ void ti_i2c() {
     i2c_mode = I2cMode::none;
     I2cPump::release();
     if (impossible_walls != 0u) {
-        print(serial, "  ", impossible_walls, " WALLS UNDER THE WIRE were refused: the ruler or the "
+        print(serial, "  ", impossible_walls, " WALLS UNDER THE FLOOR were refused: the ruler or the "
                       "harness misread a tenure",
               crlf);
     }

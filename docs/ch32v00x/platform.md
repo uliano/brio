@@ -286,7 +286,7 @@ goes through `panic<P, ResetReporter>(code, context)`.
 
 ## Bench findings
 
-The reference suite is `test_ch32_platform` (forty-one verdicts in
+The reference suite is `test_ch32_platform` (thirty-eight verdicts in
 `z`, nine more in letter `i`, which reboots the board three times), on
 the CH32V006K8U6 at 48 MHz, and letters `e` and `u` again in an image
 built with `CH32V00X_HPE=OFF` (its `z` green too). What it measured:
@@ -396,10 +396,14 @@ letters ending in real resets):
   arithmetic said, within 1 % and 4 ms (a .noinit token counting the
   loop's last millisecond): 299 to 300 ms against 299 at 106.8 kHz on
   the CH32V006F8U6, 252 to 253 ms against 252 at 126.5 kHz on the
-  CH32V003F4P6, twelve runs each. Fed every 60 ms it never bites; a
+  CH32V003F4P6, twelve runs each. Fed every 61 ms it never bites; a
   fresh boot finds it off.
-- **The update flags cross in 41 us**: PVU seen, then down 2010 cycles
-  after the prescaler write - five LSI cycles, as 4.3.4 says.
+- **The update flags cross within five LSI cycles**, as 4.3.4 says: PVU
+  seen, then down 519 to 2391 cycles after the prescaler write on the
+  CH32V006F8U6 and 412 to 2064 on the CH32V003F4P6 (ten runs each) - the
+  write lands anywhere in the LSI's phase. The letter judges the five
+  cycles at the datasheet's slowest LSI and its fastest HSI, 2721 and 2453
+  cycles, plus a ruler read at each end.
 - **The WWDG's step is exact**: armed at /8, the first early warning
   2064546 cycles after the start for 63 x 32768 = 2064384; fed from
   its own early-warning handler it runs six warnings in 300 ms and

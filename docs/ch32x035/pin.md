@@ -270,10 +270,10 @@ brio::Pin<'B', 12>::lock();
 ## Bench findings
 
 The reference suite is `test_x035_pin` (19 verdicts in `z` and 2 more
-in letter `w` with its jumper PB11-PB12 in place) on a CH32X035F8U6 -
-WCH's evaluation board in its QFN20 edition, over a WCH-LinkE - beside
-one read over the debug port. PA5, PA6 and PA7 are wires to the desk's
-CH32V006K8U6, whose dark console leaves its ends floating inputs: the
+in letter `w` with its jumper PB11-PB12 in place) on a CH32X035F8U6 on
+its WeAct board ([../boards/weact-ch32x035f8.md](../boards/weact-ch32x035f8.md)),
+beside one read over the debug port. PA5, PA6 and PA7 are wires to the desk's
+CH32V006F8U6 on its WeAct board, whose dark console leaves its ends floating inputs: the
 letters that drive and pull them ran green across those wires. Letters
 `b` and `c` check that first - each link pad they rest on must read high
 on this end's pull-up and low on its pull-down - and decline, judging

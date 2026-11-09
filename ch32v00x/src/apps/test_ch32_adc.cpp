@@ -27,7 +27,8 @@
 //      judged on the CH32V003
 //   c  THE RATE: continuous conversions of VREFINT into a 256-word DMA
 //      block at three sample times and two clocks, timed on the STK
-//      against tCONV = sample + the part's tail (12.5 or 11 ADCCLK)
+//      against tCONV = sample + the part's tail (12.5 or 11 ADCCLK): a
+//      256 block less a 64 block, so the start and the end cancel
 //   d  THE TRIGGERS: TIM1's TRGO at 10 kHz pacing the rule group (1000
 //      conversions in 100 ms through the DMA), TIM2's TRGO, TIM1's CC1
 //      and CC2; the INJECTION group paced by TIM3's CC1 where there is
@@ -410,18 +411,47 @@ void tc_rate() {
     };
     const Run runs[] = {{code_div8, adc_sample_longest}, {code_div8, adc_sample_shortest},
                         {code_fast, sample_mid}, {code_fast, adc_sample_shortest}};
+    // The poll turn of the wait that closes each block: a counted run of
+    // cycles_until's turns (the same flag-free turn plus a counter), so
+    // the figure is at least the turn that detects the DMA's completion.
+    uint8_t turns = 0;
+    console_drain();
+    const uint32_t turn = brio::cycles_until<Ruler>([&] { return ++turns >= 64u; }, 1'000).value_or(0u) / 64u;
     uint8_t exact = 0;
-    uint8_t settled_runs = 0;
+    bool settled_by_run[4] = {};
     uint16_t fast_spread = 0;
+    uint8_t index = 0;
     for (const Run& r : runs) {
         (void)adc_ready(r.prescaler);
-        const uint32_t took = dma_block(256, r.t);
         const uint32_t adc_hz = Adc::adcclk_hz(clock);
-        // 256 conversions: the expected cycles, in HCLK, are 256 x tCONV
-        // x (HCLK / ADCCLK).
-        const uint32_t expected = 256u * adc_conversion_half_cycles(r.t) * (SysClock::hz / adc_hz) / 2u;
-        const uint32_t per_conv_ns = took != 0u ? (took * 1000u / 48u) / 256u : 0u;
-        const bool timed = took != 0u && took >= expected - expected / 20u && took <= expected + expected / 10u + 400u;
+        const uint32_t hclk_per_adcclk = SysClock::hz / adc_hz;
+        // A block's span is its start latency (the ADC's power-up after
+        // the previous block's power cycle, the store that starts it,
+        // the window's first ruler read), n x tCONV (RM 9.2.2, ADCCLK from
+        // HCLK: no clock error between converter and ruler), the DMA's
+        // last write and up to one poll turn to see the flag. The 256
+        // block less the 64 block, each preceded by the same power cycle,
+        // cancels everything but 192 x tCONV, one ADCCLK of start jitter
+        // and one poll turn at each end. Fastest of three of each, so an
+        // interrupt landing at a block's end (the tick: one in about 400
+        // turns) lengthens no figure judged.
+        (void)dma_block(64, r.t);  // the first block follows adc_ready, not a power cycle
+        uint32_t short_min = 0xFFFF'FFFFu;
+        uint32_t long_min = 0xFFFF'FFFFu;
+        for (uint8_t k = 0; k < 3u; ++k) {
+            const uint32_t s = dma_block(64, r.t);
+            const uint32_t l = dma_block(256, r.t);
+            if (s != 0u && s < short_min) { short_min = s; }
+            if (l != 0u && l < long_min) { long_min = l; }
+        }
+        const uint32_t tconv = adc_conversion_half_cycles(r.t) * hclk_per_adcclk / 2u;
+        const uint32_t expected = 192u * tconv;
+        // |d - 192 tCONV| <= one turn at each end + one ADCCLK.
+        const uint32_t allowance = 2u * turn + hclk_per_adcclk;
+        const bool ended = short_min != 0xFFFF'FFFFu && long_min != 0xFFFF'FFFFu && long_min > short_min;
+        const uint32_t d = ended ? long_min - short_min : 0u;
+        const bool timed = ended && d + allowance >= expected && d <= expected + allowance;
+        const uint32_t per_conv_ns = ended ? (d * 1000u / (SysClock::hz / 1'000'000u)) / 192u : 0u;
         // The block's content: the spread of the 256 readings around the
         // reference. VREFINT is a slow source (DS table 3-5 recommends
         // slow sampling), so at the shortest sample of the fastest clock
@@ -434,25 +464,26 @@ void tc_rate() {
         }
         const bool settled = static_cast<uint16_t>(hi - lo) <= scaled(200);
         print(serial, "  ADCCLK ", adc_hz / 1000000u, " MHz, sample ", adc_sample_half_cycles(r.t) / 2u,
-              (adc_sample_half_cycles(r.t) & 1u) != 0u ? ".5" : "", " cycles: 256 "
-              "conversions in ", took, " cycles (", expected, " expected) = ", per_conv_ns, " ns each -> ",
-              per_conv_ns != 0u ? 1'000'000u / per_conv_ns : 0u, " ksps; block ", lo, "..", hi,
+              (adc_sample_half_cycles(r.t) & 1u) != 0u ? ".5" : "", " cycles: 256 conversions in ", long_min,
+              " cycles, 64 in ", short_min, ": 192 in ", d, " (", expected, " +-", allowance, ") = ", per_conv_ns,
+              " ns each -> ", per_conv_ns != 0u ? 1'000'000u / per_conv_ns : 0u, " ksps; block ", lo, "..", hi,
               timed ? "  timed" : "  OFF", settled ? ", settled" : ", NOT settled", crlf);
         if (timed) {
             ++exact;
         }
-        if (settled) {
-            ++settled_runs;
-        }
-        if (&r == &runs[3]) {
+        settled_by_run[index] = settled;
+        if (index == 3u) {
             fast_spread = static_cast<uint16_t>(hi - lo);
         }
+        ++index;
     }
-    bench.verdict("256 continuous conversions through DMA channel 1 at four clock/sample settings take "
-                  "tCONV = sample + the part's tail (12.5 or 11 ADCCLK cycles) each, within 5%",
+    print(serial, "  (a poll turn of the closing wait: ", turn, " cycles)", crlf);
+    bench.verdict("192 continuous conversions through DMA channel 1 (a 256 block less a 64 block) at four "
+                  "clock/sample settings take 192 tCONV = sample + the part's tail (12.5 or 11 ADCCLK cycles), "
+                  "within two poll turns and one ADCCLK",
                   exact == 4u);
-    bench.verdict("the three slower settings read the reference settled (the block within 200 counts of 4096)",
-                  settled_runs >= 3u);
+    bench.verdict("the three slower settings read the reference settled (each block within 200 counts of 4096)",
+                  settled_by_run[0] && settled_by_run[1] && settled_by_run[2]);
     print(serial, "  -> at the fastest clock and the shortest sample VREFINT spreads ", fast_spread,
           " counts: the reference wants the slow sampling the datasheet recommends", crlf);
     all_off();

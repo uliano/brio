@@ -89,7 +89,8 @@
 //      against a uniform rate error (the chapter's "not less than 3 %",
 //      14.3), glitches on the idle line, ORE from a run read late, a break
 //   n  (y) the peer's engine shapes: a bit-banged frame, one stretched
-//      cell, a LIN break ahead of a frame
+//      cell - clean up to the stretch 14.3's 3 per cent covers on the
+//      clocks' ratio, the onset printed - a LIN break ahead of a frame
 //   o  (y) the modes on a wire: mute woken by an address mark and by an
 //      idle line, IrDA between two WCH SIR codecs in normal mode and in
 //      low-power mode at one prescaler, LIN's break detection at both
@@ -97,10 +98,11 @@
 //   p  (y) half duplex on PB0 hearing a frame the peer drives onto that
 //      wire from its RX pad (drive_rxd)
 //   q  (y) the error flags' clear under a receive channel: a parity error
-//      from the far chip stands in STATR though the channel read DATAR; a
-//      STATR read arms the clear and the channel's next read performs it;
-//      and a run of eight errored frames into a ring with no transmit
-//      engine counted every other one
+//      from the far chip stands in STATR though the channel read DATAR, and
+//      still stands after a second read with no status read between; with
+//      one between, whether the channel's read performs the clear is
+//      printed; and a run of eight errored frames into a ring with no
+//      transmit engine, every byte stored, the count of errors printed
 //   r  (y) the priority rule: 8192 frames at 3 Mbaud into the engined ring
 //      at very_high while 2 KB copies run back to back on a lower channel
 //      at low - and the control, the ring told to rank low
@@ -117,7 +119,8 @@
 //      stall bound giving a live channel up once - and the next burst whole
 //   u  (y) THE IDLE LINE UNDER THE CHANNEL'S CLEAR, frame by frame: groups of
 //      one and of two frames into a one-shot channel 8, STATR read once
-//      after each - does one frame after an idle that was read raise IDLE?
+//      after each - the first group's IDLE judged, and whether one frame
+//      after an idle that was read raises IDLE printed
 //
 // THE SUPPLY at boot: the voltage detector at 3.0 V (pwr.hpp); an image
 // that drives a link pad from a sagging rail refuses every letter and
@@ -372,7 +375,55 @@ uint32_t wire_permille(uint32_t baud, uint32_t n) {
     return static_cast<uint32_t>(1000ull * (Ticker::cycles() - t0) / wire);
 }
 
-bool on_the_wire(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
+/// THE TICK'S COST TO A POLLED LOOP, measured in this image: the ruler read
+/// back to back for three tick periods, the console drained by the caller;
+/// the longest step between two reads is one read plus the tick's handler
+/// with its entry and exit, nothing else being armed - what a tick landing
+/// in a polled loop's turn adds to that turn.
+uint32_t tick_step() {
+    constexpr uint32_t period = SysClock::hz / Ticker::ticks_per_second;
+    uint32_t last = Ticker::cycles();
+    const uint32_t t0 = last;
+    uint32_t worst = 0;
+    while (last - t0 < 3u * period) {
+        const uint32_t now = Ticker::cycles();
+        worst = now - last > worst ? now - last : worst;
+        last = now;
+    }
+    return worst;
+}
+
+/// THE BOUNDS OF A RUN, in thousandths of its wire time (wire_permille()).
+/// The transmitter and the ruler run on one clock, HCLK, so no oscillator's
+/// error enters: what moves a run off its wire is code arithmetic.
+///  - Below: the frames themselves, `n` x 10 bit times of `brr` cycles each
+///    (the divisor's own rounding, 0.8 thousandths slow for 417 at 115200),
+///    since the run spans them from before the first store to TC.
+///  - Above: those, plus one bit for the first frame's start (the
+///    transmitter shifts on its own bit clock, HCLK / 16 / USARTDIV in
+///    figure 14-1, so a frame waits for its next edge, a bit at most), plus a
+///    tick step (tick_step()) for every tick the run can hold - its span in
+///    tick periods and two more, the run lasting barely past its wire - and
+///    two steps more for the loop's first store and TC seen a turn late
+///    (each turn a ruler read and a flag load, under a step). The loop keeps
+///    DATAR a frame ahead: its turn, a composed read (76 cycles,
+///    docs/ch32x035/platform.md) and a flag load, is under the shortest
+///    frame here, 160 cycles at 3 Mbaud, so only a tick idles the line.
+struct WireBounds {
+    uint32_t lo;
+    uint32_t hi;
+};
+WireBounds wire_bounds(uint32_t baud, uint32_t n, uint32_t brr, uint32_t step) {
+    constexpr uint32_t period = SysClock::hz / Ticker::ticks_per_second;
+    const uint64_t wire = 10ull * n * SysClock::hz / baud;
+    const uint64_t frames = 10ull * n * brr;
+    const uint64_t ticks = wire / period + 2u;
+    const uint64_t extra = brr + (ticks + 2u) * step;
+    return {static_cast<uint32_t>(1000ull * frames / wire),
+            static_cast<uint32_t>((1000ull * (frames + extra) + wire - 1u) / wire)};
+}
+
+bool on_the_wire(uint32_t permille, const WireBounds& b) { return permille >= b.lo && permille <= b.hi; }
 
 void td_frame_time() {
     if (!console_drain()) {
@@ -392,11 +443,21 @@ void td_frame_time() {
         }
         took = cycles_between(c0, cycles_now());
     }
-    const uint32_t expected = 10u * Usart<2>::brr();   // ten bits of BRR cycles each
+    const uint32_t bit = Usart<2>::brr();
+    const uint32_t expected = 10u * bit;   // ten bits of BRR cycles each
     print(serial, crlf, "  one 8N1 frame ('U' above) took ", took, " HCLK cycles, ten bit times of "
           "the divisor are ", expected, crlf);
-    bench.verdict("the frame lasts ten bit times of the divisor, within two bit times",
-                  took + 2u * Usart<2>::brr() >= expected && took <= expected + 2u * Usart<2>::brr());
+    // THE BOUNDS, in bit times of the divisor. Below: the frame is ten bits -
+    // start, eight data, stop - and TC rises when it has been transmitted
+    // (14.10.1), after the stop bit; c0 is read before the DATAR store, so
+    // the span is never shorter. Above: the first bit waits for the
+    // transmitter's bit clock, HCLK / 16 / USARTDIV (figure 14-1), one bit at
+    // most, and the masked poll sees TC one turn late - three peripheral
+    // loads and a dozen instructions with nothing else running, far under a
+    // bit's 417 cycles: so under twelve.
+    bench.verdict("the frame lasts ten bit times of the divisor, and under twelve (one for the transmitter's "
+                  "bit clock, less than one for the poll's turn)",
+                  took >= expected && took < expected + 2u * bit);
 
     // The runs: the console's 128 frames at the 115200 its init() asked
     // (BRR 417 for 416.7, 0.8 thousandths slow by the divisor's own
@@ -407,11 +468,14 @@ void td_frame_time() {
         bench.skip("the console did not drain: the runs not timed");
         return;
     }
+    const uint32_t step = tick_step();
     const uint32_t console_pm = wire_permille<Usart<2>>(115200, 128);
-    print(serial, crlf, "  the console: 128 frames in ", console_pm, " thousandths of their wire time at 115200",
-          crlf);
-    bench.verdict("the console's line runs at the rate asked: 128 frames at 115200 within -1 % to +3 % of "
-                  "their wire time", on_the_wire(console_pm));
+    const WireBounds console_b = wire_bounds(115200, 128, Usart<2>::brr(), step);
+    print(serial, crlf, "  the console: 128 frames in ", console_pm, " thousandths of their wire time at 115200 (",
+          console_b.lo, " to ", console_b.hi, ", a tick step ", step, " cycles)", crlf);
+    bench.verdict("the console's line runs at the rate asked: 128 frames at 115200 within their divisor's figure "
+                  "and its start bit and tick steps (wire_bounds())",
+                  step != 0u && on_the_wire(console_pm, console_b));
     const bool opened = Loop::init(clock, 115200);
     // THE RX PAD PULLED UP: it is a wire to the far board's pad, which a
     // dark board leaves a floating input, and a floating receiver invents
@@ -421,17 +485,21 @@ void td_frame_time() {
     (void)delay_us(clock, 200);   // TE's idle frame
     static constexpr uint32_t rates[] = {115200, 1'000'000, 3'000'000};
     uint32_t pm[3] = {};
+    WireBounds wb[3] = {};
     bool moved = opened;
     for (uint8_t k = 0; k < 3u; ++k) {
         moved = moved && Loop::set_baud(SysClock::hz, rates[k]);
         pm[k] = moved ? wire_permille<U4>(rates[k], 1024) : 0u;
+        wb[k] = wire_bounds(rates[k], 1024, U4::brr(), step);
     }
     Loop::release();
-    print(serial, "  USART4 on PB0, 1024 frames: ", pm[0], " thousandths of their wire time at 115200, ", pm[1],
-          " at 1 Mbaud, ", pm[2], " at 3 Mbaud", crlf);
-    bench.verdict("and USART4's at each rate asked: 1024 frames at 115200, 1 Mbaud and 3 Mbaud, each within "
-                  "-1 % to +3 % of its wire time",
-                  moved && on_the_wire(pm[0]) && on_the_wire(pm[1]) && on_the_wire(pm[2]));
+    print(serial, "  USART4 on PB0, 1024 frames: ", pm[0], " thousandths of their wire time at 115200 (", wb[0].lo,
+          " to ", wb[0].hi, "), ", pm[1], " at 1 Mbaud (", wb[1].lo, " to ", wb[1].hi, "), ", pm[2],
+          " at 3 Mbaud (", wb[2].lo, " to ", wb[2].hi, ")", crlf);
+    bench.verdict("and USART4's at each rate asked: 1024 frames at 115200, 1 Mbaud and 3 Mbaud, each within its "
+                  "divisor's figure and its start bit and tick steps",
+                  moved && step != 0u && on_the_wire(pm[0], wb[0]) && on_the_wire(pm[1], wb[1]) &&
+                      on_the_wire(pm[2], wb[2]));
 }
 
 // ---------------------------------------------------------------------------
@@ -463,11 +531,17 @@ void te_break() {
     // which is no earlier than the SBK write. c0 is read before that write
     // and the poll sees the clear after it happens, so the span read is
     // never shorter: took >= 9 x BRR. A bit that cleared at once, or on a
-    // data bit, fails it. The upper bound, 20 bit times, is the letter's
-    // older one, chosen by eye: about twice the measured 10.4.
+    // data bit, fails it. THE UPPER BOUND: the break frame is 10 bits low and
+    // its stop bit (14.2), so SBK clears within 11 bit times of the break's
+    // first bit; that bit waits for the transmitter's bit clock, HCLK / 16 /
+    // USARTDIV (figure 14-1), one bit at most after the store; and the masked
+    // poll sees the clear one turn late - three peripheral loads and a dozen
+    // instructions with nothing else running, far under a bit's 417 cycles.
+    // So under 13 bit times.
     bench.verdict("SBK clears itself on the break frame's stop bit: after at least 9 bit times (the start bit "
-                  "and eight data bits), within 20",
-                  cleared && took >= 9u * bit && took <= 20u * bit);
+                  "and eight data bits), under 13 (the break and its stop bit, one bit for the transmitter's "
+                  "bit clock, less than one for the poll's turn)",
+                  cleared && took >= 9u * bit && took < 13u * bit);
     Loop::release();
 }
 
@@ -1723,15 +1797,46 @@ void tn_shapes() {
           clean.frames == 6u && clean.fe == 0u && clean.ne == 0u && clean.last == 0x55u);
     (void)link_command_mode();
 
+    // ONE STRETCHED CELL: data bit 4 of 0x00 (cell 5, usart_peer's
+    // cell_ticks()) longer by p per cent of a bit, so every later edge - the
+    // stop bit's rising one the first that matters, the data being all low -
+    // comes p/100 of a bit late. THE BOUND, from 14.3: the receiver takes
+    // clean any frame whose total deviation is under 3 per cent, so a 0x00
+    // frame from a sender 3 per cent slow - its stop edge at 9 x 1.03 = 9.27
+    // of this receiver's bits after the start edge - is clean, and so is any
+    // frame whose stop edge comes no later. Here that edge is (9 + p/100)
+    // peer bits, each (1 + e) of this receiver's, e this end's rate against
+    // the far clock (hsi_error()), taken 1100 ppm worse for the two
+    // oscillators' wander between legs (judge_span()'s figure). So every p
+    // with (9 + p/100) x (1 + e + 1100 ppm) <= 9.27 must be clean:
+    //   p_max = 927 x 10^6 / (10^6 + e + 1100) - 900 per cent, floored,
+    // one per cent less for the far engine's edges, rounded to its count of
+    // four cycles in a bit of 5000 (under a tenth of a per cent): 20 at the
+    // WeAct pair's +5400 ppm, 27 at a crystal peer's -2600. Where the onset
+    // lies past it (the receiver's real sampling point, which 14.3 does not
+    // give) is printed.
+    const int32_t e = hsi_error();
+    const int32_t p_max = static_cast<int32_t>(927'000'000ll / (1'000'000ll + e + 1100)) - 900 - 1;
     int8_t onset = 0;
+    bool inside_clean = true;
     for (const int8_t p : {10, 20, 30, 40, 50, 60, 70}) {
         const Drain d = bitbang_run(0x00, 4, 5, p, 0, base);
         print(serial, "  cell 5 stretched +", p, " %: frames=", d.frames, " fe=", d.fe, crlf);
-        if ((d.fe != 0u || d.frames != 4u) && onset == 0) onset = p;
+        const bool clean = d.frames == 4u && d.fe == 0u;
+        if (!clean && onset == 0) onset = p;
+        if (p <= p_max) inside_clean = inside_clean && clean;
         (void)link_command_mode();
     }
-    print(serial, "  one stretched cell breaks the frame from +", onset, " %", crlf);
-    judge("one stretched cell survives far past the rate tolerance (30 % and more)", onset == 0 || onset >= 30);
+    print(serial, "  one stretched cell breaks the frame from +", onset, " % (0 = never); 14.3's 3 % and the "
+          "clocks' ratio (", e, " ppm) keep every stretch up to +", p_max, " % clean", crlf);
+    if (hsi_known && p_max >= 10) {
+        judge("one stretched cell is taken clean up to the stretch 14.3's 3 per cent covers on the two clocks' "
+              "ratio (the arithmetic beside it)",
+              inside_clean);
+    } else {
+        bench.skip("the clocks' ratio is unknown, or leaves no stretch inside 14.3's 3 per cent: no stretch is "
+                   "known to be covered");
+    }
 
     const Drain lin = bitbang_run(0x55, 1, -1, 0, 13, base);
     const bool lbd = lin.lbd;
@@ -2074,14 +2179,20 @@ void tq_clear_under_dma() {
     // idle: the frame after a counted one loses its error to the clear the
     // counting status read armed (the header's rule), so eight count four.
     // A status read on the wait for a frame - TXE's, with TXEIE down - arms
-    // the clear for the NEXT frame too, and the run counts fewer.
+    // the clear for the NEXT frame too, and the run counts fewer. That rule
+    // is this silicon's habit, which 14.10.1 does not state (it names the
+    // CPU's two reads, not which frame's flags a channel's read clears):
+    // the count is printed. The driver's contract is judged - every byte
+    // stored, nothing overrun or given up, and the errors reported, at least
+    // one and never more than the frames.
     const ErroredRun run = errored_run();
     print(serial, "  eight errored frames into the ring with no transmit engine: ", run.got, " stored",
-          run.all_0x35 ? ", every one 0x35" : ", NOT ALL 0x35", "; FE counted ", run.fe, ", ORE ", run.ore,
-          ", faults ", run.faults, ", ", run.entries, " USART entries", crlf);
+          run.all_0x35 ? ", every one 0x35" : ", NOT ALL 0x35", "; FE counted ", run.fe, " (the header's rule "
+          "gives 4 of 8), ORE ", run.ore, ", faults ", run.faults, ", ", run.entries, " USART entries", crlf);
     judge("A RUN OF ERRORED FRAMES under a ring beside the interrupt transmitter: eight stored, every one "
-          "0x35, the framing errors counted every other one (4 of 8)",
-          run.ran && run.got == 8u && run.all_0x35 && run.fe == 4u && run.ore == 0u && run.faults == 0u);
+          "0x35, no overrun, no fault, the framing errors reported (1 to 8 counted)",
+          run.ran && run.got == 8u && run.all_0x35 && run.fe >= 1u && run.fe <= 8u && run.ore == 0u &&
+              run.faults == 0u);
     (void)link_command_mode();
     const ClearCase asked = clear_case(true);
     const ClearCase unasked = clear_case(false);
@@ -2090,11 +2201,18 @@ void tq_clear_under_dma() {
           "; data ", asked.data_ok, unasked.data_ok, crlf);
     judge("the channel took both frames, 0x03 and 0x04, each time", asked.ran && unasked.ran && asked.data_ok &&
                                                                          unasked.data_ok);
-    judge("the parity error stands in STATR after its frame, though the channel read DATAR",
+    // 14.10.1 clears PE by a status read and THEN a data read: with no status
+    // read before it, the channel's read of DATAR cannot clear it - judged
+    // twice below. Whether the channel's read, after a status read, performs
+    // the clear - the habit the vector is written to - is the silicon's, the
+    // chapter naming the CPU's reads only: printed.
+    judge("the parity error stands in STATR after its frame, though the channel read DATAR (no status read "
+          "before that read, 14.10.1)",
           asked.pe_after_first);
-    judge("a STATR read ARMS the clear and the CHANNEL'S next DATAR read performs it: PE down after the clean "
-          "second frame",
-          !asked.pe_after_second);
+    print(serial, "  a STATR read between, then the channel's read of the clean second frame: PE ",
+          asked.pe_after_second ? "STILL UP (the channel's read did not perform the clear)"
+                                : "down (the status read armed the clear, the channel's read performed it)",
+          crlf);
     judge("with no status read since, the channel's read clears nothing: PE still up after the second frame",
           unasked.pe_after_second);
     (void)link_command_mode();
@@ -2273,30 +2391,42 @@ void tt_guards() {
           " delivered, the vector ", probe.entries, " entries, ", probe.hw, " overrun(s), ", probe.skips,
           " gap(s), ", probe.faults, " given up, ", probe.waiting_end ? "waiting for the end" : "NOT waiting for the end",
           "; the next burst ", probe.next, " of 8", probe.next_in_order ? " in order" : " NOT in order", crlf);
-    // The bound counts USART4's own entries (u4_entries is this vector's,
-    // and nothing else enters it): the overrun's (EIE on ORE), the wait's
-    // unmoved entries up to the probe's second, which clears it, and the
-    // idle line's at the burst's end - a handful; eight is the letter's
-    // margin over them (not derived source by source), and a storm, the
-    // wait re-entered back to back, is hundreds.
-    judge("THE OVERRUN WITH NOTHING TO TAKE: a handful of entries, no channel given up, the overrun and the gap "
-          "counted once each, the four frames before it in order, the vector back waiting for the end",
-          probe.up && probe.staged && probe.entries <= 8u && probe.faults == 0u && probe.hw == 1u &&
-              probe.skips == 1u && probe.got >= 4u && probe.got < 8u && probe.in_order && probe.waiting_end);
+    // THE COUNTS, from the staging and the vector (ch32x035/usart.hpp).
+    // The burst's frames 5 to 8 land inside the block - four frames, 347 us,
+    // against its 512 - with the vector held off: DATAR keeps frame 5 and the
+    // overrun overwrites the shift register with the rest (14.10.1, ORE's
+    // note), and the channel takes frame 5 once the block is over. So five
+    // bytes reach the ring, the four before and that one. ENTRIES, USART4's
+    // own (u4_entries is this vector's, and nothing else enters it): at the
+    // unmask, one for the wait for the end - ORE under EIE, the idle line
+    // under IDLEIE, one entry for both - which arms RXNEIE; ORE raises
+    // RXNEIE's interrupt by itself (14.10.1), so the wait for a frame is
+    // entered with the count unmoved until its rx_overrun_probe-th entry,
+    // the second, clears it; and one more if the far chip left an idle line
+    // inside the burst before the block (its frames are back to back, but
+    // the count allows it): 1 + 2 + 1 = 4. A storm, the wait re-entered
+    // back to back, is hundreds.
+    judge("THE OVERRUN WITH NOTHING TO TAKE: at most four entries (the arithmetic beside it), no channel given "
+          "up, the overrun and the gap counted once each, five bytes delivered - the four before it in order "
+          "and the one DATAR held - the vector back waiting for the end",
+          probe.up && probe.staged && probe.entries <= 4u && probe.faults == 0u && probe.hw == 1u &&
+              probe.skips == 1u && probe.got == 5u && probe.in_order && probe.waiting_end);
     judge("... and the next burst arrives whole", probe.next == 8u && probe.next_in_order);
     const GuardCase stall = guard_case(false);
     print(serial, "  THE STALL BOUND, the ring starved 8.2 ms: staged ", stall.staged, ", the vector ", stall.entries,
           " entries, ", stall.faults, " given up, ", stall.hw, " overrun(s), ", stall.got,
           " byte(s) after the restart; the next burst ", stall.next, " of 8",
           stall.next_in_order ? " in order" : " NOT in order", crlf);
-    // The bound counts USART4's own entries: one on the overrun, then
-    // rx_stall_entries (255) of the wait for a frame, the 255th giving the
-    // channel up; the 44 above them leave room for the burst's other
-    // entries on this vector (its idle line, the wait the consumer's
-    // restart arms), a margin not derived source by source.
-    judge("THE STALL BOUND gives a starved LIVE channel up once, after some 256 entries - no storm - and the "
-          "consumer's look binds it again",
-          stall.up && stall.staged && stall.faults == 1u && stall.entries >= 255u && stall.entries <= 300u);
+    // THE COUNT, USART4's own entries, read before the consumer's look:
+    // one for the wait for the end on the overrun (EIE), then the wait for a
+    // frame re-entered on RXNE, which stands over a channel that cannot take
+    // DATAR, until its rx_stall_entries-th entry (255) gives the channel up
+    // and drops RXNEIE - nothing else armed after it, the idle line at the
+    // burst's end finding IDLEIE down; and one more if the far chip left an
+    // idle line inside the burst before the block: 256 to 257.
+    judge("THE STALL BOUND gives a starved LIVE channel up once, after 256 or 257 entries (the arithmetic beside "
+          "it) - no storm - and the consumer's look binds it again",
+          stall.up && stall.staged && stall.faults == 1u && stall.entries >= 256u && stall.entries <= 257u);
     judge("... and the next burst arrives whole", stall.next == 8u && stall.next_in_order);
     (void)link_command_mode();
 }
@@ -2395,12 +2525,23 @@ void tu_idle_under_clear() {
           two.idle[2], " (", two.landed, " landed); data ", one.data_ok, two.data_ok, crlf);
     judge("every group landed through the channel, the bytes in order",
           one.up && two.up && one.landed == 5u && two.landed == 3u && one.data_ok && two.data_ok);
-    judge("ONE frame after an idle that was READ raises NO IDLE of its own (the second and fourth groups), and "
-          "one after a status read that found IDLE down does (the third and fifth): the read that saw IDLE "
-          "armed its clear, the one that saw none armed nothing",
-          one.idle[0] && !one.idle[1] && one.idle[2] && !one.idle[3] && one.idle[4]);
-    judge("TWO frames always do: every group of two followed by IDLE",
-          two.idle[0] && two.idle[1] && two.idle[2]);
+    // The first group of each walk follows the CPU's own status-then-data
+    // read, the clear 14.10.1 names: its frame sets RXNE, so the idle line
+    // after it raises IDLE (14.10.1: IDLE is not set again until RXNE is) -
+    // judged. What the later groups read hangs on the channel's read
+    // performing a clear a status read armed, and on whether that clear also
+    // forgets the idle its own frame armed: the silicon's habit, which the
+    // chapter does not state, printed (ch32x035/usart.hpp's header has the
+    // rule the vector is written to).
+    judge("the first group of each walk, after the CPU's own clear, raises IDLE on the idle line behind it "
+          "(14.10.1)",
+          one.landed != 0u && two.landed != 0u && one.idle[0] && two.idle[0]);
+    print(serial, "  the later groups: one frame after an idle that was read ",
+          one.landed >= 4u && !one.idle[1] && !one.idle[3] ? "raised NO IDLE" : "RAISED IDLE (or did not land)",
+          ", one after a status read that found IDLE down ",
+          one.landed >= 5u && one.idle[2] && one.idle[4] ? "raised it" : "did NOT (or did not land)",
+          ", two frames ", two.landed >= 3u && two.idle[1] && two.idle[2] ? "raised it every time" : "NOT every time",
+          crlf);
     (void)link_command_mode();
 }
 

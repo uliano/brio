@@ -204,7 +204,7 @@ again with the counter stopped by the update.
 
 ## Bench findings
 
-`test_x035_tim` on the CH32X035F8U6, 47 verdicts with no wire of its own:
+`test_x035_tim` on the CH32X035F8U6, 45 verdicts with no wire of its own:
 CH3 on PB11, C2N and C3N on PB0 and PB1 - the desk's UART wires, the far
 CH32V006 dark, which letters `b`, `c` and `d` check first (each pad
 charged to either level and let go must keep it; a pad that does not is
@@ -213,8 +213,12 @@ each pad's level read off INDR, each edge placed by a sampler reading
 port B into a buffer with interrupts masked, a sample every 9.01 HCLK
 cycles; the intervals between flags stamped on the STK's cycle count,
 good to the poll's lateness, which letter `f` measures in its own image
-and prints: the largest turn of its wait, the tick's vector in it, plus
-the smallest.
+and prints: the largest turn of its wait, the tick's vector in it (a span
+from a stamp taken on another path, the first underflow after the enable,
+to twice that and a count). The silicon's habits the chapter does not
+state - CTLR1's bit 13 out of reset, a software compare event on an
+output channel, a UG on a stopped counter, the shortest interval an edge
+list keeps - are printed, not judged.
 
 - **The reset values** are tables 12-3 and 12-4's but for CTLR1, 0x2000
   on both timers, and DMAADR, which reads CTLR1 (above).

@@ -681,7 +681,7 @@ over a WCH-LinkE - at 48 MHz from the HSI with the flash at two wait
 states, the board's rail supplied (with none, fed through the pads'
 protection diodes, it restarts under load at 48 MHz:
 [../boards/ch32x035-evt-f8u6.md](../boards/ch32x035-evt-f8u6.md)).
-`test_x035_platform` (208 verdicts in `z`, nothing wired) ran ten times
+`test_x035_platform` (207 verdicts in `z`, nothing wired) ran ten times
 in the image built with the hardware prologue and three times in an
 image built without it; each figure of this section says which, and over
 how many runs.
@@ -697,7 +697,8 @@ suite measured:
   and `reset_flags()` reads them without disturbing them - two reads
   agree; after `clear_reset_flags()` the whole register reads zero, RMVF
   included, which on this silicon takes the verb's second store
-  ([clock.md](clock.md)). The electronic signature gives 62 KB of code
+  ([clock.md](clock.md)): RMVF written 1 reads back 1 here, which 3.4.8
+  does not say, so the letter prints it. The electronic signature gives 62 KB of code
   flash, and the unique identifier reads 0x2917ABCD, 0x9129BC45 and
   0xFFFFFFFF - its third word, bits 95..64 of the 96 RM 19.1 gives it,
   all ones on this die. The word at 0x1FFFF704 reads 0x035E0611 - the
@@ -737,9 +738,9 @@ suite measured:
 - **One turn per wake** (letter `k`). A Tenuto pack of three quiet
   active objects, two holding a periodic time event that does not fire
   in the window, turned as `Tenuto::run()` turns it over 100 ticks with
-  the tick the only interrupt: 101 kernel turns (the window opens and
-  closes on a tick, so a turn straddling one end counts), at 48 MHz in
-  ten runs and at 8 MHz in three. A quiet turn whose `idle()` the latch
+  the tick the only interrupt: 101 kernel turns, one a tick and one more
+  on the event the console's last interrupt latched before the window,
+  at 48 MHz in ten runs and at 8 MHz in three. A quiet turn whose `idle()` the latch
   returns at once - the turn an interrupt would cost twice over with the
   latch left - takes 416 cycles at 48 MHz and 141 at 8 MHz, two counter
   reads included. Without the consume the waking edge, left latched,

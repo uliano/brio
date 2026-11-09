@@ -86,8 +86,8 @@
 //      recover(); and the block's own transmit request let go four ways -
 //      release(), SPE cleared and the gate closed with no reset, leaving the
 //      next owner of channel 3 nothing
-//   e  OVR AND ITS CLEAR, wireless, measured against 16.2.7 on the resource:
-//      what raises the flag, which reads clear it, flush_rx()
+//   e  OVR AND ITS CLEAR, wireless, on the resource: what raises the flag
+//      (judged), which reads clear it (printed against 16.2.7), flush_rx()
 //   u  MODF RAISED IN SOFTWARE, wireless: a host on software NSS with SSI
 //      cleared, 16.2.7's STATR read then CTLR1 write with nothing between
 //      them judged, an access between the two steps measured three ways,
@@ -100,7 +100,7 @@
 //      answers (modes 2 and 3, CPOL = 1; in modes 0 and 1 it listens
 //      alone), a bit-order mismatch as an exact
 //      two-way reversal, the receive CRC over the foreign frames, and which
-//      frame the buffer keeps when one is lost
+//      frame the buffer keeps when one is lost (printed)
 //   p  (y) THE LADDER against the peer, /256 to /2 on the polled host and
 //      on the engines, both of the peer's serves, /2 = 24 MHz judged with
 //      the high-speed read as the driver's default has it and printed
@@ -132,9 +132,9 @@
 //      pull-up, NSS on the peer's
 //   w  (y) THE WAVEFORMS: this chip as the logic analyser of its four link
 //      pads - both hosts' SCK and MOSI, both clients' MISO, every mode
-//   s  (by name) the /2 frame and the core's share of the bus: letter b's
-//      engined frame at /2 twenty times with the completion polled in SRAM
-//      and twenty with the core waiting off the bus
+//   s  (by name) the /2 frame and the core's share of the bus, printed and
+//      judged nowhere: letter b's engined frame at /2 twenty times with the
+//      completion polled in SRAM and twenty with the core waiting off the bus
 //   d  (by name) THE WITNESS, wireless, printing a table and judging nothing:
 //      on the resource, with a frame waiting behind the one shifting, which of
 //      RXNE and TXE a poll from SRAM sees first at each frame's end, and how
@@ -549,7 +549,67 @@ uint32_t frame_x1000(SpiClock rate, SpiMode mode, SpiDataSize bits, uint16_t big
 
 uint32_t permille_of(uint32_t f1000, uint32_t width, uint32_t divisor) { return f1000 / (width * divisor); }
 
-bool wire_ok(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
+// THE BOUND OF A FRAME INSIDE AN ENGINED BLOCK (frame_x1000), derived. SCK
+// is HCLK over the divisor (16.3.1) and the ruler counts HCLK, so the two
+// ends of the rate are one oscillator: the HSI's -1.7..+1.6 % (data sheet
+// table 3-9) cancels, and a frame takes no fewer cycles than its SCK
+// periods. A block's span, the least of three, carries on top of its frames
+// and its fixed cost (which the difference of two lengths cancels):
+//  - the ruler: a cycle at each read, 2 in a difference of two spans;
+//  - await_done() seeing the completion late, never early: one turn of its
+//    flag loop - five instructions in four words of flash and a taken
+//    branch, 4 x 4 + 8 + 4 for the predicted site, 28 by the flash cost
+//    model (docs/ch32x035/platform.md, "the two cost models") - or, once in
+//    1024 of them, its outer turn, the composed read and the budget's
+//    compare (some 30 instructions in 21 words, four taken transfers at 8
+//    to 12 and four predicted sites, about 150) and then a flag turn: 178;
+//  - the completion's vector held by the instruction in flight: at most a
+//    taken transfer to a 32-bit target, 12;
+//  - a tick's handler, at the start (between the first read and the
+//    channels' enable) or holding the completion's vector at the end: its
+//    entry and exit, 70 cycles with the hardware prologue (platform.md,
+//    letter e), and its body, tick_body_max as this image stamps it. Three
+//    runs of one length inside two tick periods (96 000 cycles) hold at
+//    most two ticks, so the least of them has none; a longer run may carry
+//    one at each end.
+// A span's excess lies in [0, their sum], so a difference of two spans lies
+// within +-the sum, spread over the frames between the two lengths; the
+// truncating divisions of frame_x1000() and permille_of() take at most one
+// more unit off.
+constexpr uint32_t ruler_quantum = 2;
+constexpr uint32_t await_turn_most = 178;
+constexpr uint32_t entry_in_flight = 12;
+constexpr uint32_t prologue_trip = 70;
+/// What a block's fixed cost and its wrapper add to its frames, at most
+/// (the engines' 1116 to 1244 cycles and the wrapper's 236 to 240 measured,
+/// docs/ch32x035/spi.md, "The host above the wire"): only to decide whether
+/// three runs fit two tick periods.
+constexpr uint32_t run_fixed_most = 2048;
+
+/// The excess one span can carry, in HCLK cycles (the comment above), for
+/// a run of `run` cycles.
+uint32_t span_excess(uint32_t run, uint32_t turn) {
+    const uint32_t tick = prologue_trip + tick_body_max;
+    return ruler_quantum + turn + (3u * run < 96'000u ? 0u : 2u * tick);
+}
+
+/// A frame inside an engined block, `wire` HCLK cycles of SCK periods, in
+/// thousandths of them, measured over `frames` frames between two lengths
+/// whose longer is `big_n` frames: within the excess spread over them.
+bool wire_ok(uint32_t permille, uint32_t wire, uint32_t frames, uint32_t big_n) {
+    const uint32_t span = frames * wire;
+    const uint32_t excess = span_excess(big_n * wire + run_fixed_most, await_turn_most + entry_in_flight);
+    const uint32_t slack = (excess * 1000u + span - 1u) / span;
+    return permille + slack + 1u >= 1000u && permille <= 1000u + slack;
+}
+
+/// The same for frame_x1000()'s own figure, a frame in thousandths of a
+/// cycle, against `wire` cycles.
+bool frame_ok(uint32_t f1000, uint32_t wire, uint32_t frames, uint32_t big_n) {
+    const uint32_t excess = span_excess(big_n * wire + run_fixed_most, await_turn_most + entry_in_flight);
+    const uint32_t slack = (excess * 1000u + frames - 1u) / frames + 1u;
+    return f1000 + slack >= wire * 1000u && f1000 <= wire * 1000u + slack;
+}
 
 // ===========================================================================
 // The peer: spi_link.hpp over the bus under test
@@ -1505,6 +1565,27 @@ PathCosts measure_costs() {
     return c;
 }
 
+// THE POLLED LOOPS' BOUND (letter b), derived as the engines' is (wire_ok's
+// comment): the loop's SCK and the ruler are both HCLK, a frame is never
+// shorter than its SCK periods, and a frame x10 is the 256-frame span less
+// the 32-frame span, x 10 / 224, each span the least of three. A span's
+// excess: the ruler, 2 in a difference; the end seen up to one turn of the
+// loop's last wait late - a load across the bus, a mask and a taken branch:
+// from SRAM 2 + 1 + 3 and 3 for the predicted site, 9; from the flash two
+// words 8, a taken transfer 12 and the predicted site 4, 24 (the two cost
+// models, docs/ch32x035/platform.md); and, where three runs of a length
+// outlast two tick periods (/16, 32 768 cycles of frames a run), a tick's
+// handler at each end. The truncating x10 division only lowers the figure.
+constexpr uint32_t sram_wait_turn = 9;
+constexpr uint32_t flash_wait_turn = 24;
+
+/// A polled loop's frame x10 at `wire` cycles a frame, its last wait's turn
+/// `turn`: at the wire within the excess spread over the 224 frames.
+bool loop_at_wire(uint32_t frame_x10, uint32_t wire, uint32_t turn) {
+    const uint32_t excess = span_excess(256u * wire + run_fixed_most, turn);
+    return frame_x10 <= wire * 10u + (excess * 10u + 223u) / 224u;
+}
+
 /// The measured edges within one frame of the arithmetic on the same
 /// figures - the count quantizes, the best of five keeps a cycle or two of
 /// noise.
@@ -1642,16 +1723,17 @@ void tb_ladder() {
           crlf, "   ");
     for (uint8_t code = 0; code < 8u; ++code) {
         print(serial, " /", asked_divisor(static_cast<SpiClock>(code)), " ", ladder[code]);
-        if (wire_ok(ladder[code])) {
+        if (wire_ok(ladder[code], 8u * asked_divisor(static_cast<SpiClock>(code)), 224, 256)) {
             ++exact;
         }
     }
     print(serial, crlf);
     print(serial, "  16-bit frames: /4 ", w16_div4, ", /16 (mode 3) ", w16_div16, crlf);
     bench.verdict("THE ENGINES RUN AT THE RATE ASKED at every BR code, /2 to /256: a frame inside a block takes "
-                  "its SCK periods at HCLK over the divisor, -1 % to +3 %",
+                  "its SCK periods at HCLK over the divisor, to the instrument's excess spread over the frames",
                   exact == 8u);
-    bench.verdict("and in 16-bit frames at /4 and /16", wire_ok(w16_div4) && wire_ok(w16_div16));
+    bench.verdict("and in 16-bit frames at /4 and /16",
+                  wire_ok(w16_div4, 64, 112, 128) && wire_ok(w16_div16, 256, 112, 128));
 
     // THE HIGH-SPEED READ'S RATE at every code, the bit set by hand after
     // the code is in force (the host itself never sets it off /2): 16.3.1
@@ -1668,29 +1750,27 @@ void tb_ladder() {
         S::high_speed_read_raw(true);
         const uint32_t f = frame_x1000(rate, SpiMode::mode0, SpiDataSize::bits8, 256, 32);
         S::high_speed_read_raw(false);
-        const uint32_t pow2 = 8u * asked_divisor(rate) * 1000u;
-        const uint32_t p2 = 8u * (code + 2u) * 1000u;
-        if (f >= pow2 * 99u / 100u && f <= pow2 * 103u / 100u) {
+        // Each reading counted to the ladder's bound (wire_ok's comment).
+        if (frame_ok(f, 8u * asked_divisor(rate), 224, 256)) {
             ++powers;
         }
-        if (f >= p2 * 99u / 100u && f <= p2 * 103u / 100u) {
+        if (frame_ok(f, 8u * (code + 2u), 224, 256)) {
             ++plus_two;
         }
         print(serial, " BR", code, " ", f);
     }
+    // A finding either way, which no request depends on (the host never sets
+    // the bit off /2): printed, not judged.
     print(serial, crlf, "  -> ", powers, " of 8 codes at the powers of two, ", plus_two,
           " of 8 at FHCLK/(BR+2)", crlf);
-    bench.verdict("the high-speed read's rate was measured at every code (16.3.1 against 16.3.8: a finding "
-                  "either way)",
-                  powers + plus_two >= 1u);
-    bench.verdict("and at /2, where both readings agree, the frame is its 16 cycles with the bit set",
+    bench.verdict("at /2, where both readings agree, the frame is its 16 cycles with the bit set",
                   [] {
                       console_drain();
                       DmaHost::prime(SpiMode::mode0, SpiClock::div2);
                       S::high_speed_read_raw(true);
                       const uint32_t f = frame_x1000(SpiClock::div2, SpiMode::mode0, SpiDataSize::bits8, 256, 32);
                       S::high_speed_read_raw(false);
-                      return f >= 15'840u && f <= 16'480u;
+                      return frame_ok(f, 16, 224, 256);
                   }());
 
     // THE HOST'S COSTS, both placements: the suite's hosts in SRAM, then their
@@ -1772,13 +1852,17 @@ void tb_ladder() {
         edge(flash, k);
     }
     print(serial, "(read /4, read /2, write /2)", crlf);
-    bench.verdict("THE TRANSMIT-ONLY LOOP IN SRAM is at the wire (3 %) at /2, /4, /8 and /16",
-                  ram.wr[0] <= 165u && ram.wr[1] <= 330u && ram.wr[3] <= 659u && ram.wr[2] <= 1319u);
+    bench.verdict("THE TRANSMIT-ONLY LOOP IN SRAM is at the wire at /2, /4, /8 and /16: a frame its SCK periods, "
+                  "to the measurement's excess spread over the frames",
+                  loop_at_wire(ram.wr[0], 16, sram_wait_turn) && loop_at_wire(ram.wr[1], 32, sram_wait_turn) &&
+                      loop_at_wire(ram.wr[3], 64, sram_wait_turn) && loop_at_wire(ram.wr[2], 128, sram_wait_turn));
     // From the flash at /2 the loop's turn fetched behind the wait states
     // is the bound - 24.0 cycles a frame with its function on a word, 28.0
-    // half a word off (the host aligns it): the fetch's figure.
-    bench.verdict("and from the flash within 5 % of the wire at /4 and at the wire from /8",
-                  flash.wr[1] <= 336u && flash.wr[3] <= 659u && flash.wr[2] <= 1319u);
+    // half a word off (the host aligns it): the fetch's figure, under the
+    // wire's 32 at /4.
+    bench.verdict("and from the flash at the wire at /4, /8 and /16",
+                  loop_at_wire(flash.wr[1], 32, flash_wait_turn) && loop_at_wire(flash.wr[3], 64, flash_wait_turn) &&
+                      loop_at_wire(flash.wr[2], 128, flash_wait_turn));
     bench.verdict("SRAM shortens the receive loop's frame at /2", ram.rd[0] < flash.rd[0]);
     bench.verdict("THE GUIDANCE IS THE ARITHMETIC'S: the fewest frames a polled transaction spends the engines' measured "
                   "fixed cost on is within one frame of ceil((E - F) / frame) on the same figures, read at /4 and /2 and "
@@ -2718,8 +2802,8 @@ uint32_t block_at_div2(uint16_t n, bool quiet) {
     // with nothing else on the bus, so it stays a bare loop: a ruler read in
     // each turn would change what the letter measures. Bounded by its count,
     // 8 000 000 turns of at least two cycles, past 300 ms against 85 us; a
-    // block that never ended reads 0, which the line counts outside
-    // -1..+3 %.
+    // block that never ended reads 0, which the line counts outside letter
+    // b's bound.
     for (uint32_t i = 0; i < 8'000'000UL && !host_done; ++i) {
     }
     return host_done ? Ruler::now() - t0 : 0u;
@@ -2742,18 +2826,19 @@ void ts_bus_share() {
             const uint32_t pm = big > small ? (big - small) * 1000u / (224u * 16u) : 0u;
             lo = pm < lo ? pm : lo;
             hi = pm > hi ? pm : hi;
-            if (!wire_ok(pm)) {
+            if (!wire_ok(pm, 16, 224, 256)) {
                 ++over;
             }
         }
         print(serial, way != 0u ? "  waited OFF the bus (delay_us, the vector's stamp): "
                                 : "  the completion flag polled in SRAM:                ",
               "the /2 frame ", lo, " to ", hi, " thousandths of the wire in 20 runs, ", over,
-              " outside -1..+3 %", crlf);
+              " outside letter b's bound", crlf);
     }
+    // Both waits see the end sooner than the one letter b's bound is drawn
+    // for (await_done()'s turn): the lines are a measurement, judged nowhere.
     FlashDmaHost::release();
     host_ready<Host>();
-    bench.verdict("ran", true);
 }
 
 // ===========================================================================
@@ -2999,14 +3084,19 @@ void te_overrun() {
           hex(shown_then_read), crlf, "  with no load first, DATAR then STATR ", hex(read_first), " ",
           hex(read_first_again), ", a zero written to OVR ", hex(wrote_zero), ", SPE down and up ", hex(spe_toggled),
           ", a read of the empty buffer after those loads ", hex(read_empty), crlf, "  flush_rx() ", hex(flushed), crlf);
-    bench.verdict("OVR RISES on a frame completed with one standing unread, and a read after a load that showed it "
-                  "clears it",
-                  (raised & (spi_ovr | spi_rxne)) == (spi_ovr | spi_rxne) &&
-                      (shown_then_read & (spi_ovr | spi_rxne)) == 0u);
-    bench.verdict("16.2.7'S ORDER DOES NOT CLEAR IT ON THIS DIE: DATAR then STATR leaves it standing with RXNE down, and "
-                  "so do a zero written to it and SPE down and up; a read after those loads clears it, the buffer empty",
-                  (read_first & spi_ovr) != 0u && (read_first & spi_rxne) == 0u && (read_first_again & spi_ovr) != 0u &&
-                      (wrote_zero & spi_ovr) != 0u && (spe_toggled & spi_ovr) != 0u && (read_empty & spi_ovr) == 0u);
+    bench.verdict("OVR RISES on a frame completed with one standing unread (16.2.7), RXNE up beside it",
+                  (raised & (spi_ovr | spi_rxne)) == (spi_ovr | spi_rxne));
+    // Which access clears the flag is the resource's habit, read on one die
+    // against 16.2.7's sentence: printed. The driver depends on neither
+    // reading - flush_rx(), judged next, runs both orders (STATR, DATAR,
+    // STATR).
+    const bool order_clears = (read_first & spi_ovr) == 0u || (read_first_again & spi_ovr) == 0u;
+    print(serial, "  a read after a load that showed OVR ",
+          (shown_then_read & (spi_ovr | spi_rxne)) == 0u ? "cleared it" : "LEFT A FLAG", "; 16.2.7's order, DATAR "
+          "then STATR, ", order_clears ? "cleared it" : "left it standing", ", a zero written ",
+          (wrote_zero & spi_ovr) != 0u ? "left it" : "cleared it", ", SPE down and up ",
+          (spe_toggled & spi_ovr) != 0u ? "left it" : "cleared it", ", a read after those loads ",
+          (read_empty & spi_ovr) == 0u ? "cleared it" : "left it", crlf);
     bench.verdict("flush_rx() leaves neither flag after a frame unread and a frame lost",
                   (flushed & (spi_ovr | spi_rxne)) == 0u);
     host_ready();
@@ -3441,11 +3531,12 @@ void to_peer_matrix() {
     // frame in flight, so it never lets a second complete over an unread
     // one): what the silicon does, for a program that writes ahead with the
     // resource's verbs. Two of the peer's frames clocked with nothing read,
-    // the first read after both are in, the rest of the exchange by hand.
-    // Frame 0 in the buffer, frame 1 gone; frame 2 comes as the next frame
-    // read. The wait is 120 us against a frame's 43 at /256; the peer's
+    // the first read after both are in, the rest of the exchange by hand;
+    // printed: whether OVR rose, whether the buffer kept frame 0, and
+    // whether frame 2 came as the next frame read. The wait is 120 us
+    // against a frame's 43 at /256; the peer's
     // stream differs frame to frame in all eight seeds.
-    uint8_t kept_first = 0;
+    uint8_t kept_first = 0, acted = 0, ovr_up = 0, next_exact = 0;
     for (uint8_t k = 0; k < 8u; ++k) {
         spilink::Params lp{};
         lp.cfg = spilink::Cfg{.apply = 1, .mode = 3, .dord = 0, .regime = spilink::regime_buffer_wait};
@@ -3457,6 +3548,7 @@ void to_peer_matrix() {
         if (!peer_act(Op::exchange, lp)) {
             continue;
         }
+        ++acted;
         settle();
         Host::prime(SpiMode::mode3, link_clock);
         (void)delay_us(clock, 20);
@@ -3484,17 +3576,19 @@ void to_peer_matrix() {
         frames = wait_not_busy() && frames;
         link_hold();
         CsPin::set();
-        if (behind && frames && (st & spi_ovr) != 0u && first == spilink::pattern_value(lp.pattern, lp.seed_b, 0) &&
-            third == spilink::pattern_value(lp.pattern, lp.seed_b, 2)) {
-            ++kept_first;
-        }
+        const bool clean = behind && frames;
+        ovr_up = static_cast<uint8_t>(ovr_up + (clean && (st & spi_ovr) != 0u ? 1u : 0u));
+        kept_first = static_cast<uint8_t>(
+            kept_first + (clean && first == spilink::pattern_value(lp.pattern, lp.seed_b, 0) ? 1u : 0u));
+        next_exact = static_cast<uint8_t>(
+            next_exact + (clean && third == spilink::pattern_value(lp.pattern, lp.seed_b, 2) ? 1u : 0u));
         (void)link_command_mode();
     }
-    print(serial, "  two frames unread, OVR up: the buffer held the first in ", kept_first, " of 8", crlf);
-    bench.verdict("A LOST FRAME IS THE LATER ONE: OVR up, the buffer keeps the frame that stood unread, and the frame "
-                  "after the lost one reads exact",
-                  kept_first == 8u);
-    bench.verdict("and the command channel still works after all of that", command(Op::ping));
+    // Unspecified by 16.2.7 and depended on by no loop: printed, not judged.
+    print(serial, "  two frames unread, in ", acted, " of 8 runs the peer took: OVR up in ", ovr_up,
+          ", the buffer holding the first in ", kept_first, ", the frame after the lost one exact in ", next_exact,
+          crlf);
+    bench.verdict("the command channel still works after all of that", command(Op::ping));
 }
 
 // ===========================================================================
@@ -4576,11 +4670,27 @@ Demotion demote_once() {
     return d;
 }
 
+/// THE EARLIEST THE PEER'S PULSE CAN RAISE MODF, in milliseconds after
+/// demote_once()'s t0, derived. The peer waits aux8 = 30 ms of its own
+/// ticks after the ack before it pulls the wire (spi_peer's run_ss_pulse):
+/// a millis() loop, at least 29 whole periods, on its HSI at -2.0 % at
+/// worst (CH32V006 data sheet V2.0, table 3-11), 29 x 0.98 = 28.42 ms. This
+/// end starts t0 after the same ack: peer_act()'s settle, 5 ms on an HSI
+/// that may run 1.7 % slow (data sheet table 3-9), 5.087 ms; delay_us(50)
+/// and its lateness (140 cycles at most, docs/ch32x035/platform.md), 0.053
+/// ms; the frame's decode and the host's reset and configure between them,
+/// some hundreds of instructions, under 0.2 ms (2400 words at the flash
+/// model's 4 cycles, platform.md). So the pulse lands at least
+/// 28.42 - 5.34 = 23.08 ms after t0, which this end's ticks, each up to
+/// 1.0173 ms long, count as at least 22 whole periods (millis() counts the
+/// tick edges between its two reads).
+constexpr uint32_t modf_earliest_ms = 22;
+
 void tm_peer_modf() {
     if (!need_peer()) {
         return;
     }
-    uint8_t accepted = 0, raised = 0, demoted = 0, first = 0, within_two = 0;
+    uint8_t accepted = 0, raised = 0, demoted = 0, first = 0;
     for (uint8_t k = 0; k < 4u; ++k) {
         const Demotion d = demote_once();
         print(serial, "  pulse ", k, ": MODF ", d.at_enable ? "ALREADY SET" : "clear", " at the enable, ",
@@ -4588,13 +4698,13 @@ void tm_peer_modf() {
               d.t_high, " ms; STATR ", hex(d.st_before), " before the clearing sequence, ", hex(d.st_after),
               " after it; clear_mode_fault() answered down at call ", d.sequences, crlf);
         accepted = static_cast<uint8_t>(accepted + (d.accepted ? 1u : 0u));
-        raised = static_cast<uint8_t>(raised + (d.modf && !d.at_enable && d.t_modf >= 20u ? 1u : 0u));
+        raised = static_cast<uint8_t>(raised + (d.modf && !d.at_enable && d.t_modf >= modf_earliest_ms ? 1u : 0u));
         demoted = static_cast<uint8_t>(demoted + (d.modf && (d.ctlr1 & (spi_mstr | spi_spe)) == 0u ? 1u : 0u));
         first = static_cast<uint8_t>(first + (d.sequences == 1u ? 1u : 0u));
-        within_two = static_cast<uint8_t>(within_two + (d.sequences == 1u || d.sequences == 2u ? 1u : 0u));
     }
     bench.verdict("the peer accepted four ss_pulses", accepted == 4u);
-    bench.verdict("MODF comes up when a SECOND CHIP pulls this host's NSS low (16.2.7), and not before - four of four",
+    bench.verdict("MODF comes up when a SECOND CHIP pulls this host's NSS low (16.2.7), and not before the pulse can "
+                  "come (22 ms after the ack, derived) - four of four",
                   raised == 4u);
     bench.verdict("and it demotes the host: MSTR and SPE cleared by the hardware, four of four", demoted == 4u);
     print(serial, "  clear_mode_fault() answered the flag down at its first call in ", first, " of 4", crlf);
@@ -4748,6 +4858,14 @@ void tw_waveforms() {
             fill_pattern(tx_buf, 8, 0x11);
             (void)HRx::start(std::span<uint8_t>(rx_buf, 8));
             (void)HTx::start(std::span<const uint8_t>(tx_buf, 8));
+            // The sampler runs unmasked, a sample every 32 cycles against
+            // SCK's 128-cycle halves at /256: a handler inside the block -
+            // the console sending the last mode's line, a tick - can swallow
+            // an edge and slip the decode of both lines by a bit. The
+            // console drained and a fresh tick edge
+            // leave the block's 16384 cycles a quiet 48000, as in w.1.
+            console_drain();
+            after_tick_edge();
             (void)delay_us(clock, 30);
             CsPin::clear();
             link_hold();

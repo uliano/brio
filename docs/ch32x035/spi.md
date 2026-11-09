@@ -114,7 +114,7 @@ the six SPI examples) as the vendor's shape. Driver:
 [brio/ch32x035/afio.hpp](../../brio/ch32x035/afio.hpp); reference suite
 `test_x035_spi` (a suite's letter, below, is one command key of its
 console and the group of verdicts it runs; `z` runs the single-board
-set and `y` the two-board set) against the desk's CH32V006K8U6 running
+set and `y` the two-board set) against the desk's CH32V006F8U6 running
 its `spi_peer` ([../ch32v00x/spi.md](../ch32v00x/spi.md)); this chip's
 own `spi_peer` is that board's suite's instrument (below).
 
@@ -473,19 +473,26 @@ launch, the stall's reset and the owed reset run from the flash as they do by de
 ## Bench findings
 
 The reference suite is `test_x035_spi` on the CH32X035F8U6 at 48 MHz, its
-SPI1 on PA4..PA7 wired straight to the CH32V006K8U6's column 0 (PC1, PC5,
-PC6, PC7). The suite is three images - whole it came within 5 % of the
+SPI1 on PA4..PA7 wired straight to the CH32V006F8U6's column 1 (PC0, PC5,
+PC6, PC7), both on their WeAct boards. The suite is three images - whole it came within 5 % of the
 62 KB every part has - `test_x035_spi-1` (the wireless letters), `-2`
 (the two-board letters and the slip statistics) and `-3` (the engines of bytes,
 letter `j`, in an image where theirs is the only binding armed). `z` on the
 first - the block, the engine a request names, the ladder and the costs, the
 refusals, OVR's clear, MODF's clear, the fault exits, the end of the wire - runs with the far
-board's client deselected: 56 verdicts, three runs green, letters `f` and `i`
+board's client deselected: 54 verdicts, three runs green, letters `f` and `i`
 ten runs each, `j` ten on its image. `y` on the second against the CH32V006
-running `spi_peer` on its crystal, commanded in band through spi_link: 49
+running `spi_peer` from its HSI's PLL (its board fits no crystal), commanded in band through spi_link: 48
 verdicts, three runs green, `t` and `h` ten runs each, the kernel letter `q` fifteen. Letter `d`, run by
 its own key on the first image and not in `z`, prints a table and judges nothing: the witness of
-what the silicon does at a frame's end, above.
+what the silicon does at a frame's end, above; letter `s`, the same, prints the core's share of the bus.
+The rate bounds are derived, not chosen: SCK and the ruler are both HCLK, so the HSI's tolerance
+cancels, and a frame is judged to the instrument's excess in cycles - the ruler's reads, the
+completion seen up to a turn of the suite's wait late, the vector held by the instruction in flight
+and, where three runs of one length outlast two tick periods, a tick's handler at each end - spread
+over the frames measured (the suite's comment above `wire_ok()` has the arithmetic). The silicon's habits the
+chapter leaves open - which access clears OVR, which frame a loss keeps, HSRXEN's rate off /2 - are
+printed, not judged.
 
 - **The reset values are table 16-2's** (STATR 0x0002, CRCR 0x0007, the
   rest zero), a control word lands as spelled, and eight of eight CTLR1
@@ -622,9 +629,11 @@ what the silicon does at a frame's end, above.
   combinations; answered exact in the four MSb-first ones, and LSb first
   the far host read 0xFF or 0x00 - a line that does not move - in all
   four.
-- **MODF from a second chip** (letter m): the peer's PC1 held low 2 ms
-  demotes a host whose NSS is a hardware input 24 ms after the enable,
-  MSTR and SPE cleared, four of four; STATR 0x22 before
+- **MODF from a second chip** (letter m): the peer's PC0 held low 2 ms
+  demotes a host whose NSS is a hardware input 24 to 25 ms after the
+  enable - judged no sooner than 22 ms, the earliest the peer's 30 ms wait
+  less this end's 5 ms settle allows on the two HSIs' tolerances -, MSTR
+  and SPE cleared, four of four; STATR 0x22 before
   `clear_mode_fault()`, 0x02 after it, the verb answering the flag down at
   its first call, once the pad has been high a millisecond.
 - **MODF raised in software, and its clear** (letter u, wireless): the
@@ -964,8 +973,11 @@ Implemented but not bench-verified, each with what would measure it:
 - **The last 11 thousandths of the engines' frame at /2**: letter b
   reads 997 to 1011 with the console quiet, and the same rung measured
   5 000 times over in a scratch letter 998 to 1002, so the engines hold the
-  wire and something in the letter's first reading does not cancel. Printing
-  the two blocks' timings of each run of the letter would find it.
+  wire; 11 thousandths at /2 are 40 cycles over the 224 frames, what a turn
+  of the suite's wait for the completion (28 cycles) and the instruction in
+  flight at the vector (12) put into one block's span and not the other's,
+  inside the letter's bound. Printing the two blocks' timings of each run
+  would confirm that this is where the spread lives.
 - **E's several values**: letter b reads the engines' fixed cost from the flash
   1240 to 1244 cycles and from SRAM 1116 to 1128 from run to run of one image.
   Printing the 32-frame block's own timings and the

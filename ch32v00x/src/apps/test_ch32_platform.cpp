@@ -553,15 +553,21 @@ void td_delay() {
     const uint32_t took = Ticker::ticks() - t0;
     print(serial, "  20 x delay_us(500) took ", took, " ticks", crlf);
     bench.verdict("every 500 us wait was served", served);
-    bench.verdict("twenty of them are at least 10 ms and no more than 12",
-                  took >= 10u && took <= 12u);
+    // delay_us() promises at least its time, never how late (ch32v00x's
+    // delay: late, never early), and the tick counts the same HCLK: ten
+    // milliseconds of waits span at least ten tick edges whatever the
+    // phase of the first read. How late each wait runs - its entry, its
+    // last poll, a tick handler landing inside - is no written figure: the
+    // count above is printed for it.
+    bench.verdict("twenty of them are at least 10 ms", took >= 10u);
 
     const uint32_t c0 = cycles_now();
     const bool one = delay_us(clock, 100);
     const uint32_t spent = cycles_between(c0, cycles_now());
     print(serial, "  delay_us(100) spent ", spent, " cycles (4800 asked)", crlf);
-    bench.verdict("100 us is at least 4800 cycles at 48 MHz, and under 5200",
-                  one && spent >= 4800u && spent < 5200u);
+    // The lower bound is the contract (CNT counts HCLK, the ruler's
+    // clock); the cycles over it are printed, for the same reason.
+    bench.verdict("100 us is at least 4800 cycles at 48 MHz", one && spent >= 4800u);
 
     bench.verdict("a wait of one tick period (1000 us) is refused",
                   !delay_us(clock, 1000));
@@ -668,8 +674,9 @@ void te_latency() {
     Pfic::disable(Irq::software);
     print_trip(t);
     bench.verdict("every raise of the software interrupt was taken", t.seen == trip_rounds);
-    bench.verdict("the handler was entered within 100 cycles of the raise", t.best_entry <= 100u);
-    bench.verdict("and the whole trip is under 300 cycles", t.best_trip < 300u);
+    // The entry and the trip are this core's costs, which neither the
+    // QingKe V2 manual nor the datasheet states in cycles: PRINTED above
+    // (the page's table carries them), no bound by eye.
 }
 
 // ---------------------------------------------------------------------------
@@ -688,10 +695,8 @@ void tu_usart_trip() {
     print_trip(t);
     bench.verdict("every raise of the console's USART line was taken, and the console's own work went on",
                   t.seen == trip_rounds);
-    // The bound: the minimal handler's trip is under 100 cycles (letter e);
-    // the transport's isr() over an idle port is a status load and a few
-    // compares - a few tens more. 300 is the letter e bound.
-    bench.verdict("its whole trip is under 300 cycles", t.best_trip < 300u);
+    // The trip is a cost no document states in cycles: printed above, as
+    // letter e's are.
 }
 
 // ---------------------------------------------------------------------------

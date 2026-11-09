@@ -105,7 +105,9 @@ key).
   to /128; the datasheets cap fADC at 48 MHz on the CH32V006 (/2 =
   24 MHz at this stratum's 48 MHz) and at 12 MHz on the CH32V003 (/4).
 - **tCONV = sample + 12.5 ADCCLK cycles on the CH32V006, + 11 on the
-  CH32V003** (measured to the cycle, four settings on each): 16
+  CH32V003** (measured at four settings on each, within the letter's
+  instrument - a poll turn over 192 conversions, under a cycle a
+  conversion on the CH32V006 and about one on the CH32V003): 16
   cycles at the shortest sample on the first - a megasample and a
   half at 24 MHz - and 14 on the second, 836 ksps at 12 MHz. The
   sample-time codes are the same eight, the CH32V006's in half cycles
@@ -216,13 +218,20 @@ the part's full scale, so one source judges both.
   PVD is the one independent witness of a wireless board's supply,
   and the verdict judges against it - a cable's drop has moved that
   board's supply by a quarter of a volt between sessions.
-- **The rate**: 256 continuous conversions through DMA channel 1 in
-  516197 cycles at 6 MHz and 239.5 (516096 computed), 32890 at 6 MHz
-  and 3.5 (32768), 21112 at 24 MHz and 28.5 (20992), 8337 at 24 MHz
-  and 3.5 (8192) on the CH32V006: tCONV to the cycle, 1.47 Msps at the
-  top. On the CH32V003: 516387 at 6 MHz and 241 (516096), 29091 at
-  6 MHz and 3 (28672), 42305 at 12 MHz and 30 (41984), 14649 at 12 MHz
-  and 3 (14336) - the tail of 11 cycles to the cycle, 838 ksps.
+- **The rate**: continuous conversions of VREFINT through DMA channel 1,
+  timed as a 256-conversion block less a 64-conversion block (the fastest of
+  three of each, each after the same power cycle, so the start and the
+  block's end cancel): 192 conversions in 387030 to 387086 cycles at 6 MHz
+  and 239.5 (387072 computed), 24541 to 24595 at 6 MHz and 3.5 (24576),
+  15725 to 15782 at 24 MHz and 28.5 (15744), 6134 to 6190 at 24 MHz and 3.5
+  (6144) on the CH32V006F8U6, ten runs - 1.5 Msps at the top. On the
+  CH32V003F4P6: 387078 to 387111 at 6 MHz and 241 (387072), 21448 to 21458
+  at 6 MHz and 3 (21504), 31270 to 31498 at 12 MHz and 30 (31488), 10855 to
+  10900 at 12 MHz and 3 (10752) - 848 ksps. Each figure lies within two
+  turns of the wait that sees a block end and one ADCCLK, the bound the
+  letter derives: the turn is 77 cycles on the CH32V006F8U6 and 251 on the
+  CH32V003F4P6, whose composed cycle count runs with no multiplier, so the
+  part's tail resolves to that turn and not to the cycle.
 - **The calibration** (CH32V003): completes on its own at init and on
   demand; VREFINT reads the same with the calibration register reset
   and calibrated again (376 and 376).

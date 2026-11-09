@@ -245,10 +245,16 @@ void ta_boot() {
           " after clear_reset_flags()=", hex(after), " RSTSCKR=", hex(rcc()->RSTSCKR), crlf);
     bench.verdict("reset_flags() is non-destructive: two reads agree", first == second);
     bench.verdict("clear_reset_flags() leaves the flags clean", after == 0u);
-    bench.verdict("and the register holds nothing else afterwards: RMVF is a LEVEL on "
-                  "this silicon - written 1 it stays 1 - so the verb clears it too, and "
-                  "the low 24 bits are reserved",
+    bench.verdict("and the register holds nothing else afterwards: the verb clears RMVF "
+                  "too (3.4.8 says what a 1 does, not whether it stays), and the low 24 "
+                  "bits read zero (reserved)",
                   rcc()->RSTSCKR == 0u);
+    // Whether RMVF stays 1 once written is the silicon's, which 3.4.8 does
+    // not say: read on this die, printed; the verb is right either way.
+    rcc()->RSTSCKR = rcc()->RSTSCKR | rcc_rmvf;
+    const bool rmvf_stays = (rcc()->RSTSCKR & rcc_rmvf) != 0u;
+    Rcc::clear_reset_flags();
+    print(serial, "  RMVF written 1 reads ", rmvf_stays ? "1 (a level)" : "0 (a pulse)", crlf);
 
     const uint16_t kbytes = esig_flash_kbytes();
     print(serial, "  ESIG flash capacity: ", kbytes, " KB; unique id ",
@@ -301,7 +307,11 @@ void tb_critical() {
     // unmasks it, not before the next one (measured: read at once, the
     // count has not moved yet), so wait for it - bounded - and say how long.
     // The bare STK loop: its count is the figure printed, and the tick it
-    // waits for is the one a ruler's composed count would wait on too.
+    // waits for is the one a ruler's composed count would wait on too. The
+    // budget, 1000 cycles: the trap's entry and exit, 70 with the hardware
+    // prologue (letter e), a tick handler's body, 65 in
+    // docs/ch32x035/platform.md's handler table (this image's does less),
+    // and a turn of this loop come to under 200, five times over.
     const uint32_t unmasked = cycles_now();
     while (Ticker::ticks() == t0 && cycles_between(unmasked, cycles_now()) < 1000u) {
     }
@@ -324,7 +334,11 @@ void tb_critical() {
     // it, so the console must be silent first. The loop below is the
     // sleep itself, bounded by its twenty calls (each returns on an
     // interrupt), and each idle() is entered masked as the kernel enters
-    // it: no ruler wait belongs there.
+    // it: no ruler wait belongs there. With the console silent the tick is
+    // the one interrupt left, so a sleeping idle() takes one call to the
+    // tick, or two when the first returns at once on the event the drain's
+    // last console interrupt latched (the event register is one bit and
+    // SEVONPEND sets it); an idle() that did not sleep takes all twenty.
     if (!console_quiet()) {
         return;
     }
@@ -341,9 +355,9 @@ void tb_critical() {
     const uint32_t idle_cycles = cycles_between(c1, cycles_now());
     print(serial, "  with the console silent, ", calls, " idle() call(s) covered the ",
           idle_cycles / cycles_per_us(), " us to the next tick", crlf);
-    bench.verdict("idle() sleeps and the tick is what brings it back, inside "
-                  "one tick period",
-                  calls >= 1u && calls < 20u);
+    bench.verdict("idle() sleeps and the tick is what brings it back: one call, or two "
+                  "with the event an earlier interrupt latched",
+                  calls >= 1u && calls <= 2u);
     bench.verdict("and it comes back with interrupts enabled", P::interrupts_enabled());
 }
 
@@ -370,10 +384,13 @@ void tc_ticker() {
     TimeStamp stamp{};
     Ticker::now(stamp);
     print(serial, "  ticks=", ticks, " millis=", ms, " secs=", secs, " now=", stamp, crlf);
+    // The four reads lie a few instructions apart, far under a period, so at
+    // most one tick lands among them: each later counter is ticks' figure
+    // or one more.
     bench.verdict("millis() is ticks() at 1000 Hz (no correction, no drift)",
-                  ms >= ticks && ms - ticks <= 2u);
+                  ms >= ticks && ms - ticks <= 1u);
     bench.verdict("secs() is the whole-second part of the same counter",
-                  secs == ticks / 1000u || secs == (ticks + 2u) / 1000u);
+                  secs == ticks / 1000u || secs == (ticks + 1u) / 1000u);
     bench.verdict("now() agrees with both counters",
                   stamp.seconds == secs || stamp.seconds == secs + 1u);
 
@@ -443,7 +460,7 @@ void judge_window(const Window& w, uint32_t us, uint32_t allowance, const char* 
         bench.skip("a tick landed in the timed window: reported, not judged");
         return;
     }
-    bench.verdict(claim, w.served && w.spent >= asked && w.spent < asked + allowance);
+    bench.verdict(claim, w.served && w.spent >= asked && w.spent <= asked + allowance);
 }
 
 void td_delay() {
@@ -463,12 +480,23 @@ void td_delay() {
     bench.verdict("twenty of them are at least 10 ms and no more than 12",
                   took >= 10u && took <= 12u);
 
+    // THE ALLOWANCE, derived: delay_us() counts STK positions on HCLK, the
+    // clock the window is read on, so the HSI's tolerance cancels and the
+    // window exceeds what it asked by the wait's own path - not a share of
+    // it. By the flash cost model (docs/ch32x035/platform.md, "the two cost
+    // models") over this image's code: the call and delay_us()'s checks
+    // before its first count, some 13 instructions in ten words, a call and
+    // three predicted sites, 64; the return from the count that ends it,
+    // about nine instructions, two taken transfers and two predicted sites,
+    // 52; and up to one turn of its poll beyond the asked span, six
+    // instructions in four words, two taken transfers and two predicted
+    // sites, 56: 172 cycles at most, at either length.
+    constexpr uint32_t delay_path_most = 64u + 52u + 56u;
     if (drained) {
-        judge_window(short_wait, 100, 100u * cycles_per_us() / 25u,
-                     "100 us is at least what it asked for and under 4 per cent over");
-        judge_window(long_wait, 900, 900u * cycles_per_us() / 100u,
-                     "900 us - the longest wait that still fits a tick period - is at "
-                     "least what it asked for and under 1 per cent over");
+        judge_window(short_wait, 100, delay_path_most,
+                     "100 us is at least what it asked for and over it by the wait's own path alone");
+        judge_window(long_wait, 900, delay_path_most,
+                     "900 us - the longest wait that still fits a tick period - the same");
     }
 
     bench.verdict("a wait of one tick period (1000 us) is refused", !delay_us(clock, 1000));
@@ -554,8 +582,16 @@ void te_latency() {
     print(serial, "  whole trip (raise -> the raiser sees it done): ", best_trip, "..", worst_trip,
           " cycles", crlf);
     bench.verdict("every raise of the software interrupt was taken", seen == rounds);
-    bench.verdict("the handler was entered within 100 cycles of the raise", best_entry <= 100u);
-    bench.verdict("and the whole trip is under 300 cycles", best_trip < 300u);
+    // THE ENTRY'S BOUND, derived by the flash cost model (docs/ch32x035/
+    // platform.md, "the two cost models"; letter i judges each of its terms):
+    // the trap's entry from the store that pends it, 20; the three
+    // instructions between the first stamp and that store and the handler's
+    // one before its stamp, four words at 4 cycles, 16; and the 8 cycles
+    // the model's counts leave to the measured leasts. The trip's exit - the
+    // hardware epilogue and the raiser's spin - has no term in the model:
+    // printed above, not judged.
+    bench.verdict("the handler was entered within the cost model's 44 cycles of the raise",
+                  best_entry <= 20u + 16u + 8u);
 }
 
 // ---------------------------------------------------------------------------
@@ -945,8 +981,10 @@ void tk_turns() {
     QuietKernel::init_all();
 
     // Turns over 100 quiet ticks: the tick is the only interrupt (the
-    // console drained, nothing else enabled). The window opens and closes
-    // on a tick read, so a turn may straddle either end: 100 to 102.
+    // console drained, nothing else enabled), so one turn a tick - a turn
+    // whose idle() sleeps to the next tick, or finds it pending and returns
+    // - and at most one more, on the event the drain's last console
+    // interrupt latched (the event register is one bit): 100 or 101.
     const uint32_t t = Ticker::ticks();
     uint32_t turns = 0;
     while (Ticker::ticks() - t < 100u) {
@@ -977,7 +1015,7 @@ void tk_turns() {
           " cycles (two counter reads included)", crlf);
     bench.verdict("the kernel loop turns once per interrupt, not twice (no event is left "
                   "latched behind the wake)",
-                  turns >= 100u && turns <= 102u);
+                  turns >= 100u && turns <= 101u);
 }
 
 void banner() {

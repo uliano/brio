@@ -14,7 +14,7 @@
 // THE LINK IS USART4 ON ITS DEFAULT COLUMN (8.3.2.1, code 000): TX PB0,
 // RX PB1, polled through the resource - no interrupt, no ring: an
 // instrument's loop owns the instance (RM ch. 14). The desk wires it
-// crossed, full duplex, to the CH32V006's USART2 on its column 4; the peer
+// crossed, full duplex, to the CH32V006F8U6's USART2 on its column 3 (PD3, PD2); the peer
 // serves full duplex alone and refuses onewire (no USART TX of this
 // package reaches its own RX pad). The console is USART2 on PA2/PA3, the
 // probe's serial, at 115200: observability only.

@@ -129,8 +129,15 @@ bool console_drain() {
     return idle;
 }
 
+/// The datasheets' LSI span (CH32V006 DS V2.0 table 3-12: 90 to 172 kHz;
+/// CH32V003 DS V1.6 table 3-12: 100 to 150 kHz) and HSI accuracy over
+/// -40..85 C (table 3-11: +-2.0 % and +-2.2 %), in per mille.
+constexpr uint32_t lsi_min_hz = device::part == Ch32Part::v003 ? 100'000u : 90'000u;
+constexpr uint32_t lsi_max_hz = device::part == Ch32Part::v003 ? 150'000u : 172'000u;
+constexpr uint32_t hsi_fast_permille = device::part == Ch32Part::v003 ? 1022u : 1020u;
+
 /// The LSI's rate on THIS die, measured where it is used: one die's figure
-/// is no other's (the datasheet allows 100 to 150 kHz, and the bench's
+/// is no other's (the datasheet allows 100 to 150 kHz, 90 to 172 on the CH32V006, and the bench's
 /// parts measure from about 106 to 126 kHz). The AWU (ch32v00x/sleep.hpp)
 /// counts 8 periods of its /128 prescaler - 1024 LSI cycles, about 10 ms -
 /// timed on the ruler, the dog fed through the wait. Letter i reads its
@@ -280,7 +287,8 @@ void tj_iwdg_alive() {
     }
 
     // /32 and 999: (999 + 1) x 32 / LSI - 258 ms at 124 kHz, 213 to 320 ms
-    // over the datasheet's 100 to 150 kHz.
+    // over the CH32V003's 100 to 150 kHz, 186 to 356 ms over the
+    // CH32V006's 90 to 172.
     const IwdgConfig cfg{.prescaler = IwdgPrescaler::div32, .reload = 999};
     Iwdg::start();
     Iwdg::unlock();
@@ -289,6 +297,8 @@ void tj_iwdg_alive() {
     const bool pvu_up = Iwdg::busy(iwdg_pvu);
     const bool synced = Iwdg::sync(iwdg_pvu);
     const uint32_t pvu_cycles = Ruler::now() - t0;
+    const uint32_t r0 = Ruler::now();
+    const uint32_t read_cycles = Ruler::now() - r0;
     Iwdg::unlock();
     iwdg()->RLDR = cfg.reload;
     const bool rvu_up = Iwdg::busy(iwdg_rvu);
@@ -298,9 +308,17 @@ void tj_iwdg_alive() {
     print(serial, "  started: PVU ", pvu_up ? "rose" : "never rose", " and fell after ", pvu_cycles,
           " cycles (", pvu_cycles / 48u, " us); RVU ", rvu_up ? "rose" : "never rose", "; PSCR=",
           hex(iwdg()->PSCR), " RLDR=", hex(iwdg()->RLDR), crlf);
+    // THE BOUND: PVU falls within 5 LSI cycles (RM 4.3.4, IWDG_STATR) -
+    // 55.6 us at the CH32V006's slowest 90 kHz, 50 us at the CH32V003's
+    // 100 kHz - read on a ruler up to 2.0 / 2.2 per cent fast (the HSI),
+    // plus the window's own reads: one ruler read measured just above
+    // (read_cycles) at each end, sync()'s last turn inside it.
+    constexpr uint32_t pvu_most = static_cast<uint32_t>(
+        5ULL * SysClock::hz * hsi_fast_permille / (1000ULL * lsi_min_hz) + 1u);
+    print(serial, "  (bound ", pvu_most, " + 2 x ", read_cycles, " cycles)", crlf);
     bench.verdict("the prescaler update crosses into the LSI domain (PVU seen, then down within "
-                  "five LSI cycles)",
-                  synced && pvu_cycles < 48u * 60u);
+                  "five LSI cycles at the slowest LSI)",
+                  synced && pvu_cycles <= pvu_most + 2u * read_cycles);
     bench.verdict("the reload update likewise", synced2);
     bench.verdict("both fields read back as written once their flags are down",
                   Iwdg::prescaler() == IwdgPrescaler::div32 && Iwdg::reload() == 999u);
@@ -320,8 +338,12 @@ void tj_iwdg_alive() {
         (void)delay_us(clock, 900);
         brio::spin_us<Ruler>(60'000);
     }
-    bench.verdict("fed every 60 ms, under a quarter of the shortest period the datasheet's LSI allows (213 ms at "
-                  "150 kHz), the board is still here after a second",
+    // 60.9 ms a turn against the shortest period the datasheet's LSI
+    // allows: 32000 / lsi_max_hz (186 ms on the CH32V006, 213 on the
+    // CH32V003), a third of it at most.
+    static_assert(61u * 3u <= 32'000'000u / lsi_max_hz);
+    bench.verdict("fed every 61 ms, under a third of the shortest period the datasheet's LSI allows, "
+                  "the board is still here after a second",
                   true);
     print(serial, "  the IWDG stays running: the loop feeds it from now on (letter i stops that)",
           crlf);

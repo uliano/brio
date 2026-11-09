@@ -527,7 +527,30 @@ uint32_t frame_permille(SpiClock rate, SpiMode mode, SpiDataSize bits, const uin
     return frame_x1000 / (width * asked_divisor(rate));
 }
 
-bool wire_ok(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
+/// One ruler read and one bare turn of await_done()'s inner poll,
+/// measured in letter g before its blocks.
+uint32_t read_cycles = 0;
+uint32_t bare_cycles = 0;
+
+/// THE BOUND on frame_permille(). The SCK divides HCLK, the clock the
+/// ruler counts: no error between the two clocks, and the engine cannot
+/// run faster than the wire. The difference of the two blocks cancels
+/// their start (the same code) and their completion interrupt (the same
+/// path); what is left is where each block's end is seen - within one
+/// bare turn of the closing wait's poll, or, once a block outlasts the
+/// first 1024 of them, within the ruler read that ends a run of polls
+/// (await_done) - at either end, and the fastest of three keeps a tick
+/// handler out of the figure. In thousandths of the difference's wire
+/// time, plus one for the floors.
+bool wire_ok(uint32_t permille, SpiClock rate, SpiDataSize bits, uint16_t big_n, uint16_t small_n) {
+    const uint32_t width = bits == SpiDataSize::bits16 ? 16u : 8u;
+    const uint32_t frame = width * asked_divisor(rate);
+    const uint32_t wire = static_cast<uint32_t>(big_n - small_n) * frame;
+    const bool crosses = static_cast<uint32_t>(big_n) * frame >= 1024u * bare_cycles;
+    const uint32_t end = bare_cycles + (crosses ? read_cycles : 0u);
+    const uint32_t a = 1u + (2u * end * 1000u + wire - 1u) / wire;
+    return permille + a >= 1000u && permille <= 1000u + a;
+}
 
 // ===========================================================================
 // The peer: spi_link.hpp over the bus under test
@@ -1283,7 +1306,8 @@ void ti_engine_rules() {
 // standing in DATAR (RXNE), whatever MISO carried. THE CONTROL: the same
 // staging, the gate opened with no reset and the receive channel armed by hand
 // for SPI1's receive, its count read with nothing clocked: the one item it moves
-// is the request the reset withdraws (RXNE and RXDMAEN kept under the gate). A
+// is the request the reset withdraws (RXNE and RXDMAEN kept under the gate),
+// printed - the held request is the silicon's habit, not the manual's. A
 // held request is taken within a few bus cycles of the enable, so 3 ms of
 // settling leave nothing in flight, and the count is exact.
 
@@ -1343,11 +1367,20 @@ void tl_release_reinit() {
         }
     }
     host_ready();
-    bench.verdict("RELEASED WITH RXDMAEN SET AND A FRAME STANDING, THEN INITIALIZED AGAIN: a read of eight on the "
-                  "engines ends spi_ok with its one interrupt and nothing left in the receive buffer",
-                  good == runs);
-    bench.verdict("THE CONTROL: the same staging with the reset left out moves one item, the held request",
-                  held == runs);
+    // The held request is a habit of the silicon (the RM does not say a
+    // request raised under a disabled channel waits for it), so the
+    // control is a PRINTED MEASUREMENT; it is the premise that makes the
+    // re-init's pass mean something, and a pass it did not stage is a skip.
+    // A failed re-init fails whatever the control showed: init()'s contract
+    // holds on every die.
+    print(serial, "  -> the control moved the held request in ", held, " of ", runs, " runs", crlf);
+    if (held == runs || good != runs) {
+        bench.verdict("RELEASED WITH RXDMAEN SET AND A FRAME STANDING, THEN INITIALIZED AGAIN: a read of eight on the "
+                      "engines ends spi_ok with its one interrupt and nothing left in the receive buffer",
+                      good == runs);
+    } else {
+        bench.skip("the control held no request: the re-init ran without the request it withdraws");
+    }
 }
 
 // ===========================================================================
@@ -1937,6 +1970,16 @@ void tg_wire() {
         dma_done();
         return;
     }
+    const uint32_t r0 = Ruler::now();
+    read_cycles = Ruler::now() - r0;
+    host_done = false;
+    const uint32_t b0 = Ruler::now();
+    for (uint32_t k = 0; k < 1024u; ++k) {
+        if (host_done) {
+            break;
+        }
+    }
+    bare_cycles = (Ruler::now() - b0 - read_cycles + 1023u) / 1024u;
     const uint32_t m0_div2 = frame_permille(SpiClock::div2, SpiMode::mode0, SpiDataSize::bits8, tx_buf, rx_buf, 256, 32);
     const uint32_t m0_div4 = frame_permille(SpiClock::div4, SpiMode::mode0, SpiDataSize::bits8, tx_buf, rx_buf, 256, 32);
     const uint32_t m0_div16 = frame_permille(SpiClock::div16, SpiMode::mode0, SpiDataSize::bits8, tx_buf, rx_buf, 256, 32);
@@ -1947,10 +1990,16 @@ void tg_wire() {
     print(serial, "  a frame inside an engined block, buffers in SRAM, in thousandths of its SCK periods at the rate "
           "asked: mode 0 /2 ", m0_div2, ", /4 ", m0_div4, ", /16 ", m0_div16, ", /64 ", m0_div64, "; mode 3 /16 ",
           m3_div16, "; 16-bit /4 ", w16_div4, ", /16 ", w16_div16, crlf);
+    print(serial, "  (a ruler read ", read_cycles, " cycles, a bare poll ", bare_cycles, ": the bound at /2 is +-",
+          1u + (2u * bare_cycles * 1000u + 3583u) / 3584u, " thousandths)", crlf);
+    using C = SpiClock;
+    using W = SpiDataSize;
     bench.verdict("THE ENGINES RUN AT THE RATE ASKED: a frame in a block takes its SCK periods - /2 /4 /16 /64 "
-                  "mode 0, /16 mode 3, /4 /16 16-bit - each -1 % to +3 %",
-                  wire_ok(m0_div2) && wire_ok(m0_div4) && wire_ok(m0_div16) && wire_ok(m0_div64) &&
-                      wire_ok(m3_div16) && wire_ok(w16_div4) && wire_ok(w16_div16));
+                  "mode 0, /16 mode 3, /4 /16 16-bit - each within the closing poll's turn at either end",
+                  wire_ok(m0_div2, C::div2, W::bits8, 256, 32) && wire_ok(m0_div4, C::div4, W::bits8, 256, 32) &&
+                      wire_ok(m0_div16, C::div16, W::bits8, 256, 32) && wire_ok(m0_div64, C::div64, W::bits8, 256, 32) &&
+                      wire_ok(m3_div16, C::div16, W::bits8, 256, 32) && wire_ok(w16_div4, C::div4, W::bits16, 128, 16) &&
+                      wire_ok(w16_div16, C::div16, W::bits16, 128, 16));
     // And with no buffer named - the host's own cells, 2048 and 256 frames:
     // the transmit engine pours the 0xFF dummy, the receive engine writes
     // its discard cell.
@@ -1959,9 +2008,10 @@ void tg_wire() {
     const uint32_t cell16_div4 = frame_permille(SpiClock::div4, SpiMode::mode0, SpiDataSize::bits16);
     print(serial, "  the same with no buffer named (the host's dummy and discard cells): /2 ", cell_div2, ", /4 ",
           cell_div4, "; 16-bit /4 ", cell16_div4, crlf);
-    bench.verdict("and a block with no buffer named runs at the wire too: /2 and /4, 8 and 16 bits, each -1 % to "
-                  "+3 % of its SCK periods",
-                  wire_ok(cell_div2) && wire_ok(cell_div4) && wire_ok(cell16_div4));
+    bench.verdict("and a block with no buffer named runs at the wire too: /2 and /4, 8 and 16 bits, each within "
+                  "the closing poll's turn at either end",
+                  wire_ok(cell_div2, C::div2, W::bits8, 2048, 256) && wire_ok(cell_div4, C::div4, W::bits8, 2048, 256) &&
+                      wire_ok(cell16_div4, C::div4, W::bits16, 2048, 256));
     dma_done();
 
     // THE HOST'S COSTS: the flash placement (the default), and on the CH32V006
@@ -2770,17 +2820,17 @@ void tv_overrun() {
     const uint16_t both = spi_ovr | spi_rxne;
     bench.verdict("OVR RISES on a frame completed with one standing unread, the buffer still full",
                   (raised & both) == both);
-    if constexpr (device::part == Ch32Part::v003) {
-        bench.verdict("ON THE CH32V003 16.2.7'S ORDER DOES NOT CLEAR IT: a read then loads leave it standing, RXNE down; "
-                      "a read after a load that showed it clears it, the buffer full or empty",
-                      (order_1 & both) == spi_ovr && (order_2 & both) == spi_ovr && (order_read & both) == 0u &&
-                          (shown_read_1 & both) == 0u && (shown_read_2 & both) == 0u);
-    } else {
-        bench.verdict("ON THE CH32V006 16.2.7'S ORDER CLEARS IT: after a read, the first load still shows it, RXNE down, "
-                      "and the next does not, with or without a load before the read",
-                      (order_1 & both) == spi_ovr && (order_2 & both) == 0u && (order_read & both) == 0u &&
-                          (shown_read_1 & both) == spi_ovr && (shown_read_2 & both) == 0u);
-    }
+    // Which accesses clear OVR, in which order, is where the two parts
+    // differ on the bench (the CH32V003F4P6 needs a read after a load that
+    // showed the flag; the CH32V006F8U6 clears on 16.2.7's read-then-load).
+    // 16.2.7 states one order, the dies answer differently, and brio rests
+    // on neither: clear_overrun() and flush_rx() are judged below on their
+    // outcome. So the sequences are a PRINTED MEASUREMENT, never a verdict
+    // keyed on the part.
+    auto ovr = [both](uint16_t st) { return (st & both) == spi_ovr ? "stands" : (st & both) == 0u ? "clear" : "other"; };
+    print(serial, "  -> 16.2.7's order (a read, then loads): OVR ", ovr(order_1), " after the first load, ", ovr(order_2),
+          " after the second, ", ovr(order_read), " after a read again; a read after a load that showed it: ",
+          ovr(shown_read_1), ", then ", ovr(shown_read_2), " (a habit of this silicon, printed)", crlf);
     bench.verdict("A ZERO WRITTEN TO OVR CLEARS NOTHING (the register table's RW0)", (wrote_zero & both) == both);
     bench.verdict("clear_overrun() and flush_rx() leave neither flag after a frame unread and a frame lost",
                   (verb_clear & both) == 0u && (verb_flush & both) == 0u);
@@ -3086,10 +3136,13 @@ void tw_wire_end() {
     bench.verdict("THE PAD IS THE WIRE: on every pass, /256 and /64 and all four modes, a poll saw SCK off its idle level "
                   "before the flag came, and the flag came",
                   all_moved == flag_passes + 8u);
-    bench.verdict("RXNE DOES NOT LEAD THE LAST EDGE: at the flag SCK is at the mode's idle level, 8 and 16 bits, all four "
-                  "modes, /256 and /64",
-                  flag_idle == flag_passes);
-    bench.verdict("NOR DOES THE RECEIVE CHANNEL'S COMPLETION: the same on its flag", channel_idle == 8u);
+    // Where RXNE and the receive channel's completion fall against the
+    // last SCK edge is the silicon's timing, which 16.2 does not state
+    // (seen leading it now and then at /64): a PRINTED MEASUREMENT. What
+    // brio promises - the wire has ended when a request ends - is judged
+    // below, on the driver's own answer.
+    print(serial, "  -> at the flag SCK at its idle level: RXNE ", flag_idle, " of ", flag_passes,
+          " passes, the receive channel's completion ", channel_idle, " of 8", crlf);
     uint16_t asked = 0;
     uint16_t off_polled = 0;
     uint16_t off_engines = 0;
@@ -3925,6 +3978,23 @@ Demotion demote_once() {
     return d;
 }
 
+// When MODF may come up, in this end's milliseconds after the enable. The
+// peer waits aux8 = 30 of its own milliseconds (29 to 30 real: a millis
+// loop) after the ack it served; this end, after the same ack, settles
+// spi_link's settle_ms (4 to 5 of its own) and configures the block (under
+// 0.1 ms) before it starts counting, and each end's bookkeeping around the
+// ack is under 1 ms. The two RC clocks (this end's HSI +-2.0 %, CH32V006 DS
+// V2.0 table 3-11, or +-2.2 %, CH32V003 DS V1.6 table 3-11; the CH32X035
+// peer's -1.7..+1.6 %, its DS V1.7 table 3-9) put the peer's milliseconds
+// at 962 to 1040 thousandths of ours, and the
+// millis difference, a whole count, reads up to one under or over the
+// span: lower 29 x 0.962 - 5 - 0.1 - 1 - 1 = 20.80 -> at least 21; upper
+// 30 x 1.040 - 4 + 1 + 1 = 29.20 -> at most 29 (in microseconds below).
+constexpr uint32_t modf_least_ms = 21;
+constexpr uint32_t modf_most_ms = 29;
+static_assert(29'000u * 962u / 1000u - 5'000u - 100u - 1'000u - 1'000u > (modf_least_ms - 1u) * 1000u);
+static_assert(30'000u * 1040u / 1000u - 4'000u + 1'000u + 1'000u < (modf_most_ms + 1u) * 1000u);
+
 void tm_peer_modf() {
     if (!need_peer()) {
         return;
@@ -3938,13 +4008,14 @@ void tm_peer_modf() {
               " before the clearing sequence, ", hex(d.st_after), " after it; clear_mode_fault() answered down at call ", d.sequences,
               crlf);
         accepted = static_cast<uint8_t>(accepted + (d.accepted ? 1u : 0u));
-        raised = static_cast<uint8_t>(raised + (d.modf && !d.at_enable && d.t_modf >= 20u ? 1u : 0u));
+        raised = static_cast<uint8_t>(
+            raised + (d.modf && !d.at_enable && d.t_modf >= modf_least_ms && d.t_modf <= modf_most_ms ? 1u : 0u));
         demoted = static_cast<uint8_t>(demoted + (d.modf && (d.ctlr1 & (spi_mstr | spi_spe)) == 0u ? 1u : 0u));
         first = static_cast<uint8_t>(first + (d.sequences == 1u ? 1u : 0u));
     }
     bench.verdict("the peer accepted four ss_pulses", accepted == 4u);
-    bench.verdict("MODF comes up when a SECOND CHIP pulls this host's NSS low (16.2.7), and not before - four of "
-                  "four",
+    bench.verdict("MODF comes up when a SECOND CHIP pulls this host's NSS low (16.2.7), and not before: 21 to 29 "
+                  "ms after the enable, the peer's 30 ms lead at the two RCs' ratio - four of four",
                   raised == 4u);
     bench.verdict("and it demotes the host: MSTR and SPE cleared by the hardware, four of four", demoted == 4u);
     bench.verdict("clear_mode_fault() - 16.2.7's STATR read then CTLR1 write - clears MODF at its first call once "

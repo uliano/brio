@@ -137,7 +137,7 @@ vendor's shape. Driver:
 [brio/ch32x035/afio.hpp](../../brio/ch32x035/afio.hpp); reference suite
 `test_x035_i2c` (a suite's letter, below, is one command key of its
 console and the group of verdicts it runs, `z` the key that runs them
-all) against a CH32V006K8U6 running its `twi_peer`.
+all) against a CH32V006F8U6 on WeAct's core board running its `twi_peer`.
 
 ## What the silicon does
 
@@ -207,17 +207,24 @@ all) against a CH32V006K8U6 running its `twi_peer`.
   until a START or a STOP.
 - **A START into a held SDA goes out, and the address loses.** With the peer
   holding SDA low, a START set by a peripheral that saw the line taken raised
-  SB 40 us later at 100 kHz, MSL and BUSY up, and the address written then
-  lost arbitration 16 us on, at its first one bit (measured): the requester
-  gets `i2c_arb_lost`, inside any per-bus timeout. A peripheral reset while
-  the line was already held, by `init()` or by `recover()`'s SWRST, has not
-  seen it taken, and the same START stays pending: no SB and no ARLO in 50 ms,
-  START standing in CTLR1, BUSY up - the case the per-bus timeout answers
-  (measured).
-- **The host's own STOP stands in CTLR1 for about a bit** after the
-  completion edge - 460 to 468 cycles at 100 kHz, 108 to 116 at 400 kHz,
-  at 48 MHz (measured) - and no flag marks it leaving: `start()` waits for
-  it, bounded, before anything writes CTLR1. A read-modify-write of CTLR1
+  SB 64 to 70 us later at 100 kHz, MSL and BUSY up, and the address written then
+  lost arbitration 16 or 17 us on, at its first one bit (measured, thirteen
+  runs): the requester gets `i2c_arb_lost`, inside any per-bus timeout. A
+  peripheral reset while the line was already held, by `init()` or by
+  `recover()`'s SWRST, has not seen it taken, and the same START stays
+  pending: no SB and no ARLO in 50 ms, START standing in CTLR1, BUSY up - the
+  case the per-bus timeout answers (measured). The chapter does not say what a
+  START into a held line does, and the siblings answer otherwise, so the suite
+  prints both answers; it judges the arbitration the chapter does state - once
+  SB is up, the address's first one bit lost within two SCL periods at the
+  slowest rate the suite's letter f passes - and the engine's outcome, letter
+  h's reply in its place.
+- **The host's own STOP stands in CTLR1 for under a bit** after the
+  completion edge - 320 to 440 cycles at 100 kHz at 48 MHz, and at 400 kHz
+  gone by the first look behind the edge (measured, thirteen runs; the
+  suite's ceiling is one SCL period at the slowest rate it passes and the
+  reading's turn) - and no flag marks it leaving: `start()` waits for it,
+  bounded, before anything writes CTLR1. A read-modify-write of CTLR1
   under it (STOP written back as it stood, ACK set) left no trace: STOP
   cleared on its own a millisecond later and the next tenure ran
   (measured). The host keeps the F1 lineage's rule all the same, no CTLR1
@@ -399,12 +406,12 @@ BRIO_CH32_VECTOR(i2c1_ev_handler) {
 ## Bench findings
 
 The reference suite is `test_x035_i2c` on the CH32X035F8U6 at 48 MHz
-against a CH32V006K8U6 running `twi_peer` on its remap code 011 (PB5,
-PB6), the bus pulled up by a 1.5 kOhm resistor from each line to this
+against a CH32V006F8U6 on WeAct's core board running `twi_peer` on its
+column 0 (SCL PC2, SDA PC1), the bus pulled up by a 1.5 kOhm resistor from each line to this
 board's PB3, which the suite drives high from its boot. The suite is two images, `test_x035_i2c-1` (the
 single-host wire letters) and `-2` (the kernel, the two hosts, the dead
 channel, the stuck BUSY, the vectors' client, the cost, the bounds, the live
-tenure): `z` is 67 and 67 verdicts, green.
+tenure): `z` is 67 and 65 verdicts.
 
 - **The lot probe** answered present: FREQ, CKCFGR and OADDR1 hold what
   they are given, PE sets, and a START on the idle bus raises SB with MSL
@@ -412,7 +419,10 @@ tenure): `z` is 67 and 67 verdicts, green.
   back. The reset values are table 15-1's (all zero).
 - **The wire's rise**: each line released from low reads high at the
   first read after the release, its count starting after the release's
-  return (44 and 45 cycles, no poll): a fraction of a 400 kHz bit.
+  return (32 cycles on SCL and 55 on SDA, no poll - the stamps' own
+  instructions), judged within a 400 kHz bit, 120 cycles; the I2C
+  specification's 300 ns for a fast-mode rise is 14 cycles, under what this
+  instrument resolves.
 - **The scan, the shapes, the vocabulary**: 112 addresses probed in 14 ms,
   the peer's command address the one answering and 111 `i2c_nack_addr`;
   a write, a read and a write-then-read against the peer, its count and
@@ -570,7 +580,7 @@ tenure): `z` is 67 and 67 verdicts, green.
 
 `twi_peer` (ch32x035/src/apps/twi_peer.cpp) is the CH32X035's peer on the
 twi_link protocol, on column 010 - SCL PC16, SDA PC17, wired to the
-CH32V006's PB5 and PB6. It drives PB3 high, the bus's pull-ups, from the
+CH32V006F8U6's PC2 and PC1. It drives PB3 high, the bus's pull-ups, from the
 supply check at boot (the voltage detector at 3.0 V; below it PB3 and the pads
 stay floating) to the end of its run. Its target is polled
 (`I2cClientOptions`) and drops the byte it was asked beyond a closing NACK
@@ -607,9 +617,13 @@ target, each measured from the far end:
 ### The two bounds of `start()` against their names (`test_x035_i2c` letter t)
 
 Eighteen runs, all green. The time is the ticker's cycle count around the call, 20.8
-ns a count, a read of it some 60 cycles inside each figure, so a figure reads high by
+ns a count, a read of it some 76 cycles inside each figure, so a figure reads high by
 that and never low. Each verdict takes the name as its floor and, as its ceiling, the
-name plus the free bus's own figure, one poll, a tick's entry and the ruler. A floor on
+name plus the free bus's own figure, three polls (the poll in which the bound runs out,
+and the wait's entry and its last look, which the release listing shows shorter than
+two polls) and a tick's step on a polled loop. The poll is the one the letter measures
+first with the STK stopped (below), and the tick's step the longest step between two
+ruler reads across three tick periods, both in the same run. A floor on
 a figure that holds those cycles would pass a wait up to 7 us short; what keeps the wait
 from being short is the sum read below.
 
@@ -629,11 +643,13 @@ counter read and no call; the poll is out of line and cold.
 
 **Before the ticker runs** nothing moves the counter, so the wait also spends a
 budget, the time asked at eight cycles a poll, which a running counter always beats.
-With STE cleared by hand, timed on TIM2 (the letter counts it at 2 us, which keeps the
-longest span its verdict admits, 60 ms, inside the 16-bit counter's half-wrap; the
-figures here were read at 1 us a count): `bus_free_us` ends after its
-600 polls in 962 or 963 us with SCL low and 1016 or 1017 us over an idle wire, a poll 76 or 77 and 81 cycles, and `stop_drain_us` after 30 000 polls in 30.0 ms, a poll
-48 cycles. A program that calls `start()` before `Ticker::init()` has bounds that long.
+With STE cleared by hand, timed on TIM2 (the letter counts it at 2 us from zero, and a
+span that wrapped the 16-bit counter, 131 ms, raises its update flag and fails the
+verdict): `bus_free_us` ends after its 600 polls in 1012 us with SCL low and 1066 us
+over an idle wire, a poll 80 and 85 cycles, and `stop_drain_us` after 30 000 polls in
+37.5 ms, a poll 60 cycles - the wait's entry, its last look and over the idle wire the
+reset spread over the polls. A program that calls `start()` before `Ticker::init()` has
+bounds that long.
 
 **Why 5 ms and 100 us.** `stop_drain_us` holds the dispatch of every active object
 under the arbiter's kernel and is there for a client digesting a write: 5 ms is a
@@ -659,8 +675,10 @@ client lets go. Nothing of the request reached the wire, so it can be posted aga
 Eighteen runs, 12 rounds a run, all sound: CTLR1's STOP up, START down and BUSY up at the
 reply, no reset, no vector, and behind the hold STOP and BUSY down with nothing done.
 The ceiling beside the letter is `stop_drain_us`, what `start()` costs around the wait,
-a poll, a tick's entry, the ruler and the kernel's own turn, read in the same round as
-the post-to-reply of a request refused with nothing on the wire (41 to 43 us).
+three polls, a tick's step and the kernel's own turn, read in the same round as
+the post-to-reply of a request refused with nothing on the wire (41 to 43 us). The next
+request's time to its reply, which holds the probe's vector entries, is printed; its one
+reply and its status are judged.
 
 What a program sees of it: a client that stretches past 5 ms after a write loses the
 request behind it to `i2c_timeout` however long the per-bus timeout is, and that
@@ -860,7 +878,7 @@ runs a preempting object, is in SRAM in the first and in the flash in the
 twin ([platform.md](platform.md), "The scheduler's place"). They run
 `util/i2c_bus.hpp`'s arbiter (pending depth 4, the per-bus timeout at
 20 ms) over the engined `I2cHost<1>` on PC16/PC17 (channels 6 and 7) inside
-Rubato, the preemptive kernel, against the same CH32V006K8U6 `twi_peer`.
+Rubato, the preemptive kernel, against the same CH32V006F8U6 `twi_peer`.
 Each request names its mechanism by its shape: `dma` for a read of two
 bytes or more or a write of three or more, `interrupt` otherwise. The suite's
 active objects are the pack. Pressure, an object of the pack, is the highest:

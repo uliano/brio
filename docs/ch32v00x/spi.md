@@ -895,7 +895,7 @@ channel, the matrix, the ladder, the kernel against the peer, the client, MODF:
 k, n, o, p, q, r, m), `-4` (the next request after a failure, the end of the
 wire and the same host released with a request standing, then initialized: t,
 w, l) and `-5` (the engines of bytes, in an image where theirs is the only
-binding armed: j): `z` is 46, 24, 28, 13 and 1 verdicts, green in three runs of
+binding armed: j): `z` is 46, 23, 28, 10 and 1 verdicts, green in three runs of
 each, letters g, h, i, j, k, l, t, u and w in ten runs or more: a, c, f, g, h, i, j,
 l, u, v and w with the peer deselected (their select is PC3, a pad with no wire, PC1
 held high), the other letters against it; s (the pair's ceiling) and x (the
@@ -988,7 +988,13 @@ verdict, and a peer that answered once and then goes quiet fails it.
   1000 and 999 to 1000 thousandths at HCLK/2, /4, /16 and /64 in mode 0,
   1000 at /16 in mode 3, 998 at /4 and 999 to 1000 at /16 in 16-bit frames (ten
   runs); and with no buffer named, on the host's own cells, 999 to 1000 at /2,
-  /4 and 16-bit /4. THE CELLS ARE IN SRAM: with the 0xFF cell a constant in
+  /4 and 16-bit /4. Each figure is judged against a bound derived beside the
+  letter: the SCK and the ruler count the same HCLK, the two blocks' start
+  and completion cancel in the difference, and what is left is where each
+  block's end is seen - within one bare poll of the closing wait (10 cycles
+  on the CH32V003F4P6: +-7 thousandths at HCLK/2, +-2 at /16), or
+  within a ruler read once a block outlasts the wait's first 1024 polls.
+  THE CELLS ARE IN SRAM: with the 0xFF cell a constant in
   flash the same block took 1031 thousandths at HCLK/2 - 16.5 cycles
   where 16 are the wire's, the transmit channel reading its source
   behind two wait states (RM V1.5 18.3.1) - and a transmit source in

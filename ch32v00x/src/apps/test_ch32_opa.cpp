@@ -194,9 +194,17 @@ void tb_pga() {
         PosPad::release();
         print(serial, "  PGA x4, PA2 pulled down: channel 9 reads ", low, "; pulled up: ", high, "; the OPA off: ", off,
               crlf);
-        bench.verdict("the PGA's output reaches the ADC's channel 9: near zero with the input low, saturated with "
-                      "it high",
-                      low <= scaled(100) && high >= scaled(3900));
+        // THE BOUND, high side: the output saturates no lower than VDD - 35
+        // mV with a load lighter than 20 kOhm (DS V2.0 table 3-26-1; the
+        // ADC's sampling capacitor draws no steady current), at the lowest
+        // supply the table recommends, 2.5 V: 4096 x (1 - 35 / 2500) = 4038,
+        // less the ADC's total error, 6 counts (table 3-25, which states it
+        // as a typical and gives no maximum): 4032. The
+        // low side has a typical only (25 mV), so its figure is printed and
+        // the verdict asks only that it lie below the high one.
+        bench.verdict("the PGA's output reaches the ADC's channel 9: lower with the input low than with it high, "
+                      "and high within the datasheet's saturation and the ADC's error (4032 counts)",
+                      low < high && high >= 4032u);
     } else {
         // No gain and no feedback switch: the amplifier open-loop is a
         // comparator of its two pads. PA2 (OPP0) against PD0 (OPN1),
@@ -221,9 +229,15 @@ void tb_pga() {
         OutPad::release();
         print(serial, "  open-loop, PA2 down / PD0 up: PD4 on channel 7 reads ", low, "; PA2 up / PD0 down: ", high,
               "; the OPA off, PD4 released: ", off, crlf);
-        bench.verdict("the amplifier open-loop drives PD4 to the rail its inputs order: low with P below N, high "
-                      "with P above N, on the ADC's channel 7",
-                      low <= scaled(100) && high >= scaled(3900));
+        // THE BOUND, high side: the output saturates no lower than VDD - 36
+        // mV with a load lighter than 20 kOhm (DS V1.6 table 3-25), at the
+        // table's lowest supply, 2.8 V: 1024 x (1 - 36 / 2800) = 1010, less
+        // the ADC's total error of 4 counts at most (table 3-24): 1006. The
+        // low side has a typical only (5 mV): printed, and judged below the
+        // high one.
+        bench.verdict("the amplifier open-loop drives PD4 the way its inputs order: lower with P below N than "
+                      "with P above N, and high within the datasheet's saturation and the ADC's error (1006 of 1024)",
+                      low < high && high >= 1006u);
     }
     Adc::release();
 }

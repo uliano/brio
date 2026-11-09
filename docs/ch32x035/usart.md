@@ -388,16 +388,15 @@ brio::Usart<4>::send_break();
 
 ## Bench findings
 
-The reference suite is `test_x035_usart` on a CH32X035F8U6 - WCH's
-evaluation board in its QFN20 edition, over a WCH-LinkE - at 48 MHz, the
+The reference suite is `test_x035_usart` on a CH32X035F8U6 at 48 MHz, the
 console on USART2 and the instance under test USART4 on its default
-column, PB0 and PB1, which are the desk's link: crossed to a CH32V006K8U6
-(its USART2 on column 4) running `usart_peer` on its 24 MHz crystal
-doubled. `z` (26 verdicts) is the single-board set, run with the far
+column, PB0 and PB1, which are the desk's link: crossed to a CH32V006F8U6
+on WeAct's core board (its PD3 and PD2, USART2 on column 3) running
+`usart_peer`. `z` (26 verdicts) is the single-board set, run with the far
 board dark - on its console or with its peer still searching, both
-leaving their link pads floating inputs; `y` (97 verdicts) is the
-two-board set against that peer, every leg judged from what the far chip
-reports.
+leaving their link pads floating inputs; `y` (95 verdicts against a
+crystal peer) is the two-board set against that peer, every leg judged
+from what the far chip reports.
 
 On WeAct's pair - this part on its core board
 ([../boards/weact-ch32x035f8.md](../boards/weact-ch32x035f8.md)) against
@@ -408,14 +407,16 @@ and its calibrate times this end against that HSI (IDENT's `xtal` reads
 to back that should read alike up to 1051 ppm apart (twelve runs of `y`,
 letter `k`'s legs against their 1 Mbaud reference and letter `s`'s SRAM
 blasts against the polled one), twice the 500 ppm the span verdicts
-allow. There `y` judges 70 verdicts and skips 20: it judges the bytes
+allow. There `y` judges 68 verdicts and skips 20: it judges the bytes
 of every letter, letter `m`'s rate tolerance and letter `j`'s stand-off,
 which need only the ratio; the spans of letters `k`, `l` and `s` are
 printed and skipped (19), and letter `j`'s HSI against a crystal and its
 trim walk are one skip. The Rubato link suite's echo letters decline on that pair too,
 this end being the faster writer (the lead a polled echo can hold is
 under -962 ppm against an RC peer, the suite's header has the
-arithmetic). What the suite measured against the crystal peer:
+arithmetic). What the suite measured against a crystal peer - a CH32V006K8U6
+on its 24 MHz crystal doubled (its USART2 on column 4), this part on WCH's
+evaluation board in its QFN20 edition:
 
 - **The divisor counts HCLK** (letter `a`): the console's BRR is 417 at
   48 MHz - 26 and 1/16 - which `actual_baud()` puts at 115107 baud, 0.08
@@ -449,7 +450,11 @@ arithmetic). What the suite measured against the crystal peer:
   takes the address-mark wake, the address 9 and RWU.
 - **A frame's length** (letter `d`): one 8N1 byte of the console timed
   from the DATAR write to TC took 4400 HCLK cycles, against 4170 for ten
-  bit times of the divisor - 10.55 bit times.
+  bit times of the divisor - 10.55 bit times (10.67 to 10.83 on WeAct's
+  board). Judged from ten bit times to under twelve: TC rises after the
+  stop bit (14.10.1), the first bit waits for the transmitter's bit clock,
+  HCLK / 16 / USARTDIV (figure 14-1), a bit at most, and the masked poll's
+  turn is far under another.
 - **The rate asked, on the transmitter's own clock** (letter `d`, a run
   polled one frame ahead of the shifter, from the first store to TC on
   the ticker's cycle count, against its wire time at HCLK over the baud
@@ -458,11 +463,19 @@ arithmetic). What the suite measured against the crystal peer:
   115200 and at 1 Mbaud and 1001 at 3 Mbaud, a divisor of exactly 16 -
   with the receive pad pulled up: it is a wire to the far board's
   floating input, and with it floating the 3 Mbaud run took 2054
-  thousandths, the receiver's invented frames taking the core.
+  thousandths, the receiver's invented frames taking the core. The
+  transmitter and the ruler share HCLK, so no oscillator's error enters:
+  a run is judged from its divisor's own figure up to that plus a bit for
+  the first start and, for every tick the run can hold and two turns of
+  the loop, the step a tick adds to a polled loop, measured in the same
+  run; the letter prints both bounds beside each run.
 - **The break** (letter `e`): SBK set on USART4 at 115200 cleared itself
-  4347 HCLK cycles later, 10.4 bit times of the 417-cycle divisor - judged
-  no earlier than 9 bit times, the start bit and the eight data bits that
-  precede the stop bit the manual names (14.10.4), and within 20.
+  4347 HCLK cycles later, 10.4 bit times of the 417-cycle divisor (10.2 to
+  11.1 on WeAct's board) - judged no earlier than 9 bit times, the start
+  bit and the eight data bits that precede the stop bit the manual names
+  (14.10.4), and under 13: the break frame's ten low bits and its stop bit
+  (14.2), a bit for the transmitter's bit clock, and the masked poll's
+  turn.
 - **The debug port's column is refused** (letter `f`): with SW_CFG at 0,
   `init()` of USART3 on its code 1 - PC18 and PC19 - answers false,
   USART3's gate is as it was and its remap field at the reset code.
@@ -548,13 +561,17 @@ arithmetic). What the suite measured against the crystal peer:
   the status read armed the clear and the channel's read performed it;
   with no status read between, PE is still up after the second. The
   CH32V006's and the CH32V203's answer, which the transport's receive
-  vector is built on. And a run of errored frames under a ring with no
+  vector is built on. The suite judges the two readings 14.10.1's sequence
+  decides - no status read, no clear - and prints the one it does not: a
+  channel's read performing the clear a status read armed. And a run of errored frames under a ring with no
   transmit engine (ten runs): eight frames of 0x35 from the far engine at
   115200, each with its last data cell stretched a whole bit over the
   stop bit's sample - a framing error carrying its byte - four bit times
   apart, into channel 8's ring beside the interrupt transmitter: all
   eight stored, FE counted four, the every-other-one of the header's
-  rule, eight USART entries. The same ring reading STATR after the wait
+  rule, eight USART entries (the count printed, and judged only as the
+  errors reported, one to eight; the bytes, no overrun and no fault
+  judged). The same ring reading STATR after the wait
   for a frame - for the interrupt transmitter's TXE, with TXEIE down -
   counted none of the eight (three of three runs, measured with that read
   in place), which is why the wait asks CTLR1 for TXEIE and reads STATR
@@ -622,10 +639,15 @@ arithmetic). What the suite measured against the crystal peer:
   DATAR keeping the first frame (0xB0) and the seven after it lost. A
   break of 20 bit times: one frame, FE, data 0x00.
 - **The far chip's engine shapes** (letter `n`): six bit-banged 0x55
-  frames clean; one cell (data bit 5 of 0x00) stretched survives to +40
-  per cent and fails from +50 - the stop sample's half bit; a 13-bit
-  break ahead of a frame raises LBD in LIN mode and the frame after it
-  arrives.
+  frames clean; one cell (data bit 4 of 0x00, the peer's cell 5) stretched
+  survives to +40 per cent and fails from +50 - the stop sample's half bit
+  (on WeAct's pair, this end 0.5 per cent fast of the far clock, it fails
+  from +40 in 7 runs of 20 and from +50 in the rest). Judged: every
+  stretch 14.3's 3 per cent covers on the clocks' measured ratio is clean
+  - a stop edge no later than a frame 3 per cent slow puts it, 9.27 of the
+  receiver's bits, which leaves +27 per cent against a crystal peer and +20
+  on WeAct's pair; the onset beyond is printed. A 13-bit break ahead of a
+  frame raises LBD in LIN mode and the frame after it arrives.
 - **The modes on a wire** (letter `o`): muted under the address-mark
   wake with ADD 5, 9-bit words from three groups addressed 3, 5 and 3 -
   the receiver delivers the address frame 0x105 and its three data and
@@ -653,12 +675,17 @@ arithmetic). What the suite measured against the crystal peer:
   burst of eight at 115200 had put four frames in the ring: the overrun
   with nothing to take, the vector held off until the block (4096 items,
   512 us) and the burst were over - ORE up, RXNE down, no frame after it:
-  four entries, no channel given up, the overrun and the gap counted once
-  each, five bytes delivered (the four before and the one DATAR held), the
-  vector back waiting for the end; the stall bound, the vector running
-  while a block of 65535 items starved the ring 8.2 ms - RXNE standing
-  under RXNEIE: 257 entries (the overrun's, 255 of the wait for a frame,
-  a tick's), the live channel given up once, a DMA fault counted, and the
+  three entries on WeAct's pair (the wait for the end's, on ORE and the
+  idle line, then two of the wait for a frame on ORE's RXNEIE, the second
+  clearing it; four against the crystal peer, at most four judged), no
+  channel given up, the overrun and the gap counted once each, five bytes
+  delivered (the four before and the one DATAR held), the vector back
+  waiting for the end; the stall bound, the vector running while a block
+  of 65535 items starved the ring 8.2 ms - RXNE standing under RXNEIE: 256
+  entries on WeAct's pair and 257 against the crystal peer (the overrun's
+  and 255 of the wait for a frame, the 255th giving the channel up; 256 or
+  257 judged, the one more an idle line the far chip may leave inside its
+  burst), the live channel given up once, a DMA fault counted, and the
   consumer's look binding it again. The next burst after each, whole and
   in order.
 - **The idle line under the channel's clear, frame by frame** (letter
@@ -668,7 +695,10 @@ arithmetic). What the suite measured against the crystal peer:
   the status read saw IDLE and armed its clear - raises no IDLE of its
   own (its channel read performs the clear and forgets the idle its frame
   armed), and one after a status read that found IDLE down does: that
-  read armed no clear of IDLE. Groups of two read IDLE every time.
+  read armed no clear of IDLE. Groups of two read IDLE every time. The
+  chapter does not state that pattern, so the suite prints it and judges
+  the bytes and the first group's IDLE, which follows the CPU's own
+  status-then-data clear (14.10.1).
 - **A frame that completes between the status read and the data read is
   lost, its overrun cleared unseen**: the F1 clear sequence - STATR read,
   then DATAR - clears ORE whether it rose before the status read or after

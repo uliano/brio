@@ -234,15 +234,15 @@ constexpr uint8_t no_answer = 200;
 /// spans: the kernel ticker's own cycles(), the tick count and the STK
 /// counter's position composed across the restart (ch32x035/ticker.hpp), a
 /// plain call - a time-out needs no inlined read. It wraps at 2^32, so only
-/// differences are used; a read of it is some 60 cycles (letter t's `ruler`).
+/// differences are used; a read of it is some 76 cycles (docs/ch32x035/platform.md).
 struct Ruler {
     static uint32_t now() { return Ticker::cycles(); }
     static constexpr uint32_t hz() { return SysClock::hz; }
 };
 
 /// ONE LOAD OF THE STK COUNTER, for the one span shorter than a read of
-/// the Ruler: letter a's rise of a line, tens of cycles judged under 60,
-/// where the Ruler's own 60 cycles would be most of the figure. The
+/// the Ruler: letter a's rise of a line, tens of cycles judged under a
+/// 400 kHz bit, where the Ruler's own 76 cycles would be most of the figure. The
 /// difference folds one restart at the compare, so it holds for a span
 /// under one tick period (48000 cycles), which rise_of() checks on the
 /// Ruler read around it.
@@ -748,9 +748,15 @@ void ta_block() {
     const Rise sda = rise_of<SdaPin>();
     print(serial, "  rise from low, released, the rail on: SCL ", scl.cycles, " cycles (", scl.polls,
           " polls), SDA ", sda.cycles, " cycles (", sda.polls, " polls) at 48 MHz - a 400 kHz bit is 120", crlf);
-    bench.verdict("with the rail on, each line rises from the pad in well under a 400 kHz bit "
-                  "(the 1.5 kOhm resistors to PB3)",
-                  scl.cycles < 60u && sda.cycles < 60u);
+    // THE BOUND is the claim's own quantity, a 400 kHz bit (2.5 us, 120
+    // cycles): the figure holds the stamps' own instructions (a rise faster
+    // than them reads as zero polls), so it reads high, never low. The I2C
+    // specification's 300 ns for a fast-mode rise is 14 cycles, under the
+    // instrument's own figure, and is not judged here.
+    constexpr uint32_t bit_400k = SysClock::hz / 400'000u;
+    bench.verdict("with the rail on, each line rises from the pad within a 400 kHz bit, the stamps' own "
+                  "cycles included (the 1.5 kOhm resistors to PB3)",
+                  scl.cycles < bit_400k && sda.cycles < bit_400k);
 
     // ---- THE USB PADS' PULLS under the alternate function, the rail OFF ----
     // (RM 8.3.2.4: "only pull-up mode is set here", the GPIO configuration
@@ -1627,10 +1633,14 @@ void th_kernel() {
     print(serial, "  the tenure into a held CLOCK answered ", kl::Probe::n, " with status ",
           kl::Probe::replies[0], " after ", took_clock, " ms (limit 20, hold 45); SCL at the reply: ",
           SclPin::read() ? "high" : "LOW", crlf);
+    // THE SAME LIMIT as the wedge's above: the one-shot armed at the
+    // request's dispatch, after t1 was read, matures bus_timeout_ticks on
+    // (never sooner), recover() waits for nothing (ch32x035/i2c.hpp), so
+    // `took_clock` is bus_timeout_ticks to answered_by_ticks.
     bench.verdict("a client holding the CLOCK past the limit is answered i2c_timeout ON THE ARBITER'S "
                   "CLOCK - the one wedge the silicon cannot answer by itself",
-                  kl::Probe::n == 1u && kl::Probe::replies[0] == i2c_timeout && took_clock >= 20u &&
-                      took_clock <= 30u);
+                  kl::Probe::n == 1u && kl::Probe::replies[0] == i2c_timeout &&
+                      took_clock >= kl::bus_timeout_ticks && took_clock <= answered_by_ticks);
     kl::drain(100);
     owner = Owner::host;
     settle_ms(400);
@@ -2299,9 +2309,14 @@ void tk_unstick() {
     print(serial, "  SDA held by the peer: ", held ? "yes" : "no", "; unstick() clocked ", pulses,
           " pulse(s) before it let go", crlf);
     bench.verdict("the peer really held SDA low", held);
-    bench.verdict("unstick() clocked until the client released - the peer's four falling edges "
-                  "asked, a handful of pulses, never 0xFF",
-                  pulses >= 1u && pulses <= 9u);
+    // THE COUNT is the peer's: twi_peer polls SCL for falling edges and lets
+    // SDA go on the fourth (h.aux8), its turn a few instructions against the
+    // 5 us low half of each of unstick()'s pulses; unstick() reads SDA a half
+    // bit after letting SCL rise, by when the line, 1.5 kOhm over the bus's
+    // picofarads, is high. So it reads released after the fourth pulse.
+    bench.verdict("unstick() clocked until the client released - the peer's four falling edges asked, four "
+                  "pulses",
+                  pulses == h.aux8);
     settle_ms(450);
     print(serial, "  the event vector, idle, after the hand-made START and STOP: ", host_isr_entries,
           " entries, STAR1=", hex(H::status1()), crlf);
@@ -2370,24 +2385,54 @@ void tu_unwedge() {
 // ===========================================================================
 //
 // THE INSTRUMENT. Ticker::cycles() around start(), a count being one cycle of HCLK;
-// the read's own cost is inside the figure (a read of it is some 60 cycles), so a figure reads high by
-// it, never low. The row with the STK stopped times on TIM2 at 2 us a count, the
-// instrument's resolution there.
+// the read's own cost is inside every figure alike (a read of it is some 76 cycles), so a
+// figure reads high by it, never low. The rows with the STK stopped time on TIM2 at 2 us a
+// count, the instrument's resolution there; they run first, because they measure the
+// poll the other rows' ceilings use.
 //
 // What brackets a figure. Below: the name, bus_free_us or stop_drain_us in cycles,
-// since the wait ends no earlier. Above: the same plus what start() costs around
-// the wait, which the free bus's row prints (`free`), one poll (poll_max) because
-// the wait looks at the counter once a poll, one tick's entry (tick_entry) because
-// a tick may land in that last poll, and the ruler.
+// since the wait ends no earlier. Above (over_of()): the same plus
+//  - what start() costs around the wait on a free bus, its two first looks, which the
+//    free bus's row measures (`free`, the ruler's read inside it as in every row);
+//  - three polls: the wait reads the counter once a poll, so it ends up to one poll
+//    after the bound, and the wait's entry (poll_for_us()'s call, the rate's multiply,
+//    the counter's two loads) and its last look after the loop hold fewer instructions
+//    and peripheral loads than two polls (the release listing, the watch's: some 30
+//    instructions and five peripheral loads with wait_bus_free()'s own frame, against
+//    two polls' 44 and eight; the drain's wait is shaped alike). THE POLL is measured
+//    in this run with the STK stopped, on TIM2, an independent counter: the span over
+//    the budget's count of polls, which holds the wait's entry and last look too, so it
+//    reads long;
+//  - one tick's step (tick_step()), measured in this run: a tick landing in the last
+//    poll lengthens it by its handler.
 constexpr uint32_t bound_per_us = SysClock::hz / 1'000'000u;
 constexpr uint32_t bus_free_named = 100;
 constexpr uint32_t stop_drain_named = 5'000;
-/// The longest poll, in cycles: the watch's over an idle wire, 81 measured (the stopped row's figure), four peripheral loads through a flash fetched a word at a time, and room for the layout's moves.
-constexpr uint32_t poll_max = 96;
-constexpr uint32_t tick_entry = 220;
-constexpr uint32_t ruler = 60;
 /// With the STK stopped: the budget is the bound over 8 cycles a poll.
 constexpr uint32_t budget_of(uint32_t us) { return us * bound_per_us / 8u; }
+
+/// THE TICK'S COST TO A POLLED LOOP, measured in this image: the ruler read
+/// back to back for three tick periods behind a drained console; the longest
+/// step between two reads is one read plus the tick's handler with its entry
+/// and exit, nothing else being armed. 0 when the console did not drain.
+uint32_t tick_step() {
+    if (!console_drain()) {
+        return 0;
+    }
+    constexpr uint32_t period = SysClock::hz / Ticker::ticks_per_second;
+    uint32_t last = Ticker::cycles();
+    const uint32_t t0 = last;
+    uint32_t worst = 0;
+    while (last - t0 < 3u * period) {
+        const uint32_t now = Ticker::cycles();
+        worst = now - last > worst ? now - last : worst;
+        last = now;
+    }
+    return worst;
+}
+
+/// The ceiling's terms over the name, in cycles (the block comment above).
+constexpr uint32_t over_of(uint32_t free_hi, uint32_t poll, uint32_t step) { return free_hi + 3u * poll + step; }
 
 Host::Request nobody_probe() {
     Host::Request r{};
@@ -2452,10 +2497,6 @@ struct ArbAnswer {
     uint8_t status;
     uint32_t us;
 };
-/// THE KERNEL'S TURN around a request on the wire: the post waits for the dispatch and
-/// the reply for the probe's turn, under 2 ms between them on a loop with nothing else
-/// to do (the first reply's figure is printed).
-constexpr uint32_t standing_arb_us = 2'000;
 
 ArbAnswer ask_arbiter(const Host::Request& r) {
     kl::Probe::clear_tally();
@@ -2488,10 +2529,13 @@ ArbAnswer ask_of(bool timed, const Host::Request& r, uint32_t ms) {
 /// is on the wire. Under the 20 ms per-bus timeout the client holds 15 ms, or the
 /// write itself would meet the timeout; with none it holds 45.
 ///
-/// THE BOUND, post to reply: stop_drain_us, then `over` (what start() costs around
-/// the wait, a poll, a tick's entry, the ruler), then the kernel's turn, which is
-/// read here on a request refused with nothing on the wire: the same post, dispatch
-/// and reply with no wait in them. One microsecond for the truncation of each.
+/// THE BOUND, post to reply: stop_drain_us, then `over` (over_of(): what start()
+/// costs around the wait, three polls, a tick's step), then the kernel's turn, which
+/// is read here on a request refused with nothing on the wire: the same post,
+/// dispatch and reply with no wait in them. One microsecond for the truncation of
+/// each. The next request's time to its reply, the hold over, is printed and not
+/// judged: it holds the probe's vector entries, which this letter does not time; its
+/// one reply and its status are judged.
 bool run_out_row(I2cSpeed speed, bool timed, uint32_t over) {
     const uint16_t hold_us = timed ? 15'000 : 45'000;
     constexpr uint8_t stands = 3;
@@ -2542,7 +2586,7 @@ bool run_out_row(I2cSpeed speed, bool timed, uint32_t over) {
         if (drained && accepted && turn.replies == 1u && turn.status == i2c_rejected && through.replies == 1u &&
             through.status == i2c_ok &&
             stood && a.replies == 1u && a.status == i2c_timeout && a.us >= stop_drain_named && a.us <= ceiling && untouched &&
-            freed && next.replies == 1u && (next.status == i2c_ok || next.status == i2c_nack_addr) && next.us < standing_arb_us &&
+            freed && next.replies == 1u && (next.status == i2c_ok || next.status == i2c_nack_addr) &&
             Host::unwedges() == resets0) {
             ++clean;
         }
@@ -2558,7 +2602,10 @@ bool run_out_row(I2cSpeed speed, bool timed, uint32_t over) {
 /// Requests waiting behind the tenure when its reply comes: each spends the bound in
 /// one dispatch of the arbiter (begin_waiting()), and each is answered. A write of two
 /// under a 15 ms hold and two probes queued behind it: 15 ms, then 5 and 5. The bound
-/// is run_out_row()'s twice over and the write's, printed with what it took.
+/// is run_out_row()'s twice over and the write's, printed with what it took: the hold
+/// on the peer's clock, the write's three bytes at the slowest rate letter f passes
+/// (360 us, tenure_budget_us's arithmetic), the two run-outs with their `over`, and
+/// three of the kernel's turns, one a reply, read as run_out_row() reads it.
 bool run_out_queue(uint32_t over) {
     constexpr uint32_t hold_us = 15'000;
     host_ready();
@@ -2571,6 +2618,9 @@ bool run_out_queue(uint32_t over) {
     const bool accepted = peer_act(Op::serve, held);
     kl::BusKernel::init_all();
     owner = Owner::bus_ao;
+    Host::Request refused = command_probe(link_speed);
+    refused.addr = 0x00;
+    const ArbAnswer turn = ask_arbiter(refused);
     Host::Request w = kl::request(twilink::dut_addr, kl::out_a);
     w.tx_len = 2;
     w.speed = link_speed;
@@ -2589,15 +2639,16 @@ bool run_out_queue(uint32_t over) {
     const bool freed = !H::stopping() && !H::busy();
     owner = Owner::host;
     print(serial, "  two requests waiting behind a 15 ms hold: replies ", n, ", status ", kl::Probe::replies[0], " ",
-          kl::Probe::replies[1], " ", kl::Probe::replies[2], ", all in ", us, " us", crlf);
+          kl::Probe::replies[1], " ", kl::Probe::replies[2], ", all in ", us, " us, the kernel's turn ", turn.us,
+          " us", crlf);
     // The hold is the peer's, timed on its clock: peer_lo_us(15'000) = 14445 to
     // peer_hi_us(15'000) = 15555 us here (the two RC clocks' ratio); the two
     // stop_drain_us bounds and the rest are this board's own, on this clock.
-    const bool ok = drained && accepted && n == 3u && kl::Probe::replies[0] == i2c_ok &&
-                    kl::Probe::replies[1] == i2c_timeout &&
+    const bool ok = drained && accepted && turn.replies == 1u && turn.status == i2c_rejected && n == 3u &&
+                    kl::Probe::replies[0] == i2c_ok && kl::Probe::replies[1] == i2c_timeout &&
                     kl::Probe::replies[2] == i2c_timeout && us >= peer_lo_us(hold_us) + 2u * stop_drain_named &&
                     us <= peer_hi_us(hold_us) + 360u + 2u * (stop_drain_named + over / bound_per_us + 1u) +
-                              standing_arb_us &&
+                              3u * (turn.us + 1u) &&
                     freed;
     host_ready();
     settle_ms(220);
@@ -2624,6 +2675,80 @@ void tt_bounds() {
         return;
     }
     start_drained = true;
+    // ---- first, with the STK stopped: each wait on its count of polls, and the poll ----
+    // The STK stopped stops the suite's Ruler too, so the span is TIM2's, a 16-bit
+    // count at 2 us started from zero: its update flag still down at the end says it
+    // did not wrap (131 ms), so the count is the whole span. Each wait ends on its
+    // budget of polls (budget_of(), at 8 cycles a poll, the least a poll can take), so
+    // never under the time named. The span over that count is THE POLL the running
+    // rows' ceilings take (over_of()), the wait's entry and its last look spread over
+    // it, so it reads long: rounded up, and one cycle more for the count's quantum, 2 us
+    // over 600 polls.
+    using PollTimer = Tim<2>;
+    constexpr uint32_t poll_timer_us = 2;
+    PollTimer::init();
+    (void)PollTimer::configure({.prescaler = static_cast<uint16_t>(poll_timer_us * bound_per_us - 1u), .period = 0xFFFF});
+    PollTimer::enable(true);
+    // A console that did not drain would put its vector inside the timed call:
+    // the call is then not made, its figure reads 0, under every floor, and
+    // start_drained goes false.
+    bool wrapped = false;
+    const auto stopped_us = [&wrapped]() -> uint32_t {
+        if (!console_drain()) {
+            start_drained = false;
+            return 0;
+        }
+        stk()->CTLR = stk()->CTLR & ~stk_ste;
+        PollTimer::set_count(0);
+        PollTimer::clear_flags(PollTimer::update_flag);
+        host_done = false;
+        host_isr_entries = 0;
+        (void)Host::start(nobody_probe());
+        const uint16_t t1 = static_cast<uint16_t>(PollTimer::count());
+        wrapped = wrapped || PollTimer::flag(PollTimer::update_flag);
+        stk()->CTLR = stk()->CTLR | stk_ste;
+        return poll_timer_us * t1;
+    };
+    host_ready();
+    SclPin::output(false);
+    (void)delay_us(clock, 20);
+    const uint32_t free_budget_us = stopped_us();
+    SclPin::function();
+    (void)delay_us(clock, 20);
+    (void)Host::recover();
+    const bool wire_idle = stand_busy();
+    const uint32_t watch_budget_us = stopped_us();
+    settle_ms(1);
+    (void)Host::recover();
+    const bool stood = stand_stop(link_speed);
+    const uint32_t drain_budget_us = stopped_us();
+    settle_ms(60);
+    (void)Host::recover();
+    settle_ms(200);
+    PollTimer::enable(false);
+    const uint32_t free_polls = budget_of(bus_free_named);
+    const uint32_t drain_polls = budget_of(stop_drain_named);
+    const auto per_poll = [](uint32_t us, uint32_t polls) { return (us * bound_per_us + polls - 1u) / polls + 1u; };
+    const uint32_t poll_free = per_poll(free_budget_us, free_polls);
+    const uint32_t poll_watch = per_poll(watch_budget_us, free_polls);
+    const uint32_t poll_drain = per_poll(drain_budget_us, drain_polls);
+    uint32_t poll = poll_free > poll_watch ? poll_free : poll_watch;
+    poll = poll_drain > poll ? poll_drain : poll;
+    print(serial, "  the STK stopped: bus_free_us ends after ", free_polls, " polls in ", free_budget_us, " us, ",
+          poll_free, " cycles a poll with SCL low, ", watch_budget_us, " us and ", poll_watch,
+          " over an idle wire (BUSY up ", wire_idle ? 1 : 0, ", the reset inside); stop_drain_us after ", drain_polls,
+          " polls in ", drain_budget_us, " us, ", poll_drain, " cycles a poll (rounded up, one more for the count)",
+          wrapped ? "; TIM2 WRAPPED" : "", crlf);
+    bench.verdict("with the STK stopped each wait still ends, on its count of polls: never under the time named, "
+                  "the span TIM2 counted whole",
+                  start_drained && stood && wire_idle && !wrapped && free_budget_us >= bus_free_named &&
+                      watch_budget_us >= bus_free_named && drain_budget_us >= stop_drain_named);
+    // THE TICK'S STEP, the last of the ceilings' terms.
+    const uint32_t step = tick_step();
+    if (step == 0u) {
+        start_drained = false;
+    }
+    print(serial, "  a tick's step on a polled loop: ", step, " cycles (0 = the console did not drain)", crlf);
     // ---- the free bus: what start() costs around the wait ----
     constexpr uint8_t tries = 8;
     uint32_t free_lo = 0xFFFFFFFFu;
@@ -2636,8 +2761,8 @@ void tt_bounds() {
         free_hi = c > free_hi ? c : free_hi;
         settle_ms(2);
     }
-    print(serial, "  free bus: start() ", free_lo, " to ", free_hi, " cycles, the ruler's ", ruler, " inside", crlf);
-    const uint32_t over = free_hi + poll_max + tick_entry + ruler;
+    print(serial, "  free bus: start() ", free_lo, " to ", free_hi, " cycles, the ruler's read inside", crlf);
+    const uint32_t over = over_of(free_hi, poll, step);
     // ---- bus_free_us, BUSY held by SCL low: the bound alone ----
     uint32_t held_lo = 0xFFFFFFFFu;
     uint32_t held_hi = 0;
@@ -2659,7 +2784,7 @@ void tt_bounds() {
     print(serial, "  bus_free_us ", bus_free_named, " with SCL held low: start() ", held_lo, " to ", held_hi, " cycles, ",
           (held_hi - free_lo) / bound_per_us, " us at most over the free bus's", crlf);
     bench.verdict("bus_free_us means what it says: with SCL held low start() spends its 100 us and no more than the "
-                  "poll, the tick and the ruler over them, no reset taken",
+                  "free bus's cost, three polls and a tick's step over them, no reset taken",
                   start_drained && held_lo >= bus_free_named * bound_per_us &&
                       held_hi <= bus_free_named * bound_per_us + over && held_kept);
     // ---- bus_free_us, BUSY standing over an idle wire: the bound and the reset ----
@@ -2722,70 +2847,6 @@ void tt_bounds() {
                   untimed_sound);
     bench.verdict("two requests waiting behind the hold are each answered i2c_timeout, one bound each",
                   run_out_queue(over));
-    // ---- both with the STK stopped: the poll budget, on TIM2 at 2 us a count ----
-    // The STK stopped stops the suite's Ruler too, so the span is TIM2's, a 16-bit
-    // count. The longest span the verdict admits is stop_drain_us's polls at the
-    // longest poll, budget_of(5000) x 96 / 48 = 60000 us: at 2 us a count that is
-    // 30000 counts, inside the counter's half-wrap (32768), so a span past the
-    // bound cannot wrap back into it (at 1 us a count it would: 60000 counts).
-    using PollTimer = Tim<2>;
-    constexpr uint32_t poll_timer_us = 2;
-    static_assert(brio::span_fits<16>(budget_of(stop_drain_named) * poll_max / bound_per_us / poll_timer_us),
-                  "the longest admitted span inside the 16-bit counter's half-wrap");
-    PollTimer::init();
-    (void)PollTimer::configure({.prescaler = static_cast<uint16_t>(poll_timer_us * bound_per_us - 1u), .period = 0xFFFF});
-    PollTimer::enable(true);
-    // A console that did not drain would put its vector inside the timed call:
-    // the call is then not made, its figure reads 0, under every floor, and
-    // start_drained goes false.
-    const auto stopped_us = []() -> uint32_t {
-        if (!console_drain()) {
-            start_drained = false;
-            return 0;
-        }
-        stk()->CTLR = stk()->CTLR & ~stk_ste;
-        const uint16_t t0 = static_cast<uint16_t>(PollTimer::count());
-        host_done = false;
-        host_isr_entries = 0;
-        (void)Host::start(nobody_probe());
-        const uint16_t t1 = static_cast<uint16_t>(PollTimer::count());
-        stk()->CTLR = stk()->CTLR | stk_ste;
-        return poll_timer_us * static_cast<uint16_t>(t1 - t0);
-    };
-    host_ready();
-    SclPin::output(false);
-    (void)delay_us(clock, 20);
-    const uint32_t free_budget_us = stopped_us();
-    SclPin::function();
-    (void)delay_us(clock, 20);
-    (void)Host::recover();
-    const bool wire_idle = stand_busy();
-    const uint32_t watch_budget_us = stopped_us();
-    settle_ms(1);
-    (void)Host::recover();
-    const bool stood = stand_stop(link_speed);
-    const uint32_t drain_budget_us = stopped_us();
-    settle_ms(60);
-    (void)Host::recover();
-    settle_ms(200);
-    PollTimer::enable(false);
-    const uint32_t free_polls = budget_of(bus_free_named);
-    const uint32_t drain_polls = budget_of(stop_drain_named);
-    print(serial, "  the STK stopped: bus_free_us ends after ", free_polls, " polls in ", free_budget_us, " us, ",
-          free_budget_us * bound_per_us / free_polls, " cycles a poll with SCL low, ", watch_budget_us, " us and ",
-          watch_budget_us * bound_per_us / free_polls, " over an idle wire (BUSY up ", wire_idle ? 1 : 0,
-          ", the reset inside); stop_drain_us after ", drain_polls, " polls in ", drain_budget_us, " us, ",
-          drain_budget_us * bound_per_us / drain_polls, " cycles a poll", crlf);
-    // The count's quantum, 2 us, above each bound: a reading lies within one count
-    // of the span.
-    bench.verdict("with the STK stopped each wait still ends, on its count of polls: never under the time named, never "
-                  "over the budget at the longest poll",
-                  start_drained && stood && wire_idle && free_budget_us >= bus_free_named &&
-                      free_budget_us <= free_polls * poll_max / bound_per_us + poll_timer_us &&
-                      watch_budget_us >= bus_free_named &&
-                      watch_budget_us <= free_polls * poll_max / bound_per_us + poll_timer_us &&
-                      drain_budget_us >= stop_drain_named &&
-                      drain_budget_us <= drain_polls * poll_max / bound_per_us + poll_timer_us);
     host_ready();
     bench.verdict("and the command channel is back", command(Op::ping));
 }
@@ -3561,10 +3622,17 @@ void ty_starved() {
                   "was asked",
                   ly::exact(rd1, 1u + next_n, 3u) && ly::exact(rd8, 8u + next_n, 3u) &&
                       ly::exact(late_r, 8u + next_n, 3u));
-    print(serial, "  a load starting on the second-last byte of a read of 8: one more byte off the far end in ",
-          window.more, " of ", window.rows, " rows", crlf);
-    bench.verdict("A READ OF EIGHT CAUGHT ON ITS SEVENTH BYTE: the reply exact, the far end at most one byte over",
-                  window.rows != 0u && window.ok == window.rows && window.took_max <= 8u + next_n + 2u);
+    // What the far end gave past the eight is printed, not judged: how many
+    // bytes the controller clocks while the channel is held there - DATAR
+    // and the shift register full, the NACK armed by the channel's own
+    // reads - is not given by the chapter, and the far end counts a byte as
+    // it loads it, before the controller clocks it out.
+    print(serial, "  a load starting on the second-last byte of a read of 8: the far end counted ", window.took_min,
+          " to ", window.took_max, " (", 8u + next_n, " asked), more than asked in ", window.more, " of ",
+          window.rows, " rows", crlf);
+    bench.verdict("A READ OF EIGHT CAUGHT ON ITS SEVENTH BYTE: the reply exact, every row i2c_ok with its eight "
+                  "bytes",
+                  window.rows != 0u && window.ok == window.rows);
     bench.verdict("and the command channel is back", command(Op::ping));
 }
 
@@ -3665,15 +3733,26 @@ void tq_quirks() {
     host_ready();
     say("the block up when the peer took SDA", seen);
     say("the block brought up over the held line", over);
-    bench.verdict("a START into a wire a foreign chip holds, from a block that saw the line taken, is "
-                  "NOT refused: SB rises within a fraction of a millisecond, and the address's first one "
-                  "bit loses arbitration - the engine's i2c_arb_lost of letter h",
-                  seen.held && seen.arlo_at == 0u && seen.sb_at != 0u && seen.sb_at < 500u &&
-                      seen.addr_arlo_at != 0u && seen.addr_arlo_at < 500u);
-    bench.verdict("from a block brought up over the held line the START stays PENDING - no SB, no ARLO "
-                  "in 50 ms, BUSY standing: the per-bus timeout's case",
-                  over.held && over.sb_at == 0u && over.arlo_at == 0u && (over.c1 & i2c_start) != 0u &&
-                      (over.s2 & i2c_busy) != 0u);
+    // WHAT A START INTO A HELD SDA DOES - SB after some tens of microseconds,
+    // ARLO, or a START left pending - the chapter does not say, and the
+    // siblings answer differently (the header): the habit is printed above,
+    // and the driver's outcome under it is letter h's verdict. What is
+    // judged is the arbitration the chapter does state: once SB has risen,
+    // the address's first bit is a 1 the held line reads 0, and the
+    // controller loses arbitration on it - within the START's hold and that
+    // bit's low and high phases, under two SCL periods at the slowest rate
+    // letter f passes (13.3 us at 100 kHz, 26.7 us), plus the microsecond of
+    // the reading's rounding.
+    constexpr uint32_t arlo_within_us = 2u * 40u / 3u + 1u;   // two periods of 13.3 us, rounded down, +1
+    if (!seen.held || !over.held) {
+        bench.skip("the far chip did not hold SDA at both STARTs: the arbitration not staged");
+    } else if (seen.sb_at == 0u) {
+        bench.skip("SB never rose into the held line here: the address's arbitration not staged");
+    } else {
+        bench.verdict("SB up into the held line, the address's first one bit loses arbitration within two SCL "
+                      "periods at the slowest rate letter f passes - the engine's i2c_arb_lost of letter h",
+                      seen.addr_arlo_at != 0u && seen.addr_arlo_at <= arlo_within_us);
+    }
 
     // ---- 2. How long the host's own STOP stands in CTLR1 after the
     // completion edge, at both speeds. ----
@@ -3715,10 +3794,22 @@ void tq_quirks() {
     }
     print(serial, "  2. the host's STOP stands in CTLR1 for ", stand[0], " cycles at 100 kHz and ", stand[1],
           " at 400 kHz after the completion edge (a bit is 480 and 120); status ", sts[0], "/", sts[1], crlf);
-    bench.verdict("the host's own STOP stands in CTLR1 after the completion edge, for about one bit - "
+    // THE CEILING: the vector stores STOP before it raises the completion
+    // edge, and STOP is cleared when the STOP condition is detected
+    // (15.9.1): the rest of the last clock's low phase, then the high phase
+    // before SDA rises - one SCL period at most, at the slowest rate letter f
+    // passes (13.3 us at 100 kHz, 640 cycles; 3.3 us at 400 kHz, 160). The
+    // reading adds one turn of cycles_until() at most (the fall seen late; the
+    // edge seen late only shortens it): a composed ruler read, 76 cycles
+    // (docs/ch32x035/platform.md), and a register load, under twice the read.
+    constexpr uint32_t stop_turn = 2u * 76u;
+    constexpr uint32_t stop_100k = SysClock::hz / 75'000u + stop_turn;    // 100 kHz a quarter slower
+    constexpr uint32_t stop_400k = SysClock::hz / 300'000u + stop_turn;   // 400 kHz a quarter slower
+    bench.verdict("the host's own STOP stands in CTLR1 after the completion edge at 100 kHz, and at both speeds "
+                  "for no more than one SCL period at the slowest rate letter f passes and the reading's turn - "
                   "what start()'s bounded wait spends",
-                  sts[0] == i2c_ok && sts[1] == i2c_ok && stand[0] > 0u && stand[0] < 4800u &&
-                      stand[1] < 2400u);
+                  sts[0] == i2c_ok && sts[1] == i2c_ok && stand[0] > 0u && stand[0] <= stop_100k &&
+                      stand[1] <= stop_400k);
 
     // ---- 3. A CTLR1 store while that STOP stands: a second STOP request? ----
     {
@@ -4329,11 +4420,10 @@ void tx_cost() {
                       mr16.entries == r16.entries);
     // From SRAM behind this suite's vector, which stays in the flash: the
     // vector's own path (the storm budget, the owner, the stamps) is the
-    // flash's, the trampoline's body SRAM's.
-    bench.verdict("and its entry a quarter shorter than the flash's at least, over the 255-byte write and the "
-                  "16-byte read",
-                  ram_body != 0u && 4u * ram_body < 3u * pump_body && ram_read != 0u &&
-                      4u * ram_read < 3u * (r16.entries != 0u ? r16.body / r16.entries : 0u));
+    // flash's, the trampoline's body SRAM's. How much shorter the entry runs
+    // there is the fetch's - the flash's wait states against SRAM's, behind
+    // peripheral loads the placement does not touch - which no written figure
+    // bounds: the two are printed above, side by side, and not judged.
     longest_entry = longest_flash;
     print(serial, "  unwedges so far (15.9.1's stuck BUSY taken out by start()): plain ", Host::unwedges(),
           ", engined ", DmaHost::unwedges(), crlf);

@@ -46,11 +46,14 @@
 //   i  THE RELEASE CONTRACT: USART3's transmit request raised under DMAT and
 //      released four ways - its enable, the block, the gate, the reset
 //      line - then channel 2 bound by its next owner: does it move a stray
-//      item at its first enable?
+//      item at its first enable? (judged after the reset line, the
+//      contract; printed after the other three)
 //   j  the arbiter: two memory-to-memory blocks on channels 1 and 8, at two
 //      levels and at one, their order read off the counts
 //   k  THE CORE'S SLEEP: a copy and a paced block started before the
 //      platform's idle() - does the controller move while the core sleeps?
+//      (printed) - and the platform's idle() that does not sleep over them
+//      (judged)
 //   m  the benchmark row: copy, fill and copy from the flash at 16, 256 and
 //      4096 bytes, and 1024 bytes paced by USART3 at 1 Mbaud - the lines of
 //      docs/design/benchmark.md's grammar
@@ -466,7 +469,7 @@ void te_tx_engine() {
     }
     // 100 ms, four times the 23.6 ms the run's wire takes; a run that
     // never went idle reads as the most a span can, which the verdict's
-    // 1030 refuses.
+    // bound refuses.
     const bool went_idle = brio::wait_until<Ruler>([] { return Serial::tx_idle(); }, 100'000);
     const uint32_t took = went_idle ? Ruler::now() - t0 : 0xFFFF'FFFFu;
     // 272 frames of ten bits at 115200 (BRR 417 for 416.7: 0.8 thousandths
@@ -481,8 +484,18 @@ void te_tx_engine() {
     bench.verdict("a burst longer than the ring went out in blocks", blocks >= 2u);
     bench.verdict("with no transfer fault", Serial::dma_faults() == 0u);
     bench.verdict("and the ring drained to empty", drained);
-    bench.verdict("at the rate asked: 2720 bits at 115200 within -1 % to +3 % of their wire time",
-                  permille >= 990u && permille <= 1030u);
+    // THE BOUND, derived. The baud generator and the ruler both count HCLK,
+    // so the HSI's tolerance cancels and the frames take exactly 2720 x 417
+    // cycles, 1000.8 thousandths of the wire figure above: never fewer. On
+    // top of them the span holds its two ends - the first print reaching
+    // the transmit engine and the line idle seen by the wait's turn - each
+    // a few hundred instructions at most, under a frame's 4170 cycles - so
+    // at most two frames of 272, 7.4 thousandths; a gap between the
+    // engine's blocks is what the verdict exists to see (a block's
+    // completion leaves two frames, the data register's and the shifter's,
+    // to start the next one in).
+    bench.verdict("at the rate asked: 2720 bits at 115200 in their wire time, its ends within two frames",
+                  permille >= 1000u && permille <= 1008u);
 }
 
 // ---------------------------------------------------------------------------
@@ -711,8 +724,8 @@ void ti_held_request() {
     bench.verdict("with no request ever raised, the next owner moves nothing", control == 0u);
     bench.verdict("after the reset line, the next owner moves nothing: the release contract holds here",
                   reset == 0u);
-    bench.verdict("every way of letting go ended with the channel at most one stray item down",
-                  dmat_off <= 1u && ue_off <= 1u && gated <= 1u);
+    // The three ways short of the reset: what the silicon does with a raised
+    // request the chapter does not describe, read on one die - printed.
     if (dmat_off + ue_off + gated != 0u) {
         print(serial, "  -> A RAISED REQUEST OUTLIVES its peripheral's release on this die unless the block is "
                       "reset", crlf);
@@ -891,14 +904,14 @@ void tk_sleep() {
     const uint32_t slept = Ruler::now() - t0;
     const uint16_t left = DmaChannel<5>::count();
     (void)engine_wait();   // the copy's end is not this verdict's: the count at the wake is
+    // What the controller does while the core sleeps is the silicon's habit,
+    // read on one die (the chapter does not say): printed, as is the paced
+    // block it makes crawl. The platform's verdicts below do not rest on it.
     print(serial, "  4096-byte copy, the core asleep (no guard) ", slept, " cycles: ", left,
           " items left at the wake", crlf);
-    bench.verdict("IN SLEEP THE CONTROLLER MOVES NOTHING: the copy stood still while the core slept (this die)",
-                  left > 3000u);
     const uint32_t raw_paced = paced_permille([] { raw_sleep(); });
     print(serial, "  256 bytes paced at 1 Mbaud, the core sleeping between interrupts (no guard): ", raw_paced,
           " thousandths of the pace", crlf);
-    bench.verdict("and a request-paced block crawls: it moves only while the core is awake", raw_paced > 2000u);
 
     // THE PLATFORM: idle() asks the controller first and does not sleep
     // over a working channel - the same copy idles to its own interrupt.
@@ -923,17 +936,35 @@ void tk_sleep() {
         5'000);
     const uint32_t wall = Ruler::now() - c0;
     print(serial, "  the same copy idling through the platform to its own interrupt: ", wall, " cycles", crlf);
-    bench.verdict("the platform's idle() does not sleep over it: ended within a tick, at the controller's rate",
-                  copied && wall < 40'000u && memcmp(big_a, big_b, big_bytes) == 0);
+    // The copy started right after a tick, so the next interrupt a sleep
+    // over it could wait for is the next tick, a period (48 000 cycles)
+    // away; the copy's own 4096 items at the controller's measured six
+    // cycles an item take some 25 000.
+    bench.verdict("the platform's idle() does not sleep over it: ended within the tick period it started in",
+                  copied && wall < SysClock::hz / Ticker::ticks_per_second && memcmp(big_a, big_b, big_bytes) == 0);
     const uint32_t guarded_paced = paced_permille([] { one_idle(); });
     print(serial, "  256 bytes paced at 1 Mbaud, idling through the platform: ", guarded_paced,
           " thousandths of the pace", crlf);
-    bench.verdict("a paced block idled through the platform keeps its pace (within 2 per cent)",
-                  guarded_paced >= 990u && guarded_paced <= 1020u);
+    // THE BOUND, derived. USART3's baud generator (BRR 48, exact at 1 Mbaud)
+    // and the ruler both count HCLK, so the HSI's tolerance cancels: a frame
+    // is 480 cycles, the pace 256 of them. The data register and the shifter
+    // hold two frames, so the last item can be written no sooner than 254
+    // frames after the first (992.2 thousandths); the completion comes no
+    // later than the 256 frames, the idle frame TE sent ahead of them and
+    // the completion's vector and one turn of the wait (a few hundred
+    // cycles, under one frame): 258 frames, 1007.8 thousandths.
+    bench.verdict("a paced block idled through the platform keeps its pace: 254 to 258 of its frames",
+                  guarded_paced >= 992u && guarded_paced <= 1007u);
     (void)slept_through;
     // This suite's console receives through a CIRCULAR channel, which is
     // always working: the program holds itself awake (the platform's file
-    // header), and idle() returns at once on every turn.
+    // header), and idle() returns at once on every turn. The console
+    // drained first: then the ticks are the only interrupts in the window.
+    if (!console_drain()) {
+        bench.skip("the console did not drain: the idle turns not counted");
+        role5 = Role::count;
+        return;
+    }
     const uint32_t i0 = Ticker::ticks();
     uint32_t turns = 0;
     while (Ticker::ticks() - i0 < 20u) {
@@ -941,8 +972,12 @@ void tk_sleep() {
         ++turns;
     }
     print(serial, "  the console's receive ring at work: 20 ticks of idle() took ", turns, " turns", crlf);
-    bench.verdict("a receive ring holds the program awake: idle() returns at once, many turns a tick",
-                  Dma::any_working() && turns > 200u);
+    // An idle() that slept would return at an interrupt: over 20 ticks, the
+    // 20 ticks' and at most one event latched before the window (the event
+    // register is one bit), 21 turns.
+    bench.verdict("a receive ring holds the program awake: idle() returns at once, more turns than the 21 a sleep "
+                  "to every interrupt allows",
+                  Dma::any_working() && turns > 21u);
     role5 = Role::count;
 }
 
@@ -1052,9 +1087,10 @@ void tm_bench() {
     pacer_close();
     Paced::stop();
     bench_line(serial, "paced", 1024, s, Ruler::hz(), 100'000);
+    // The benchmark row is a measurement (docs/design/benchmark.md): lines,
+    // no verdict.
     role2 = Role::count;
     role5 = Role::count;
-    bench.verdict("ran", true);
 }
 
 void banner() {

@@ -22,12 +22,12 @@
 //
 // What is exercised, letter by letter:
 //   a  the block: every register's reset value on both timers - CTLR1
-//      reading 0x2000, its "reserved" bit 13 set, and DMAADR (the burst's
-//      window onto CTLR1) with it - bit 13 writable both ways and kept by
-//      configure(), the prescaler taken at the update and not before,
-//      INTFR written zero to clear, a software compare event raising
-//      nothing on an output channel, the remap field written and refused
-//      beyond its codes
+//      bar its "reserved" bit 13, which this die reads set (printed), and
+//      DMAADR (the burst's window onto CTLR1) with it - bit 13 kept by
+//      configure() as it reads, the prescaler taken at the update and not
+//      before, INTFR written zero to clear, what a software compare event
+//      raises on an output channel (printed), the remap field written and
+//      refused beyond its codes
 //   b  the levels: a timer that never ran driving its output low, the
 //      complementary output alone following OCxREF on a running counter,
 //      the HOLD while the counter is stopped, CCxNP, MOE letting the output
@@ -37,7 +37,7 @@
 //      EDGE LIST streamed by DMA into CH2CVR (channel 3) and CH3CVR
 //      (channel 6) on each compare's own request - every interval on the
 //      pad against the counts asked - and the shortest interval the
-//      channel keeps
+//      channel keeps (printed)
 //   d  one pulse: OPM's pulse width on the pad and CEN cleared by the
 //      update; active and inactive on match, frozen both ways, toggle,
 //      PWM mode 2
@@ -50,7 +50,8 @@
 //      policies; THE DOWN COUNTER; UDIS - configure() asked for it, no
 //      update at an overflow, a PSC written meanwhile not taken, the next
 //      overflow after it is cleared; URS - UG loading the shadows with no
-//      UIF, an overflow still raising it
+//      UIF, an overflow still raising it; what a UG does to a stopped
+//      counter (printed)
 //   g  TIM2'S OUTPUTS ON A PAD: C2N on PB12 - a header pin and nothing
 //      else - under TIM2_RM 101 and 110, forced levels, CC2NP and a
 //      toggle read off the pad. Both codes put channel 1's CH1 and C1N on
@@ -237,6 +238,32 @@ uint32_t cycles_of(const Sampled& r, uint32_t idx) {
     return static_cast<uint32_t>((static_cast<uint64_t>(idx) * r.cycles + r.n / 2u) / r.n);
 }
 
+// THE BOUND OF A PERIOD READ OFF THE PAD (letters c and g), derived. The
+// timer and the STK both count HCLK, so the HSI's tolerance cancels and the
+// toggle's edges lie exactly the asked count of cycles apart. What the
+// sampler adds to a span of k - 1 periods: an edge placed to one sample at
+// each end, an interval to two (judge_list's grain, twice the mean spacing
+// and one); the spacing inside a turn of four reads uneven by up to the
+// loop's branch, under a second grain; and the run's two ends outside the
+// samples - six instructions after the first STK read, four and a branch
+// before the last, about 36 cycles by the flash cost model
+// (docs/ch32x035/platform.md, "the two cost models") - which the mean
+// spacing spreads over every sample, a share span / run of them.
+constexpr uint32_t sampler_ends = 36;
+
+/// Whether `span`, the cycles from the first of `k` edges to the last, is
+/// k - 1 periods of `asked` cycles to the sampler's resolution.
+bool period_near(const Sampled& r, uint8_t k, uint32_t span, uint32_t asked) {
+    if (k < 5u || r.n == 0u || r.cycles == 0u) {
+        return false;
+    }
+    const uint32_t grain = 2u * r.cycles / r.n + 1u;
+    const uint32_t ends = (sampler_ends * span + r.cycles - 1u) / r.cycles;
+    const uint32_t tol = 2u * grain + ends;
+    const uint32_t want = asked * (k - 1u);
+    return span + tol >= want && span <= want + tol;
+}
+
 /// The counter running at PSC 47, far from any compare: the state in which
 /// a forced level reaches the pad (the outputs hold while it is stopped).
 void run_far() {
@@ -267,8 +294,10 @@ bool reset_values() {
         print(serial, crlf);
     }
     // DMAADR is the burst's window onto the register DBA names - CTLR1 at
-    // DBA's reset value - so it reads what CTLR1 reads.
-    return zero && r.ATRLR == 0xFFFFu && r.CTLR1 == tim_ctlr1_reserved13 && r.DMAADR == r.CTLR1;
+    // DBA's reset value - so it reads what CTLR1 reads. CTLR1's own value
+    // is printed above and not judged: 12.4.1's table says zero, and what
+    // this die reads in its reserved bit 13 is the silicon's.
+    return zero && r.ATRLR == 0xFFFFu && (r.CTLR1 & ~tim_ctlr1_reserved13) == 0u && r.DMAADR == r.CTLR1;
 }
 
 /// HCLK cycles a count x100, over about 100 us on the STK with interrupts
@@ -297,10 +326,11 @@ uint32_t rate_x100() {
 
 void ta_block() {
     all_off();
-    // MEASURED: CTLR1 resets to 0x2000 - 12.4.1 calls bit 13 reserved and
-    // its table says zero.
-    bench.verdict("TIM1 at its reset: every register the table's but CTLR1, which reads 0x2000 (bit 13 set), and "
-                  "DMAADR, the burst's window, which reads it too",
+    // CTLR1 reads 0x2000 out of reset on this die, where 12.4.1 calls bit
+    // 13 reserved and its table says zero: printed by reset_values(), the
+    // rest of CTLR1 judged.
+    bench.verdict("TIM1 at its reset: every register the table's, CTLR1 bar its reserved bit 13, and DMAADR, the "
+                  "burst's window, reading what CTLR1 reads",
                   reset_values<T1>());
     bench.verdict("TIM2 the same", reset_values<T2>());
     T1::regs().CTLR1 = 0;
@@ -309,10 +339,12 @@ void ta_block() {
     const uint16_t set = T1::regs().CTLR1;
     (void)T1::configure({.prescaler = 3});
     const uint16_t kept = T1::regs().CTLR1;
+    // Whether the reserved bit takes a write is the silicon's (printed);
+    // configure() keeping it as it reads is the driver's, judged.
     print(serial, "  bit 13 written 0 reads ", hex(cleared), ", written 1 reads ", hex(set),
           "; after configure() ", hex(kept), crlf);
-    bench.verdict("bit 13 is writable both ways, and configure() keeps it as it reads",
-                  cleared == 0u && set == tim_ctlr1_reserved13 && (kept & tim_ctlr1_reserved13) != 0u);
+    bench.verdict("configure() keeps bit 13 as it reads",
+                  (kept & tim_ctlr1_reserved13) == (set & tim_ctlr1_reserved13));
 
     // The prescaler's shadow: PSC 47, then PSC 0 written with no update -
     // the count goes on at 48 cycles a count - then an update takes it.
@@ -343,7 +375,7 @@ void ta_block() {
     bench.verdict("UG raises UIF; ones written keep it, another flag's clear keeps it, its own zero clears it",
                   raised && kept_ones && kept_other && clear);
 
-    // A software compare event on an output channel: MEASURED, nothing.
+    // A software compare event on an output channel: measured, printed.
     T1::init();
     (void)T1::output_channel(1, {.mode = TimOutputMode::frozen, .compare = 50, .preload = false, .enable = false});
     T1::regs().SWEVGR = static_cast<uint16_t>(tim_cc1g << 1);
@@ -353,9 +385,9 @@ void ta_block() {
     T1::regs().SWEVGR = static_cast<uint16_t>(tim_cc1g << 1);
     const bool running_flag = T1::flag(T1::compare_flag(1));
     T1::enable(false);
+    // 12.4.6 says CCxG sets CCxIF on an output channel; what this die does is
+    // printed, and no driver verb depends on it.
     print(serial, "  CC2G on an output channel: CC2IF ", stopped_flag, " stopped, ", running_flag, " running", crlf);
-    bench.verdict("CCxG on an output channel raises no CCxIF, counter stopped or running (12.4.6 says it does)",
-                  !stopped_flag && !running_flag);
 
     // The remap field.
     const bool wrote = T1::remap(code) && T1::remap() == code && Afio::remap_code(Remap::tim1) == code;
@@ -570,8 +602,8 @@ void tc_toggle() {
     const uint32_t per = k >= 2u ? span / (k - 1u) : 0u;
     print(serial, "  the free-running toggle: ", k, " edges, ", per, " cycles apart (1000 asked), a sample every ",
           r0.cycles * 100u / r0.n, " hundredths of a cycle", crlf);
-    bench.verdict("a toggle at each match: an edge every period, 1000 cycles within 0.5 %",
-                  k >= 5u && near(static_cast<int32_t>(per), 1000, 5));
+    bench.verdict("a toggle at each match: an edge every period, 1000 cycles to the sampler's resolution",
+                  period_near(r0, k, span, 1000));
 
     // The edge list at PSC 2 (three cycles a count), on C2N (DMA channel 3)
     // and C3N (channel 6).
@@ -614,9 +646,9 @@ void tc_toggle() {
             keeps = gap;
         }
     }
+    // How fast the controller serves a request is not in chapter 9: the
+    // figure is printed, not judged.
     print(serial, "  the smallest interval the channel keeps: ", keeps, " HCLK cycles", crlf);
-    bench.verdict("the channel keeps up with intervals of 12 HCLK cycles and less (every value of the list taken)",
-                  keeps != 0u && keeps <= 12u);
     all_off();
 }
 
@@ -814,24 +846,27 @@ void te_dma() {
 /// THE BOUND OF EVERY INTERVAL BELOW. Both the timers and the STK count
 /// HCLK, so an interval between two flags is an exact number of counter
 /// clocks and what a stamp adds is its poll's LATENESS - from the flag's
-/// rise to the stamp after the poll saw it: at most one whole turn of
+/// rise to the stamp after the poll saw it: up to one whole turn of
 /// wait_flag()'s loop (brio::wait_until's: an INTFR read across the bus
 /// and Ruler::now(), Ticker::cycles()'s five reads, from a flash behind
 /// two wait states) with whatever vector lands in it - the tick's, the
-/// console being drained first - and then the stamp's own read, under one
-/// plain turn. An interval is the difference of two latenesses, so it is
-/// good to the largest turn plus the smallest. Both are MEASURED in this
-/// image, on the same verb waiting for a flag that never rises over three
-/// tick periods (a tick's vector lands in at least one turn of it), not
-/// assumed: a turn's cost is the layout's (docs/ch32x035/platform.md, a
-/// flash loop costs by its address mod 4). The measured turn carries one
-/// more Ruler::now() than a waiting turn - the stamp it takes of itself -,
-/// which stands for the stamp's own read after the wait.
-uint32_t stamp_slack_cycles = 0;
+/// console being drained first - and then a fixed path, the wait's return
+/// and the stamp's own read, the same code at both ends of an interval.
+/// An interval is the difference of two latenesses, so the fixed path
+/// cancels and the interval is good to the largest turn. That turn is
+/// MEASURED in this image, on the same verb waiting for a flag that never
+/// rises over three tick periods (a tick's vector lands in at least one
+/// turn of it), not assumed: a turn's cost is the layout's
+/// (docs/ch32x035/platform.md, a flash loop costs by its address mod 4).
+/// The measured turn carries one more Ruler::now() than a waiting turn -
+/// the stamp it takes of itself -, so it is the largest waiting turn and a
+/// read more. A span from a stamp taken on another path (letter f's first
+/// underflow) does not cancel the fixed path: there it is held to a turn,
+/// which holds the wait's poll and two composed reads, more than the wait's
+/// return and one read.
+uint32_t turn_most = 0;
 
-bool near_cycles(uint32_t got, uint32_t want) {
-    return got + stamp_slack_cycles >= want && got <= want + stamp_slack_cycles;
-}
+bool near_cycles(uint32_t got, uint32_t want) { return got + turn_most >= want && got <= want + turn_most; }
 
 /// Wait for a flag of timer T, at most `limit_us` (util/test_wait.hpp).
 template <typename T>
@@ -893,9 +928,9 @@ void measure_slack() {
         },
         3'000);
     down<T1>();
-    stamp_slack_cycles = most + least;
+    turn_most = most;
     print(serial, "  the poll's turn: ", least, " cycles, ", most, " with the tick's vector in it - every interval "
-          "below good to ", stamp_slack_cycles, crlf);
+          "below good to ", turn_most, crlf);
 }
 
 /// THE REPETITION COUNTER (12.3.1, 12.4.13): one update in RPTCR + 1
@@ -1039,10 +1074,12 @@ void tf_time_base() {
     // with ATRLR, an underflow - and an update - every ATRLR + 1 counts,
     // and a compare raises CC1IF once a period as on the way up; 1 ms a
     // period. A UG reloads it with ATRLR (12.3.1: "the counter will start
-    // counting again from the current auto-reload value") WHILE IT RUNS,
-    // and a UG on a STOPPED counter leaves the count where it is, either
-    // way (measured) - so configure() writes the start itself: ATRLR here,
-    // and the first underflow comes a whole period after the enable.
+    // counting again from the current auto-reload value"; 12.4.6's UG) WHILE
+    // IT RUNS; what a UG does to a STOPPED counter, either way, is read on
+    // this die and printed (12.4.6 does not make an exception of it) - and
+    // configure() writes the start itself, ATRLR here, so the driver is
+    // right either way, and the first underflow comes a whole period after
+    // the enable.
     T1::init();
     (void)T1::configure({.prescaler = 47, .period = 999});
     T1::set_count(500);
@@ -1089,13 +1126,23 @@ void tf_time_base() {
           " hundredths of a cycle a count downwards; updates ", ugaps[0], " ", ugaps[1], " ", ugaps[2], " ",
           ugaps[3], " and CC1IF ", cgaps[0], " ", cgaps[1], " ", cgaps[2], " ", cgaps[3], " cycles apart against ",
           1000u * per_us, crlf);
-    bench.verdict("A UG reloads a running down counter with ATRLR, and leaves a stopped counter's count alone "
-                  "counting either way",
-                  ug_running >= 990u && ug_running <= 999u && ug_stopped == 500u && ug_up_stopped == 500u);
+    // The count is read a few instructions after the UG, under one count
+    // of 48 cycles, and the UG clears the prescaler's counter (12.4.6): the
+    // reload itself, 999 - or down to 996 when the tick's handler lands
+    // between the two, its entry and exit 70 cycles and its body under 65
+    // (docs/ch32x035/platform.md), under three counts more.
+    bench.verdict("A UG reloads a running down counter with ATRLR (12.4.6)", ug_running >= 996u && ug_running <= 999u);
+    // The first underflow: the counter starts at the enable's store, which
+    // comes under a count after the first stamp (a tick's vector, which the
+    // span of more than a period may also hold at this end, aside), its
+    // prescaler at zero since configure()'s UG, and falls 1000 counts of 48
+    // cycles; the flag is seen within the largest turn, a vector included,
+    // and the stamp's path is under a turn (near_cycles()'s comment): 48 000
+    // to 48 000 + 48 + twice the largest turn.
     bench.verdict("THE DOWN COUNTER: configure() starts it at ATRLR, the first underflow a whole period after "
-                  "the enable (within the slack and a count), the count falling at the prescaled rate",
-                  loaded == 999u && first_came && first_quiet &&
-                      near(static_cast<int32_t>(first_after), 48000, static_cast<int32_t>(stamp_slack_cycles + 48u)) &&
+                  "the enable (to the poll's turns and a count), the count falling at the prescaled rate",
+                  loaded == 999u && first_came && first_quiet && first_after >= 48'000u &&
+                      first_after <= 48'000u + 48u + 2u * turn_most &&
                       near(static_cast<int32_t>(down_rate), 4800, 48));
     bench.verdict("an underflow every ATRLR + 1 counts, a compare's flag once a period, the direction reading "
                   "down - within the slack", down_ok);
@@ -1212,15 +1259,14 @@ bool tim2_c2n(uint8_t code) {
     Pad2::release();
     down<T2>();
     (void)T2::remap(0);
-    return remapped && claimed && high && low && inverted && ch1_off && k >= 5u &&
-           near(static_cast<int32_t>(per), 1000, 5);
+    return remapped && claimed && high && low && inverted && ch1_off && period_near(r, k, span, 1000);
 }
 
 void tg_tim2_pad() {
     all_off();
     const bool code5 = tim2_c2n<T2C2n5>(5);
     bench.verdict("TIM2_RM 101: C2N reaches PB12 - forced active high, inactive low, CC2NP inverting, a toggle "
-                  "an edge every 1000 cycles within 0.5 %",
+                  "an edge every 1000 cycles to the sampler's resolution",
                   code5);
     const bool code6 = tim2_c2n<T2C2n6>(6);
     bench.verdict("TIM2_RM 110: the same on the same pad", code6);

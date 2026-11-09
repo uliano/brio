@@ -10,7 +10,7 @@
 //
 //  - THE BUS IS I2C1 ON ITS COLUMN 010 (8.3.2.1): SCL PC16, SDA PC17 - the
 //    USB pads, the one column of the CH32X035F8U6 off the debug port, and
-//    the desk's I2C wires to the CH32V006's column 3. Open drain, which on
+//    the desk's I2C wires to the CH32V006F8U6's column 0 (PC2, PC1). Open drain, which on
 //    this series only the I2C itself makes (8.2.8).
 //  - THE PULL-UPS HANG FROM PB3, AND THIS IMAGE HOLDS THEM UP. A 1.5 kOhm
 //    resistor from each line to PB3, never to VCC: PC17 is this board's

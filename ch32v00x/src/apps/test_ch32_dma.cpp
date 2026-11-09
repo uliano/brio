@@ -395,8 +395,18 @@ void te_tx_engine() {
     bench.verdict("a burst longer than the ring went out in blocks", blocks >= 2u);
     bench.verdict("with no transfer fault", Serial::dma_faults() == 0u);
     bench.verdict("and the ring drained to empty", drained);
-    bench.verdict("at the rate asked: 2720 bits at 115200 within -1 % to +3 % of their wire time",
-                  permille >= 990u && permille <= 1030u);
+    // THE BOUND. The divisor counts HCLK, the clock the ruler counts: no
+    // error between the two clocks. The frames take 2720 bit times at
+    // BRR 417 (1000.8 thousandths of the wire: the floor is 1000), and
+    // the engine starts each next run while the shifter still holds about
+    // a frame and a half (ch32v00x/usart.hpp's header), so a block
+    // boundary adds no gap. On top: the start (the first line formatted
+    // into the ring, the engine launched - some 70 bytes of print()), the
+    // closing wait's turn and a tick handler landing on either, together
+    // well under two thousandths (2266 cycles), and the figure's floor:
+    // 1000 to 1003.
+    bench.verdict("at the rate asked: 2720 bits at 115200 in 1000 to 1003 thousandths of their wire time",
+                  permille >= 1000u && permille <= 1003u);
 }
 
 // ---------------------------------------------------------------------------

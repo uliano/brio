@@ -201,7 +201,9 @@ the key that runs the single-board set, `w` the two-board key, below).
   hundred. A frame 3 per cent off the rate is taken clean, 6 per cent
   off raises FE or NE (14.3's floor of 3 per cent holds).
 - **The break** SBK sends is ten bits of low, thirteen in LIN mode
-  (measured on the capture: 50000 and 65000 cycles at 9600); the
+  (measured on the capture: 50000 and 65000 cycles at 9600, judged to
+  two cycles: both edges come from the generator on HCLK, which the
+  capture counts too); the
   detector raises LBD, and its interrupt once, on ten low bits under
   LBDL 0 and eleven under LBDL 1 - one bit short of each is a frame.
 - **Mute mode**: with RWU set, frames back to back are not received;
@@ -213,8 +215,10 @@ the key that runs the single-board set, `w` the two-board key, below).
   works, and RWU cannot be set under an address mark while RXNE
   stands (`mute()` refuses).
 - **IrDA**: the encoder's pulse is 3/16 of a bit in normal mode (938
-  cycles at 9600) and three periods of the prescaled clock in
-  low-power mode (48 cycles with PSC 16); the decoder takes a
+  cycles at 9600: three of the generator's sixteenth-bit ticks, judged
+  to two cycles) and 48 cycles in low-power mode with PSC 16 - three
+  periods of the prescaled clock, as on the F1 lineage, printed and not
+  judged since this RM gives that mode no width; the decoder takes a
   bit-banged RZI frame - a zero is a pulse against the idle level -
   with the line idling either way, and with a pulse of 3/16 or of half
   a bit; with the line idling low the break flag rises beside the
@@ -227,8 +231,9 @@ the key that runs the single-board set, `w` the two-board key, below).
   input under CTSE, rising and falling, and a written zero clears it;
   CTSIE enters the vector once a toggle (four of four).
 - **The flags**: TXE returns within a bit of a write on an idle
-  transmitter, TC at the end of the frame (1093 us for a 1042 us frame
-  at 9600); TC's clear is a pair, a STATR read then a DATAR write, or a
+  transmitter, TC a frame after the byte moved (18 to 20 us and 1059 to
+  1062 us for a 1042 us frame at 9600 on the CH32V006F8U6, timed masked
+  right after a tick); TC's clear is a pair, a STATR read then a DATAR write, or a
   zero written (14.8.1), so a DATAR write that no status read preceded
   leaves the TC of the frame before standing, and a wait for TC right
   after it returns at once with the new frame still on the wire
@@ -475,14 +480,14 @@ U::mute();                                        // asleep until a 9-bit frame 
 
 ## Bench findings
 
-The reference suite is `test_ch32_serial` (73 verdicts in `z` with the
+The reference suite is `test_ch32_serial` (72 verdicts in `z` with the
 jumper PD2 to PD4 fitted, which lends TIM2's channel 1 as the ruler to
 six of its letters (b, c, e, g, r, t) - 58 without it, those letters
 then reporting the checks they could not run as skipped and claiming
 nothing -, one host-assisted letter outside `z` driven by `brio
 stress`) on the CH32V006K8U6 at 48 MHz, with USART2 on column 3 as the
 instrument and the console untouched on USART1; and its TWO-BOARD KEY
-`w` (letters 1 to 8, 60 verdicts) on column 4 against the CH32X035's
+`w` (letters 1 to 8, 59 verdicts) on column 4 against the CH32X035's
 `usart_peer`. The whole suite does not fit the CH32V006K8's 40 KB, so on
 that part it is three images (the build's group axis): `-1` and `-2`
 the single-board letters on the HSI's PLL, `-3` the two-board key on
@@ -501,7 +506,17 @@ out there.
   a divisor computed wrong would pass): letters b, c, i and t time a
   run of frames from the first store to TC on the ticker's cycle count
   against its wire time at the rate ASKED, HCLK over the baud named,
-  and judge it -1 % to +3 %. The bare resource, polled one frame ahead
+  in thousandths. The ruler and the generator share HCLK, so the window
+  is arithmetic, written beside the suite's verdicts: never under the
+  divisor's own time (BRR x baud / HCLK) less the two truncations; and,
+  for the suite's own loop polling one frame ahead, no more than the
+  divisor's time plus the first frame's bit, two poll turns and the
+  ticks that starve the line where a frame is shorter than a tick's
+  entry and a turn (3 Mbaud's 160 cycles) - 1003 thousandths at 9600,
+  1006 at 2400, 1008 at 3 Mbaud. A transport's run starts from the
+  transport's own path, and the engine's from a restart at each lap,
+  costs nothing written bounds: those runs are judged from below and
+  printed above. Each run follows a drained console. The bare resource, polled one frame ahead
   of the shifter, at letter c's eight rates: 1003 thousandths at 2400
   (24 frames), 1000 at 9600, 76800, 115200 and 1.5 Mbaud, 999 at 460800
   and 921600 - the divisor's own 998 there, BRR 104 and 52 for 104.2
@@ -536,19 +551,24 @@ out there.
   at 115200 (a bit is 416) and 202 to 310 at 250000 (a bit is 192), on
   the interrupt transmitter and the transmit engine - TC at the stop
   bit's end, the rest the poll's turn on a 48 MHz core with a tick
-  landing in it. At 1 Mbaud a bit is 48 cycles, under one turn of the
-  poll, and the letter does not judge there.
+  landing in it. The letter judges a reading no tick landed in (a ticked
+  one is printed and run again, four tries a transport): at least a bit,
+  and at most two, a quiet turn being under a bit at both rates. At 1
+  Mbaud a bit is 48 cycles, under one turn of the poll, and the letter
+  does not judge there.
 - **The burst edge from the vector** (letter s, nothing polled): every
-  burst of one frame told; a burst of 16 told 52770 cycles after its
-  last stop bit (1.0 frame at 9600) with two USART interrupts and none a
-  byte; four laps of the 256-byte ring with no silence read whole on the
+  burst of one frame told; a burst of 16 told 52485 to 52749 cycles
+  after its last stop bit (1.0 frame at 9600, ten runs on the
+  CH32V006F8U6; printed, since this RM gives IDLE no length) with two
+  USART interrupts and none a byte; four laps of the 256-byte ring with no silence read whole on the
   lap's marks.
 - **An overrun at a burst's tail** (letter u, banged at 115200): a fill
   on channel 1 at the ring's own level, which wins the tie against
   channel 7 (8.2.1), starving the ring under a burst's last three frames,
   the vector held off until the channel had taken the frame DATAR held -
-  ORE up, RXNE down, no frame after it. The vector entered THREE times,
-  no channel was given up, the overrun and the gap were each counted
+  ORE up, RXNE down, no frame after it. The vector entered THREE times
+  (printed: the order it meets the held flags in fixes the count, and
+  nothing written fixes the order), no channel was given up, the overrun and the gap were each counted
   once, the four frames before it and the one DATAR held arrived in
   order, and the next burst of eight arrived whole. THE CONTROL, the
   same image with the clear disabled: 256 entries - the overrun's and the
@@ -679,7 +699,7 @@ out there.
   the two reads of the clear sequence while a stamp is taken; under the
   160-cycle frame at 3 Mbaud, where the echo held.
 - **Column 4 as the DUT, against a second chip** (the two-board key `w`,
-  60 verdicts, the far chip a CH32X035 on its RC oscillator running
+  59 verdicts, the far chip a CH32X035 on its RC oscillator running
   `usart_peer`): the peer calibrated by this crystal first - its HSI found
   at -2718 to -3154 ppm at its trim's centre over two sessions, moved one
   step and ADOPTED, every run after that reading this crystal within 250
@@ -688,8 +708,10 @@ out there.
   receiver, against a 1 Mbaud run back to back: within 200 ppm of HCLK
   over BRR at every rate (BRR 417 at 115200 read -945 to -997 ppm
   against the divisor's -799, BRR 52 at 921600 +1533 to +1698 against
-  +1602); nine formats echoed, the half and the one-and-a-half stop
-  timed as frames of 19 and 21 half bits (within 320 ppm); odd parity into even raising PE six times in six; 0x00
+  +1602) - the residuals and these spans printed, not judged, since no
+  data sheet bounds the RCs' wander between two runs; nine formats
+  echoed, the half and the one-and-a-half stop timed as frames of 19
+  and 21 half bits (within 320 ppm, judged within half a half bit); odd parity into even raising PE six times in six; 0x00
   frames from the calibrated peer's edge engine clean from -4 to +5 per
   cent off - 14.3's 3 per cent and then some - breaking from -5 per cent
   as FE, and on the fast side flagged NE at +6 per cent and received

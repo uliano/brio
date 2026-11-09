@@ -363,7 +363,7 @@ sleep: `idle()` returns at once while `Dma::any_working()` answers true
 ## Bench findings
 
 The reference suite is `test_x035_dma` on the CH32X035F8U6 at 48 MHz, its
-own console on the two engines (USART2 on channels 7 and 6), 54 verdicts
+own console on the two engines (USART2 on channels 7 and 6), 50 verdicts
 in `z`; the paced loads are USART3's transmitter, whose column is handed
 no pad. The transport's engines across a wire are `test_x035_usart`'s
 ([usart.md](usart.md)).

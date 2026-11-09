@@ -134,6 +134,10 @@ uint32_t us_since(uint16_t from) {
 constexpr bool page_of_64 = Flash::page_size == 64u;
 constexpr uint32_t program_max_us = page_of_64 ? 3100u : 2000u;
 constexpr uint32_t erase_max_us = page_of_64 ? 3100u : 3000u;
+/// The datasheets' minimum page erase: 2.4 ms on the CH32V003 (the same
+/// table); the CH32V006's table states a typical (2.5 ms) and a maximum
+/// only, so no lower bound is written for it and its least is zero.
+constexpr uint32_t erase_min_us = page_of_64 ? 2400u : 0u;
 
 uint8_t page_buf[Flash::page_size];
 
@@ -502,8 +506,8 @@ void tf_journal() {
     uint8_t k = 0;
     uint32_t save_us[16] = {};
     uint8_t free_cells_at[16] = {};
-    // THE BOUNDS, from the datasheet's maxima (program_max_us,
-    // erase_max_us) and the journal's own work on top - the entry's image,
+    // THE BOUNDS, from the datasheet's figures (program_max_us,
+    // erase_max_us, erase_min_us) and the journal's own work on top - the entry's image,
     // its CRC over 44 bytes and the two locks' keys, under 0.2 ms at 48
     // MHz. An ORDINARY save is one program. A COLLECTION erases the idle
     // half (half_cells pages: twelve on the CH32V006, eight on the
@@ -511,11 +515,14 @@ void tf_journal() {
     // churned value and the reserve's entry an earlier run left) and erases
     // the half it left before the save's own program: no longer than two
     // halves' erases and four programs at their maxima and 1 ms of the
-    // journal's work (81 ms on the CH32V006), and longer than ONE half's
-    // erases at their maximum (36 ms there) - the proof that both halves
-    // were erased. Anything over 20 ms is a collection.
+    // journal's work (81 ms on the CH32V006), and no shorter than both
+    // halves' erases at their MINIMUM - the proof that both halves were
+    // erased: 2 x 8 x 2.4 ms = 38.4 ms on the CH32V003; nothing on the
+    // CH32V006, whose datasheet gives no minimum (the content verdicts
+    // below are the proof there). Anything over 20 ms is a collection (an ordinary save is
+    // under 2.2 ms, a collection on the CH32V003 at least 38.4 ms).
     constexpr uint32_t ordinary_most_us = program_max_us + 200u;
-    constexpr uint32_t collection_least_us = Journal::half_cells * erase_max_us;
+    constexpr uint32_t collection_least_us = 2u * Journal::half_cells * erase_min_us;
     constexpr uint32_t collection_most_us = 2u * Journal::half_cells * erase_max_us + 4u * program_max_us + 1000u;
     uint8_t collections = 0;
     bool bounded = true;
@@ -534,7 +541,7 @@ void tf_journal() {
             ++collections;
             collection_us = save_us[k];
             collection_ticks = ticks;
-            bounded = bounded && save_us[k] > collection_least_us && save_us[k] <= collection_most_us;
+            bounded = bounded && save_us[k] >= collection_least_us && save_us[k] <= collection_most_us;
         } else {
             ordinary_most = save_us[k] > ordinary_most ? save_us[k] : ordinary_most;
         }
@@ -550,8 +557,8 @@ void tf_journal() {
           " us", crlf);
     bench.verdict("an ordinary save is one page program: none longer than the datasheet's maximum and 0.2 ms "
                   "of the journal's own work", ordinary_most != 0u && ordinary_most <= ordinary_most_us);
-    bench.verdict("a collecting save erases both halves and copies the live ids: longer than one half's erases "
-                  "at their maximum, within the maxima of all of it",
+    bench.verdict("a collecting save erases both halves and copies the live ids: no shorter than both halves' "
+                  "erases at their minimum, within the maxima of all of it",
                   collections >= 1u && bounded);
     bench.verdict("sixteen saves through at least one collection all succeeded", churned);
     uint8_t back[32];

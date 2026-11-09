@@ -212,13 +212,28 @@ void tb_awu() {
     // 1024/64 = 16 times the first window.
     const uint32_t cycles2 = time_window(8, 7);
     print(serial, "  8 counts at /128 = ", cycles2, " cycles, expected ", cycles * 16u, crlf);
-    bench.verdict("a prescaled window scales as the divider says (within 5%)",
-                  cycles2 != 0u && cycles2 > cycles * 16u * 95u / 100u &&
-                      cycles2 < cycles * 16u * 105u / 100u);
+    // THE BOUND: the prescaler's neighbours divide by half and twice
+    // /128, so a window off by a code reads 0.5 or 2 times the expected;
+    // the bound sits between, 3/4 to 4/3. What moves a right one is far
+    // inside it: the first window's start phase (one count of 64, 1.6 %),
+    // the poll's turn and a tick handler (a few hundred cycles of 25000),
+    // the LSI's drift over 15 ms. The datasheet states no short-term
+    // stability for the LSI, so no tighter figure is written to derive.
+    bench.verdict("a prescaled window scales as the divider says (between 3/4 and 4/3: half way to a "
+                  "neighbouring divider)",
+                  cycles2 != 0u && cycles2 > cycles * 16u * 3u / 4u && cycles2 < cycles * 16u * 4u / 3u);
 
-    bench.verdict("the timed site's own init measures the same rate (within 2%)",
+    // THE BOUND: the site measures the same 64 undivided counts. Each
+    // window's start falls anywhere in an LSI count, so the two differ by
+    // up to one count of 64 (15.6 thousandths); on top, the poll's turn
+    // here (one cycles() read) and a tick handler landing at either end,
+    // under 250 cycles of the 25000 (a handler's whole trip is 78 to 144
+    // cycles, platform.md's table): 10 thousandths. 26 in all.
+    const uint32_t site_slack = lsi_hz * 26u / 1000u;
+    bench.verdict("the timed site's own init measures the same rate (one LSI count of 64 and the polls: "
+                  "within 2.6 %)",
                   Timed::init() &&
-                      (Timed::lsi_hz() > lsi_hz * 98u / 100u && Timed::lsi_hz() < lsi_hz * 102u / 100u));
+                      (Timed::lsi_hz() + site_slack >= lsi_hz && Timed::lsi_hz() <= lsi_hz + site_slack));
     print(serial, "  site's LSI = ", Timed::lsi_hz(), " Hz", crlf);
 }
 
@@ -367,13 +382,17 @@ void tl_long_windows() {
     const uint32_t lsi = ref == 0u ? 0u : static_cast<uint32_t>((static_cast<uint64_t>(SysClock::hz) * 32768u) / ref);
     print(serial, "  LSI ", lsi, " Hz on the STK; code 14 ", r14, " and code 15 ", r15,
           " thousandths of their named ratios to the reference", crlf);
-    // The bound: the LSI, an RC, wanders a few tenths of a per cent over
-    // seconds (letter b's windows agree within 2 per cent); 20 thousandths
-    // each way, where a wrong divider is off by 200 or more.
-    bench.verdict("the AWU's /10240 code divides by 10240: 32 counts are 10 times the reference, within 2 %",
-                  ref != 0u && r14 >= 980u && r14 <= 1020u);
-    bench.verdict("the /61440 code divides by 61440: 64 counts are 120 times the reference, within 2 %",
-                  ref != 0u && r15 >= 980u && r15 <= 1020u);
+    // THE BOUND: half way to the nearest wrong divider. Code 14 dividing
+    // by its power of two (8192) reads 800 thousandths, its neighbour
+    // code 13 (4096) 400; code 15 at 16384 reads 267. So 900 to 1100
+    // tells the named divider from every other, and what moves a right one
+    // - the LSI's drift over seconds, for which the datasheet states no
+    // figure, and a count of phase in 32768 - is far inside it.
+    bench.verdict("the AWU's /10240 code divides by 10240: 32 counts are 10 times the reference, within 10 % "
+                  "(half way to /8192)",
+                  ref != 0u && r14 >= 900u && r14 <= 1100u);
+    bench.verdict("the /61440 code divides by 61440: 64 counts are 120 times the reference, within 10 %",
+                  ref != 0u && r15 >= 900u && r15 <= 1100u);
 
     // A STANDBY OF TWENTY SECONDS through the timed site: the site places
     // the AWU at a long code and the kernel's time is advanced by the span.
@@ -574,6 +593,11 @@ void tw_awu_edge() {
         bench.verdict("the AWU initializes", false);
         return;
     }
+    // The LSI's rate, the period's yardstick below: the site's own
+    // measurement (half a millisecond), taken here if no letter took it.
+    if (Timed::lsi_hz() == 0u) {
+        (void)Timed::init();   // a failed one leaves 0, which the period verdict fails on
+    }
     // The AWU free-running at 8 undivided LSI counts (about 64 us): it
     // matches again every period while enabled, which is what the sweep
     // locks to. Its period over 32 matches is the lock's spread. On the
@@ -604,8 +628,17 @@ void tw_awu_edge() {
     const uint32_t awu_period = (p_min + p_max) / 2u;
     const uint32_t awu_period_us = awu_period / (SysClock::hz / 1'000'000u);
     print(serial, "  the AWU re-matches every ", p_min, "..", p_max, " cycles (", awu_period_us, " us)", crlf);
-    bench.verdict("the AWU matches again every period while enabled, within 2% of itself",
-                  p_min > 0u && p_max < p_min + p_min / 50u);
+    // THE BOUND: the window is 8 (32) LSI counts at the rate letter b's
+    // site measured; a match every other period would read twice that,
+    // one at half the window half of it, so each period lies between 3/4
+    // and 4/3 of the expected. Its spread from one match to the next - the
+    // LSI's jitter, which the datasheet does not state - is printed above.
+    const uint32_t window_counts = device::sleep_entry_from_sram ? 32u : 8u;
+    const uint32_t expected_period = Timed::lsi_hz() == 0u ? 0u
+        : static_cast<uint32_t>((static_cast<uint64_t>(SysClock::hz) * window_counts) / Timed::lsi_hz());
+    bench.verdict("the AWU matches again every period while enabled, each period its window at the LSI "
+                  "measured (between 3/4 and 4/3 of it)",
+                  expected_period != 0u && p_min > expected_period * 3u / 4u && p_max < expected_period * 4u / 3u);
 
     Rescue::init();
     (void)Rescue::configure(TimConfig{.prescaler = static_cast<uint16_t>(SysClock::hz / 1'000'000u - 1u),
