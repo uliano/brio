@@ -355,13 +355,23 @@ constexpr uint32_t xosc_startup_us(XoscStartup code) {
 /// and 20.6.3 requires it to be no faster than the monitored XOSC.
 using CfdPrescaler = uint8_t;
 
-/// The smallest CFDPRESC whose safe clock is at or below `xosc_hz`,
-/// given the OSC48M output rate actually in force. Returns 7 (the
-/// field's maximum) when even that is too fast, which is the honest
-/// answer for a very slow crystal.
+/// The smallest CFDPRESC whose safe clock is at or below HALF of
+/// `xosc_hz`, given the OSC48M output rate actually in force. Returns 7
+/// (the field's maximum) when even that is too fast, which is the
+/// honest answer for a very slow crystal.
+///
+/// Why half and not "at or below": `osc48m_hz` is the RC's nominal rate,
+/// and the RC is factory-trimmed to +-5 % only (table 45-57, standard
+/// accuracy), so a safe clock chosen equal to the crystal is faster than
+/// it on half the dies - against 20.6.3's rule, and the detector then
+/// sees "too few crystal edges in four safe clocks" on a healthy
+/// crystal. A factor of two covers the tolerance with room for the
+/// detector's sampling; it costs one safe clock of detection latency
+/// (four safe clocks at 12 MHz instead of 24 MHz for a 24 MHz crystal:
+/// 333 ns instead of 167 ns).
 constexpr CfdPrescaler cfd_prescaler_for(uint32_t xosc_hz, uint32_t osc48m_hz) {
     for (uint8_t p = 0; p < 7; ++p) {
-        if ((osc48m_hz >> p) <= xosc_hz) {
+        if ((osc48m_hz >> p) <= xosc_hz / 2u) {
             return p;
         }
     }
@@ -400,7 +410,9 @@ struct XoscConfig {
     /// CFDEN, with the safe-clock prescaler. 20.6.3 requires OSC48M -
     /// the safe clock's source - to be running BEFORE the detector is
     /// enabled, which on this family it always is (clock.hpp's init
-    /// leaves it free-running); `init()` checks anyway.
+    /// leaves it free-running); `init()` checks anyway. On an oscillator
+    /// that is already running, arming can trip the detector at once:
+    /// `init()` undoes that trip (see Xosc::failure_detector()).
     bool failure_detector = false;
     CfdPrescaler cfd_prescaler = 0;
 };
@@ -480,6 +492,11 @@ struct Xosc {
      * crystal that is not oscillating is exactly that last case: a
      * bounded wait and a false return, never a hang.
      *
+     * Called on an oscillator that is ALREADY RUNNING with the detector
+     * asked for, it also answers false when the detector still reports
+     * a failure after the arming trip has been undone
+     * (failure_detector(true) explains the trip and the wait it adds).
+     *
      * The default bound is generous because a crystal's start-up is the
      * STARTUP field's business and can be a whole second at the top
      * code.
@@ -491,6 +508,7 @@ struct Xosc {
         if (cfg.failure_detector && !Osc48m::ready()) {
             return false;   // 20.6.3: the safe clock must run FIRST
         }
+        const bool arming_running = cfg.failure_detector && enabled() && ready();
         // The prescaler before CFDEN, so the safe clock is never briefly
         // faster than the crystal it stands in for.
         OSCCTRL_REGS->OSCCTRL_CFDPRESC = static_cast<uint8_t>(cfd_word(cfg));
@@ -498,7 +516,12 @@ struct Xosc {
         OSCCTRL_REGS->OSCCTRL_XOSCCTRL = ctrl_word(cfg);
         while (!ready() && spins-- != 0u) {
         }
-        return ready();
+        if (!ready()) {
+            return false;
+        }
+        // From a stopped oscillator the detector waits out the start-up
+        // time before it judges (20.6.3), and that covers the arming.
+        return !arming_running || settle_armed();
     }
 
     /// The same thing with the configuration known at compile time, so an
@@ -534,14 +557,35 @@ struct Xosc {
 
     // ---- the clock failure detector ---------------------------------------
 
-    /// CFDEN on a running oscillator, without disturbing anything else
-    /// in XOSCCTRL. The detector does not judge until the start-up time
-    /// has elapsed (20.6.3).
-    static void failure_detector(bool on) {
+    /**
+     * CFDEN, without disturbing anything else in XOSCCTRL. Main context;
+     * no masking.
+     *
+     * ARMING A RUNNING OSCILLATOR CAN TRIP THE DETECTOR AT ONCE. The
+     * detector waits out the start-up time only after the oscillator
+     * starts (20.6.3); set on a crystal that is already running, its first
+     * monitor period can find too few edges, latch XOSCFAIL and switch the
+     * output to the safe clock with the crystal healthy (measured on the
+     * ATSAMC21J18A: 6 arming runs in 60 on a running 24 MHz crystal, 0 in
+     * 60 when CFDEN went in the same store as ENABLE). So when it arms a
+     * running oscillator this verb waits four monitor periods, and if the
+     * output has switched it clears the flag, asks the switch back (SWBEN)
+     * and waits four more: true when the output is on the crystal and the
+     * detector sees no failure, false when it still does - a real failure,
+     * the output left on the safe clock. Each wait is a bounded spin of
+     * STATUS polls derived beside settle_polls(): 32 polls for a 24 MHz
+     * crystal at cfd_prescaler_for()'s choice, 16384 at the slowest safe
+     * clock (CFDPRESC 7 over OSC48M divided by 16).
+     *
+     * Disarming, or arming a stopped oscillator, writes the bit and
+     * answers true without waiting.
+     */
+    static bool failure_detector(bool on) {
         const uint16_t v = reg();
         OSCCTRL_REGS->OSCCTRL_XOSCCTRL = static_cast<uint16_t>(
             on ? (v | OSCCTRL_XOSCCTRL_CFDEN_Msk)
                : (v & static_cast<uint16_t>(~OSCCTRL_XOSCCTRL_CFDEN_Msk)));
+        return !(on && enabled() && ready()) || settle_armed();
     }
     static bool failure_detector() {
         return (reg() & OSCCTRL_XOSCCTRL_CFDEN_Msk) != 0u;
@@ -575,6 +619,48 @@ struct Xosc {
     }
     static bool switch_back_pending() {
         return (reg() & OSCCTRL_XOSCCTRL_SWBEN_Msk) != 0u;
+    }
+
+private:
+    /*
+     * The number of STATUS polls that lasts at least four of the
+     * detector's monitor periods, whatever the CPU runs at. A monitor
+     * period is four safe clocks (20.6.3); a safe clock is 2^CFDPRESC
+     * cycles of the OSC48M output; that output is the RC divided by
+     * OSC48MDIV. At the RC's slowest (45.6 MHz, table 45-57) one period
+     * lasts at most 4 x 2^p x div / 45.6 MHz = 87.8 ns x 2^p x div. A
+     * poll turn below is at least four CPU cycles (a load from the APB
+     * bridge, a test, a count, a taken branch), and the CPU runs at 64 MHz
+     * at most (the family's ceiling), so a poll lasts at least 62.5 ns:
+     * 1.41 x 2^p x div polls per period, taken as 2, times four periods.
+     */
+    static uint32_t settle_polls() {
+        return (8UL << cfd_prescaler()) * Osc48m::divider();
+    }
+
+    /// Wait out `polls` STATUS reads, stopping early if the output switches
+    /// to the safe clock. True when it switched.
+    static bool switched_within(uint32_t polls) {
+        while (polls-- != 0u) {
+            if (switched_to_safe_clock()) {
+                return true;
+            }
+        }
+        return switched_to_safe_clock();
+    }
+
+    /// The arming trip undone, see failure_detector(bool).
+    static bool settle_armed() {
+        const uint32_t polls = settle_polls();
+        if (!switched_within(polls)) {
+            return true;
+        }
+        Oscctrl::clear_flags(OscctrlFlag::xosc_fail);
+        switch_back();
+        uint32_t left = polls;
+        while (switch_back_pending() && left-- != 0u) {
+        }
+        return !switched_within(polls) && !failing();
     }
 };
 

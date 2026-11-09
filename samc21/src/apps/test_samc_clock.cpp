@@ -272,8 +272,9 @@ void ta_block() {
                   Xosc::config_valid(XoscConfig{.hz = crystal_hz}));
     bench.verdict("and the gain chooser picks the top code for it",
                   xosc_gain_for(crystal_hz) == XoscGain::up_to_32mhz);
-    bench.verdict("the safe clock is chosen no faster than the crystal",
-                  (sys_hz >> cfd_prescaler_for(crystal_hz, sys_hz)) <= crystal_hz);
+    bench.verdict("the safe clock is chosen at most half the crystal, for the RC's "
+                  "+-5 %",
+                  (sys_hz >> cfd_prescaler_for(crystal_hz, sys_hz)) <= crystal_hz / 2u);
 
     // The DPLL refusals. The DCO's floor is the one worth stating twice:
     // the output prescaler divides what the DCO made and is not a way
@@ -482,23 +483,17 @@ void tc_failure_detector() {
                                         .cfd_prescaler = p}));
     bench.verdict("CFDEN reads back", Xosc::failure_detector());
     bench.verdict("CFDPRESC reads back", Xosc::cfd_prescaler() == p);
-    // ARMING ITSELF CAN TRIP THE DETECTOR. Setting CFDEN on a crystal that
-    // has run for milliseconds sometimes latches XOSCFAIL and switches the
-    // output to the safe clock at once: measured 6 runs in 60, the crystal
-    // healthy before and after. Printed, then undone the way 20.6.3 says
-    // a failure is undone (the flag cleared, SWBEN), so the verdicts below
-    // judge the healthy crystal and not the arming's transient.
+    // ARMING A RUNNING CRYSTAL CAN TRIP THE DETECTOR, and the driver
+    // undoes the trip before init() answers (Xosc::failure_detector()). The
+    // crystal is running here on purpose, so these verdicts judge that
+    // undoing: straight after init() nothing may be latched or switched.
     const bool armed_latched = (Oscctrl::flags() & OscctrlFlag::xosc_fail) != 0u;
     const bool armed_switched = Xosc::switched_to_safe_clock();
     print(serial, "  right after arming: XOSCFAIL latched ", armed_latched ? 1 : 0,
           ", switched to the safe clock ", armed_switched ? 1 : 0, crlf);
-    if (armed_switched) {
-        Oscctrl::clear_flags(OscctrlFlag::xosc_fail);
-        Xosc::switch_back();
-        pause_ms(5);
-    }
+    bench.verdict("arming leaves the output on the crystal", !armed_switched);
+    bench.verdict("and leaves no latched failure behind", !armed_latched);
 
-    Oscctrl::clear_flags(OscctrlFlag::xosc_fail);
     pause_ms(5);
     bench.verdict("a healthy crystal raises no failure", !Xosc::failing());
     bench.verdict("and no latched flag either",

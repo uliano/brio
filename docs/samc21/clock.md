@@ -123,7 +123,15 @@ at least one rising and one falling edge; otherwise STATUS.XOSCFAIL
 is replaced by the safe clock and STATUS.XOSCCKSW (CLKSW) says so.
 Status tracks, INTFLAG latches. SWBEN asks to go back once the
 crystal recovers and is cleared by the hardware when the switch
-happens.
+happens. Two things the chapter leaves implicit decide whether the
+detector stays quiet on a healthy crystal. The OSC48M behind the safe
+clock is trimmed to +-5 % only (table 45-57), so a safe clock chosen
+equal to the crystal is faster than it on half the dies:
+`cfd_prescaler_for()` picks the safe clock at most half the crystal.
+And the detector waits out the start-up time only after the
+oscillator starts, so armed on a crystal that is already running its
+first window can fail: `Xosc::init()` and `Xosc::failure_detector(true)`
+undo that trip when they arm a running oscillator ("Bench findings").
 
 **The DPLL multiplies in sixteenths.** The DCO runs at
 f_ref x (LDR + 1 + LDRFRAC/16) and CLK_DPLL is that divided by the
@@ -215,7 +223,10 @@ Resources (thin typed register views, `samc21/clock.hpp`):
   masking counter, ONDEMAND/RUNSTDBY, and the clock failure detector
   with its safe-clock prescaler and its switch-back. `init()` waits
   for STATUS.XOSCRDY and returns false rather than hanging when the
-  crystal does not start; the compile-time `init<cfg>()` twin refuses
+  crystal does not start; arming the detector on a running oscillator
+  (`init()` or `failure_detector(true)`) waits a few monitor periods
+  more and undoes the trip that arming can cause, answering false only
+  when the failure stands; the compile-time `init<cfg>()` twin refuses
   an impossible configuration outright. **The pads are not claimed:**
   OSCCTRL takes XIN and XOUT itself when the oscillator is enabled
   (20.5.1), and gives them back when it is disabled.
@@ -334,13 +345,18 @@ measurand.
   Restoring XTALEN clears the failure and SWBEN is consumed by the
   hardware, after which XOSCCKSW is clear again. Erratum 1.22.1
   confirmed inapplicable by behaviour as well as by the row.
-- **Arming the detector can trip it.** Setting CFDEN (`Xosc::init` with
-  `failure_detector`) on a crystal that has run for milliseconds latched
+- **Arming the detector on a running crystal can trip it.** Setting
+  CFDEN on the 24 MHz crystal after it had run for milliseconds latched
   XOSCFAIL and switched the output to the safe clock at once in 6 runs
-  of 60, the crystal healthy before and after; clearing the flag and
-  asking SWBEN put the output back on the crystal. A program that arms
-  the detector reads XOSCCKSW afterwards. Why the first windows fail is
-  not established.
+  of 60, the crystal healthy before and after, with the safe clock at
+  24 MHz; with it at 12 MHz, 1 run of 60. With CFDEN written in the
+  same store as ENABLE, from a stopped oscillator, 0 runs of 60 at
+  24 MHz: the start-up wait of 20.6.3 covers the arming. The driver
+  therefore undoes the trip when it arms a running oscillator - it
+  waits four monitor periods, and if the output switched it clears the
+  flag, asks SWBEN and checks again - and with the safe clock forced
+  back to 24 MHz it undid the trip in 11 of 60 runs, every
+  verdict of the letter green in all sixty.
 - **The DPLL's ratio arithmetic is exact.** Locked to the crystal
   through a 2 MHz reference and measured against the same crystal -
   so the crystal's own error cancels - the counts are the predicted

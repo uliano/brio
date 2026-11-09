@@ -65,8 +65,8 @@ static_assert(xosc_startup_us(0) == 31);
 static_assert(xosc_startup_us(4) == 496);   // 31 x 2^4, the table's 488
 
 // The safe clock must be no faster than the crystal it stands in for.
-static_assert(cfd_prescaler_for(24'000'000, 48'000'000) == 1);
-static_assert(cfd_prescaler_for(48'000'000, 48'000'000) == 0);
+static_assert(cfd_prescaler_for(24'000'000, 48'000'000) == 2);
+static_assert(cfd_prescaler_for(48'000'000, 48'000'000) == 1);
 static_assert(cfd_prescaler_for(400'000, 48'000'000) == 7);
 
 static_assert(Xosc::config_valid(XoscConfig{.hz = 24'000'000}));
@@ -103,7 +103,7 @@ void xosc_verbs() {
     (void)Xosc::ready();
     (void)Xosc::failing();
     (void)Xosc::switched_to_safe_clock();
-    Xosc::failure_detector(true);
+    (void)Xosc::failure_detector(true);
     (void)Xosc::failure_detector();
     Xosc::cfd_prescaler(3);
     (void)Xosc::cfd_prescaler();
