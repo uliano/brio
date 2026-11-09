@@ -827,9 +827,18 @@ struct Can {
      * DUAL-INSTANCE fact: on a part with CAN1 alone, or on CAN3's own
      * block, there is nothing to split and this verb refuses.
      * The reset value is 14 (CAN_FMR's reset value 0x2A1C0E01).
+     *
+     * REFUSED OUTSIDE FILTER INITIALIZATION MODE: with FINIT clear the
+     * silicon keeps the old split and drops the write without a sign
+     * (measured on the STM32F446RE: 20 written, 14 read back), so the
+     * caller opens the window with filter_init(true) around this call.
+     * The verb does not open it itself, because FINIT stops reception
+     * on both instances (30.4.1) and only the caller knows when that is
+     * acceptable. Main context; no wait, no masking.
      */
     static bool start_bank(uint8_t bank) {
-        if (!can_dual() || filter_banks == 0u || bank > filter_banks) {
+        if (!can_dual() || filter_banks == 0u || bank > filter_banks ||
+            !filter_initializing()) {
             return false;
         }
         CAN_TypeDef& f = filter_regs();

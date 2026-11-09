@@ -1215,12 +1215,10 @@ void tk_can2() {
                   Slave::filter_master == 1u && Bus::filter_master == 1u);
     // 14 is CAN2SB's reset value, so a second split is written first and
     // read back, then the 14 the letter works with - once with the filters
-    // active (printed: the driver writes it there, and what the silicon
-    // does with it is measured) and once in filter initialization mode
-    // (judged).
+    // active, where the silicon drops the write and the verb must refuse
+    // it, and once in filter initialization mode, where it takes.
     const bool took_outside = Slave::start_bank(20);
     const uint8_t read_outside = Slave::start_bank();
-    (void)Slave::start_bank(14);
     (void)Slave::filter_init(true);
     const bool took_inside = Slave::start_bank(20);
     const uint8_t read_inside = Slave::start_bank();
@@ -1230,6 +1228,8 @@ void tk_can2() {
           took_outside ? "true" : "false", ", it reads ", read_outside,
           "; with FINIT set it answered ", took_inside ? "true" : "false", ", it reads ",
           read_inside, crlf);
+    bench.verdict("the verb refuses the split with FINIT clear, and nothing moves",
+                  !took_outside && read_outside == 14u);
     bench.verdict("the split reads back where it is written in filter initialization mode",
                   took_inside && read_inside == 20u && back);
 
