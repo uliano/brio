@@ -515,8 +515,9 @@ rail gives 1240 / 335 / 176 / 135 / 88.)
 - **The chopper moves the offset, and which way is the die's**: on one
   board -136 counts (-21 mV) at the low rail with `ANACTRL.ONCHOP` clear
   against -89 (-14 mV) with it set, a third off; on the other -94 (-15 mV)
-  against -107 (-17 mV), a seventh added. The reference suite judges the
-  move and prints the direction.
+  against -107 (-17 mV), a seventh added. The reference suite prints the
+  move and its direction and judges neither: the chapter gives the
+  chopper no figure, and table 45-27's offset is stated with it on.
 
 ### Linearity, swept with a PWM and the converter's own filter
 
@@ -543,7 +544,12 @@ converter reads k x 64 counts:
   45-27's +/-11 LSB at the point, and what the same INL can tilt an
   eleven-point least-squares line by at its outermost point - plus 1.6
   times the rms for the noise of the point and of the line. The sweep is
-  measured whole with the console quiet and printed after.
+  measured whole with the console quiet and printed after. A run lands in
+  one of two regimes - an rms near half a count, or six to ten - and in
+  the quiet one the point at k = 320 can stay disturbed by hundreds of
+  counts through all four takes (two runs of ten): its mean is then no
+  reading of the converter, and the INL verdict is a skip with the
+  points printed.
 - Best-fit line over |k| <= 320 (eleven points): **slope 65.132 counts
   per k where ideal is 64.000, intercept 4 counts**. That is a **gain of
   +1.7 %** - inside table 45-27's +/-3.4 % maximum, above its +/-1.1 %
@@ -733,17 +739,19 @@ response needs a mid-scale source, which is what the SKPCNT measurement
 above used.
 
 **`EVCTRL.WINMONEO` moves something real, with a control that moves
-nothing.** Routed to a TC counting events: **447 events in 20 ms** with
-the condition matching - one per conversion, matching the result rate -
-and **0** in the same 20 ms with a condition this reading cannot meet.
+nothing.** Routed to a TC counting events: **469 events in 20 ms** with
+the condition matching - one per conversion, the 468.75 decimation
+windows 20 ms holds - and **0** in the same 20 ms with a condition this
+reading cannot meet.
 (The control has to be a condition and not a threshold: nothing is above
 a reading sitting at the positive rail, so "RESULT < a large negative
 number" is what the negative case had to be.)
 
 **All three interrupts drive the NVIC**, under the vector name the
 device header declares (`SDADC_Handler`): ten milliseconds of
-free-running conversions with RESRDY armed give **214 vector entries**
-with the handler reading RESULT (which is what clears the flag), and
+free-running conversions with RESRDY armed give **235 vector entries**,
+one per decimation window, with the handler reading RESULT (which is
+what clears the flag), and
 with RESRDY disarmed and nothing reading RESULT the OVERRUN bit reaches
 the same vector. One trap sits between the two: a vector disabled at the
 NVIC while RESRDY is up keeps its pending bit, so the next enable enters

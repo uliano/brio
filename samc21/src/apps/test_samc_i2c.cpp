@@ -111,7 +111,7 @@ bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 /// The console drained before a timed window opens (its transmit
 /// interrupt would land inside the span), or a failed verdict saying so
 /// and false: the letter then skips the window.
-bool quiet_console() {
+bool drained_for_window() {
     if (console_drain()) {
         return true;
     }
@@ -431,10 +431,10 @@ void ta_block() {
     const uint32_t after_disabled = Raw::ctrla();
     print(serial, "  SWRST from DISABLED (I2C mode): ", hex(before), " -> ",
           hex(after_disabled), " (sync cleared=", sync_d, ")", crlf);
-    bench.verdict("ERRATUM 1.17.16 IS NOT REPRODUCED in I2C mode either: SWRST "
-                  "from the DISABLED state resets the block - the enable-first "
-                  "discipline is kept anyway, one enable of cost",
-                  sync_d && after_disabled == 0u);
+    // Printed, not judged: an erratum need not reproduce on a die, and the
+    // enable-first discipline holds whichever way it goes.
+    print(serial, "  erratum 1.17.16 in I2C mode: ",
+          sync_d && after_disabled == 0u ? "not reproduced here" : "reproduced here", crlf);
 
     // The configuration in the silicon, and the enable protection.
     (void)Raw::configure(cfg);
@@ -990,6 +990,11 @@ void tf_speeds() {
         }
         uint8_t w[16];
         for (uint8_t i = 0; i < 16; ++i) w[i] = static_cast<uint8_t>(i * 7u);
+        // The last speed's line off the wire before the wall time starts:
+        // its transmit interrupts would land inside the timed tenures. A
+        // drain that ran out fails its own verdict, and the ordering
+        // verdict below does not rest on a few lost microseconds.
+        (void)drained_for_window();
         const uint32_t t0 = Ticker::millis();
         for (uint8_t k = 0; k < 25; ++k) {
             if (write_tenure(twilink::dut_addr, w, 16, speeds[s], 400) != i2c_ok) {
@@ -997,7 +1002,7 @@ void tf_speeds() {
             }
         }
         took[s] = Ticker::millis() - t0;
-        if (quiet_console()) {
+        if (drained_for_window()) {
             scl[s] = sampled_write(w, 16, speeds[s], asked[s]);
         } else {
             scl[s].status = 0xEEu;   // not sampled: the verdict below fails on it

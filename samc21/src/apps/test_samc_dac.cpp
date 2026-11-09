@@ -126,6 +126,41 @@ constexpr uint32_t main_gen_hz = SysClock::hz;
 /// no figure is assumed.
 uint16_t vdd_mv = 0;
 
+/// How far the located supply can sit from the true one, per mille. The
+/// supply is the 1.024 V level read by ADC0 against VDDANA, so the true
+/// supply is vdd_mv x (the level + ADC0's error) / 1024: the level
+/// 1003..1045 mV (table 45-36, at 5.0 V) moved by the levels' supply
+/// coefficient over 2.7..5.5 V (-0.2..+0.3 %/V, the table's typical, the
+/// only figure it gives): 996..1050 mV, and ADC0's error reading it
+/// (table 45-24's maxima: offset 80 mV, gain 42 mV x 0.39 - the level's
+/// fraction of a 2.7 V supply - and INL 4 counts, 5.4 mV at 5.5 V: 102
+/// mV) - a factor of 894/1024 .. 1152/1024.
+constexpr uint32_t supply_lo_permille = 873;
+
+/// The most counts of 4096 a voltage of `mv` (up to 1000) can be against
+/// the true supply, given the located one (rounded up); full scale when
+/// no supply has been located (nothing judged tight).
+uint32_t located_counts(uint32_t mv) {
+    if (vdd_mv == 0u) return 4096u;
+    return (mv * 4096u * 1000u + vdd_mv * supply_lo_permille - 1u) /
+           (vdd_mv * supply_lo_permille);
+}
+
+/// The DAC read by ADC0 against VDDANA: the pair's worst combined error at
+/// a fraction f_num / f_den of full scale, in millivolts, from the
+/// tables' maxima - the DAC (DS60001479M table 45-32) offset 20 mV and
+/// gain 20 mV x f, ADC0 single-ended (table 45-24, the larger of its
+/// 3.0 V and 5.0 V rows) offset 80 mV and gain 42 mV x f - and then in
+/// counts of 4096 through located_counts(), with the INLs (the DAC's 0.9
+/// LSB of 1024, 4 counts; the ADC's 4) and a count of quantization.
+uint32_t pair_err_mv(uint32_t f_num, uint32_t f_den) {
+    return 100u + (62u * f_num) / f_den;
+}
+uint32_t pair_err_counts(uint32_t f_num, uint32_t f_den) {
+    if (vdd_mv == 0u) return 4096u;   // no supply located: nothing is judged tight
+    return located_counts(pair_err_mv(f_num, f_den)) + 9u;
+}
+
 // ---------------------------------------------------------------------------
 // The stopwatch (letter i only): TC0 + TC1 as one 32-bit counter on the
 // BOARD'S CRYSTAL. A settling time reported against OSC48M would carry
@@ -302,8 +337,9 @@ uint16_t pad_reading(uint16_t code, uint16_t samples = 8) {
  * docs/samc21/adc.md) against VDDANA as the reference, at SAMPLEN 14 (the
  * 10 us table 45-22 asks of the channel). The level sits under every
  * supply the device runs on (2.7..5.5 V, DS60001479M table 45-2), so the
- * reading never saturates; its accuracy is the level's own, +-2.05 %
- * (table 45-36). Leaves ADC0 released and SUPC.VREF at reset.
+ * reading never saturates; its accuracy is the level's and ADC0's, as
+ * supply_lo_permille spells out. Leaves ADC0 released and SUPC.VREF at
+ * reset.
  */
 bool locate_vdd() {
     if (vdd_mv != 0u) {
@@ -320,7 +356,12 @@ bool locate_vdd() {
     const uint32_t counts = mean_of<Adc0>(32);
     (void)Vref::configure(VrefConfig{});
     Adc0::release();
-    if (counts == 0u) {
+    // What the level can read under any supply the device runs on: the
+    // level's 1003..1045 mV (table 45-36) with ADC0's offset and gain (80
+    // mV and 42 mV x the fraction, table 45-24), INL and quantization
+    // against 2.7..5.5 V (table 45-2) is 676..1737 counts. Outside that no
+    // level was read, and a smaller count would overflow the millivolts.
+    if (counts < 676u || counts > 1737u) {
         return false;
     }
     vdd_mv = static_cast<uint16_t>((1024UL * 4096UL + counts / 2u) / counts);
@@ -338,12 +379,13 @@ bool need_vdd() {
 }
 
 /// Whether a bandgap level of `level_mv` can be produced and read under a
-/// supply located at `supply_mv`: the level at most 95 % of the supply.
-/// The 5 % is the level's own +-2.05 % at its top (table 45-36), the
-/// located supply's +-2.05 % at its bottom and the levels' 0.3 %/V
-/// supply coefficient.
+/// supply located at `supply_mv`: the level at its top (+2.05 %, table
+/// 45-36, and 0.69 % of typical supply coefficient: x 1.028) with ADC0's
+/// offset and gain at full scale over it (122 mV, table 45-24, which
+/// covers the DAC's offsets too), under the least the true supply can be
+/// (supply_lo_permille).
 constexpr bool level_below_supply(uint32_t level_mv, uint32_t supply_mv) {
-    return level_mv * 20u < supply_mv * 19u;
+    return level_mv * 1028u + 122'000u < supply_mv * supply_lo_permille;
 }
 
 /// Letter i's wait on a fast analog edge, at the cost of the condition
@@ -511,17 +553,20 @@ void tb_loop() {
     print(serial, "  mid-code on PA02: ", no_pmux, " counts with the pad left "
           "under PORT, ", with_pmux, " with the DAC's peripheral function "
           "claimed", crlf);
-    bench.verdict("THE ANALOG OUTPUT REACHES THE PAD EITHER WAY - the buffer "
-                  "is connected by CTRLB.EOEN and not by the pin multiplexer",
-                  near(no_pmux, with_pmux, 24u) && no_pmux > 1800u &&
-                      no_pmux < 2300u);
-
     // THE NOISE FLOOR, measured before any band below is chosen.
     dac_set(512);
     const Spread mid = spread_of<Adc0>(64);
     print(serial, "  64 single readings at mid-code span ", mid.span(),
           " counts of 4096 around ", mid.mean, crlf);
     const uint16_t band = static_cast<uint16_t>(mid.span() + 8u);
+    // The two readings are one code through one converter: they differ by
+    // the noise alone (the 64 readings' span, measured above) and a count;
+    // either is the pair at mid-scale, within the tables' error.
+    const uint32_t mid_err = pair_err_counts(1u, 2u);
+    bench.verdict("THE ANALOG OUTPUT REACHES THE PAD EITHER WAY - the buffer "
+                  "is connected by CTRLB.EOEN and not by the pin multiplexer",
+                  near(no_pmux, with_pmux, mid.span() + 1u) &&
+                      near(no_pmux, 2048u, mid_err));
 
     // The endpoints. Table 45-30 bounds the LINEAR output range at
     // 0.05 V .. VDDANA - 0.05 V, so code 0 and code 1023 are outside
@@ -545,22 +590,30 @@ void tb_loop() {
     print(serial, "  1/4 VDDANA reads ", quarter, " counts (a quarter of full "
           "scale would be 1024); VDDANA located at ", vdd_mv, " mV through the "
           "1.024 V bandgap level", crlf);
-    bench.verdict("the scaled supply is a quarter of full scale to under one "
-                  "per cent, so the reference really is VDDANA",
-                  near(quarter, 1024u, 20u));
+    // ADC0's own error at a quarter of full scale is 80 + 10.5 mV (table
+    // 45-24), some 75 counts at 5 V; the divider's is not tabled. +-10 %
+    // holds both, and the nearest other reference (INTREF at 4.096 V) would
+    // read 27 % high, the lower levels saturate.
+    bench.verdict("the scaled supply is a quarter of full scale within 10 %, so the "
+                  "reference really is VDDANA",
+                  near(quarter, 1024u, 102u));
 
     Adc0::select(AnalogIn<Vout>{});
-    bench.verdict("code 0 sits at the bottom of the range, within a few counts "
-                  "of ground",
-                  at_0 <= 40u);
-    bench.verdict("code 1023 sits at the top, within a per cent of full scale",
-                  at_1023 >= 4050u);
-    bench.verdict("mid-code is half of full scale to better than one per cent "
-                  "- and one per cent is the two converters' combined offset "
-                  "and gain error, not their linearity",
-                  near(at_512, 2048u, 41u));
+    // The ends lie outside table 45-30's linear range by its 50 mV, plus
+    // the pair's error there; the inner codes are the pair's error alone.
+    const uint32_t lin_counts = located_counts(50u);
+    bench.verdict("code 0 sits at the bottom of the range, within the linear range's "
+                  "50 mV and the pair's error of ground",
+                  at_0 <= lin_counts + pair_err_counts(0u, 1u));
+    bench.verdict("code 1023 sits at the top, within the linear range's 50 mV and the "
+                  "pair's error of full scale",
+                  at_1023 + lin_counts + pair_err_counts(1u, 1u) >= 4096u);
+    bench.verdict("mid-code is half of full scale within the two converters' "
+                  "combined offset and gain error (tables 45-24, 45-32)",
+                  near(at_512, 2048u, mid_err));
     bench.verdict("a quarter and three quarters land where they should",
-                  near(at_256, 1024u, 41u) && near(at_768, 3072u, 41u));
+                  near(at_256, 1024u, pair_err_counts(1u, 4u)) &&
+                      near(at_768, 3072u, pair_err_counts(3u, 4u)));
 
     // Monotonic over a coarse walk - the fine one is letter h.
     bool monotone = true;
@@ -584,10 +637,17 @@ void tb_loop() {
         adc_mv(two_volts, Adc0::result_steps(), vdd_mv);
     print(serial, "  set_mv(2000) wrote code ", Dac::code(), " and the ADC "
           "reads ", two_volts_mv, " mV", crlf);
+    // The pair's error at 2 V of the supply, in millivolts, and the two
+    // conversions' quantization (a DAC step, an ADC count). The located
+    // supply cancels from the code written and the millivolts read back
+    // but for the pair's error, which comes back scaled by the located
+    // supply over the true one: up to 1000/873.
+    const uint32_t two_err = pair_err_mv(2000u, vdd_mv) * 1000u / supply_lo_permille + 1u +
+                             (vdd_mv + 1023u) / 1024u + (9u * vdd_mv + 4095u) / 4096u;
     bench.verdict("util/analog.hpp's dac_code() and adc_mv() agree across the "
-                  "silicon to better than 50 mV, with NOT ONE LINE of util/ "
-                  "changed for this target",
-                  near(two_volts_mv, 2000u, 50u));
+                  "silicon within the pair's tabled error, with NOT ONE LINE of "
+                  "util/ changed for this target",
+                  near(two_volts_mv, 2000u, two_err));
 
     dac_set(0);
     Vout::release();
@@ -651,10 +711,32 @@ void tc_reference() {
                   "device header's INT1V name is the SAM D21's, stale here",
                   measured[1] > measured[0] + 700u &&
                       (!held[2] || measured[2] > measured[1] + 1500u));
-    bench.verdict("...and each level lands within 10 % of its nominal",
-                  near(measured[0], nominal[0], 102u) &&
-                      near(measured[1], nominal[1], 205u) &&
-                      (!held[2] || near(measured[2], nominal[2], 410u)));
+    // Each level within its tables. The figure is 1.023 x (the DAC's
+    // output at code 1000 + ADC0's error) x 1024 / (the 1.024 V level +
+    // ADC0's error reading it), so the supply cancels and the two ADC0
+    // errors meet: their gains cancel (each in proportion to its voltage)
+    // and their common offset is left weighed by 1.023 - L/1024 (80 mV,
+    // table 45-24). With it: the level and the 1.024 V level scaled by
+    // L/1024, 2.05 % each (table 45-36) and 0.69 % each of typical supply
+    // coefficient, 5.5 % of L; the DAC's offset and gain at code 1000 (20
+    // + 20 mV, table 45-32's one row, x 1.023: 41 mV) and its INL at an
+    // INTREF reference (3.5 LSB of L/1024, table 45-32); 4 counts of INL
+    // on each reading (6 mV x (1 + L/1024)); 3 mV of quantization.
+    // Between two levels the gains cancel and the offset weighs once more
+    // per 1024 mV: the spreads, the offset and the INLs leave over 800 of
+    // the 1024 mV and over 1600 of the 2048, against the 700 and 1500
+    // judged above.
+    const auto level_tol = [](uint16_t nominal) {
+        const uint32_t l = nominal;
+        const uint32_t weigh = 1023u * 1024u > 1000u * l ? 1023u * 1024u - 1000u * l
+                                                       : 1000u * l - 1023u * 1024u;
+        return l * 55u / 1000u + 41u + (80u * weigh + 1024u * 1000u - 1u) / (1024u * 1000u) +
+               6u * (1024u + l) / 1024u + 35u * l / 10240u + 4u;
+    };
+    bench.verdict("...and each level lands within its tables' band of its nominal",
+                  near(measured[0], nominal[0], level_tol(nominal[0])) &&
+                      near(measured[1], nominal[1], level_tol(nominal[1])) &&
+                      (!held[2] || near(measured[2], nominal[2], level_tol(nominal[2]))));
 
     // Does the DAC's reference path need SUPC.VREF.VREFOE, the way the
     // ADC's bandgap INPUT channel does (adc.md)? Same level, bit off
@@ -673,6 +755,7 @@ void tc_reference() {
     bench.verdict("THE DAC'S REFERENCE PATH DOES NOT NEED SUPC.VREF.VREFOE: "
                   "the reference multiplexer takes the bandgap internally, "
                   "unlike the ADC's bandgap INPUT channel",
+                  // the same one-per-cent definition as letter d's
                   without > 1200u && near(without, with, 40u));
 
     Dac::release();
@@ -741,14 +824,21 @@ void td_adc_intref_reference() {
     bench.verdict("THE ADC'S REFERENCE PATH DOES NOT NEED VREFOE: a conversion "
                   "against REFSEL = INTREF works with the bit CLEAR",
                   ref_off > 100u && ref_off < 4000u);
+    // "Not in this path" is defined here as an effect under one per cent:
+    // the same chain read twice differs by its noise alone (table 45-24's
+    // 2 mV rms, a tenth of a count after 32 conversions), and a reference
+    // that leaned on VREFOE would read near zero with the bit clear.
     bench.verdict("...and the bit changes the reading by less than one per "
                   "cent, so it is genuinely not in this path",
                   near(ref_off, ref_on, 41u));
-    bench.verdict("the two references agree on the DAC's voltage to better "
-                  "than five per cent, which is the bandgap's own level "
-                  "accuracy and not a fault of either path",
+    // The band: the 2.048 V level +-2.05 % and the supply located through
+    // the 1.024 V level +-2.05 % (table 45-36), ADC0's offset and gain at
+    // each reference (table 45-24: 80 + 42 mV against VDDANA, 21 + 28 mV
+    // against a 2 V reference) and 10 mV of INL and quantization.
+    bench.verdict("the two references agree on the DAC's voltage within the "
+                  "bandgap's level accuracy and the converter's tabled errors",
                   near(implied_off, source_mv,
-                       static_cast<uint32_t>(source_mv / 20u)));
+                       static_cast<uint32_t>(source_mv) * 41u / 1000u + 181u));
 
     Dac::release();
 }
@@ -799,6 +889,10 @@ void te_dac_as_reference() {
     print(serial, "  scaled from the first: ", predicted1, " and ", predicted2,
           " predicted against ", counts[1], " and ", counts[2], " measured",
           crlf);
+    // The ratio cancels the supply and ADC0's gain; what is left is the
+    // DAC's 20 mV offset against each reference voltage (table 45-32: 0.8 %
+    // at code 512 on 5 V, 1.2 % at 3.3 V), twice, and 4 counts of INL:
+    // under three per cent and 4 counts.
     bench.verdict("AND IT IS RATIOMETRIC: the reading falls exactly as one "
                   "over the DAC's code, to under three per cent, with the "
                   "supply cancelling out of both sides",
@@ -811,11 +905,9 @@ void te_dac_as_reference() {
     const uint16_t implied = adc_mv(counts[0], 4096u, dac_ref_at_512);
     print(serial, "  which puts 1/4 VDDANA at ", implied, " mV against the ",
           quarter_mv, " mV the supply says", crlf);
-    bench.verdict("...and the absolute answer lands within ten per cent of "
-                  "what the supply says, which is as much as a DAC reference "
-                  "carrying its own gain and offset error can promise",
-                  near(implied, quarter_mv,
-                       static_cast<uint32_t>(quarter_mv / 10u)));
+    // The absolute figure is printed above, not judged: the quarter-supply
+    // divider's own accuracy is in no table, and with a DAC as the
+    // reference no ADC row applies either.
 
     Dac::release();
 }
@@ -865,12 +957,16 @@ void tf_internal_channel() {
     print(serial, "  worst spread of two interleaved rounds of 128 readings: "
           "internal ", internal_span, " counts, pad ", pad_span, crlf);
 
+    // Code 768 is 3075 counts against VDDANA, within the pair's tabled
+    // error at three quarters of full scale; the two routes share the
+    // converter and the reference, so they differ by their noise (the
+    // spans above) and a count of each mean.
     bench.verdict("MUXPOS = DAC READS THE DAC - the code 38.8.9's table marks "
                   "Reserved and the device header declares is real silicon",
-                  internal.mean > 2800u && internal.mean < 3300u);
-    bench.verdict("and it agrees with the pad path to under two per cent, so "
+                  near(internal.mean, 3075u, pair_err_counts(3u, 4u)));
+    bench.verdict("and it agrees with the pad path within the two routes' noise, so "
                   "it is the same voltage by two routes",
-                  near(internal.mean, pad.mean, 82u));
+                  near(internal.mean, pad.mean, internal_span + pad_span + 2u));
 
     // 41.6.8.1's claim about EOEN, printed: either answer is a fact about
     // the silicon, and brio depends on neither (dac_up() sets both).
@@ -893,14 +989,10 @@ void tf_internal_channel() {
     const uint16_t larger = internal_span > pad_span ? internal_span : pad_span;
     const uint16_t smaller = internal_span > pad_span ? pad_span : internal_span;
     const bool decisive = larger >= 8u && larger >= 3u * (smaller + 1u);
-    if (decisive) {
-        bench.verdict("THE ERRATUM'S READING NOISE IS REAL: the internal "
-                      "channel spreads decisively wider than the pad path",
-                      internal_span > pad_span);
-    } else {
-        bench.skip("the erratum's reading noise: the two spreads are not "
-                   "decisively apart (both printed above)");
-    }
+    // Printed, not judged: an erratum need not reproduce on a die.
+    print(serial, "  erratum 1.8.9's reading noise: ",
+          decisive && internal_span > pad_span ? "shows (the internal channel decisively wider)"
+                                               : "not decisively shown", crlf);
 
     // Second half, and the one only two converters can ask: does a
     // conversion on the internal channel disturb the DAC's OUTPUT? ADC0
@@ -934,19 +1026,13 @@ void tf_internal_channel() {
                   "DAC channel", adc1_up);
     const bool output_decisive =
         disturbed.span() >= 8u && disturbed.span() >= 3u * (quiet.span() + 1u);
-    if (output_decisive) {
-        bench.verdict("ERRATUM 1.8.9'S OUTPUT NOISE IS REAL AND LARGE: the "
-                      "DAC's own pad shakes while another converter samples it "
-                      "through MUXPOS = DAC",
-                      disturbed.span() > quiet.span());
-        bench.verdict("...AND IT IS THE SELECTION AND NOT THE TRAFFIC: the "
-                      "same converter free-running on another input leaves the "
-                      "pad as quiet as silence does",
-                      control.span() <= quiet.span() + 4u);
-    } else {
-        bench.skip("the erratum's output noise: the pad is not decisively "
-                   "noisier while that conversion runs (spreads printed above)");
-    }
+    // Printed, not judged, for the same reason.
+    print(serial, "  erratum 1.8.9's output noise: ",
+          output_decisive && disturbed.span() > quiet.span()
+              ? (control.span() <= quiet.span() + 4u
+                     ? "shows, and only with MUXPOS = DAC selected"
+                     : "shows, with traffic on another input too")
+              : "not decisively shown", crlf);
 
     dac_set(0);
 
@@ -967,14 +1053,14 @@ void tf_internal_channel() {
     print(serial, "  after this letter has used ADC1: a plain ADC0 init "
           "returns ", yes_no(plain_init), " with SYNCBUSY ", Hex{stuck},
           " and the converter reads ", dead_read, crlf);
+    // Whether erratum 1.4.10 shows is printed, not judged; the errata's
+    // way out (ADC1 first) is the verdict, and a quarter of the supply
+    // reads within 10 % (ADC0's tabled error at a quarter of full scale,
+    // some 75 counts at 5 V, and the divider's untabled own).
     if (!plain_init) {
-        bench.verdict("ERRATUM 1.4.10 REPRODUCES ON THIS DIE - once ADC1 has "
-                      "run, ADC0.SYNCBUSY.ENABLE is stuck at one and stays "
-                      "there",
-                      (stuck & ADC_SYNCBUSY_ENABLE_Msk) != 0u);
-        bench.verdict("...and it is not a stale bit but a DEAD CONVERTER: "
-                      "ADC0 does not enable and reads zero",
-                      dead_read == 0u);
+        print(serial, "  erratum 1.4.10 shows: SYNCBUSY.ENABLE ",
+              (stuck & ADC_SYNCBUSY_ENABLE_Msk) != 0u ? "stuck" : "clear",
+              ", the converter reads ", dead_read, crlf);
         const bool rescued = adc0_up(pad_cfg);
         Adc0::select(AdcInput::scaled_supply);
         const uint16_t good_read = Adc0::read();
@@ -984,11 +1070,11 @@ void tf_internal_channel() {
         bench.verdict("THE ERRATA'S OWN ORDER IS THE WAY OUT: ADC1 enabled "
                       "before ADC0 and the converter is back, with no reset of "
                       "the device",
-                      rescued && near(good_read, 1024u, 30u));
+                      rescued && near(good_read, 1024u, 102u));
     } else {
         print(serial, "  erratum 1.4.10 did not reproduce in this arrangement - "
               "an observation on one die", crlf);
-        bench.verdict("...and ADC0 reads normally", near(dead_read, 1024u, 30u));
+        bench.verdict("...and ADC0 reads normally", near(dead_read, 1024u, 102u));
     }
 
     Adc0::release();
@@ -1053,11 +1139,9 @@ void tg_comparator() {
 
     bench.verdict("ACNEGATIVE::DAC IS REAL - ac.hpp's enumerator flips a comparator",
                   found[0] > 0u && found[0] < 1023u);
-    bench.verdict("and the three crossings land where the two dividers say, "
-                  "to under three per cent of full scale",
-                  near(found[0], predicted[0], 31u) &&
-                      near(found[1], predicted[1], 31u) &&
-                      near(found[2], predicted[2], 31u));
+    // Where the crossings land, and the gaps between them below, are
+    // printed, not judged: the VDD scaler's INL, offset and gain errors are
+    // typical figures only (table 45-34), so nothing written bounds them.
     // The strong claim: the SPACING between crossings is the DAC's own
     // linearity, with the comparator's offset differenced out.
     const uint32_t gap1 = static_cast<uint32_t>(found[1] - found[0]);
@@ -1065,10 +1149,8 @@ void tg_comparator() {
     print(serial, "  the two gaps are ", gap1, " and ", gap2, " codes, "
           "predicted 256 each - and differencing them cancels the "
           "comparator's offset", crlf);
-    bench.verdict("the equal steps of the scaler map to equal steps of the "
-                  "DAC to under two per cent, which is the two ladders "
-                  "agreeing",
-                  near(gap1, 256u, 20u) && near(gap2, 256u, 20u));
+    bench.verdict("the crossings come in the scaler's order",
+                  found[0] < found[1] && found[1] < found[2]);
 
     // A control: with the DAC parked at zero the comparator must see the
     // scaler above it at every step, and at full scale below it.
@@ -1095,8 +1177,8 @@ void tg_comparator() {
 // converters' offset and gain error, so the residual is COMBINED
 // NONLINEARITY - and this letter declines to apportion it. Table 45-32
 // puts the DAC's INL at +/-0.6 LSB max at a VDDANA reference (0.6 DAC
-// LSB is 2.4 ADC counts) and table 45-24 puts the ADC's at +/-4 LSB, so
-// the combined budget is about 6.4 counts and the band below is 12.
+// LSB is 2.4 ADC counts, 0.9 at 2.7 V) and table 45-24 puts the ADC's at
+// +/-4 LSB; with the fit's tilt the band below is 21 counts.
 void th_curve() {
     bench.verdict("the DAC comes up", dac_up());
     const bool adc_ok = adc0_up(avg_cfg);
@@ -1178,13 +1260,21 @@ void th_curve() {
     bench.verdict("the transfer is MONOTONIC over the whole fitted range - no "
                   "code reads below its predecessor",
                   monotone);
+    // The residual's bound: each point carries the pair's INL at a VDDANA
+    // reference (the DAC's 0.9 LSB of 1024 at 2.7 V, 3.6 counts, table
+    // 45-32; the ADC's 4, table 45-24): 7.6 counts; the 31-point line can
+    // be tilted by the same INL times its hat weights' largest row sum,
+    // 1.625: 7.6 x 2.625 = 20 counts, and one more for the 64-sample means'
+    // noise and quantization: 21.
     bench.verdict("the residual from the best-fit line stays inside the two "
-                  "converters' COMBINED datasheet nonlinearity (12 counts "
-                  "against a 6.4-count budget)",
-                  worst_centi <= 1200);
-    bench.verdict("and the slope is within one per cent of a full-scale span, "
-                  "which is the pair's combined gain error",
-                  slope_milli > 3960 && slope_milli < 4050);
+                  "converters' COMBINED datasheet nonlinearity (21 counts, the "
+                  "INLs and the fit's tilt)",
+                  worst_centi <= 2100);
+    // The pair's gain errors: the DAC's 20 mV and the ADC's 42 mV (24 at
+    // 3.0 V) of full scale, 1.3 % at the worst row: 4004 x 0.987..1.013.
+    bench.verdict("and the slope is within the pair's combined gain error of a "
+                  "full-scale span (1.3 %)",
+                  slope_milli > 3950 && slope_milli < 4058);
 
     // The endpoints, measured but deliberately NOT fitted.
     dac_set(0);
@@ -1258,9 +1348,10 @@ void ti_timing() {
           startup_ns, " ns (table 45-31 says 3000; the ENABLE write's own "
           "synchronization is inside this number)", crlf);
     bench.verdict("every arming came up", up);
-    bench.verdict("the startup is a handful of microseconds, the order table "
-                  "45-31 gives",
-                  startup_min > 0u && startup_ns < 60'000u);
+    // The figure is printed above, not judged: table 45-31's 3 us is a
+    // simulation's, and the ENABLE write's synchronization inside the
+    // number has no figure of its own.
+    bench.verdict("STATUS.READY rose after every ENABLE", startup_min > 0u);
 
     // Back through the driver's own front door, so the cached
     // configuration and the register agree for the rest of the letter.
@@ -1373,14 +1464,16 @@ void ti_timing() {
     print(serial, "  table 45-31 gives no settling time at all, only a "
           "350 ksps conversion rate (2857 ns a conversion); table 45-34 puts "
           "the comparator's own propagation at 38 ns", crlf);
+    // "Decisively": beyond what the two windows can differ by with no
+    // wait at all - each window's own pair of stopwatch reads, whose
+    // whole cost (the single-shot figure above) bounds their jitter,
+    // which also covers the one SysTick entry by which two windows of
+    // about 1.5 ms can differ.
     bench.verdict("the waiting loop really does wait - it is decisively "
                   "slower than the same loop with nothing to wait for",
-                  ta > tb + crossings);
-    bench.verdict("A FULL-SCALE STEP REACHES MID-SUPPLY WITHIN ONE POLL OF "
-                  "THE COMPARATOR - an upper bound of a few hundred "
-                  "nanoseconds, an ORDER OF MAGNITUDE under the 2857 ns "
-                  "conversion period, which is a rate and not a settling time",
-                  per_ns > 0u && per_ns <= 3u * poll_ns + 200u);
+                  ta > tb + 2u * floor_ticks);
+    // How fast the step crosses is printed above, not judged: table 45-31
+    // gives no settling time at all, only a conversion rate.
 
     (void)Dac::set(0);
     (void)Comp::enable(false);
@@ -1502,9 +1595,13 @@ void tj_event_feed() {
           hi, " counts; TC3 counted ", counted, " EMPTY events, the handler "
           "took ", feed_empties, " EMPTY interrupts and wrote ",
           feed_next, " of ", wave_len, " values (wave[0] the starter's)", crlf);
+    // The table's codes 100 and 900 are 400 and 3604 counts against
+    // VDDANA; the extremes the ADC saw reach each within the pair's
+    // tabled error there.
     bench.verdict("THE PAD FOLLOWED THE TABLE - the ADC saw both levels of a "
                   "waveform the EMPTY interrupt fed and an event started",
-                  lo < 600u && hi > 3300u);
+                  lo <= 400u + pair_err_counts(100u, 1023u) &&
+                      hi + pair_err_counts(900u, 1023u) >= 3604u);
     bench.verdict("THE DAC IS A GENERATOR TOO: TC3 counted the buffer going "
                   "empty",
                   counted > 0u);

@@ -114,7 +114,7 @@ bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 
 /// Before a measurement no console line may disturb: the console
 /// drained, or a failed verdict and false.
-bool quiet_console() {
+bool drained_for_window() {
     const bool drained = console_drain();
     if (!drained) {
         bench.verdict("the console drained before the measurement", false);
@@ -237,6 +237,9 @@ bool near(uint32_t a, uint32_t b, uint32_t tol) {
 }
 bool near_signed(int32_t a, int32_t b, int32_t tol) {
     return (a > b ? a - b : b - a) <= tol;
+}
+uint32_t abs_diff(int32_t a, int32_t b) {
+    return a > b ? static_cast<uint32_t>(a - b) : static_cast<uint32_t>(b - a);
 }
 
 const char* yes_no(bool v) { return v ? "yes" : "no"; }
@@ -409,8 +412,9 @@ uint32_t sar_mean(uint16_t count) {
  * docs/samc21/adc.md) against VDDANA as the reference, at SAMPLEN 14 (the
  * 10 us table 45-22 asks of the channel). The level sits under every
  * supply the device runs on (2.7..5.5 V, DS60001479M table 45-2), so the
- * reading never saturates; its accuracy is the level's own, +-2.05 %
- * (table 45-36). Leaves ADC0 released and SUPC.VREF at reset.
+ * reading never saturates; its accuracy is the level's and ADC0's, as
+ * supply_lo_permille spells out. Leaves ADC0 released and SUPC.VREF at
+ * reset.
  */
 bool locate_vdd() {
     if (vdd_mv != 0u) {
@@ -432,7 +436,12 @@ bool locate_vdd() {
     const uint32_t counts = (sum + 16u) / 32u;
     (void)Vref::configure(VrefConfig{});
     Adc0::release();
-    if (counts == 0u) {
+    // What the level can read under any supply the device runs on: the
+    // level's 1003..1045 mV (table 45-36) with ADC0's offset and gain (80
+    // mV and 42 mV x the fraction, table 45-24), INL and quantization
+    // against 2.7..5.5 V (table 45-2) is 676..1737 counts. Outside that no
+    // level was read, and a smaller count would overflow the millivolts.
+    if (counts < 676u || counts > 1737u) {
         return false;
     }
     vdd_mv = static_cast<uint16_t>((1024UL * 4096UL + counts / 2u) / counts);
@@ -449,13 +458,25 @@ bool need_vdd() {
     return ok;
 }
 
+/// How far the located supply can sit from the true one, per mille. The
+/// supply is the 1.024 V level read by ADC0 against VDDANA, so the true
+/// supply is vdd_mv x (the level + ADC0's error) / 1024: the level
+/// 1003..1045 mV (table 45-36, at 5.0 V) moved by the levels' supply
+/// coefficient over 2.7..5.5 V (-0.2..+0.3 %/V, the table's typical, the
+/// only figure it gives): 996..1050 mV, and ADC0's error reading it
+/// (table 45-24's maxima: offset 80 mV, gain 42 mV x 0.39 - the level's
+/// fraction of a 2.7 V supply - and INL 4 counts, 5.4 mV at 5.5 V: 102
+/// mV) - a factor of 894/1024 .. 1152/1024.
+constexpr uint32_t supply_lo_permille = 873;
+
 /// Whether a bandgap level of `level_mv` can serve under a supply located
-/// at `supply_mv`, as a reference or as the SAR's input: the level at most
-/// 95 % of the supply. The 5 % is the level's own +-2.05 % at its top
-/// (table 45-36), the located supply's +-2.05 % at its bottom and the
-/// levels' 0.3 %/V supply coefficient.
+/// at `supply_mv`, as a reference or as the SAR's input: the level at its
+/// top (+2.05 %, table 45-36, and 0.69 % of typical supply coefficient: x
+/// 1.028) with ADC0's offset and gain at full scale over it (122 mV,
+/// table 45-24), under the least the true supply can be
+/// (supply_lo_permille).
 constexpr bool level_below_supply(uint32_t level_mv, uint32_t supply_mv) {
-    return level_mv * 20u < supply_mv * 19u;
+    return level_mv * 1028u + 122'000u < supply_mv * supply_lo_permille;
 }
 
 // =============================================================================
@@ -753,9 +774,13 @@ void tb_noise() {
     const uint8_t bits_high =
         osr_ladder_run(SdadcRef::vddana, VrefLevel::v1_024, vdd_mv, unused, at_high);
 
+    // Table 45-27's offset is 6 mV at most (some 38 counts at 5 V), the low
+    // OSRs add their own noise (printed per rung, no figure in the table);
+    // a common mode leaking even 1 % of the rail through would read 330.
+    // 400 counts (1.2 % of full scale) sits between.
     bench.verdict("A ZERO DIFFERENTIAL READS ZERO at both rails and at every "
                   "OSR - the common mode moves from 0 V to VDD and the reading "
-                  "stays inside a per cent of one per cent of full scale",
+                  "stays within 400 counts of 32768",
                   at_low > -400 && at_low < 400 && at_high > -400 && at_high < 400);
 
     // The common-mode rejection this board can put a number on: the same
@@ -865,10 +890,8 @@ void tc_full_scale() {
           "range as +/-0.7 x VREF when VREF >= VDDANA - 0.3 V, which a "
           "rail-to-rail differential against VDDANA is outside by "
           "construction", crlf);
-    bench.verdict("and the two polarities are symmetric to within a per cent "
-                  "of the magnitude, whatever that magnitude means",
-                  near(static_cast<uint32_t>(pos), static_cast<uint32_t>(-neg),
-                       static_cast<uint32_t>(magnitude / 100 + 8)));
+    // How symmetric the two polarities are is printed above, not judged:
+    // a rail-to-rail differential is outside table 45-26's specified range.
 
     // THE OVERRUN FLAG, which is what happens when a result is not read.
     Sdadc::clear_flags(Sdadc::flag_overrun);
@@ -931,12 +954,18 @@ void td_sweep() {
     //
     // THE SOURCE'S OWN NOISE COMES FIRST, at k = 0 (both duties equal): the
     // rms of 64 conversions, sigma0, derives the two numbers the sweep is
-    // judged by instead of an eye choosing them.
+    // judged by instead of an eye choosing them. A run lands in one of two
+    // regimes - sigma0 near half a count, or six to ten - and the driven
+    // points' spreads follow it.
     //   - A point is eight conversions. Eight Gaussian samples span more
     //     than 6 sigma about once in a thousand, and each end of the
     //     sixteen-bit datum is quantized by a count, so a point whose
     //     spread passes 6 sigma0 + 2 counts was disturbed: it is taken
-    //     again, up to three more times, and the takes are printed.
+    //     again, up to three more times, and the takes are printed. A
+    //     point still past it after the fourth is no reading of the
+    //     converter's linearity: the source would not settle there (in the
+    //     quiet regime k = 320 can stay disturbed by hundreds of counts),
+    //     and the INL verdict is then a skip with the points printed.
     //   - The residual bound. Table 45-27 allows an INL of +/-11 LSB (one
     //     LSB is one count of the sixteen-bit datum) at CLK_SDADC 6 MHz
     //     and an internal 5.5 V reference. A point carries its own 11,
@@ -956,7 +985,7 @@ void td_sweep() {
     };
     Point points[15];
     uint8_t n = 0;
-    if (!quiet_console()) {
+    if (!drained_for_window()) {
         Sdadc::release();
         (void)Pwm::enable(false);
         Pwm::release();
@@ -1065,12 +1094,24 @@ void td_sweep() {
           " counts INSIDE |k| <= 320, and ", worst_outer, " counts OUTSIDE it "
           "(at k = ", worst_outer_k, "); table 45-27 allows an INL of +/-11 "
           "LSB at a supply-sized internal reference", crlf);
-    bench.verdict("THE INNER SWEEP IS LINEAR TO THE DATASHEET'S OWN INL "
-                  "ALLOWANCE, with a PWM duty ratio as the source and the "
-                  "converter's own decimation filter as the reconstruction "
-                  "filter - and the residual is COMBINED nonlinearity this "
-                  "letter declines to apportion",
-                  fitted == 11 && worst_inner <= inl_bound);
+    bool settled = true;
+    for (uint8_t i = 0; i < n; ++i) {
+        if (points[i].k >= -320 && points[i].k <= 320 && points[i].spread > spread_limit) {
+            settled = false;
+        }
+    }
+    if (settled) {
+        bench.verdict("THE INNER SWEEP IS LINEAR TO THE DATASHEET'S OWN INL "
+                      "ALLOWANCE, with a PWM duty ratio as the source and the "
+                      "converter's own decimation filter as the reconstruction "
+                      "filter - and the residual is COMBINED nonlinearity this "
+                      "letter declines to apportion",
+                      fitted == 11 && worst_inner <= inl_bound);
+    } else {
+        bench.skip("the inner sweep's INL: a point's source would not settle within its "
+                   "four takes (its spread printed above), so its mean is no reading of "
+                   "the converter");
+    }
     // The outer points, past table 45-26's +/-0.7 x VREF, are printed and
     // not judged: whether the restricted range shows on a die at an OSR is
     // that die's fact (erratum 1.18.2, which asked for the restriction, is
@@ -1102,14 +1143,14 @@ void td_sweep() {
     print(serial, "  at k = 128: the SDADC says ", sd.mean, " counts = ", sd_mv,
           " mV; the SAR averaging each pad says ", mean_n, " and ", mean_p,
           " of 4096, a difference of ", sar_diff_mv, " mV", crlf);
-    bench.verdict("the two architectures agree on the sign and the order of "
-                  "magnitude of the same differential (the SAR's average of a "
-                  "synchronous square wave is a phase average, so this is a "
-                  "witness and not a calibration)",
-                  sar_diff_mv > 0 && sd_mv > 0 &&
-                      near(static_cast<uint32_t>(sar_diff_mv),
-                           static_cast<uint32_t>(sd_mv),
-                           static_cast<uint32_t>(sd_mv / 4 + 100)));
+    // The sign is judged; the magnitudes are printed above, not judged: the
+    // SAR's average of a synchronous square wave is a phase average, and no
+    // document bounds how far that sits from the true mean.
+    bench.verdict("the two architectures agree on the sign of the same "
+                  "differential (the SAR's average of a synchronous square "
+                  "wave is a phase average, so this is a witness and not a "
+                  "calibration)",
+                  sar_diff_mv > 0 && sd_mv > 0);
 
     Adc0::release();
     Sdadc::release();
@@ -1196,7 +1237,10 @@ void te_timing() {
     bench.verdict("THE FREE-RUNNING PERIOD IS OSR x 4 CLK_SDADC CYCLES - the "
                   "three ratios agree to two per mille, so the residual is the "
                   "oscillator's and not the filter's",
-                  hi - lo <= 2000u && near(lo, 1'000'000u, 20'000u));
+                  // the three share OSC48M (a tick in thousands each: 2 per
+                  // mille); against the crystal OSC48M is within 5 % (table
+                  // 45-57)
+                  hi - lo <= 2000u && near(lo, 1'000'000u, 50'000u));
 
     // THE PRESCALER QUESTION. The datasheet says the divider is
     // 2 x (P + 1); the device header's enumerators say 2 << P. The two
@@ -1221,6 +1265,9 @@ void te_timing() {
           t_p3 ? (t_p23 * 1000u) / t_p3 : 0u,
           "   (a LINEAR 2x(P+1) divider predicts 1250 / 2000 / 6000; the device "
           "header's power-of-two enumerators predict 2000 / 16000 / -)", crlf);
+    // Periods on one oscillator: their ratios are exact but for the ticks
+    // each average carries (a per mille); the bounds sit far inside the gap
+    // to the power-of-two reading (2000 / 16000).
     bench.verdict("THE PRESCALER IS LINEAR, 2 x (PRESCALER + 1) - the datasheet "
                   "is right and the device header's DIV2/DIV4/DIV8 enumerators "
                   "are the SAM D21's and are wrong here",
@@ -1264,6 +1311,9 @@ void te_timing() {
     print(serial, "  differences against SKPCNT 2: ", s3 - s2, " / ", s5 - s2,
           " / ", s9 - s2, " where one decimation window is ", window_ticks,
           " ticks", crlf);
+    // window_ticks is the nominal OSC48M's; the real one is within 5 %
+    // (table 45-57): an eighth of a window on one, a quarter on three, a
+    // half on seven hold that with room, and 8 ticks of the stamps.
     bench.verdict("SKPCNT COSTS A WHOLE DECIMATION WINDOW EACH, and a single "
                   "conversion therefore takes (SKPCNT + 1) of them - so table "
                   "45-26's single-conversion row multiplies the output rate "
@@ -1497,6 +1547,9 @@ void tg_reference() {
     print(serial, "  bandgap ratios from the readings, x1000: 1.024/2.048 -> ",
           ratio_1_to_2, ", 2.048/4.096 -> ", ratio_2_to_4,
           " (both nominally 2000)", crlf);
+    // Each level within 2.05 % (table 45-36): a ratio of two within 4.1 %
+    // (82 of 2000); the converter's 6 mV offset against readings of
+    // hundreds of millivolts, its INL and the means' noise: 120.
     bench.verdict("THE BANDGAP'S LEVELS ARE A FACTOR OF TWO APART, seen from "
                   "the SDADC's reference multiplexer with the input cancelling "
                   "out (every level the supply holds)",
@@ -1534,16 +1587,27 @@ void tg_reference() {
           " per mille, and puts VDDANA at ", vdd_from_sar, " mV", crlf);
     print(serial, "  the SDADC's own two readings put level / VDDANA at ",
           sdadc_ratio, " per mille", crlf);
+    // The band, from the tables: the SAR's offset and gain against VDDANA
+    // (table 45-24: 80 mV + 42 mV x the fraction) relative to the level it
+    // reads, the sigma-delta's gain error (3.4 %, table 45-27) and its
+    // offset (6 mV) relative to the same level, in per mille of the ratio,
+    // and 5 per mille of rounding.
+    const uint32_t arch_permille =
+        x_mv != 0u ? (80u * 1000u + 42u * 1000u * x_mv / (vdd_mv != 0u ? vdd_mv : 1u)) / x_mv +
+                         34u + 6000u / x_mv
+                   : 1000u;
     bench.verdict("TWO CONVERTER ARCHITECTURES, ONE RATIO: the sigma-delta's "
                   "reference multiplexer and the SAR's input multiplexer agree "
-                  "on the bandgap against the supply to within five per cent",
+                  "on the bandgap against the supply within the tables' band",
                   sdadc_ratio > 0 && sar_ratio > 0 &&
                       near(static_cast<uint32_t>(sdadc_ratio),
                            static_cast<uint32_t>(sar_ratio),
-                           static_cast<uint32_t>(sar_ratio / 20 + 5)));
+                           static_cast<uint32_t>(sar_ratio) * arch_permille / 1000u + 5u));
     // Refined only inside the device's 2.7..5.5 V (table 45-2), widened by
-    // the level's own 5 % (level_below_supply()).
-    if (vdd_from_sar >= 2565u && vdd_from_sar <= 5775u) {
+    // what a level's reading can put the supply off by, worst at the 1.024
+    // V level: a factor of 1024/1152 .. 1024/894 (supply_lo_permille's
+    // arithmetic).
+    if (vdd_from_sar >= 2700u * 1024u / 1152u && vdd_from_sar <= 5500u * 1024u / 894u) {
         vdd_mv = static_cast<uint16_t>(vdd_from_sar);
     }
 
@@ -1568,6 +1632,9 @@ void tg_reference() {
           "); driven to GND: ", on_ground.mean,
           " counts, which is below table 45-26's 1 V minimum for a reference",
           crlf);
+    // The same voltage through two reference paths: the pad's drop under
+    // the reference input's load is not tabled; 5 % and 40 counts is this
+    // claim's tolerance, a missing path reading far off full scale.
     bench.verdict("REFSEL = VREFB READS THE PIN: with PA04 at the supply the "
                   "external and the internal path to the same voltage agree to "
                   "under five per cent",
@@ -1591,7 +1658,10 @@ void tg_reference() {
 // h - the post-processing: OFFSETCORR, GAINCORR, SHIFTCORR, the chopper
 // =============================================================================
 void th_corrections() {
-    (void)locate_vdd();          // the millivolts below are printed, never judged
+    // The supply sets what a millivolt of noise is in raw units: the bounds
+    // below rest on it. Unlocated, the lowest supply the part runs on (2.7 V,
+    // table 45-2) is assumed, which makes them widest.
+    (void)locate_vdd();
     drive_pair0(false, false);   // an exact zero to correct
     bench.verdict("the converter comes up with the identity correction "
                   "(OFFSETCORR 0, GAINCORR 1, SHIFTCORR 0)",
@@ -1605,6 +1675,25 @@ void th_corrections() {
           "unsigned integer defined on 16 bits' denies: 256 of them is one "
           "count of the specified datum", crlf);
 
+    // THE BOUND ON EVERY COMPARISON BELOW: a corrected batch against the
+    // uncorrected one taken first. Table 45-27 gives the input noise as
+    // 0.12 mV rms at most (OSR 256, chopper on: this configuration); a mean
+    // of eight is taken to be no quieter than one conversion (the batch
+    // means here scatter about as much as that rms - the noise is not
+    // white), so two means differ by under 4 x sqrt(2) x 0.12 = 0.68 mV.
+    // One raw unit is VREF / 2^23 (VREF = VDDANA, whose located value
+    // carries ADC0's own error: the true supply is at least
+    // supply_lo_permille of it, taken so the bound errs wide), and a gain
+    // correction multiplies both means' noise by GAINCORR / 2^SHIFTCORR;
+    // +2 raw of rounding.
+    const uint32_t vdd_for_noise =
+        vdd_mv != 0u ? (static_cast<uint32_t>(vdd_mv) * supply_lo_permille) / 1000u
+                     : 2'700u;
+    const int32_t noise_raw =
+        static_cast<int32_t>((680ULL * 8'388'608ULL) / (vdd_for_noise * 1000ULL)) + 2;
+    print(serial, "  two batch means differ by under 0.68 mV of input noise (table "
+          "45-27): ", noise_raw, " raw at ", vdd_for_noise, " mV", crlf);
+
     // OFFSETCORR is ADDED, and 39.6.3.4's formula is the arithmetic the
     // driver publishes as sdadc_corrected() - in RAW units.
     const int32_t offsets[] = {1000, -1000, 8000, 25600};
@@ -1616,7 +1705,7 @@ void th_corrections() {
         print(serial, "  OFFSETCORR ", o, ": ", s.raw_mean, " raw = ", s.mean,
               " counts (predicted ", predicted_raw, " raw = ",
               predicted_raw / 256, " counts)", crlf);
-        if (!near_signed(s.raw_mean, predicted_raw, 400)) {
+        if (!near_signed(s.raw_mean, predicted_raw, noise_raw)) {
             offsets_exact = false;
         }
     }
@@ -1646,7 +1735,9 @@ void th_corrections() {
             sdadc_corrected(base.raw_mean, 51200, g.gain, g.shift);
         print(serial, "  GAINCORR ", g.label, ": ", s.raw_mean, " raw = ",
               s.mean, " counts (predicted ", predicted_raw, " raw)", crlf);
-        if (!near_signed(s.raw_mean, predicted_raw, 800)) {
+        const int32_t gain_tol =
+            (noise_raw * static_cast<int32_t>(g.gain)) / (1 << g.shift) + 2;
+        if (!near_signed(s.raw_mean, predicted_raw, gain_tol)) {
             gains_exact = false;
         }
     }
@@ -1700,18 +1791,15 @@ void th_corrections() {
                                         : static_cast<uint32_t>(without.mean);
     const uint32_t b = with.mean < 0 ? static_cast<uint32_t>(-with.mean)
                                      : static_cast<uint32_t>(with.mean);
-    // Which way it moves is the die's: one die's offset shrank by a
-    // third with the chopper on, another's grew by a seventh. The claim
-    // is that it MOVES - by more than either arrangement's own scatter.
+    // Printed, not judged: which way the chopper moves the offset, and
+    // whether it moves it past the scatter, is the die's (one die's offset
+    // shrank by a third with the chopper on, another's grew by a seventh),
+    // and the chapter gives the chopper no figure - table 45-27's offset is
+    // stated with it on, and nothing without it.
     const uint32_t moved = a > b ? a - b : b - a;
-    if (a > 40u || b > 40u) {
-        bench.verdict("THE CHOPPER MOVES THE OFFSET, and the direction is "
-                      "reported rather than assumed",
-                      moved > without.span() + with.span() + 2u);
-    } else {
-        bench.skip("the chopper's effect: both offsets are under 40 counts and "
-                   "their difference is inside this suite's own scatter");
-    }
+    print(serial, "  the chopper moved the offset by ", moved, " counts (",
+          b < a ? "smaller" : "larger", " with it on) against a combined scatter of ",
+          without.span() + with.span(), crlf);
 
     Sdadc::release();
     hand_back<Inn0>();
@@ -2002,10 +2090,29 @@ void tk_sequence() {
     }
     print(serial, "  pair 0 / 1 / 2 selected one at a time: ", alone[0], " / ",
           alone[1], " / ", alone[2], " counts", crlf);
+    // The bands: a full-supply differential against the supply as the
+    // reference is full scale, less table 45-27's gain error (3.4 %) and
+    // offset (6 mV, at the lowest supply 2.7 V: 73 counts) - or the rail;
+    // the zero pair is letter b's zero differential at a rail common mode,
+    // judged there within 400 counts.
+    constexpr int32_t full_scale_floor = 32768 - (32768 * 34) / 1000 - 73;
     bench.verdict("THREE INDEPENDENT DIFFERENTIAL PAIRS, each following its own "
                   "two pads",
-                  alone[0] > 10000 && alone[1] < -10000 &&
-                      alone[2] > -600 && alone[2] < 600);
+                  alone[0] >= full_scale_floor && alone[1] <= -full_scale_floor &&
+                      alone[2] >= -400 && alone[2] <= 400);
+
+    /// Which pair's lone reading a result is nearest: the pairs read about
+    /// +32768, -32768 and 0, so a result is told by any error under 16384,
+    /// and THE ORDER is what the sequence verdicts below claim.
+    auto nearest = [&alone](int32_t v) -> uint8_t {
+        uint8_t best = 0;
+        for (uint8_t p = 1; p < 3u; ++p) {
+            if (abs_diff(v, alone[p]) < abs_diff(v, alone[best])) {
+                best = p;
+            }
+        }
+        return best;
+    };
 
     // Now the sequencer: one START, three results, in order from the
     // lowest enabled input (39.6.2.7). THE CONVERTER IS CYCLED FIRST -
@@ -2053,9 +2160,8 @@ void tk_sequence() {
           state[2], crlf);
     bench.verdict("ONE START RUNS THE WHOLE SEQUENCE, in the order 39.6.2.7 "
                   "prescribes - lowest enabled input first",
-                  near_signed(got[0], alone[0], 800) &&
-                      near_signed(got[1], alone[1], 800) &&
-                      near_signed(got[2], alone[2], 800));
+                  nearest(got[0]) == 0u && nearest(got[1]) == 1u &&
+                      nearest(got[2]) == 2u);
     bench.verdict("and SEQSTATUS.SEQSTATE labels each result with the input it "
                   "came from",
                   state[0] == 0u && state[1] == 1u && state[2] == 2u);
@@ -2081,13 +2187,13 @@ void tk_sequence() {
           " counts, SEQSTATE ", only_state, crlf);
     bench.verdict("a one-input sequence converts THAT input, whatever MUXSEL "
                   "says",
-                  near_signed(only, alone[1], 800));
+                  nearest(only) == 1u);
 
     bench.verdict("and zero in SEQCTRL gives the multiplexer back",
                   Sdadc::sequence(0) && Sdadc::select(0));
     Sdadc::discard(2);
     const Stats back = stats_of(4);
-    bench.verdict("...measured", near_signed(back.mean, alone[0], 800));
+    bench.verdict("...measured", nearest(back.mean) == 0u);
 
     Sdadc::release();
     hand_back<Inn0>(); hand_back<Inp0>();

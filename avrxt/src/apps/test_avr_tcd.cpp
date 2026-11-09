@@ -1532,10 +1532,9 @@ void th_input_modes() {
         print(serial, "    the CAPTURE path (ACTION = capture, INPUTMODE = 0) loses ",
               lost ? "some" : "NOTHING", " here", crlf);
         verdict("CNTPRES = DIV1 (the documented workaround) loses no capture", clean);
-        verdict(has_xoschf ? "on THIS die the capture path loses none with a counter prescaler "
-                             "either - errata 2.14.1 NOT reproduced there"
-                           : "on THIS die the capture path loses none with a counter prescaler "
-                             "either - errata 2.13.1 NOT reproduced there", !lost);
+        // Whether the erratum shows with a counter prescaler is the die's
+        // silicon revision's business: printed above ("loses ..."), never
+        // judged - an erratum need not reproduce, nor stay away.
 
         // The erratum says "events can be missed", and the events that
         // matter to this peripheral are the ones that reach the OUTPUT
@@ -1593,10 +1592,8 @@ void th_input_modes() {
         }
         if (!edges_ok) verdict("WOA's edges and the on-time captures came within 100 ms each", false);
         verdict("the SYNCPRES workaround misses no output override", blocked[1] == 8);
-        verdict(has_xoschf ? "and on THIS die neither does CNTPRES = 32 - errata 2.14.1 NOT "
-                             "reproduced on the output path either"
-                           : "and on THIS die neither does CNTPRES = 32 - errata 2.13.1 NOT "
-                             "reproduced on the output path either", blocked[0] == 8);
+        // CNTPRES = 32 (the erratum's condition): printed above (n/8
+        // blocked), not judged, for the same reason as the capture path's.
         print(serial, has_xoschf
                           ? "    errata 2.14.1 says asynchronous input events can be missed "
                             "with CNTPRES != DIV1 on this revision. Neither path lost one here, "

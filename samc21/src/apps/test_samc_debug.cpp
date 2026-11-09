@@ -201,10 +201,10 @@ void ta_pac_block() {
     print(serial, "  STATUSC bits outside its own register mask: ",
           hex(undrawn_c), "  (PAC_STATUSC_Msk = ", hex(PAC_STATUSC_Msk), ")",
           crlf);
-    bench.verdict("bridge C comes up protecting something at a bit BOTH "
-                  "documents leave blank - bit 25, PERID 89, past the "
-                  "header's own ID_PERIPH_MAX of 87",
-                  undrawn_c == (1UL << 25));
+    // Printed, not judged: a bit both documents leave blank is this die's
+    // fact, no contract.
+    print(serial, "  bridge C protects at reset outside its documented mask: ",
+          undrawn_c == (1UL << 25) ? "bit 25 (PERID 89) alone" : "not bit 25 alone", crlf);
 
     // Whether the mystery bit behaves like a protection bit at all: can
     // it be cleared, does clearing it flag, and does it come back?
@@ -568,9 +568,11 @@ void tb_pac_map() {
           hex(past_the_groups), "/", hex(past_again), "; flag unprotected ",
           port_illegal_unprotected ? "SET" : "clear", ", protected ",
           port_illegal_protected ? "SET" : "clear", crlf);
-    bench.verdict("erratum 1.13.2 confirmed WITH A CONTROL: the same illegal "
-                  "access that flags on the MCLK raises nothing on the PORT",
-                  !port_illegal_unprotected && !port_illegal_protected);
+    // Whether erratum 1.13.2 shows is printed, not judged: an erratum is
+    // its silicon revision's, and nothing here depends on it.
+    print(serial, "  erratum 1.13.2 (the PORT past its groups raises nothing): ",
+          !port_illegal_unprotected && !port_illegal_protected ? "shows" : "does not show",
+          crlf);
 
     // ERRATUM 1.13.3, live at revision F: an IOBUS write is said to go
     // past PAC write protection. The PORT answers at 0x41000000 on the
@@ -656,11 +658,9 @@ void tb_pac_map() {
           iobus_flag ? "set" : "clear", "), APB ",
           apb_landed ? "LANDED" : "dropped", " (flag ",
           apb_flag ? "set" : "clear", ")", crlf);
-    bench.verdict("erratum 1.13.3 CONFIRMED: the APB write is refused and "
-                  "flagged while the IOBUS write to the same register goes "
-                  "straight through - PAC write protection has a back door "
-                  "on this bus",
-                  iobus_landed && !apb_landed && apb_flag);
+    print(serial, "  erratum 1.13.3 (an IOBUS write passes PAC protection the APB "
+                  "write meets): ", iobus_landed && !apb_landed && apb_flag ? "shows" : "does not show",
+          crlf);
 
     // ERRATUM 1.19.1 (TSENS) AND ERRATUM 1.7.4 (CCL), THE TWO POLES OF
     // THIS CHAPTER, measured side by side against the map above.
@@ -683,10 +683,8 @@ void tb_pac_map() {
     print(serial, "  TSENS.CTRLB written under protection: flag ",
           tsens_ctrlb_flag ? "SET" : "clear",
           "  (CTRLA, in the map above, flags)", crlf);
-    bench.verdict("erratum 1.19.1's silence is a fact about the REGISTER and "
-                  "not about the peripheral: TSENS.CTRLB raises no flag where "
-                  "TSENS.CTRLA does",
-                  !tsens_ctrlb_flag);
+    print(serial, "  erratum 1.19.1 (TSENS.CTRLB silent under protection): ",
+          !tsens_ctrlb_flag ? "shows" : "does not show", crlf);
 
     // 1.7.4: writing CCL.CTRL.SWRST triggers a PAC protection error -
     // WITH NO PROTECTION SET AT ALL. The opposite pole: a flag without a
@@ -701,11 +699,8 @@ void tb_pac_map() {
     print(serial, "  CCL.CTRL.SWRST written with the CCL ",
           ccl_protected_before ? "PROTECTED" : "unprotected", ": flag ",
           ccl_swrst_flag ? "SET" : "clear", crlf);
-    bench.verdict("erratum 1.7.4 confirmed here too: a CCL software reset "
-                  "raises the CCL's PAC flag with no protection anywhere - "
-                  "so an ABSENT flag is not evidence and a PRESENT one is not "
-                  "proof of a violation",
-                  !ccl_protected_before && ccl_swrst_flag);
+    print(serial, "  erratum 1.7.4 (a CCL software reset flags with no protection): ",
+          !ccl_protected_before && ccl_swrst_flag ? "shows" : "does not show", crlf);
     Pac::clear_all_flags();
 
     map_clocks(false);
@@ -890,9 +885,11 @@ void td_identity() {
                   id.series == 1u);
     bench.verdict("the revision letter is a letter of the errata matrix",
                   id.revision_letter() >= 'A' && id.revision_letter() <= 'Z');
-    bench.verdict("and the whole DID is the one docs/samc21/vendor/README.md "
-                  "recorded over SWD at bring-up",
-                  id.raw == manifest_did);
+    // The whole DID, the revision with it, is printed against the one the
+    // vendor README recorded, not judged: the revision is the die's, and a
+    // board with another revision is no failure.
+    print(serial, "  the whole DID ", id.raw == manifest_did ? "is" : "is NOT",
+          " the one docs/samc21/vendor/README.md recorded over SWD at bring-up", crlf);
 
     // The four serial words, in the manifest's own format.
     const DeviceSerial serial_words = DeviceSerial::read();

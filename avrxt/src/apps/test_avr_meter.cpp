@@ -147,9 +147,19 @@ bool console_drain() {
 
 /// The kernel loop for a measured span of kernel ticks: mature the time
 /// events, serve every queue, and count the wall clock in PIT ticks -
-/// the very timebase the sampler's pace is expressed in.
+/// the very timebase the sampler's pace is expressed in. A tick that
+/// does not move within 10 ms (ten periods, counted on the delay verb)
+/// returns at once, and the letter's counts then fail its verdicts
+/// instead of the loop spinning for ever.
 void run_ticks(uint32_t ticks) {
     const uint32_t t0 = P::now();
+    for (uint8_t ms = 0; P::now() == t0; ++ms) {
+        if (ms == 10u) {
+            print(serial, "  the 1024 Hz tick does not run", crlf);
+            return;
+        }
+        delay_us(clock, 1000);
+    }
     while (P::now() - t0 < ticks) {
         TimeEvents<P>::process();
         (void)K::step();

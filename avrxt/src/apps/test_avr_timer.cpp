@@ -261,6 +261,16 @@ bool console_drain() {
     }
     return Serial::tx_idle();
 }
+
+/// The drain before a hold that times a count: the hold is a cycle loop
+/// a console interrupt would lengthen, so the letter's title line must be
+/// off the wire first. False, with a failed verdict, on a wedged console;
+/// the letter then returns.
+bool drained_for_window() {
+    if (console_drain()) return true;
+    verdict("the console drained before the timed window", false);
+    return false;
+}
 // ---- the partner's nets ----------------------------------------------------------
 // PC4..PC7 are USART1's ALT1 pads, and on a board with the PC-PE jumpers
 // (board.hpp's board::pc_pe_jumpers, the AVR EA's) each is one net with
@@ -431,6 +441,10 @@ void t3_heartbeat() {
     quiesce();
     verdict("init", Beat::init(clock, 100, 0x01));
     Beat::pulse_us<0>(500);
+    if (!drained_for_window()) {
+        quiesce();
+        return;
+    }
     beats = 0;
     hold_ms(1000);
     const uint16_t b = beats;
@@ -527,6 +541,10 @@ void t6_pulse_counter() {
     ChCarry::source(Tca<0>::OvfEvent{});
     PulseCounter<T1>::init(ChCarry{});
     PulseCounter<T1>::snapshot_on(ChSnap{});
+    if (!drained_for_window()) {
+        quiesce();
+        return;
+    }
     PulseCounter<T1>::reset();
     hold_ms(200);
     ChSnap::pulse();
@@ -556,7 +574,12 @@ void t7_cascade() {
     } else {
         print(serial, "  reads: ", a, " ", b, " ", c, " (1 s = ", SysClock::hz, " ticks)", crlf);
     }
-    verdict("1 s within 0.2 % (RTC millis vs crystal)", near(static_cast<int32_t>(b - a), SysClock::hz, SysClock::hz / 500u));
+    // hold_ms(1000) is a thousand exact 1 ms delays plus the loop's turn
+    // (a 32-bit decrement and a branch, under twenty cycles a millisecond:
+    // 0.1 % at 20 MHz), the reads a hundred cycles more: at least the
+    // crystal's second, at most 0.2 % over it.
+    verdict("hold_ms(1000) is the crystal's second, at most 0.2 % over",
+            b - a >= SysClock::hz && b - a <= SysClock::hz + SysClock::hz / 500u);
     verdict("monotonic", c >= b && b >= a);
     // the Ticker (RTC from the internal OSC32K) against the crystal: a finding
     // The Ticker's 1000 ms are waited on the Ticker itself, bounded by the
@@ -599,6 +622,10 @@ void t8_tick_timeout() {
     clear_captures();
     await_captures(3, 100);
     const uint16_t period = cap_a;
+    if (!drained_for_window()) {
+        quiesce();
+        return;
+    }
     irq_count = 0;
     hold_ms(200);
     const uint16_t n = irq_count;
@@ -643,17 +670,23 @@ void t9_event_counter() {
     DirPin::output();
     ChC::source(EvPin<DirPin>{});
     EventCounter<1>::init(ChCarry{});
+    if (!drained_for_window()) {
+        DirPin::input();
+        quiesce();
+        return;
+    }
     EventCounter<1>::reset();
     hold_ms(200);
     const uint16_t up = EventCounter<1>::count();
-    print(serial, "  up for 200 ms: ", up, crlf);
-    verdict("200 +-2 events", near(up, 200, 2));
     EventCounter<1>::direction_on(ChC{});
-    DirPin::set();                               // down while high
+    DirPin::set();                               // down while high (the prints wait)
+    const uint16_t down_from = EventCounter<1>::count();
     hold_ms(100);
     const uint16_t down = EventCounter<1>::count();
+    print(serial, "  up for 200 ms: ", up, crlf);
+    verdict("200 +-2 events", near(up, 200, 2));
     print(serial, "  then down for 100 ms: ", down, crlf);
-    verdict("counted down by 100 +-2", near(static_cast<int32_t>(up) - down, 100, 2));
+    verdict("counted down by 100 +-2", near(static_cast<int32_t>(down_from) - down, 100, 2));
     DirPin::clear();
     DirPin::input();
     quiesce();
@@ -768,6 +801,8 @@ void tc_ccl() {
     hold_ms(200);
     const uint16_t pulses = PulseCounter<T2>::count();
     print(serial, "  edge-detector pulses in 200 ms: ", pulses, crlf);
+    // 1 kHz events (the crystal's) in hold_ms(200), 200 ms and under 0.1 %:
+    // 200, one more or less for the phase at each end.
     verdict("one pulse per event (200 +-2)", near(pulses, 200, 2));
     Ccl::disable();
     LutA::input(); LutB::input();
@@ -806,9 +841,15 @@ void tm_comparators() {
         delay_us(clock, 500);                      // the DAC falls slowly on a bare pin
         if (!Threshold<Ac<0>>::above()) { down = mv; break; }
     }
-    print(serial, "  crossings: up at ", up, " mV, down at ", down, " mV (hysteresis ", up - down, " mV) - findings", crlf);
-    verdict("up crossing within 1000 +-30 mV (offset + hysteresis)", near(up, 1000, 30));
-    verdict("hysteresis medium: 10..45 mV", up > down && up - down >= 10 && up - down <= 45);
+    // Where exactly it crosses is printed: the offset is +-15 mV at most on
+    // the DB (DS40002247B table 39-23; the EA's table 35-27 leaves it
+    // blank) and the medium hysteresis has only a typical 25 mV. Judged:
+    // both crossings inside the +-100 mV sweep around the threshold - a
+    // wrong reference or scale lands a factor away.
+    print(serial, "  crossings: up at ", up, " mV, down at ", down, " mV (hysteresis ", up - down,
+          " mV, typically 25) - findings", crlf);
+    verdict("both crossings found inside 900..1100 mV, the up one above the down one",
+            up != 0 && down != 0 && up > down);
     Ac<0>::enable_interrupt(false);
     // window
     verdict("Window init", Window<Ac<0>, AcUp>::init(AcPos::ainp3, 500, 1500, AcWindowSense::outside, Ref::v2048));

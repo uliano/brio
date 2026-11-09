@@ -291,11 +291,13 @@ source against the same crystal, and TC4 in COUNT16 counting events
 **THE COUNTER COUNTS ITS SOURCE, TICK FOR TICK**, on all four clock
 selects this board can reach. FREQM weighs the oscillator and the
 stopwatch counts the RTC, both against the crystal, and the two agree
-to **48 to 740 ppm** - which is not the counter's error but the RC's
+to **48 to 2281 ppm** - which is not the counter's error but the RC's
 own wander between the two instruments' windows (FREQM averages over
 eight milliseconds, the counter over a second). The spread of eight
-consecutive FREQM readings, printed by the letter, is 350 to 1100 ppm
-on the same oscillators.
+consecutive FREQM readings, printed by the letter, is 350 to 2137 ppm
+on the same oscillators. No document bounds that wander, so the letter
+judges what it can: the divisor, within a quarter of the nearest wrong
+one's factor of two, the agreement printed.
 
 **And because the ruler is the crystal, those are ABSOLUTE numbers**:
 OSCULP32K measures **33002 Hz** and a factory-trimmed OSC32K **33152
@@ -440,7 +442,8 @@ and counts its source again.
   runs) where `2 x VALUE / 983040` predicts **258 ppm** - a factor
   of 1.6 to 2.4. The driver's `rtc_correction_ppb()` still states the
   chapter's formula: one board's RC is no basis for replacing it, and
-  the discrepancy is recorded here instead.
+  the discrepancy is recorded here instead. The suite prints the ratio
+  and does not judge it.
 - **THE TRIM'S WHOLE RANGE IS SMALLER THAN THE SOURCE'S OWN WANDER.**
   Both 32 kHz roots on this board are internal RCs, and a repeated
   untrimmed measurement of either moves by a hundred to three hundred

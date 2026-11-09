@@ -25,10 +25,10 @@
 //     here that can time a single wake. Letter c builds it one RUNSTDBY
 //     bit at a time before anything measured with it is believed.
 // Two of the three are calibrated against the third: `fine_hz` is
-// OSC48M's own measured rate from docs/samc21/clock.md (47.755 MHz, 5100
-// ppm SLOW, and that number is crystal-referenced), and the RTC's rate
-// is measured against it at boot and printed - so every microsecond
-// below traces back to the board's crystal through one cited constant.
+// OSC48M's own rate, measured against the crystal ruler at boot (OSC48M
+// is specified only to 5 %, table 45-57), and the RTC's rate is measured
+// against it at boot too, both printed - so every microsecond below
+// traces back to the board's crystal through two measurements.
 //
 // WHAT THE WAKE NUMBERS MEAN, and what they cost. Each is the mean of 64
 // SINGLE wakes on the crystal ruler: "read the counter, sleep, wake,
@@ -143,11 +143,13 @@ constexpr uint8_t gen_ulp = 3;     ///< letter c's own generator
 constexpr uint8_t gen_xtal = 2;    ///< the crystal, for the fine standby ruler
 constexpr uint32_t crystal_hz = 24'000'000UL;
 
-/// OSC48M's own rate, MEASURED and crystal-referenced in
-/// docs/samc21/clock.md: 47.755 MHz, i.e. 5100 ppm below its nominal
-/// 48 MHz and inside its own +-5% specification. Every "fine" duration
-/// below is computed at this rate rather than at the nominal one.
-constexpr uint32_t fine_hz = 47'755'000UL;
+/// OSC48M's own rate, measured against the crystal ruler at boot (main):
+/// OSC48M is specified to 5 % of 48 MHz (DS60001479M table 45-57), and
+/// every "fine" duration below is computed at the rate this die runs at,
+/// read at a resolution of a crystal tick in 100 ms (0.4 ppm). The
+/// nominal rate stands only if the crystal does not come up, which boot
+/// prints.
+uint32_t fine_hz = 48'000'000UL;
 
 /// The RTC's source rate, measured against `fine_hz` at boot.
 uint32_t ulp_hz = 32'768UL;
@@ -313,7 +315,7 @@ bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 /// printed between here and the window's end. On a wedged console it
 /// fails a verdict and returns false; the letter goes on to its own
 /// clean-up, its tally already failed.
-bool console_quiet() {
+bool drained_for_window() {
     if (console_drain()) {
         return true;
     }
@@ -592,7 +594,10 @@ void ta_registers() {
     // program on this part.
     bench.verdict("STDBYCFG comes up at 0x0400: back-bias ON, regulator AUTO",
                   boot_stdbycfg == 0x0400u);
-    bench.verdict("PM's bus clock is on out of reset", Pm::bus_clock());
+    // Read now, not at boot: no letter of this suite clears the mask bit,
+    // so it still holds its reset value here.
+    bench.verdict("PM's bus clock is on (its reset value; no letter clears it)",
+                  Pm::bus_clock());
 
     // The three implemented codes arm and read back.
     bool arm_ok = true;
@@ -745,6 +750,18 @@ uint32_t idle_turns(bool stop, uint32_t ticks) {
     return turns;
 }
 
+/// The SysTick ticks a span of `rtc_ticks` RTC ticks holds, to the nearest
+/// tick: a tick is SysClock::hz / ticks_per_second cycles of OSC48M, which
+/// runs at fine_hz, and the span lasts rtc_ticks / ulp_hz seconds. Taken
+/// from the RTC ticks themselves, never through rtc_ms(), whose two
+/// truncations drop up to a whole millisecond - a tick.
+uint32_t systicks_in(uint32_t rtc_ticks) {
+    const uint64_t num = static_cast<uint64_t>(rtc_ticks) * fine_hz;
+    const uint64_t den = static_cast<uint64_t>(ulp_hz) *
+                         (SysClock::hz / Ticker::ticks_per_second);
+    return static_cast<uint32_t>((num + den / 2u) / den);
+}
+
 void tb_idle() {
     quiesce();
     watchdog_backstop(true);
@@ -752,7 +769,7 @@ void tb_idle() {
     // IDLE's wake source here is the kernel tick itself: SysTick keeps
     // running in idle, which is half of what this letter is about.
     (void)Pm::set_sleep_mode(SleepMode::idle0);
-    (void)console_quiet();
+    (void)drained_for_window();
     const uint32_t ticks_window = ulp_hz / 4u;      // a quarter second
     const uint32_t asleep = idle_turns(true, ticks_window);
     (void)Pm::set_sleep_mode(SleepMode::idle0);
@@ -760,15 +777,24 @@ void tb_idle() {
 
     print(serial, "  over ", rtc_ms(ticks_window), " ms: ", awake,
           " loop turns spinning, ", asleep, " sleeping in IDLE0 (one per wake)", crlf);
-    bench.verdict("the CPU really stops in IDLE0", asleep < awake / 20u);
-    // 250 ms at 1000 ticks/s is 250 wakes; the loop turns once per wake.
+    // The window is RTC time and the loop turns once per wake, so it turns
+    // as many times as the window holds SysTick ticks (systicks_in(), with
+    // fine_hz and ulp_hz measured against the crystal at boot) - about
+    // 249 - give or take a tick at each of the window's two ends; the
+    // rounding's half tick fits in the same two.
+    const uint32_t ticks_in_window = systicks_in(ticks_window);
+    // "Really stops": a sleeping loop turns no more often than the tick
+    // wakes it, where the same loop spinning turns far more often - the
+    // bound is the wakes themselves, not a fraction of the spin.
+    bench.verdict("the CPU really stops in IDLE0: it turns no more often than "
+                  "the tick wakes it, where spinning it turns more",
+                  asleep <= ticks_in_window + 2u && awake > ticks_in_window + 2u);
     bench.verdict("and it wakes once per SysTick tick",
-                  near(asleep, Ticker::ticks_per_second / 4u,
-                       Ticker::ticks_per_second / 20u));
+                  near(asleep, ticks_in_window, 2u));
 
     // What keeps running in IDLE: SysTick (the CPU clock is alive) and a
     // TC on generator 0 with no RUNSTDBY anywhere.
-    (void)console_quiet();
+    (void)drained_for_window();
     if (!arm_wake(ulp_hz / 8u)) {
         bench.verdict("the wake could be armed", false);
     } else {
@@ -785,16 +811,23 @@ void tb_idle() {
         print(serial, "  an IDLE0 sleep of ", slept_ms, " ms: the tick advanced ",
               k1 - k0, " ms and the CLK_MAIN stopwatch ", fine_us(f1 - f0), " us", crlf);
         bench.verdict("one RTC compare is a wake source from IDLE0", woke);
+        // The tick counts 48000 OSC48M cycles: the sleep's RTC milliseconds
+        // hold slept_ms x fine_hz / 48 MHz of them (fine_hz measured against
+        // the crystal), a tick either way at the two ends and the
+        // truncation: +-2. The CLK_MAIN stopwatch is converted at fine_hz
+        // itself: +-2 ms.
+        const uint32_t idle_ticks = static_cast<uint32_t>(
+            (static_cast<uint64_t>(slept_ms) * fine_hz) / 48'000'000u);
         bench.verdict("SysTick keeps counting through IDLE - the kernel tick is "
                       "not late",
-                      near(k1 - k0, slept_ms, slept_ms / 20u + 2u));
+                      near(k1 - k0, idle_ticks, 2u));
         bench.verdict("and so does a TC on generator 0, with no RUNSTDBY anywhere",
-                      near(fine_us(f1 - f0) / 1000u, slept_ms, slept_ms / 20u + 2u));
+                      near(fine_us(f1 - f0) / 1000u, slept_ms, 2u));
     }
 
     // IDLE2 is IDLE0 minus the CAN clock, and there is no CAN here: what
     // is checkable is that it sleeps, wakes, and costs the same.
-    (void)console_quiet();
+    (void)drained_for_window();
     const bool ruler = deep_up();
     const uint32_t polled = deep_leg(WaitKind::poll, SleepMode::idle0, bill_p, bill_n);
     const uint32_t l_idle0 = deep_leg(WaitKind::sleep, SleepMode::idle0, bill_p, bill_n);
@@ -825,11 +858,15 @@ void tb_idle() {
     // 24..30 us across runs (and STANDBY's, letter e, moved from ~17 us
     // to ~106 us the same way - the docs carry the correction). The
     // structural conclusions all survived; the absolutes did not.
+    // PRINTED, not judged: chapter 19 gives IDLE2 no cost of its own and
+    // table 45-13 one typical wake for both IDLE modes, and the figure is
+    // not even stable across images on one die - 24..37 us in some builds
+    // of this suite, 3..5 us in others, with the same measuring code: where
+    // the bill lands depends on the code after the wake (deep_now()).
     print(serial, "  IDLE2 therefore costs ", b2 - b0,
-          " ns more to leave than IDLE0, on a board with no CAN traffic", crlf);
-    bench.verdict("IDLE2 IS NOT FREE: gating one more clock domain costs tens "
-                  "of microseconds at the wake, which chapter 19 does not say",
-                  legs_ran && b2 - b0 > 5000 && b2 - b0 < 80000);
+          " ns more to leave than IDLE0, on a board with no CAN traffic - "
+          "NOT JUDGED: no document gives IDLE2 a cost, and the figure moves "
+          "with the code after the wake", crlf);
 
     watchdog_backstop(false);
     quiesce();
@@ -924,7 +961,7 @@ void tc_instrument() {
             break;
         }
         (void)Pm::set_sleep_mode(SleepMode::standby);
-        if (!console_quiet() || !arm_wake(window)) {
+        if (!drained_for_window() || !arm_wake(window)) {
             built = false;
             break;
         }
@@ -955,17 +992,26 @@ void tc_instrument() {
         // wake up the related GCLK and clock source"); what the four
         // legs below add is which of the three RUNSTDBY bits in that
         // chain a program actually has to set. One. The peripheral's.
+        // The bounds. A TC that stops counts only the awake part of the leg
+        // (the 'awake' figure above, under a millisecond: 32 counts). One
+        // that runs counts the window on its own oscillator: OSC32K against
+        // the RTC's OSCULP32K, each within its 25 C band over the supply
+        // (DS60001479M tables 45-54 and 45-56: +-10 % and +-6 %), so within
+        // 0.9/1.06..1.1/0.94 of the RTC's count - 18 % - and 8 counts for
+        // the reads at the two ends; on OSCULP32K itself the reads alone.
+        const auto runs_osc32k = [](const Leg& l) {
+            return near(l.counted, l.rtc, l.rtc * 18u / 100u + 8u);
+        };
         bench.verdict("a TC WITHOUT its own RUNSTDBY counts nothing through a "
                       "standby, whatever the generator and the source say",
                       legs[3].counted < 32u);
-        bench.verdict("a TC WITH it counts the whole standby",
-                      near(legs[1].counted, legs[1].rtc, legs[1].rtc / 16u + 8u));
+        bench.verdict("a TC WITH it counts the whole standby", runs_osc32k(legs[1]));
         bench.verdict("the GENERATOR's own RUNSTDBY is not needed: the "
                       "peripheral's request wakes the generator it asks for",
-                      near(legs[2].counted, legs[2].rtc, legs[2].rtc / 16u + 8u));
+                      runs_osc32k(legs[2]));
         bench.verdict("nor is the SOURCE's: the same request reaches all the way "
                       "up and restarts OSC32K itself",
-                      near(legs[4].counted, legs[4].rtc, legs[4].rtc / 16u + 8u));
+                      runs_osc32k(legs[4]));
         // And the root that has no such bit to set is no exception -
         // OSCULP32K's register carries neither RUNSTDBY nor ONDEMAND,
         // which could have made it unusable to a GCLK generator in
@@ -974,8 +1020,8 @@ void tc_instrument() {
         // this die.
         bench.verdict("OSCULP32K serves a generator through standby although it "
                       "has no RUNSTDBY bit at all - twice, first and last",
-                      near(legs[0].counted, legs[0].rtc, legs[0].rtc / 16u + 8u) &&
-                          near(legs[5].counted, legs[5].rtc, legs[5].rtc / 16u + 8u));
+                      near(legs[0].counted, legs[0].rtc, 8u) &&
+                          near(legs[5].counted, legs[5].rtc, 8u));
 
         // The awake ruler is the counter-example, and this is what earns
         // it the right to be trusted for post-wake intervals only.
@@ -1024,7 +1070,7 @@ void td_standby() {
     const uint32_t half = ulp_hz / 2u;
     for (uint8_t i = 0; i < 2u; ++i) {
         (void)Pm::set_sleep_mode(two[i]);
-        if (!console_quiet() || !arm_wake(half)) {
+        if (!drained_for_window() || !arm_wake(half)) {
             fr[i] = Freeze{0, 0, false};
             continue;
         }
@@ -1058,8 +1104,12 @@ void td_standby() {
     bench.verdict("and the erratum 1.8.13 guard gave the SysTick interrupt back "
                   "afterwards",
                   (SysTick->CTRL & SysTick_CTRL_TICKINT_Msk) != 0u);
-    bench.verdict("while the same sleep in IDLE0 keeps it to the millisecond",
-                  near(fr[0].tick, rtc_ms(fr[0].rtc), rtc_ms(fr[0].rtc) / 20u + 2u));
+    // In IDLE0 the tick runs: the sleep holds systicks_in() of its RTC
+    // ticks, a tick either way at the two ends, the rounding's half tick
+    // inside the same two.
+    const uint32_t idle_ticks = systicks_in(fr[0].rtc);
+    bench.verdict("while the same sleep in IDLE0 keeps it to the tick",
+                  near(fr[0].tick, idle_ticks, 2u));
     print(serial, "  so a standby of ", rtc_ms(fr[1].rtc), " ms makes every armed "
           "time event ", rtc_ms(fr[1].rtc) - fr[1].tick, " ms late", crlf);
 
@@ -1068,7 +1118,7 @@ void td_standby() {
     // interrupt is: interval 3 fires every 64 source ticks (f / 2^(n+3),
     // docs/samc21/rtc.md) with nothing to re-arm, which is a wake every
     // ~1.95 ms.
-    (void)console_quiet();
+    (void)drained_for_window();
     Rtc::disarm(RtcFlag::all);
     Rtc::clear_flags(RtcFlag::all);
     Rtc::arm(RtcFlag::periodic(3));
@@ -1091,7 +1141,7 @@ void td_standby() {
                   awake > 100u * (asleep != 0u ? asleep : 1u));
 
     // THE WAKE BILL.
-    (void)console_quiet();
+    (void)drained_for_window();
     const bool ruler = deep_up();
     const uint32_t polled = deep_leg(WaitKind::poll, SleepMode::idle0, bill_p, bill_n);
     const uint32_t l_idle = deep_leg(WaitKind::sleep, SleepMode::idle0, bill_p, bill_n);
@@ -1115,7 +1165,7 @@ void td_standby() {
 
     // A second wake source, and the one that proves the watchdog runs in
     // standby: the early-warning interrupt.
-    (void)console_quiet();
+    (void)drained_for_window();
     (void)Watchdog::disable();
     Watchdog::clear_flags();
     wdt_warned = false;
@@ -1142,10 +1192,14 @@ void td_standby() {
           crlf);
     bench.verdict("the WATCHDOG runs through standby and its early warning is a "
                   "wake source", armed && warned);
-    // OSCULP32K is the watchdog's clock and it is a per-cent-class RC;
-    // the band is the oscillator's, not the measurement's.
-    bench.verdict("and it arrives about where its 1.024 kHz nominal puts it",
-                  near(rtc_ms(rw1 - rw0), 125u, 20u));
+    // The watchdog counts OSCULP32K / 32 and the RTC OSCULP32K itself, so
+    // the oscillator's error cancels: 128 of its cycles are 4096 RTC
+    // ticks, 4096 x 1000 / ulp_hz ms (ulp_hz measured at boot); the
+    // enable's synchronization costs 2..3 watchdog cycles (3 ms), and the
+    // two truncations a millisecond: +-4.
+    const uint32_t ew_ms = static_cast<uint32_t>((4096ull * 1000u) / ulp_hz);
+    bench.verdict("and it arrives where 128 of its OSCULP32K / 32 cycles put it",
+                  near(rtc_ms(rw1 - rw0), ew_ms, 4u));
 
     watchdog_backstop(false);
     quiesce();
@@ -1179,7 +1233,7 @@ void te_regulator() {
 
     // One IDLE leg is the common baseline: the software is identical in
     // every combination, so subtracting it once is enough.
-    (void)console_quiet();
+    (void)drained_for_window();
     const bool ruler = deep_up();
     const uint32_t base = deep_leg(WaitKind::sleep, SleepMode::idle0, bill_p, bill_n);
     const bool base_ok = ruler && base != 0u;
@@ -1232,9 +1286,14 @@ void te_regulator() {
         // a 290 us item on top of the oscillator's; here nothing in
         // STDBYCFG or SUPC.VREG moves the wake by more than the repeat's
         // own scatter.
-        bench.verdict("NEITHER REGULATOR SETTING NOR BACK-BIAS MOVES THE WAKE: "
-                      "the whole spread is inside twice the repeat's own scatter",
-                      hi - lo < 2 * repeat + 3000);
+        // PRINTED, not judged: a null result needs a noise floor, and the
+        // one this letter has is a single repeat's difference - one sample
+        // of a scatter, against a spread of seven - plus a slack no document
+        // gives (table 45-13 has one typical standby wake and no regulator
+        // dependence). The figures above are the finding.
+        print(serial, "  no regulator setting or back-bias moved the wake by more "
+              "than the spread above - NOT JUDGED: one repeat is no noise floor",
+              crlf);
         // Erratum 1.8.14's predicted fingerprint - PERFORMANCE alone
         // keeping GCLK0 requested, hence a cheap wake - IS NOT VISIBLE.
         // Reported, not verdicted: the erratum speaks of which regulator
@@ -1256,8 +1315,10 @@ void te_regulator() {
 
 
 /// Time from a wake to a predicate coming true, in microseconds, or
-/// never_us when it does not within 50 ms - a crystal's start-up and the
-/// DPLL's lock each take under two milliseconds, so the budget reports a
+/// never_us when it does not within 50 ms - a crystal's start-up (the
+/// counted XOSC STARTUP of the configs here, under a millisecond) and the
+/// DPLL's lock (1.5 ms at most, table 45-52's tLOCK at a 32 kHz
+/// reference) each take under two milliseconds, so the budget reports a
 /// clock that never came rather than timing a slow one. Called after the
 /// wake: SysTick, like the CPU clock it rides, was stopped during the
 /// standby, so the span is the restart and nothing else. The cycles are
@@ -1277,7 +1338,7 @@ void tf_survivors() {
     // It is the one clock nobody can ask about after a wake - the CPU
     // only runs once it is back - so it is measured by DIFFERENCE: the
     // wake bill of letter d, with and without its RUNSTDBY.
-    (void)console_quiet();
+    (void)drained_for_window();
     const bool ruler = deep_up();
     const uint32_t base = deep_leg(WaitKind::sleep, SleepMode::idle0, bill_p, bill_n);
     Osc48m::run_standby(false);
@@ -1298,11 +1359,13 @@ void tf_survivors() {
     // requesting its APB clock wakes MCLK, generator 0 and the source
     // behind them (19.6.3.3.2). OSC48M is therefore already being held
     // up by the instrument, and its own flag has nothing left to add.
-    bench.verdict("OSC48M's own RUNSTDBY changes the wake by nothing at all - "
-                  "with a sleepwalking task present the main clock chain is "
-                  "already held up by that task's own request",
-                  (cost_on > cost_off ? cost_on - cost_off : cost_off - cost_on) <
-                      4000);
+    // PRINTED, not judged: 19.6.3.3.2 makes the two bills equal in
+    // principle, but how equal two means of 64 rounds read - each round's
+    // wake landing somewhere in one RTC period of 30.5 us - has no floor
+    // this letter measures, and 4 us was chosen by eye.
+    print(serial, "  OSC48M's own RUNSTDBY moved the wake by ",
+          cost_on > cost_off ? cost_on - cost_off : cost_off - cost_on,
+          " ns - NOT JUDGED: no measured floor for a difference of two bills", crlf);
 
     // --- what a sleepwalking task holds up, in three legs -------------------
     //
@@ -1348,7 +1411,7 @@ void tf_survivors() {
             (void)Gclk<gen_xtal>::enable(false);
         }
         (void)Pm::set_sleep_mode(SleepMode::standby);
-        if (!console_quiet() || !arm_wake(ulp_hz / 32u)) {
+        if (!drained_for_window() || !arm_wake(ulp_hz / 32u)) {
             l.up = false;
             continue;
         }
@@ -1397,11 +1460,15 @@ void tf_survivors() {
     // records for the FDPLL ("still running even if not requested by any
     // module causing extra consumption"), which that document marks
     // revision B only.
-    bench.verdict("XOSC KEEPS RUNNING THROUGH A STANDBY whatever RUNSTDBY says "
-                  "and whoever is or is not asking for it - table 19-2 says it "
-                  "should stop, and on this silicon it does not",
-                  xl[0].up && xl[1].up && xl[2].up && xl[0].tick_us == 0u &&
-                      xl[1].tick_us == 0u && xl[2].tick_us == 0u);
+    // Printed, not judged: it contradicts table 19-2 on one die, and a
+    // behaviour the document denies is no contract - a driver that relied
+    // on the crystal staying up would be wrong on the next revision.
+    bench.verdict("the crystal came up for the three arrangements",
+                  xl[0].up && xl[1].up && xl[2].up);
+    print(serial, "  XOSC through a standby, whatever RUNSTDBY says and whoever asks: ",
+          xl[0].tick_us == 0u && xl[1].tick_us == 0u && xl[2].tick_us == 0u
+              ? "kept running in all three (table 19-2 says it stops)"
+              : "stopped in at least one", crlf);
     // Which is why a crystal restart is not part of this board's sleep
     // bill at all: a 24 MHz crystal that DID stop would cost about
     // 1.77 ms to come back, out of every deep sleep.
@@ -1447,7 +1514,7 @@ void tf_survivors() {
             continue;
         }
         (void)Pm::set_sleep_mode(SleepMode::standby);
-        if (!console_quiet() || !arm_wake(ulp_hz / 32u)) {
+        if (!drained_for_window() || !arm_wake(ulp_hz / 32u)) {
             l.up = false;
             continue;
         }
@@ -1471,10 +1538,16 @@ void tf_survivors() {
           " us", crlf);
     bench.verdict("the DPLL locked to the crystal in both configurations",
                   dl[0].up && dl[1].up);
-    bench.verdict("its output clock is being issued again within microseconds of "
-                  "the wake, with RUNSTDBY set or clear",
-                  dl[0].up && dl[1].up && dl[0].relock_us < 200u &&
-                      dl[1].relock_us < 200u);
+    // The bound is the lock itself: table 45-52's tLOCK at this loop's 2 MHz
+    // reference is 35 us at most (characterization, stated at a 96 MHz
+    // output - the only row for this reference), and time_to() starts after
+    // the wake and adds a poll turn and its microsecond rounding: 37 us. A
+    // loop that kept running reads ready at once (logged: 1 us both ways).
+    constexpr uint32_t relock_bound_us = 35u + 2u;
+    bench.verdict("its output clock is being issued again within table 45-52's "
+                  "tLOCK of the wake, with RUNSTDBY set or clear",
+                  dl[0].up && dl[1].up && dl[0].relock_us <= relock_bound_us &&
+                      dl[1].relock_us <= relock_bound_us);
     // DECLINED IN PRINT. Whether the loop ever STOPPED is not decided
     // here: DPLLSTATUS.CLKRDY is the only witness this suite has, and
     // the crystal above just showed what such a flag is worth after a
@@ -1661,7 +1734,7 @@ void th_asleep() {
                   none_armed && Probe::last_ok && Pm::sleep_mode() == SleepMode::standby &&
                       Pm_::armed_depth() == SleepDepth::standby);
 
-    (void)console_quiet();
+    (void)drained_for_window();
     const bool armed = arm_wake(ulp_hz / 8u);
     const uint32_t k0 = Ticker::ticks();
     const uint32_t r0 = rtc_now();
@@ -1721,7 +1794,7 @@ void th_asleep() {
     bench.verdict("a deadline 50 ms away leaves STANDBY legitimate to the guard "
                   "(min_deep_ticks 2)",
                   !refused_by_guard);
-    if (!refused_by_guard && console_quiet()) {
+    if (!refused_by_guard && drained_for_window()) {
         const bool armed2 = arm_wake(ulp_hz / 4u);   // ~250 ms, five times the deadline
         const uint32_t r2 = rtc_now();
         K::idle_if_empty();
@@ -1738,26 +1811,30 @@ void th_asleep() {
             200'000u);
         const uint32_t slept_ms = rtc_ms(r3 - r2);
         const uint32_t due_to_taken_ms = rtc_ms(Probe::blip_rtc - r_armed);
-        const uint32_t late_ms = due_to_taken_ms > 50u ? due_to_taken_ms - 50u : 0u;
+        // The 50 kernel ticks in real milliseconds: a tick is 48000 OSC48M
+        // cycles, 48000 / fine_hz ms (within 5 % of one, table 45-57).
+        const uint32_t due_ms = static_cast<uint32_t>(
+            (50ull * 48'000u * 1000u + fine_hz / 2u) / fine_hz);
+        const uint32_t late_ms = due_to_taken_ms > due_ms ? due_to_taken_ms - due_ms : 0u;
         print(serial, "  a time event 50 ms away, slept over for ", slept_ms,
               " ms: it matured ", late_ms, " ms late, and the kernel never knew", crlf);
-        // THE BOUND, in the RTC milliseconds rtc_ms() reports (ulp_hz is
-        // measured against fine_hz, so a tick of 48000 OSC48M cycles is
-        // 48000 / fine_hz = 1.005 of them on any die). The deadline
-        // matures after 50 to 51 ticks of KERNEL time - an arming lands
-        // somewhere inside a period - which is 50.3 to 51.3 ms; the
+        // THE BOUND, in the RTC milliseconds rtc_ms() reports (ulp_hz and
+        // fine_hz both measured against the crystal at boot), late counted
+        // from the 50 ticks' real due_ms. The deadline matures after 50 to
+        // 51 ticks of KERNEL time - an arming lands somewhere inside a
+        // period - so 0 to one tick (1.05 ms at most) past due_ms; the
         // standby itself lets 0 to 2 ticks run (letter d's freeze verdict),
-        // up to 2.0 ms counted as slept that the deadline also spent;
+        // up to 2.1 ms counted as slept that the deadline also spent;
         // Probe takes the Blip within one pump of the tick that matures
-        // it, microseconds. So late - slept lies in [0.3 - 2.0, 1.3] ms
-        // before truncation, and each of the two spans is truncated to a
-        // whole millisecond (up to 1 ms each, in opposite directions at
-        // worst): [-2.7, 2.3], judged as [-3, +3].
+        // it, microseconds. So late - slept lies in [-2.1, 1.05] ms before
+        // truncation; each of the two spans is truncated to a whole
+        // millisecond (up to 1 ms, in opposite directions at worst) and
+        // due_ms rounded (half of one): [-3.6, 2.6], judged as [-4, +3].
         bench.verdict("A TIME EVENT SLEPT OVER MATURES LATE BY THE WHOLE SLEPT "
                       "DURATION - which is why the pattern is 'no armed time "
                       "event, then standby'",
                       armed2 && woke2 && matured && slept_ms > 200u &&
-                          late_ms + 3u >= slept_ms && late_ms <= slept_ms + 3u);
+                          late_ms + 4u >= slept_ms && late_ms <= slept_ms + 3u);
         release_sleep();
     }
     print(serial, "  (the deadline guard saw ", before,
@@ -1836,10 +1913,26 @@ int main() {
                   Fine::configure(brio::TcConfig{.mode = brio::TcMode::count32,
                                                  .prescaler = brio::TcPrescaler::div1}) &&
                   Fine::enable(true);
+    // OSC48M against the crystal: 100 ms of each, read together.
+    bool fine_measured = false;
+    if (rulers && deep_up()) {
+        const uint32_t d0 = deep_now();
+        const uint32_t f0 = fine_now();
+        brio::spin_us<Ruler>(100'000u);
+        const uint32_t d1 = deep_now();
+        const uint32_t f1 = fine_now();
+        if (d1 != d0) {
+            fine_hz = static_cast<uint32_t>(
+                (static_cast<uint64_t>(f1 - f0) * crystal_hz) / (d1 - d0));
+            fine_measured = true;
+        }
+        deep_down();
+        Xosc::stop();
+    }
     rulers = rulers && rtc_up();
 
-    // The RTC's own rate, against the awake ruler: one cited constant
-    // (OSC48M's measured 47.755 MHz) and everything else derived here.
+    // The RTC's own rate, against the awake ruler, itself measured against
+    // the crystal above.
     if (rulers) {
         const uint32_t want = 4096u;
         const uint32_t r0 = rtc_now();
@@ -1860,8 +1953,9 @@ int main() {
           cause_name(why), ", CPU ", SysClock::hz / 1'000'000u, " MHz)",
           crlf);
     print(serial, "  rulers: CLK_MAIN stopwatch at ", fine_hz / 1000u,
-          " kHz (OSC48M's measured rate, docs/samc21/clock.md), RTC on OSCULP32K "
-          "measured here at ", ulp_hz, " Hz", crlf);
+          fine_measured ? " kHz (OSC48M measured against the crystal here)"
+                        : " kHz (OSC48M's NOMINAL rate: the crystal did not come up)",
+          ", RTC on OSCULP32K measured here at ", ulp_hz, " Hz", crlf);
     print(serial, "  the kernel tick is SysTick at ",
           brio::Ticker::ticks_per_second, " Hz and IT STOPS IN STANDBY", crlf);
     if (!rulers) {

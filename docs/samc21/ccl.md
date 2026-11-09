@@ -409,7 +409,7 @@ comparator cheaply. The two cheaper candidates are a LUT as a one-stage
 synchronizer and a combinational LUT on the comparator's *asynchronous*
 flavour, and both are measured here.
 
-The instrument is `ac_sync_probe`'s: GCLK_AC and GCLK_CCL both on
+The instrument is a timing probe of the comparator's own: GCLK_AC and GCLK_CCL both on
 generator 1 at OSC48M/4096 = **11.719 kHz**, so one period is exactly
 **4096 CPU cycles** and a SysTick stopwatch resolves a fraction of one.
 PA04 is driven as a plain GPIO into COMP0's positive input against the

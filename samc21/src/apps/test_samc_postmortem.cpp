@@ -218,7 +218,7 @@ bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 /// puts the transmit interrupt's branches into the window, among the
 /// packets the letter judges. False, with a failed verdict, on a wedged
 /// console; the letter then returns.
-bool console_quiet() {
+bool drained_for_window() {
     if (console_drain()) {
         return true;
     }
@@ -257,7 +257,7 @@ void ta_record() {
 
     // A window, then the capture. Nothing is printed between the drain and
     // the capture: a console line is milliseconds of branches.
-    if (!console_quiet()) {
+    if (!drained_for_window()) {
         return;
     }
     const bool armed = Trace::arm() && Mtb::enabled();
@@ -303,7 +303,7 @@ void ta_record() {
     // so.
     const MtbPacket first_kept =
         Trace::raw().count > 0u ? Trace::raw().packets[0] : MtbPacket{0, 0};
-    if (!console_quiet()) {
+    if (!drained_for_window()) {
         Trace::clear();
         Trace::disarm();
         return;
@@ -333,7 +333,7 @@ void ta_record() {
     bench.verdict("and pending() agrees", !Trace::pending());
 
     // THE REPORTER, composed with one that does not end the program.
-    if (!console_quiet()) {
+    if (!drained_for_window()) {
         Trace::disarm();
         return;
     }
@@ -360,7 +360,7 @@ void tb_freeze_first() {
     MtbPacket running[Trace::kept]{};
 
     // Window one: stop the trace, then read it.
-    if (!console_quiet()) {
+    if (!drained_for_window()) {
         return;
     }
     (void)Trace::arm();
@@ -444,7 +444,7 @@ void tc_walk() {
     // THE YOUNG BUFFER: fewer packets than the caller asked for, and the
     // start-of-trace flag on the first one (bit 0 of the DESTINATION
     // word marks it).
-    if (!console_quiet()) {
+    if (!drained_for_window()) {
         return;
     }
     (void)Trace::arm();
@@ -464,7 +464,7 @@ void tc_walk() {
                   young_marked);
 
     // WHAT ONE CHAIN COSTS - the number keep_packets is chosen against.
-    if (!console_quiet()) {
+    if (!drained_for_window()) {
         Trace::disarm();
         return;
     }
@@ -485,7 +485,7 @@ void tc_walk() {
     // The chain calls a, b, c in that order for ever, so the leaves seen
     // in the snapshot must advance cyclically - which is what proves the
     // walk is oldest-first and not merely "some 16 packets".
-    if (!console_quiet()) {
+    if (!drained_for_window()) {
         Trace::disarm();
         return;
     }
@@ -563,7 +563,7 @@ void tf_fault() {
 
     // Drained before the token is banked: a letter that returns here
     // leaves nothing for the next boot to resume.
-    if (!console_quiet()) {
+    if (!drained_for_window()) {
         return;
     }
     bank(1);
@@ -699,7 +699,7 @@ void tp_panic() {
     print(serial, "  panic() through TracingReporter, three calls deep ...",
           crlf);
 
-    if (!console_quiet()) {
+    if (!drained_for_window()) {
         return;
     }
     bank(2);

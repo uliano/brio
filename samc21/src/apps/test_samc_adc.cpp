@@ -128,6 +128,35 @@ constexpr uint32_t adc_gen_hz = SysClock::hz;
 /// (docs/boards/samc21j.md), so no figure is assumed.
 uint16_t vdd_mv = 0;
 
+/// How far the located supply can sit from the true one, per mille. The
+/// supply is a bandgap level read by ADC0 against VDDANA, so the true
+/// supply is vdd_mv x (the level + ADC0's error) / the nominal; worst at
+/// the 1.024 V level: 1003..1045 mV (table 45-36, at 5.0 V) moved by the
+/// levels' supply coefficient over 2.7..5.5 V (-0.2..+0.3 %/V, the
+/// table's typical, the only figure it gives): 996..1050 mV, and ADC0's
+/// error reading it (table 45-24's maxima: offset 80 mV, gain 42 mV x
+/// 0.39 - the level's fraction of a 2.7 V supply - and INL 4 counts, 5.4
+/// mV at 5.5 V: 102 mV) - a factor of 894/1024 .. 1152/1024.
+constexpr uint32_t supply_lo_permille = 873;
+
+/// The most counts of 4096 a voltage of `mv` (up to 1000) can be against
+/// the true supply, given the located one (rounded up); full scale when
+/// no supply has been located (nothing judged tight).
+uint32_t located_counts(uint32_t mv) {
+    if (vdd_mv == 0u) return 4096u;
+    return (mv * 4096u * 1000u + vdd_mv * supply_lo_permille - 1u) /
+           (vdd_mv * supply_lo_permille);
+}
+
+/// A reading of a pad at the upper rail, ADC0 against VDDANA: full scale
+/// less the tabled offset and gain (table 45-24: 80 + 42 mV, the larger
+/// of its 3.0 V and 5.0 V rows), 4 counts of INL and one of
+/// quantization. Anything when the supply has not been located.
+bool at_upper_rail(uint32_t counts) {
+    if (vdd_mv == 0u) return true;
+    return counts + located_counts(122u) + 5u >= 4096u;
+}
+
 // ---------------------------------------------------------------------------
 // The stopwatch, for letter f only: TC0 + TC1 as one 32-bit counter, and
 // THE RULER IS THE BOARD'S CRYSTAL. A conversion time reported against
@@ -308,9 +337,9 @@ const char* yes_no(bool v) { return v ? "yes" : "no"; }
  * as the reference, at SAMPLEN 14 (the 10 us table 45-22 asks of the
  * channel). The level sits under every supply the device runs on
  * (2.7..5.5 V, DS60001479M table 45-2), so the reading never saturates;
- * its accuracy is the level's own, +-2.05 % (table 45-36). Leaves ADC0
- * released and SUPC.VREF at reset; false when the converter does not
- * come up or the channel reads nothing.
+ * its accuracy is the level's and ADC0's, as supply_lo_permille spells
+ * out. Leaves ADC0 released and SUPC.VREF at reset; false when the
+ * converter does not come up or the channel reads no level.
  */
 bool locate_vdd() {
     if (vdd_mv != 0u) {
@@ -327,7 +356,10 @@ bool locate_vdd() {
     const uint32_t counts = mean_of<Adc0>(32);
     (void)Vref::configure(VrefConfig{});
     Adc0::release();
-    if (counts == 0u) {
+    // What the level can read under any supply the device runs on, with
+    // ADC0's tabled errors (letter c's arithmetic): outside 676..1737 no
+    // level was read, and a smaller count would overflow the millivolts.
+    if (counts < 676u || counts > 1737u) {
         return false;
     }
     vdd_mv = static_cast<uint16_t>((1024UL * 4096UL + counts / 2u) / counts);
@@ -345,12 +377,13 @@ bool need_vdd() {
 }
 
 /// Whether a bandgap level of `level_mv` can be read against a supply
-/// located at `supply_mv` without saturating: the level at most 95 % of
-/// the supply. The 5 % is the level's own +-2.05 % at its top (table
-/// 45-36), the located supply's +-2.05 % at its bottom (the 1.024 V level
-/// it was read with) and the levels' 0.3 %/V supply coefficient.
+/// located at `supply_mv` without saturating: the level at its top
+/// (+2.05 %, table 45-36, and 0.69 % of typical supply coefficient: x
+/// 1.028) with ADC0's offset and gain at full scale over it (122 mV,
+/// table 45-24), under the least the true supply can be
+/// (supply_lo_permille).
 constexpr bool level_below_supply(uint32_t level_mv, uint32_t supply_mv) {
-    return level_mv * 20u < supply_mv * 19u;
+    return level_mv * 1028u + 122'000u < supply_mv * supply_lo_permille;
 }
 
 // =============================================================================
@@ -502,10 +535,15 @@ void tb_rails() {
     const uint32_t low = mean_of<Adc0>(32);
     print(serial, "  PA08 driven: high ", high, " counts (", counts_mv<Adc0>(high, vdd_mv),
           " mV), low ", low, " counts (", counts_mv<Adc0>(low, vdd_mv), " mV)", crlf);
-    bench.verdict("a pad driven HIGH reads full scale (within 1 %)",
-                  high >= 4096u - 41u);
-    bench.verdict("and driven LOW reads zero (within 1 % of full scale)",
-                  low <= 41u);
+    // The rails within ADC0's tabled errors (table 45-24, VDDANA reference,
+    // the larger of the 3.0 V and 5.0 V rows): offset 80 mV and gain
+    // 42 mV at full scale, 4 counts of INL and one of quantization.
+    const uint32_t full_err = located_counts(122u) + 5u;
+    const uint32_t zero_err = located_counts(80u) + 5u;
+    bench.verdict("a pad driven HIGH reads full scale (within the tabled offset and gain)",
+                  high + full_err >= 4096u);
+    bench.verdict("and driven LOW reads zero (within the tabled offset)",
+                  low <= zero_err);
 
     // THE CHEAPEST SELF-CHECK THE CONVERTER HAS: the scaled analog
     // supply against the analog supply itself is a quarter, by
@@ -515,9 +553,12 @@ void tb_rails() {
     const uint32_t quarter = mean_of<Adc0>(64);
     print(serial, "  SCALEDVDDANA against VDDANA: ", quarter,
           " counts of ", Adc0::result_steps(), " (a quarter would be 1024)", crlf);
+    // ADC0's own error at a quarter of full scale, 80 + 10.5 mV (some 75
+    // counts at 5 V), and the divider's, which no table gives: +-10 %,
+    // where an INTREF taken for VDDANA would read 27 % high or saturate.
     bench.verdict("1/4 VDDANA against VDDANA is a quarter of full scale, "
-                  "within 2 % - a ratio with no external voltage in it",
-                  near(quarter, 1024u, 21u));
+                  "within 10 % - a ratio with no external voltage in it",
+                  near(quarter, 1024u, 102u));
 
     Adc0::select(AdcInput::scaled_core);
     settle();
@@ -525,9 +566,8 @@ void tb_rails() {
     const uint16_t core_mv = static_cast<uint16_t>(4u * counts_mv<Adc0>(core, vdd_mv));
     print(serial, "  SCALEDVDDCORE: ", core, " counts -> VDDCORE about ", core_mv,
           " mV (at VDD ", vdd_mv, " mV)", crlf);
-    bench.verdict("the scaled CORE supply sits where a 1.2 V regulated core "
-                  "belongs - 900..1500 mV",
-                  core_mv >= 900u && core_mv <= 1500u);
+    // Printed above, not judged: table 45-20 gives VDDCORE a typical
+    // 1.23 V only.
 
     // The three reference divisions, seen from the other side: with the
     // input HELD AT THE RAIL, a smaller reference saturates.
@@ -551,6 +591,10 @@ void tb_rails() {
     const uint32_t small_ref = mean_of<Adc0>(16);
     print(serial, "  PA08 high against 1/2 VDDANA: ", half_ref,
           " counts; against 1/1.6 VDDANA: ", small_ref, crlf);
+    // Twice and 1.6 times the reference sit far past the converter's
+    // offset and gain errors: every conversion reads 4095, and the mean of
+    // sixteen truncates to it (4090 leaves a few counts for a conversion
+    // caught at the reference's edge on a supply transient).
     bench.verdict("a rail against a reference BELOW it saturates at full "
                   "scale, both divisions",
                   half_ref >= 4090u && small_ref >= 4090u);
@@ -601,15 +645,18 @@ void tc_bandgap() {
     const uint32_t with_oe = mean_of<Adc0>(32);
     print(serial, "  MUXPOS INTREF at 1.024 V: VREFOE off ", without_oe,
           " counts, on ", with_oe, " counts", crlf);
-    bench.verdict("THE BANDGAP CHANNEL IS DEAD WITHOUT SUPC.VREF.VREFOE - "
-                  "22.8.7 words that bit as routing the reference 'to an ADC "
-                  "input channel' and ch. 38 never mentions it, but MUXPOS "
-                  "INTREF reads a flat zero until it is set",
-                  without_oe == 0u);
+    // Printed, not judged: 22.8.7 words VREFOE as routing the reference
+    // "to an ADC input channel" and chapter 38 never mentions it, so what
+    // the channel reads without it is this die's; the driver sets the bit
+    // whenever it reads the channel, right either way.
+    print(serial, "  without VREFOE the bandgap channel ",
+          without_oe == 0u ? "reads a flat zero" : "reads a voltage", crlf);
     // The level's 1.003..1.045 V (table 45-36) against any VDDANA in
-    // 2.7..5.5 V (table 45-2) reads 747..1585 counts of 4096.
+    // 2.7..5.5 V (table 45-2), with ADC0's offset and gain (80 mV and 42
+    // mV x the fraction, table 45-24), 4 counts of INL and one of
+    // quantization, reads 676..1737 counts of 4096.
     bench.verdict("and a real voltage once it is",
-                  with_oe >= 747u && with_oe <= 1585u);
+                  with_oe >= 676u && with_oe <= 1737u);
 
     // Now the supply, from every bandgap level it holds. The 1.024 V
     // level comes first and is always read: it sits under every supply
@@ -629,6 +676,8 @@ void tc_bandgap() {
     uint32_t lo_mv = UINT32_MAX;
     uint32_t hi_mv = 0;
     uint32_t located = 0;
+    uint32_t located_counts_1v = 0;   // the 1.024 V level's reading, for the last verdict
+    uint16_t top_level = 0;           // the highest level counted
     uint8_t asked = 0;
     uint8_t counted = 0;
     for (const Level& l : levels) {
@@ -651,27 +700,43 @@ void tc_bandgap() {
               " counts -> VDDANA ", supply, " mV", crlf);
         if (located == 0u) {
             located = supply;
+            located_counts_1v = counts;
         }
-        // 2.7..5.5 V (table 45-2), widened by the level's own 5 %
-        // (level_below_supply()'s arithmetic).
-        if (supply >= 2565u && supply <= 5775u) {
+        // 2.7..5.5 V (table 45-2), widened by what a level's reading can
+        // put the supply off by, worst at the 1.024 V level: a factor of
+        // 1024/1152 .. 1024/894 (supply_lo_permille's arithmetic).
+        if (supply >= 2700u * 1024u / 1152u && supply <= 5500u * 1024u / 894u) {
             sum_mv += supply;
             ++counted;
             lo_mv = supply < lo_mv ? supply : lo_mv;
             hi_mv = supply > hi_mv ? supply : hi_mv;
+            top_level = l.nominal;
         }
     }
     bench.verdict("EVERY BANDGAP LEVEL THE SUPPLY HOLDS PUTS VDDANA INSIDE THE "
-                  "DEVICE'S 2.7..5.5 V (table 45-2, widened by the level's 5 %)",
+                  "DEVICE'S 2.7..5.5 V (table 45-2, widened by what a level's "
+                  "reading can be off by)",
                   counted >= 2u && counted == asked);
     const uint32_t mean_vdd = counted == 0u ? 0u : (sum_mv + counted / 2u) / counted;
     print(serial, "  ADC-side mean VDDANA: ", mean_vdd, " mV over ", counted,
           " levels, ", lo_mv == UINT32_MAX ? 0u : lo_mv, "..", hi_mv, crlf);
-    // Two levels, each within +-2.05 % of its nominal (table 45-36), put
-    // the supply up to 4.1 % apart; the converter's few counts of gain
-    // and offset error at 750..1600 counts are under 1 % more: 5 %.
-    bench.verdict("and they put it in the same place: within 5 % of each other",
-                  counted >= 2u && (hi_mv - lo_mv) * 20u <= mean_vdd);
+    // Two levels put the supply apart by their own +-2.05 % each (table
+    // 45-36) and their typical supply coefficient away from 5.0 V (0.69 %
+    // each): 55 per mille; by ADC0's offset, which weighs 1/1024 of the
+    // lowest level and 1/L of the highest (80 mV, table 45-24: 39 per
+    // mille with 2.048 V on top, 59 with 4.096 V; the gain cancels, since
+    // each level's reading carries it in proportion); and by 4 counts of
+    // INL on each reading (676 counts at least: 9 per mille).
+    const uint32_t spread_permille =
+        top_level == 0u ? 0u
+                        : 55u + 9u +
+                              (80UL * 1000UL * (top_level - 1024u) +
+                               1024UL * top_level - 1u) / (1024UL * top_level);
+    print(serial, "  the levels' tables allow ", spread_permille,
+          " per mille between them", crlf);
+    bench.verdict("and they put it in the same place: within the levels' and "
+                  "the converter's tabled errors of each other",
+                  counted >= 2u && (hi_mv - lo_mv) * 1000u <= mean_vdd * spread_permille);
     if (mean_vdd != 0u) {
         vdd_mv = static_cast<uint16_t>(mean_vdd);
     }
@@ -703,11 +768,16 @@ void tc_bandgap() {
     // measurement, printed and carried into docs/samc21/adc.md. What IS
     // asserted is that the long sample is the one that lands where the
     // other two mechanisms say the bandgap is.
-    bench.verdict("the 10 us sample is the one that agrees with the other "
-                  "levels (within 2 %)",
-                  near((1024u * Adc0::result_steps()) /
-                           (long_sample == 0u ? 1u : long_sample),
-                       vdd_mv, vdd_mv / 50u));
+    // The 1.024 V level was read above through this same channel, level
+    // and sample length, and every level was weighed with that reading:
+    // the two 64-reading means differ by their noise (table 45-24's 2 mV
+    // rms, 0.35 mV rms on the difference, 1.4 mV at four sigma) and a
+    // count of rounding each. (The levels agreeing with each other is
+    // the verdict above; the short sample's departure is printed.)
+    bench.verdict("the 10 us sample reproduces the 1.024 V reading every level "
+                  "was weighed with",
+                  located_counts_1v != 0u &&
+                      near(long_sample, located_counts_1v, located_counts(2u) + 2u));
 
     (void)Vref::configure(VrefConfig{});
     Adc0::release();
@@ -762,10 +832,14 @@ void td_two_converters() {
               pairs[i].a1, ", apart ", d, " counts (",
               counts_mv<Adc0>(d, vdd_mv), " mV)", crlf);
     }
+    // Each converter within its own tabled offset and gain (table 45-24:
+    // 80 + 42 mV at full scale), so the two within twice that, and their
+    // INLs and quantization (10 counts).
+    const uint32_t pair_band = located_counts(244u) + 10u;
     bench.verdict("TWO CONVERTERS, ONE TRUTH: the worst disagreement over a\n"
                   "                rail, a ground and an internal divider is "
-                  "under 1 % of full scale",
-                  worst <= 41u);
+                  "inside the two converters' tabled errors",
+                  worst <= pair_band);
     print(serial, "  worst disagreement ", worst, " counts of 4096 = ",
           (worst * 1000u) / 4096u, " per mille of full scale", crlf);
 
@@ -845,13 +919,14 @@ void te_averaging() {
     print(serial, "  the noisiest of the three is ", sources[noisiest].name,
           " at ", raw.span(), " counts of 4096 - that is the measurand", crlf);
     // Against VDDANA anywhere in 2.7..5.5 V (table 45-2): a quarter of
-    // the supply is a quarter of full scale wherever it sits; a quarter
-    // of a 0.9..1.5 V core (letter b's band) reads 167..569 counts; the
-    // 1.024 V level's 1.003..1.045 V (table 45-36) reads 747..1585.
+    // the supply is a quarter of full scale wherever it sits, within the
+    // +-10 % of letter b; the core has a typical figure only (table 45-20),
+    // so it is held to "not stuck" - off both rails; the 1.024 V level's
+    // 1.003..1.045 V (table 45-36) reads 747..1585.
     bench.verdict("every internal source reads somewhere sane and none of them "
                   "is stuck",
-                  survey[0].mean > 900u && survey[0].mean < 1150u &&
-                      survey[1].mean >= 167u && survey[1].mean <= 569u &&
+                  near(survey[0].mean, 1024u, 102u) &&
+                      survey[1].mean > 0u && survey[1].mean < 4095u &&
                       survey[2].mean >= 747u && survey[2].mean <= 1585u);
 
     // A TRUE AVERAGE: 64 samples, ADJRES from table 38-2, and the result
@@ -880,9 +955,11 @@ void te_averaging() {
     print(serial, "  the same source, 16 averaged (64x) readings: mean ",
           avg.mean, ", ", avg.low, "..", avg.high, ", span ", avg.span(),
           " counts", crlf);
+    // The same source, converter and reference: the means differ by the
+    // single readings' own scatter at most (their span) and a count.
     bench.verdict("the averaged readings sit on the SAME value as the single "
-                  "ones (within 4 counts)",
-                  near(avg.mean, raw.mean, 4u));
+                  "ones (within the singles' spread)",
+                  near(avg.mean, raw.mean, raw.span() + 1u));
     if (raw.span() >= 4u) {
         bench.verdict("AVERAGING BOUGHT WHAT IT PROMISES: the spread of 64x "
                       "averaged readings is smaller than that of single ones",
@@ -927,13 +1004,15 @@ void te_averaging() {
     const Spread over = spread_of<Adc0>(8);
     print(serial, "  8 oversampled (16-bit) readings: mean ", over.mean, ", ",
           over.low, "..", over.high, "; /16 = ", over.mean / 16u, crlf);
+    // The same bound as the average's: the singles' spread and a count.
     bench.verdict("THE TWO SCALES AGREE: a 16-bit oversampled reading divided "
-                  "by 16 lands on the 12-bit one (within 4 counts)",
-                  near(over.mean / 16u, raw.mean, 4u));
+                  "by 16 lands on the 12-bit one (within the singles' spread)",
+                  near(over.mean / 16u, raw.mean, raw.span() + 1u));
     bench.verdict("and both come out as the same VOLTAGE through "
                   "util/analog.hpp, which is the whole point of result_steps()",
                   near(adc_mv(over.mean, 65536u, vdd_mv),
-                       adc_mv(raw.mean, 4096u, vdd_mv), 4u));
+                       adc_mv(raw.mean, 4096u, vdd_mv),
+                       ((raw.span() + 2u) * vdd_mv + 4095u) / 4096u));
 
     Adc0::release();
 }
@@ -1137,6 +1216,9 @@ void tf_timing() {
     const uint32_t dropped = zero_offset.counts > with_offset.counts
                                  ? zero_offset.counts - with_offset.counts
                                  : 0u;
+    // The subtraction is exact; each figure is a mean of the same input's
+    // conversions, a fraction of a count of noise apart (table 45-24's
+    // 2 mV rms): +-4 counts covers both means and their truncation.
     bench.verdict("THE CORRECTION IS REALLY IN THE PATH: OFFSETCORR 100 takes "
                   "a hundred counts off the reading, which is 38.6.2.14's own "
                   "subtraction",
@@ -1154,12 +1236,9 @@ void tf_timing() {
           " ticks at OFFSETCORR 0 and ", cost_offset,
           " at OFFSETCORR 100, where 38.6.2.14's 13 CLK_ADC cycles would be ",
           13u * ticks_per_adc_cycle, " ticks", crlf);
-    bench.verdict("38.6.2.14'S PER-CONVERSION 13 CYCLES ARE NOT OBSERVED - a "
-                  "corrected single conversion costs under two CLK_ADC cycles "
-                  "more than an uncorrected one, offset or no offset, where "
-                  "the sentence predicts thirteen",
-                  cost_zero < 2u * ticks_per_adc_cycle &&
-                      cost_offset < 2u * ticks_per_adc_cycle);
+    // Printed above, not judged: what the correction costs a single
+    // conversion here contradicts 38.6.2.14's thirteen cycles on one die,
+    // which is no contract either way.
     // NO VERDICT on which reading of that sentence is right: the chapter
     // says free-running pays once (confirmed) and single mode pays every
     // time (not seen at either offset), and there is nothing further this
@@ -1381,7 +1460,7 @@ void th_event_chain() {
         const uint16_t v = results[i];
         if (v != 0xFFFFu) {
             ++filled_high;
-            if (v >= 4055u) {
+            if (at_upper_rail(v)) {
                 ++high_ok;
             }
         }
@@ -1548,19 +1627,21 @@ void ti_sampler_ao() {
           " mV), PA08 ", Collector::last[1], " counts (",
           counts_mv<Adc0>(Collector::last[1], vdd_mv), " mV)", crlf);
 
+    // The pace and the second it is counted over are both SysTick's: 50
+    // events, one more or less at the window's two ends.
     bench.verdict("the conversion interrupt ran at the sampler's pace",
-                  adc_interrupts >= 40u && adc_interrupts <= 60u);
+                  adc_interrupts >= 49u && adc_interrupts <= 51u);
     bench.verdict("EVERY RESULT REACHED THE SUBSCRIBER THROUGH THE KERNEL",
                   Collector::samples == adc_interrupts);
     bench.verdict("the sampler WALKED its list - both inputs, alternating",
-                  Collector::per_index[0] >= 18u && Collector::per_index[1] >= 18u &&
+                  Collector::per_index[0] >= 24u && Collector::per_index[1] >= 24u &&
                       near(Collector::per_index[0], Collector::per_index[1], 1u));
     bench.verdict("and never mislabelled one: no result arrived with an input "
                   "code outside the list",
                   Sampler::unknown_inputs() == 0u);
     bench.verdict("the values are attributed to the right inputs - the pad at "
                   "its rail, the scaled supply at a quarter",
-                  Collector::last[1] >= 4055u && near(Collector::last[0], 1024u, 41u));
+                  at_upper_rail(Collector::last[1]) && near(Collector::last[0], 1024u, 102u));
 
     hand_back<PadShared>();
     Adc0::release();
@@ -1585,6 +1666,11 @@ void tj_more() {
     Adc0::select(AdcInput::scaled_supply);
     const uint32_t right = mean_of<Adc0>(16);
 
+    // The verdicts below compare means of the same internal input through
+    // the same converter: the shifts and the gain correction are exact
+    // arithmetic, so the figures differ by the means' noise (a fraction of
+    // a count, table 45-24's 2 mV rms over 8..16 conversions) and their
+    // truncations: +-4 counts.
     // ---- LEFTADJ ----------------------------------------------------------
     AdcConfig left = base;
     left.left_adjust = true;
@@ -1743,18 +1829,23 @@ void tj_more() {
 // 87 ms before it wraps) and RESRDY polled - with FLUSHEI clear, then
 // set, because the measurement says the software flush depends on it.
 //
-// THE BOUND on "a new conversion of the full length T": the flush
-// restarts CLK_ADC on the next peripheral clock edge, so the restart
-// lands within one CLK_ADC period (256 CPU cycles, 5.3 us, 4 ticks) of
-// the flush; the flush is issued at most one poll turn late and the
-// RESRDY seen at most one turn late, a turn being a stopwatch read (a
-// double READSYNC, ~6 us) and a ruler read (util/test_wait.hpp, ~1.5 us),
-// 6 ticks: 4 + 6 + 6 = 16 ticks, judged at 20. Every poll is bounded on
-// the ruler too, at twice its stopwatch limit, so a stopwatch that stops
-// ends the leg instead of hanging it.
+// THE BOUND on "a new conversion of the full length T": a conversion
+// starts on a CLK_ADC edge, up to one period (256 CPU cycles, 5.3 us, 4
+// ticks) after its start or flush; a flush is issued and a RESRDY seen at
+// most one poll turn late, a turn being a stopwatch read (a double
+// READSYNC, ~6 us) and a ruler read (util/test_wait.hpp, ~1.5 us), 6
+// ticks; and each stopwatch reading carries its own tick of quantization.
+// T itself is measured the same way (its start's edge and its RESRDY's
+// turn), so against 2250 + T a flushed leg lands -(4 + 6) - 2 .. 4 + 6 +
+// 6 + 3 = -12..19 ticks off, judged at 19; a plain start against T, -12..
+// 12, judged at 12. Every poll is bounded on the ruler too, at twice its
+// stopwatch limit, so a stopwatch that stops ends the leg instead of
+// hanging it.
 // An event flush adds the one-shot TC2's own start: enable() crosses
 // into its clock and its first prescaled tick is up to one /1024 period
-// late (21.3 us, 16 ticks), so that leg is judged at 40.
+// late (21.3 us, 16 ticks), and the enable itself follows the stopwatch's
+// zero by under a tick; no flush issue turn, and a reading fewer:
+// -12..29, judged at 29.
 using Stopwatch3 = Tc<3>;
 constexpr uint16_t k_none = 0xFFFFu;
 
@@ -1909,18 +2000,18 @@ void tk_flush() {
                   sw_busy.result_at == k_none && sw_busy.swtrig == ADC_SWTRIG_FLUSH_Msk);
     bench.verdict("WITH FLUSHEI SET THE SAME FLUSH RE-ARMS START (SWTRIG reads "
                   "both) AND THE RESULT LANDS ONE WHOLE T AFTER THE FLUSH",
-                  close(ei_sw_busy.result_at, 2250u + T, 20u) &&
+                  close(ei_sw_busy.result_at, 2250u + T, 19u) &&
                       ei_sw_busy.swtrig == (ADC_SWTRIG_FLUSH_Msk | ADC_SWTRIG_START_Msk));
     bench.verdict("a flush with nothing in flight starts nothing, FLUSHEI or not",
                   sw_idle.result_at == k_none && ei_sw_idle.result_at == k_none);
     bench.verdict("THE FLUSH EVENT STARTS A CONVERSION ON AN IDLE CONVERTER - 'a flush "
                   "and new conversion' (EVCTRL.FLUSHEI) - every time",
-                  close(ev_idle, shot_ticks + T, 40u) &&
-                      close(ev_idle_again, shot_ticks + T, 40u));
+                  close(ev_idle, shot_ticks + T, 29u) &&
+                      close(ev_idle_again, shot_ticks + T, 29u));
     bench.verdict("BUT INTO A CONVERSION IN FLIGHT IT LOSES IT and starts none",
                   ev_busy == k_none);
     bench.verdict("and the converter is whole after all of it: a plain start takes T",
-                  close(after.result_at, T, 20u));
+                  close(after.result_at, T, 12u));
 }
 
 void banner() {

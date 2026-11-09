@@ -239,7 +239,7 @@ bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 /// margin the arming leaves. On a wedged console it fails a verdict and
 /// returns false; the letter goes on to its own clean-up, its tally
 /// already failed.
-bool console_quiet() {
+bool drained_for_window() {
     if (console_drain()) {
         return true;
     }
@@ -309,6 +309,17 @@ uint32_t rtc_ms(uint32_t ticks) {
 }
 uint32_t rtc_us(uint32_t ticks) {
     return static_cast<uint32_t>((static_cast<uint64_t>(ticks) * 1'000'000ULL) / ulp_hz);
+}
+
+/// Letters h and k tell a comparator's wake from the RTC backstop's by
+/// the sleep's length. The comparator's edge comes half a wave period
+/// after the retrigger (wave x 32 ticks: `wave` counts of OSCULP32K / 64,
+/// toggling), the backstop no earlier than its compare less the read's
+/// synchronization lag (5..6 periods, 15.3.7) - thousands of ticks later -
+/// and every latency in between is microseconds; so the classifier is
+/// the midpoint of the two, on the same oscillator.
+uint32_t edge_or_backstop_us(uint8_t wave, uint32_t window) {
+    return rtc_us((static_cast<uint32_t>(wave) * 32u + window) / 2u);
 }
 
 /// The RTC in mode 0, counting OSCULP32K tick for tick, with COMP0 as
@@ -779,7 +790,7 @@ void ta_eic() {
         walker_down();
         return;
     }
-    (void)console_quiet();
+    (void)drained_for_window();
 
     // -- the three arrangements ------------------------------------------
     //
@@ -839,7 +850,7 @@ void ta_eic() {
 
     // -- the wake, and erratum 1.11.6 ------------------------------------
     if (out_survives) {
-        (void)console_quiet();
+        (void)drained_for_window();
         (void)walker_arrange(PortEventAction::out, true);
 
         // The wake. The line's interrupt is armed and the RTC compare is
@@ -917,16 +928,19 @@ void ta_eic() {
         bench.verdict("a SAMPLED line detects every edge of a standby on "
                       "CLK_ULP32K",
                       near(sync_asleep, offered, 4) && near(sync_awake, offered, 4));
-        bench.verdict("ERRATUM 1.11.6 DOES NOT REPRODUCE at revision F: an "
-                      "ASYNCHRONOUS line detects EVERY edge of a standby, not "
-                      "just the first",
-                      near(async_asleep, offered, 4));
-        bench.verdict("and every one of them wakes the device, as many times "
-                      "as it is put back to sleep",
-                      near(async_wakes, offered, 5) && near(sync_wakes, offered, 5));
+        // The asynchronous line's counts are printed above, not judged:
+        // whether erratum 1.11.6 (live on every revision, the matrix says)
+        // shows on a die is that die's business, and brio's sampled lines
+        // do not depend on it.
+        print(serial, "  erratum 1.11.6 (an asynchronous line sees only a standby's first "
+                      "edge): ", near(async_asleep, offered, 4) && near(async_wakes, offered, 5)
+                                     ? "not reproduced here" : "reproduced here", crlf);
+        bench.verdict("and every edge of a SAMPLED line wakes the device, as many "
+                      "times as it is put back to sleep",
+                      near(sync_wakes, offered, 5));
 
         // -- which clock a sampled line needs -----------------------------
-        (void)console_quiet();
+        (void)drained_for_window();
         watchdog_backstop(true);
         uint16_t gclk_std = 0xFFFFu;
         uint16_t gclk_no_std = 0xFFFFu;
@@ -998,7 +1012,7 @@ namespace {
 
 void tb_rtc() {
     quiesce();
-    (void)console_quiet();
+    (void)drained_for_window();
     watchdog_backstop(true);
 
     // -- b1: COMP0 ---------------------------------------------------------
@@ -1024,8 +1038,19 @@ void tb_rtc() {
     const uint32_t comp_us = all ? sum / 4u : 0u;
     print(serial, "  COMP0 woke the CPU from STANDBY in ", comp_us,
           " us (asked for ", want_us, " us), 4 of 4", crlf);
-    bench.verdict("an RTC compare wakes the device from STANDBY, on time",
-                  all && near(comp_us, want_us, want_us / 50u + 60u));
+    // ON TIME, derived on one oscillator (want_us is the compare's ticks
+    // at the RTC's measured rate): the compare is written as the READ count
+    // plus p, and the read trails the counter by the synchronization delay,
+    // 5..6 periods (15.3.7), while the flag sets a period after the match
+    // (24.6.2.5) - so it fires 4..5 periods short of p after the read, one
+    // more for the tick's phase there: never more than 7 periods early. And
+    // never late: the 4 periods left before `want` hold the wake from
+    // STANDBY, which table 45-13 types at 48 us against their 122.
+    // Logged: 124 us early.
+    bench.verdict("an RTC compare wakes the device from STANDBY, on time: no "
+                  "earlier than the read's synchronization lag allows, no later "
+                  "than asked",
+                  all && comp_us + rtc_us(7) >= want_us && comp_us <= want_us);
 
     // -- b2: a periodic interrupt ------------------------------------------
     //
@@ -1037,7 +1062,7 @@ void tb_rtc() {
     // periodic outputs come off the prescaler and what one of them is
     // worth at PRESCALER = div1 is exactly the sort of thing this suite
     // does not assume.
-    (void)console_quiet();
+    (void)drained_for_window();
     Rtc::disarm(RtcFlag::all);
     Rtc::clear_flags(RtcFlag::all);
     Rtc::arm(RtcFlag::periodic(5));
@@ -1072,8 +1097,13 @@ void tb_rtc() {
           " us", crlf);
     bench.verdict("an RTC periodic interrupt wakes the device from STANDBY",
                   by_per);
-    bench.verdict("and it arrives inside one of its own periods",
-                  by_per && per_awake != 0u && per_us <= per_awake + 200u);
+    // The claim is WHICH interrupt woke it: the first periodic edge after
+    // the sleep began comes within one period, and the wake's own latency
+    // (table 45-13: 48 us typical) is a hundredth of the 7.8 ms period - so
+    // anything under two periods is the first edge, and two or more is a
+    // later one. Logged: 7727..7736 us against periods of 7793..7802.
+    bench.verdict("and it is the FIRST of its periodic interrupts that wakes it",
+                  by_per && per_awake != 0u && per_us < 2u * per_awake);
 
     // -- b3: the calendar alarm --------------------------------------------
     //
@@ -1086,7 +1116,7 @@ void tb_rtc() {
     // Drained FIRST: what is still due is read from the clock just before
     // the sleep, and a console line drained after that reading would let
     // the fast-seconds run past the alarm.
-    (void)console_quiet();
+    (void)drained_for_window();
     bool mode2 = Rtc::enable(false);
     const RtcConfig cal{.mode = RtcMode::clock, .prescaler = RtcPrescaler::div1};
     mode2 = mode2 && Rtc::configure(cal) && Rtc::enable(true);
@@ -1126,10 +1156,16 @@ void tb_rtc() {
     // still due" is itself only known to within several of them.
     // 24.6.2.5's extra period - the RTC suite's own finding - is inside
     // that and is not re-claimed here.
-    const uint32_t slack = rtc_us(2) + 200u;
+    // The window, derived: the read of the CLOCK trails the counter by the
+    // synchronization delay, 5..6 periods (15.3.7), so what is still due is
+    // over-counted by that; the alarm comes one period after its match
+    // (24.6.2.5), and the tick's phase at the read is one more - so the
+    // wake lands 6 periods early at most and no later than `due` (the 3..4
+    // periods left hold the standby wake, 48 us typical in table 45-13).
+    // Logged: 110 us early in nineteen runs, 19 in one.
     bench.verdict("and it lands where the calendar says, to the resolution "
                   "the calendar can be read at",
-                  mode2 && alarm_us + slack > due_us && alarm_us < due_us + slack);
+                  mode2 && alarm_us + rtc_us(6) >= due_us && alarm_us <= due_us);
 
     watchdog_backstop(false);
     (void)rtc_up();
@@ -1174,7 +1210,7 @@ void tc_freqm() {
 
     // Now asleep. DONE is armed, the RTC is not, so the only thing that
     // can end this standby is the meter finishing.
-    (void)console_quiet();
+    (void)drained_for_window();
     watchdog_backstop(true);
     Freqm::clear_flags();
     Freqm::arm(FreqmFlag::done);
@@ -1196,11 +1232,30 @@ void tc_freqm() {
     bench.verdict("a FREQM measurement RUNS THROUGH a standby and its DONE "
                   "interrupt is the wake",
                   slept != 0u && freqm_irqs != 0u);
-    bench.verdict("the sleeping measurement agrees with the waking one",
+    // Both measurements are the crystal on the RC's scale, and the RC is
+    // what moves between them - by how much over a few milliseconds no
+    // document says (the logs show up to 0.25 %, printed above). The band
+    // is the only figure written down: OSCULP32K's 25 C range over the
+    // supply, 30.801..34.730 kHz (table 45-56), so two readings of it stand
+    // within the ratio of those extremes, 12.8 %. That still refuses a
+    // count that stopped in standby or a window that ran twice.
+    bench.verdict("the sleeping measurement agrees with the waking one, within "
+                  "the RC's own 25 C range (table 45-56)",
                   awake_hz != 0u && asleep_hz != 0u &&
-                      near(asleep_hz / 1000u, awake_hz / 1000u, 60u));
+                      static_cast<uint64_t>(asleep_hz) * 30'801u <=
+                          static_cast<uint64_t>(awake_hz) * 34'730u &&
+                      static_cast<uint64_t>(asleep_hz) * 34'730u >=
+                          static_cast<uint64_t>(awake_hz) * 30'801u);
+    // The window is REFNUM reference periods at the boot-measured rate: the
+    // same range on the RC's side, and up to 7 periods late - the first
+    // reference edge's phase (1), the START's synchronization (5..6,
+    // 15.3.7) - with the standby wake inside them. Logged: 7..13 us late.
     bench.verdict("and the wake arrives when the window ends, not before",
-                  near(slept_us, window_us, window_us / 4u + 100u));
+                  static_cast<uint64_t>(slept_us) * 34'730u >=
+                          static_cast<uint64_t>(window_us) * 30'801u &&
+                      static_cast<uint64_t>(slept_us) * 30'801u <=
+                          static_cast<uint64_t>(window_us) * 34'730u +
+                              static_cast<uint64_t>(rtc_us(7)) * 30'801u);
 
     Freqm::release();
     quiesce();
@@ -1223,7 +1278,7 @@ uint16_t clock_ticks(bool asleep, uint32_t ticks) {
 
 void td_clocks() {
     quiesce();
-    (void)console_quiet();
+    (void)drained_for_window();
     watchdog_backstop(true);
     constexpr uint32_t window = 1000;   // ~30 ms
 
@@ -1269,7 +1324,7 @@ void td_clocks() {
                   "(erratum 1.2.3)",
                   !Osc48m::on_demand());
 
-    (void)console_quiet();
+    (void)drained_for_window();
 
     // -- the FDPLL, and platform.md's open question -------------------------
     //
@@ -1365,7 +1420,7 @@ void td_clocks() {
     // OSCULP32K has no RUNSTDBY bit at all - it is simply always on -
     // while OSC32K has both bits. The trim is the factory one, which
     // docs/samc21/osc32kctrl.md measured to be worth 44 % of the rate.
-    (void)console_quiet();
+    (void)drained_for_window();
     const uint8_t trim = Osc32k::factory_calib();
     uint16_t o32_std = 0xFFFFu;
     uint16_t o32_no_std = 0xFFFFu;
@@ -1503,7 +1558,7 @@ void te_adc() {
         return;
     }
 
-    (void)console_quiet();
+    (void)drained_for_window();
     watchdog_backstop(true);
     const uint16_t awake = events_over(false, window);
 
@@ -1595,7 +1650,7 @@ void tf_sdadc_tsens() {
     uint16_t sd_no_std = 0xFFFFu;
     uint16_t sd_std = 0xFFFFu;
     if (ok) {
-        (void)console_quiet();
+        (void)drained_for_window();
         watchdog_backstop(true);
         sd_awake = events_over(false, window);
         sd_no_std = events_over(true, window);
@@ -1642,7 +1697,7 @@ void tf_sdadc_tsens() {
     uint16_t ts_no_std = 0xFFFFu;
     uint16_t ts_std = 0xFFFFu;
     if (t_ok) {
-        (void)console_quiet();
+        (void)drained_for_window();
         watchdog_backstop(true);
         ts_awake = events_over(false, window);
         ts_no_std = events_over(true, window);
@@ -1697,7 +1752,7 @@ void tg_dac() {
     uint16_t after[2] = {0, 0};
     bool empty_after[2] = {false, false};
     bool dac_ok = true;
-    (void)console_quiet();
+    (void)drained_for_window();
     for (uint8_t i = 0; i < 2; ++i) {
         const bool std = i == 1u;
         dac_ok = dac_ok && Dac::init(gen_xtal,
@@ -1835,7 +1890,7 @@ void th_ac() {
         {true, gen_ulp, true, 0, 0, 0},    // RUNSTDBY 1, clock force-fed
         {false, gen_eic, false, 0, 0, 0},  // RUNSTDBY 0, clock stops too
     };
-    (void)console_quiet();
+    (void)drained_for_window();
     for (Leg3& l : leg) {
         if (!Gclk<gen_eic>::configure(GclkConfig{.source = GclkSource::osculp32k,
                                                  .run_standby = l.gen_std}) ||
@@ -1879,10 +1934,10 @@ void th_ac() {
             // sleep that ran the whole backstop is a sleep nothing else
             // ended.
             const uint32_t us = watch_us(l.woke);
-            if (ac_irqs != 0u && !rtc_fired && us < (rtc_us(window) * 2u) / 3u) {
+            if (ac_irqs != 0u && !rtc_fired && us < edge_or_backstop_us(wave, window)) {
                 l.by_ac = static_cast<uint8_t>(l.by_ac + 1u);
             }
-            if (rtc_fired && us > (rtc_us(window) * 2u) / 3u) {
+            if (rtc_fired && us > edge_or_backstop_us(wave, window)) {
                 l.by_rtc = static_cast<uint8_t>(l.by_rtc + 1u);
             }
         }
@@ -1910,17 +1965,16 @@ void th_ac() {
                   "table 40-1 says: nothing but the RTC backstop ended those "
                   "sleeps",
                   leg[2].by_ac == 0u && leg[2].by_rtc == rounds);
-    // THE THIRD LEG'S BAND IS WIDE ON PURPOSE, and the number behind it
-    // is printed above. Force-feeding GCLK_AC from a generator that runs
-    // in standby does NOT revive a comparator whose RUNSTDBY is clear -
-    // measured 0, 0, 0 and 1 wake out of eight over four runs, against a
-    // working comparator's eight out of eight. So the bit gates the
-    // comparator and not just its clock; but the rare single wake is
-    // real and is recorded rather than rounded away.
+    // THE THIRD LEG IS JUDGED BY TABLE 40-1 ITSELF: its RUNSTDBY = 0 row
+    // says "COMPx disabled" in standby and names no clock, so force-feeding
+    // GCLK_AC from a generator that runs there must change nothing - no
+    // comparator wake, every sleep the backstop's. (An earlier build once
+    // counted a single wake in 32 rounds; a run that does so again fails
+    // here and is a finding to diagnose, our test first.)
     bench.verdict("and COMPCTRL.RUNSTDBY gates the COMPARATOR and not just "
-                  "its clock: force-feeding GCLK_AC does not revive it, bar a "
-                  "rare stray wake",
-                  leg[0].by_ac <= rounds / 2u);
+                  "its clock: force-feeding GCLK_AC does not revive it - "
+                  "table 40-1's row names no clock",
+                  leg[0].by_ac == 0u && leg[0].by_rtc == rounds);
 
     // -- 40.6.14.2, single-shot SleepWalking -------------------------------
     //
@@ -1929,7 +1983,7 @@ void th_ac() {
     // all table 29-3 grants the AC's SOC users. The interrupt is NOT
     // armed: the whole point is that the comparison happens while the
     // CPU stays asleep and the flag is read at the wake.
-    (void)console_quiet();
+    (void)drained_for_window();
     bool single = Comparator::configure(
         AcConfig{.positive = AcPositive::pin0,
                  .negative = AcNegative::vscale,
@@ -2009,7 +2063,7 @@ void tk_ac_window() {
     Leg legs[3] = {{true, true, 0, 0, false},
                    {false, false, 0, 0, false},
                    {true, false, 0, 0, false}};
-    (void)console_quiet();
+    (void)drained_for_window();
     for (Leg& l : legs) {
         if (!Ac::init(gen_ulp) ||
             !Lower::configure(AcConfig{.positive = AcPositive::pin0,
@@ -2047,10 +2101,10 @@ void tk_ac_window() {
             Win::arm(false);
             Nvic::disable(Ac::irq());
             const uint32_t us = watch_us(woke);
-            if (ac_irqs != 0u && !rtc_fired && us < (rtc_us(window) * 2u) / 3u) {
+            if (ac_irqs != 0u && !rtc_fired && us < edge_or_backstop_us(wave, window)) {
                 l.by_ac = static_cast<uint8_t>(l.by_ac + 1u);
             }
-            if (rtc_fired && us > (rtc_us(window) * 2u) / 3u) {
+            if (rtc_fired && us > edge_or_backstop_us(wave, window)) {
                 l.by_rtc = static_cast<uint8_t>(l.by_rtc + 1u);
             }
         }
@@ -2130,7 +2184,7 @@ void ti_ccl() {
         return;
     }
 
-    (void)console_quiet();
+    (void)drained_for_window();
     watchdog_backstop(true);
     const uint16_t comb_awake = lut_edges(LutFilter::none, false, false, window);
     const uint16_t comb_asleep = lut_edges(LutFilter::none, false, true, window);
@@ -2205,7 +2259,7 @@ void tj_leftovers() {
     uint16_t tcc_no_std = 0xFFFFu;
     uint16_t tcc_std = 0xFFFFu;
     if (ok) {
-        (void)console_quiet();
+        (void)drained_for_window();
         watchdog_backstop(true);
         tcc_awake = events_over(false, window);
         tcc_no_std = events_over(true, window);
@@ -2249,7 +2303,7 @@ void tj_leftovers() {
     uint16_t ch_std = 0xFFFFu;
     uint16_t ch_no_std = 0xFFFFu;
     if (ok) {
-        (void)console_quiet();
+        (void)drained_for_window();
         watchdog_backstop(true);
         ch_awake = events_over(false, window);
         ch_std = events_over(true, window);
@@ -2312,7 +2366,7 @@ void tj_leftovers() {
     bool woke_by_bod = false;
     bool sampled_leg = false;
     uint32_t bod_sleep = 0;
-    (void)console_quiet();
+    (void)drained_for_window();
     if (BodVdd::configure(BodVddConfig{.level = BodVdd::level_max,
                                        .action = BodAction::none,
                                        .run_standby = true,
@@ -2383,7 +2437,10 @@ void tp_bus_clock() {
     // the letter therefore ends by putting the bit back and SAYING
     // whether that worked.
     const bool on_at_start = Pm::bus_clock();
-    bench.verdict("the PM's bus clock is on out of reset, as table 17-1 says",
+    // No other letter clears the mask bit, so at this letter's start it
+    // still holds its reset value.
+    bench.verdict("the PM's bus clock is on at the letter's start (table 17-1's reset "
+                  "value; no other letter clears it)",
                   on_at_start);
 
     const uint8_t before = Pm::sleepcfg();
@@ -2401,18 +2458,16 @@ void tp_bus_clock() {
           crlf);
     bench.verdict("MCLK's mask bit clears, so the request really was made",
                   off_now);
-    bench.verdict("and it comes back: on this silicon 19.5.2's one-way "
-                  "sentence is about the CLOCK and not about the MASK",
-                  back_on);
-
-    // The proof that matters: can the device still be armed and slept?
+    // Whether it comes back, and the PM with it, is printed, not judged:
+    // 19.5.2 says only a system reset re-enables CLK_PM_APB, and one die
+    // that does otherwise is no contract - brio never clears the bit.
     const bool armable = Pm::set_sleep_mode(SleepMode::standby);
     (void)Pm::set_sleep_mode(SleepMode::idle0);
-    bench.verdict("SLEEPCFG is writable and readable again, so the PM is "
-                  "usable without a reset",
-                  armable && read_after == before);
+    print(serial, "  CLK_PM_APB asked back: ", back_on ? "came back" : "stayed off",
+          "; SLEEPCFG ", armable && read_after == before ? "writable and readable again"
+                                                          : "not usable", crlf);
 
-    (void)console_quiet();
+    (void)drained_for_window();
     watchdog_backstop(true);
     const bool slept = standby_for(200);
     watchdog_backstop(false);

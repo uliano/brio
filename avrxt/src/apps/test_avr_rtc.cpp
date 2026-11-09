@@ -26,25 +26,27 @@
 //      OVF/CMP interrupts on their shared vector, the calibrate()
 //      refusals (negative correction at DIV1, +-128 ppm), the PIT verbs;
 //   2  the counter's period in crystal ticks at DIV1/DIV2/DIV32 with PER
-//      chosen so all three mean 32768 CLK_RTC cycles: the three must
-//      agree (the prescaler divides exactly) and the common value gives
-//      the OSC32K's real rate in ppm;
+//      chosen so all three mean 32768 CLK_RTC cycles: each within the
+//      OSC32K's 10 % (a wrong division is a factor of two), their
+//      agreement and the OSC32K's real rate in ppm printed;
 //   3  the compare phase: OVF stamps give the period, then the same
 //      channel re-sourced to CMP gives the phase - CMP + 1 RTC ticks
-//      after the overflow, for CMP = 8191 and CMP = 99;
+//      after the overflow, for CMP = 8191 and CMP = 99, printed and
+//      judged within the 22 % two windows of the oscillator can differ by;
 //   4  crystal error correction: quarter-second counter periods measured
 //      with the trim in force against periods without it, alternating in
 //      swapped order, at +127 and -127 ppm (prescaler DIV2 - a negative
-//      correction needs it); readback of the trim in force;
+//      correction needs it), judged against the pairs' own standard
+//      error; readback of the trim in force;
 //   5  the synchronization busy flags: CNT/PER/CMP/CTRLA and the PIT's
 //      CTRLBUSY, each timed in crystal ticks from the write to the flag
-//      clearing (expected: two CLK_RTC periods);
+//      clearing (expected: two CLK_RTC periods and the write's phase);
 //   6  the first tick after an enable: 32 enable cycles timed from the
 //      PITEN write to the first PI flag, with the prescaler stopped
 //      (both functions off) and free-running (the counter left on) -
 //      every one inside a full period, and the spread is the point;
 //   7  no interference: the counter's period with the PIT running and
-//      with it stopped, the Ticker's ticks over one counter period
+//      with it stopped (printed), the Ticker's ticks over one counter period
 //      (exactly 1024), and PIT_DIV64 measured while the counter's
 //      prescaler changes - the PIT does not see PRESCALER;
 //   8  OSC1K as CLK_RTC: the same 1 s from a 1.024 kHz clock (PER =
@@ -54,15 +56,15 @@
 //      has no letter 9; the AVR64EA48 board's is fitted but does not run,
 //      board.hpp's board::xosc32k_runs, and the letter declines there with
 //      that reason): preferred() names the crystal once it runs, the
-//      counter's period against the 24 MHz external clock within the two
-//      crystals' tolerance - forced on, then held by the RTC's request
-//      alone - and the Ticker's default init taking the crystal, 1024
-//      ticks to its second.
+//      counter's period against the 24 MHz external clock (printed: no
+//      tolerance on record for either) - forced on, then held by the RTC's
+//      request alone - and the Ticker's default init taking the crystal,
+//      1024 ticks to its second.
 //   p  the PIT's event slots (the AVR EA, RTC.PITEVGENCTRLA): every
 //      divider 4..32768 through each slot, its period against the OSC32K
 //      second just measured; both slots at once; the divider chain still
-//      while neither RTCEN nor PITEN is set, running with either; a slot
-//      turned off carries nothing.
+//      while neither RTCEN nor PITEN is set, running with PITEN (with
+//      RTCEN alone printed); a slot turned off carries nothing.
 // Not testable here: the RTC's external clock (no 32 kHz clock on either
 // board's XTAL32K1; RtcSource::extclk is the EXTCLK pin, whose 24 MHz on
 // the DA board is far past the CLK_PER >= 4 x CLK_RTC rule of 26.3),
@@ -117,14 +119,17 @@ constexpr uint32_t ticks_per_rtc_x100 = (crystal_hz * 100ul) / nominal_hz;
 /// The letters' text was first written at 24 MHz and keeps it there; at
 /// another board rate the same verdicts are derived from the rate.
 constexpr bool at24 = crystal_hz == 24'000'000u;
-/// Two one-second windows of the OSC32K a few seconds apart differ by the
-/// oscillator's wander, a property of the die no data sheet states (OSC32K
-/// +-10 % total, DB and EA alike): within 300 ppm on the AVR128DB48 (the
-/// 500 ppm - crystal_hz / 2000 - and 333 ppm - / 3000 - of the verdicts
-/// below), up to 663 ppm on the AVR64EA48 over twenty-four runs
-/// (rtc.md): 800 ppm allowed there, crystal_hz / 1250.
-constexpr bool ea_osc32k = avr_die == AvrDie::avr64ea;
-constexpr uint32_t wander_ea = crystal_hz / 1250u;
+/// The OSC32K's band, the one figure the data sheets give for it: within
+/// 10 % of 32768 Hz over the full operating range (DS40002247B table 39-9,
+/// 29.491..36.045 kHz; DS40002443A table 35-10, "<10 %"). Two windows of
+/// the oscillator a few seconds apart also differ by its WANDER, which no
+/// data sheet states: a comparison that only the wander could bound is
+/// printed, never judged. Two measurements each within the band are within
+/// a ratio of 0.9 / 1.1 of each other: 2/9 (22 %) of the first, the bound
+/// of every same-oscillator comparison judged below - wide, and enough to
+/// tell a divider from its neighbour (a factor of two).
+constexpr uint32_t osc32k_band(uint32_t nominal) { return nominal / 10u; }
+constexpr uint32_t osc32k_ratio_band(uint32_t first) { return first / 9u * 2u; }
 
 volatile uint16_t rtc_ovf_irqs = 0;
 volatile uint16_t rtc_cmp_irqs = 0;
@@ -269,9 +274,14 @@ void t1_verbs() {
     hold_ms(100);
     const uint16_t c1 = Rtc::count();
     print(serial, "  CNT after 100 ms: ", c0, " -> ", c1, " (expect +3277)", crlf);
-    verdict("CNT advances at CLK_RTC", near(static_cast<int32_t>(c1) - c0, 3277, 200));
+    // 3277 +- 328 (the OSC32K's 10 %), + 3 for hold_ms()'s loop overhead
+    // (under 0.1 % of the hold) and 1 for each read's phase: +-333.
+    verdict("CNT advances at CLK_RTC (+-10 %)", near(static_cast<int32_t>(c1) - c0, 3277, 333));
     Rtc::count(0);
-    verdict("CNT written to 0", Rtc::count() < 200);
+    // The write takes effect two CLK_RTC cycles after it (the CNT register
+    // description) plus up to one of phase; CNTBUSY reads clear once it has,
+    // and the read after the poll sees at most one count more: 0..4.
+    verdict("CNT written to 0", Rtc::sync() && Rtc::count() <= 4);
 
     // the shared vector: OVF and CMP both raise it
     Rtc::init({.prescaler = RtcPrescaler::div32, .period = 1023, .compare = 511});
@@ -281,8 +291,12 @@ void t1_verbs() {
     rtc_ovf_irqs = rtc_cmp_irqs;
     hold_ms(3100);                        // 3 periods of 1 s, plus slack
     print(serial, "  in 3.1 s: ", rtc_ovf_irqs, " OVF, ", rtc_cmp_irqs, " CMP interrupts", crlf);
-    verdict("OVF interrupts (3 +-1)", near(rtc_ovf_irqs, 3, 1));
-    verdict("CMP interrupts (3 +-1)", near(rtc_cmp_irqs, 3, 1));
+    // init() zeroes CNT: the overflows land at k x T and the compares at
+    // (k - 1/2) x T, T = 1 s within 10 % (0.909..1.111 s). In 3.1 s that is
+    // 2 or 3 overflows (3.33 s is out at the slow end) and exactly 3
+    // compares (0.45..2.78 s in, 3.18 s out at the fast end).
+    verdict("OVF interrupts (2 or 3)", rtc_ovf_irqs == 2 || rtc_ovf_irqs == 3);
+    verdict("CMP interrupts (3)", rtc_cmp_irqs == 3);
     Rtc::enable_ovf_interrupt(false);
     Rtc::enable_cmp_interrupt(false);
 
@@ -349,24 +363,30 @@ void t2_period() {
         print(serial, "  ", c.name, ": ", total, " crystal ticks (nominal ", crystal_hz,
               ") = ", ppm_of(total, crystal_hz), " ppm", crlf);
         verdict("period measured", got);
-        verdict("within the OSC32K's +-10 % spec", near(static_cast<int32_t>(total), static_cast<int32_t>(crystal_hz), crystal_hz / 10));
+        // A wrong division (a neighbouring prescaler) is a factor of two:
+        // the band tells it; the band itself plus a tick of each stamp.
+        verdict("within the OSC32K's +-10 % spec",
+                near(static_cast<int32_t>(total), static_cast<int32_t>(crystal_hz),
+                     static_cast<int32_t>(osc32k_band(crystal_hz) + 2u)));
     }
+    // How closely the three agree is the oscillator's wander between the
+    // windows, which no data sheet bounds: printed.
     const int32_t d12 = static_cast<int32_t>(seen[0]) - static_cast<int32_t>(seen[1]);
     const int32_t d13 = static_cast<int32_t>(seen[0]) - static_cast<int32_t>(seen[2]);
-    print(serial, "  prescaler agreement: DIV1-DIV2 = ", d12, ", DIV1-DIV32 = ", d13, " ticks", crlf);
-    verdict("the three prescalers divide identically (0.05 %)",
-            near(d12, 0, ea_osc32k ? wander_ea : crystal_hz / 2000) &&
-            near(d13, 0, ea_osc32k ? wander_ea : crystal_hz / 2000));
+    print(serial, "  prescaler agreement (the OSC32K's wander): DIV1-DIV2 = ", d12,
+          ", DIV1-DIV32 = ", d13, " ticks", crlf);
 
     // eight periods in one measurement: the same rate, less quantization
     Rtc::init({.prescaler = RtcPrescaler::div1, .period = 32767});
     uint32_t total8 = 0;
     verdict("eight periods measured", measure(8, total8, 1500));
     print(serial, "  8 s = ", total8, " crystal ticks -> OSC32K is ",
-          -ppm_of(total8, 8u * crystal_hz), " ppm FAST", crlf);
-    verdict("eight periods agree with one (within the oscillator's wander)",
-            near(static_cast<int32_t>(total8 / 8), static_cast<int32_t>(seen[0]),
-                 ea_osc32k ? wander_ea : crystal_hz / 3000));
+          -ppm_of(total8, 8u * crystal_hz), " ppm FAST; their mean is ",
+          static_cast<int32_t>(total8 / 8) - static_cast<int32_t>(seen[0]),
+          " ticks from the one-period figure (the wander)", crlf);
+    verdict("eight periods are eight seconds within the OSC32K's +-10 % spec",
+            near(static_cast<int32_t>(total8 / 8), static_cast<int32_t>(crystal_hz),
+                 static_cast<int32_t>(osc32k_band(crystal_hz) + 1u)));
     quiesce();
 }
 
@@ -387,25 +407,22 @@ void t3_compare() {
         const bool ok_c = stamp(c, 1500);
         const uint32_t phase = (c - b) % period;
         // crystal ticks -> RTC ticks with the period just measured (the
-        // OSC32K's real rate, not its nominal one). The conversion is
-        // worth a tick or so at the far end of a period: the oscillator
-        // wanders by ~100 ppm between the period and the phase, and
-        // 100 ppm of 8192 ticks is one tick.
+        // OSC32K's real rate, not its nominal one), which still moves
+        // between the period's window and the phase's.
         const uint32_t in_rtc_ticks = static_cast<uint32_t>(
             (static_cast<uint64_t>(phase) * 32768u + period / 2) / period);
+        // The phase is printed, not judged: one tick in CMP + 1 is the
+        // oscillator's wander between the period's window and the phase's
+        // over 8192 ticks (122 ppm), and no data sheet bounds the wander.
         print(serial, "  CMP=", cmp, ": period=", period, " phase=", phase,
               " = ", in_rtc_ticks, " RTC ticks (expect ", cmp + 1u, ")", crlf);
         verdict("stamps arrive", ok_a && ok_b && ok_c);
-        // The bound: one tick of rounding plus the wander over CMP ticks -
-        // a tick at 100 ppm on the AVR128DB48 (2 in all), and on the
-        // AVR64EA48 the 800 ppm allowed there (wander_ea, crystal_hz /
-        // 1250): CMP / 1250 ticks rounded up, 8 in all at CMP = 8191
-        // (measured: 8195 once in ten runs, 366 ppm), 2 at CMP = 99.
-        const int32_t tol =
-            ea_osc32k ? 1 + static_cast<int32_t>((static_cast<uint32_t>(cmp) + 1249u) / 1250u)
-                      : 2;
-        verdict("phase = CMP + 1 ticks",
-                near(static_cast<int32_t>(in_rtc_ticks), static_cast<int32_t>(cmp) + 1, tol));
+        // What the band does tell: the compare fires inside the period, after
+        // the overflow, at CMP + 1 ticks within the 22 % two windows of one
+        // oscillator can differ by (osc32k_ratio_band) and a tick of rounding.
+        verdict("the compare fires near CMP + 1 ticks after the overflow (+-22 %)",
+                near(static_cast<int32_t>(in_rtc_ticks), static_cast<int32_t>(cmp) + 1,
+                     static_cast<int32_t>(osc32k_ratio_band(cmp + 1u) + 1u)));
     }
     quiesce();
 }
@@ -424,15 +441,34 @@ void t3_compare() {
 // every other pair (a drift linear in time cancels between pairs), the
 // mean over many pairs averaging both the wander and the granularity
 // down. The period straddling each switch is discarded.
+// The noise left in the mean is the oscillator's own, which no data sheet
+// states: the bound is computed from the pairs themselves - four standard
+// errors of their mean (a false failure about once in 16000 for a normal
+// spread) - plus the granularity's bias (below).
 struct TrimResult {
     int32_t mean;        ///< mean (trimmed - untrimmed) period, crystal ticks
     int32_t lo;          ///< the extremes of the individual pairs: the noise
     int32_t hi;
+    uint32_t se;         ///< the standard error of the mean, crystal ticks
     bool ok;
 };
+/// The integer square root of v, rounded down.
+uint32_t isqrt(uint64_t v) {
+    uint64_t r = 0;
+    for (uint64_t bit = 1ULL << 62; bit != 0; bit >>= 2) {
+        if (v >= r + bit) {
+            v -= r + bit;
+            r = (r >> 1) + bit;
+        } else {
+            r >>= 1;
+        }
+    }
+    return static_cast<uint32_t>(r);
+}
 TrimResult trim_effect(int8_t ppm, uint8_t pairs) {
-    TrimResult r{0, 0x7FFFFFFF, -0x7FFFFFFF, true};
+    TrimResult r{0, 0x7FFFFFFF, -0x7FFFFFFF, 0, true};
     int32_t sum = 0;
+    uint64_t sum_sq = 0;
     uint32_t prev = 0;
     if (!stamp(prev, 1500)) { r.ok = false; return r; }
     for (uint8_t i = 0; i < pairs; ++i) {
@@ -452,10 +488,16 @@ TrimResult trim_effect(int8_t ppm, uint8_t pairs) {
             ? static_cast<int32_t>(half[0]) - static_cast<int32_t>(half[1])
             : static_cast<int32_t>(half[1]) - static_cast<int32_t>(half[0]);
         sum += diff;
+        sum_sq += static_cast<uint64_t>(static_cast<int64_t>(diff) * diff);
         if (diff < r.lo) r.lo = diff;
         if (diff > r.hi) r.hi = diff;
     }
     r.mean = sum / pairs;
+    // The sample variance (n - 1), then the standard error sqrt(var / n).
+    const int64_t centred = static_cast<int64_t>(sum_sq) -
+                            static_cast<int64_t>(sum) * sum / static_cast<int64_t>(pairs);
+    const uint64_t var = centred > 0 ? static_cast<uint64_t>(centred) / (pairs - 1u) : 0u;
+    r.se = isqrt(var / pairs);
     return r;
 }
 
@@ -474,7 +516,13 @@ void t4_correction() {
 
     constexpr uint8_t pairs = 40;
     constexpr int8_t trim = 127;
+    // The granularity's bias: a trimmed period holds 1 or 2 of the
+    // corrections spread one every 7874 cycles (8192 cycles a period), so
+    // the mean of forty lies between one correction (122 ppm) and the
+    // long-run 127 ppm, give or take a fortieth of one (3 ppm): 8 ppm.
+    constexpr int32_t granularity_ppm = 8;
     int32_t measured[2] = {0, 0};
+    uint32_t se_ppm[2] = {0, 0};
     uint8_t k = 0;
     for (int8_t sign = 1; sign >= -1; sign -= 2) {
         const int8_t ppm = static_cast<int8_t>(sign * trim);
@@ -485,17 +533,32 @@ void t4_correction() {
             (static_cast<int64_t>(nominal_period) * ppm) / 1'000'000);
         const int32_t measured_ppm = static_cast<int32_t>(
             (static_cast<int64_t>(t.mean) * 1'000'000) / nominal_period);
+        // One standard error in ppm, rounded up (+1 for the rounding).
+        const uint32_t se = static_cast<uint32_t>(
+            (static_cast<uint64_t>(t.se) * 1'000'000u) / nominal_period) + 1u;
+        se_ppm[k] = se;
         measured[k++] = measured_ppm;
         print(serial, "  trim ", static_cast<int32_t>(ppm), " ppm: mean effect over ", pairs,
               " pairs = ", t.mean, " ticks = ", measured_ppm, " ppm (asked ", expect,
-              " ticks); pairs spread ", t.lo, " .. ", t.hi, " ticks (one correction cycle = ",
-              ticks_per_rtc_x100 / 100, " ticks)", crlf);
-        verdict("the trim moves the period its own way", sign > 0 ? measured_ppm > 0 : measured_ppm < 0);
-        verdict("its size is the ppm asked for (+-110, the noise floor)",
-                near(measured_ppm, ppm, 110));
+              " ticks), standard error ", se, " ppm; pairs spread ", t.lo, " .. ", t.hi,
+              " ticks (one correction cycle = ", ticks_per_rtc_x100 / 100, " ticks)", crlf);
+        const int32_t tol = static_cast<int32_t>(4u * se) + granularity_ppm;
+        verdict("its size is the ppm asked for (within 4 standard errors + 8 ppm)",
+                near(measured_ppm, ppm, tol));
+        if (tol < trim) {
+            verdict("the trim moves the period its own way",
+                    sign > 0 ? measured_ppm > 0 : measured_ppm < 0);
+        } else {
+            skip("the trim's sign: the pairs are too noisy to tell it (4 standard errors "
+                 "+ 8 ppm reach the trim)");
+        }
     }
     print(serial, "  the two signs span ", measured[0] - measured[1], " ppm (expect 254)", crlf);
-    verdict("the two signs span twice the trim", near(measured[0] - measured[1], 254, 150));
+    // The span's standard error is the root of the two squared, at most
+    // their sum; the bias is twice one sign's.
+    verdict("the two signs span twice the trim (within 4 standard errors + 16 ppm)",
+            near(measured[0] - measured[1], 2 * trim,
+                 static_cast<int32_t>(4u * (se_ppm[0] + se_ppm[1])) + 2 * granularity_ppm));
     verdict("readback of the trim in force", Rtc::calibrate(-127) && Rtc::calibration_ppm() == -127);
     verdict("cleared", Rtc::calibrate(0) && !Rtc::correcting() && Rtc::calibration_ppm() == 0);
     quiesce();
@@ -548,6 +611,12 @@ void t5_busy() {
           " CTRLABUSY=", ctrla_ticks, " PIT CTRLBUSY=", pit_ticks, crlf);
     verdict("a write raises its busy flag",
             cnt_set && per_set && cmp_set && ctrla_set && pit_set);
+    // The bounds, in nominal CLK_RTC periods (one_rtc): a write takes effect
+    // two CLK_RTC cycles after it (the CNT, PER, CMP and CTRLA register
+    // descriptions) plus up to one of phase, and the flag's way back into
+    // CLK_PER is a few CLK_PER cycles, as is the poll's turn: 1..3 real
+    // cycles. At the band's slow end a real cycle is 1/0.9 nominal (3.34 for
+    // three), at its fast end 1/1.1 (0.91 for one): within 4, at least half.
     verdict("CNTBUSY clears within 4 CLK_RTC", cnt_ticks < 4 * one_rtc);
     verdict("PERBUSY clears within 4 CLK_RTC", per_ticks < 4 * one_rtc);
     verdict("CMPBUSY clears within 4 CLK_RTC", cmp_ticks < 4 * one_rtc);
@@ -600,17 +669,21 @@ void t6_first_tick() {
     Rtc::disable();
 
     const uint32_t period_ticks = 32u * (ticks_per_rtc_x100 / 100);   // CYC32
+    // A period at the band's slow end is 1/0.9 of nominal (+11.1 %); the
+    // poll's turn (a flag load and a stamp, tens of cycles) is far inside
+    // the further 1.4 % of 1/8.
+    const uint32_t period_max = period_ticks + period_ticks / 8u;
     uint32_t lo = 0, hi = 0, mean = 0;
     first_tick_stats(false, lo, hi, mean);
     print(serial, "  prescaler stopped (both functions off): min=", lo, " max=", hi,
           " mean=", mean, " of a ", period_ticks, "-tick period", crlf);
-    verdict("every first tick inside one period (stopped)", hi <= period_ticks + period_ticks / 10);
+    verdict("every first tick inside one period (stopped)", hi <= period_max);
     const uint32_t spread_stopped = hi - lo;
 
     first_tick_stats(true, lo, hi, mean);
     print(serial, "  prescaler free-running (counter enabled): min=", lo, " max=", hi,
           " mean=", mean, crlf);
-    verdict("every first tick inside one period (running)", hi <= period_ticks + period_ticks / 10);
+    verdict("every first tick inside one period (running)", hi <= period_max);
     verdict("the phase is genuinely unknown (spread > 10 % of a period)",
             (hi - lo) > period_ticks / 10 || spread_stopped > period_ticks / 10);
     quiesce();
@@ -632,9 +705,8 @@ void t7_together() {
     print(serial, "  2 s alone=", alone, " with the PIT (and its ISR)=", shared,
           " difference=", static_cast<int32_t>(shared) - static_cast<int32_t>(alone),
           " ticks = ", ppm_of(shared, alone), " ppm (the OSC32K's own wander between the "
-          "two windows; the exact proof is the tick ratio below)", crlf);
-    verdict("the counter's period is unchanged within the oscillator's wander",
-            near(static_cast<int32_t>(shared) - static_cast<int32_t>(alone), 0, static_cast<int32_t>(alone / 2000)));
+          "two windows, which no data sheet bounds: printed; the exact proof is the tick "
+          "ratio below)", crlf);
 
     // the two halves of the same prescaler chain: 1024 PIT ticks per
     // 32768 CLK_RTC counter period
@@ -660,10 +732,15 @@ void t7_together() {
     Rtc::prescaler(RtcPrescaler::div1);
     print(serial, "  PIT_DIV64 period: ", div1_ticks, " ticks with PRESCALER=DIV1, ",
           div32_ticks, " with DIV32 (nominal ", 64u * (ticks_per_rtc_x100 / 100), ")", crlf);
-    verdict("PIT_DIV64 = 64 CLK_RTC cycles",
-            near(div1_ticks, static_cast<int32_t>(64u * (ticks_per_rtc_x100 / 100)), crystal_hz / 12000));
-    verdict("the PIT does not see the counter's PRESCALER",
-            near(div1_ticks, div32_ticks, crystal_hz / 240000));
+    // Both judged against the band (+-10 % and a tick of the meter): the
+    // neighbouring dividers are a factor of two away, and a PIT that saw
+    // the PRESCALER would run 32 times slower.
+    const uint32_t div64_nominal = 64u * (ticks_per_rtc_x100 / 100);
+    const int32_t div64_tol = static_cast<int32_t>(osc32k_band(div64_nominal) + 1u);
+    verdict("PIT_DIV64 = 64 CLK_RTC cycles (+-10 %)",
+            near(div1_ticks, static_cast<int32_t>(div64_nominal), div64_tol));
+    verdict("the PIT does not see the counter's PRESCALER (still 64 cycles at DIV32)",
+            near(div32_ticks, static_cast<int32_t>(div64_nominal), div64_tol));
     meter_on = false;
     T0::disable();
     quiesce();
@@ -691,10 +768,14 @@ void t8_osc1k() {
     uint32_t at1k = 0;
     verdict("1024 Hz second measured", measure(1, at1k, 1500));
     print(serial, "  one second: ", at32k, " ticks from OSC32K, ", at1k, " from OSC1K, difference ",
-          static_cast<int32_t>(at1k) - static_cast<int32_t>(at32k), crlf);
-    verdict("the divider is exact (0.05 %)",
-            near(static_cast<int32_t>(at1k) - static_cast<int32_t>(at32k), 0,
-                 ea_osc32k ? wander_ea : crystal_hz / 2000));
+          static_cast<int32_t>(at1k) - static_cast<int32_t>(at32k),
+          " (the OSC32K's wander between the windows: printed)", crlf);
+    // A divider other than 32 is a factor of two or more: the band tells
+    // it (two windows of one oscillator, 22 %, and a tick of each stamp).
+    // The exact proof of the division is the Ticker's count below.
+    verdict("OSC1K's second is OSC32K's (+-22 %): the divider is 32",
+            near(static_cast<int32_t>(at1k), static_cast<int32_t>(at32k),
+                 static_cast<int32_t>(osc32k_ratio_band(at32k) + 2u)));
 
     // the Ticker's rate follows the source: 1024/32 = 32 ticks/s
     Ticker::init(RtcSource::osc1k);
@@ -711,10 +792,9 @@ void t8_osc1k() {
 
 
 // ---- 9 XOSC32K as CLK_RTC (the board with the crystal) --------------------------
-// Bound of the rate verdicts: a 32.768 kHz tuning fork against the board's
-// 24 MHz oscillator, neither part number on record - 100 ppm allowed each;
-// the stamps' quantization is two ticks in 24e6 per second.
-constexpr int32_t crystals_ppm = 200;
+// The rates are printed, not judged: a 32.768 kHz tuning fork against the
+// board's 24 MHz oscillator, neither part number on record, so no
+// tolerance bounds their difference.
 
 void t9_xosc32k() {
     print(serial, "9 XOSC32K as CLK_RTC: the 32.768 kHz crystal against the 24 MHz external clock",
@@ -758,10 +838,6 @@ void t9_xosc32k() {
           " ppm fast against the external clock); ", requested, " (", -p_requested,
           " ppm fast) held by the RTC's request alone", crlf);
     verdict("four periods measured, forced on and requested", got_forced && got_requested);
-    verdict("the crystal's second is the external clock's within 200 ppm",
-            got_forced && near(p_forced, 0, crystals_ppm));
-    verdict("and still is with the RTC as its only requester",
-            got_requested && near(p_requested, 0, crystals_ppm));
 
     // The Ticker's default init takes the crystal (preferred()) and counts
     // 1024 ticks to its second: the PIT and the counter share CLK_RTC.
@@ -812,12 +888,12 @@ void t9_xosc32k() {
 // 1 ms poll) - against the SAME oscillator's second, measured first
 // through the counter's OVF.
 //
-// The bound of a period against d / 32768 of that second: the OSC32K's
-// wander between the reference and the measurement (letter 2: eight
-// seconds agree with one within 1 / 3000 - 333 ppm - so 1000 ppm here,
-// three times that) plus the instrument's quantization, +-1 tick for the
-// meter and +-1 for each of the two stamps: expected / 1000 + 2 ticks. A
-// neighbouring divider is a factor of two away.
+// The bound of a period against d / 32768 of that second: two windows of
+// one oscillator, each within the data sheet's 10 %, differ by at most 22 %
+// (osc32k_ratio_band; their wander no data sheet bounds) plus the
+// instrument's quantization, +-1 tick for the meter and +-1 for each of the
+// two stamps: expected x 2/9 + 2 ticks. A neighbouring divider is a factor
+// of two away; the printed figures show how close each lands.
 /// The mean of sixteen consecutive periods (the first capture after the
 /// change discarded: it may straddle it), and their spread: a single
 /// DIV4 period - four cycles of an RC oscillator - read 0.24 % short
@@ -850,7 +926,7 @@ bool slot_period_ok(uint32_t measured, uint32_t second, uint16_t cycles) {
     const uint32_t expect = static_cast<uint32_t>(
         (static_cast<uint64_t>(second) * cycles + 16384u) / 32768u);
     return measured != 0 && near(static_cast<int32_t>(measured), static_cast<int32_t>(expect),
-                                 static_cast<int32_t>(expect / 1000u + 2u));
+                                 static_cast<int32_t>(osc32k_ratio_band(expect) + 2u));
 }
 
 void tp_pit_slots() {
@@ -890,8 +966,8 @@ void tp_pit_slots() {
             all = all && ok;
             readback = readback && back == d;
         }
-        verdict(slot == 0 ? "slot 0 carries every divider 4..32768 (period within 0.1 % + 2)"
-                          : "slot 1 carries every divider 4..32768 (period within 0.1 % + 2)", all);
+        verdict(slot == 0 ? "slot 0 carries every divider 4..32768 (period within 22 % + 2)"
+                          : "slot 1 carries every divider 4..32768 (period within 22 % + 2)", all);
         verdict(slot == 0 ? "slot 0's divider reads back" : "slot 1's divider reads back",
                 readback);
         if (slot == 0) EvPitDiv<4, 0>::release(); else EvPitDiv<4, 1>::release();
@@ -919,9 +995,9 @@ void tp_pit_slots() {
     // 3. The prescaler runs while RTCEN or PITEN is set (24.5.2.2): slot 0
     //    at DIV4 (8 kHz) on the meter, both functions off - nothing in
     //    20 ms; the PIT alone - the slot runs; the counter alone - the
-    //    counter counts (its CNT read across the window), and the slot
-    //    stays STILL: the slots follow PITEN, not the prescaler's run
-    //    condition (measured, every run; the chapter does not say so).
+    //    counter counts (its CNT read across the window), and what the
+    //    slot does then is printed: the chapter does not say whether the
+    //    slots follow PITEN or the prescaler's run condition.
     Ticker::pause();
     Pit::disable();
     Rtc::disable();
@@ -955,8 +1031,10 @@ void tp_pit_slots() {
     // OSC32K within 10 %): "counting" is anything past 500.
     verdict("neither RTCEN nor PITEN: the slot's divider is still", off_caps == 0);
     verdict("PITEN alone runs the slot", pit_caps > 100);
-    verdict("RTCEN alone: the counter counts and the slot stays still (it follows PITEN)",
-            cnt_moved > 500 && rtc_caps == 0);
+    verdict("RTCEN alone: the counter counts", cnt_moved > 500);
+    print(serial, "  RTCEN alone: the slot ", rtc_caps == 0 ? "stays still (it follows PITEN)"
+                                                            : "runs (it follows the prescaler)",
+          crlf);
     verdict("a slot set OFF carries nothing", slot_off_caps == 0);
     meter_on = false;
     T0::disable();

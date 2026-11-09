@@ -520,7 +520,9 @@ decline whole, and letters 3, 5 and 6 run what needs no ruler).**
 - `Clock<internal, 20 MHz, div4>` (family_probe): CLKSEL OSCHF,
   MCLKCTRLB 0x03 (DIV4, PEN), MCLKTIMEBASE 5 - 5 MHz, PA7 toggling.
 - Letter r (ten runs of ten): the reset state as above, read by the
-  program itself before its init - OSCHFCTRLA 0x00 at every reset - the
+  program itself before its init - OSCHFCTRLA 0x00 at every reset,
+  printed rather than judged (one die is no contract for bits the data
+  sheet leaves undocumented) - the
   fuse's 20 MHz matching the type's claim, TIMEBASE 20 and the prescaler
   off after the init. Whether the init's read-modify-write keeps
   OSCHFCTRLA's bits 3:2 is not judged on this part: they read 0 at reset,

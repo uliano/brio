@@ -775,8 +775,9 @@ nothing, as on the DB at 2 and 3.
   zero delivered bytes.
 - **The transmit path is three deep and its stages are microseconds
   apart.** With TXDATA, the buffer and the shift register all loaded,
-  DREIF stays low for a whole frame (1021 polling iterations at 9600)
-  and TXCIF for two (2095); DREIF returns while the line is still busy.
+  DREIF stays low for about a whole frame (20382 CLK_PER at 9600 and
+  20 MHz, a frame being 20830) and TXCIF two frames after it (41553
+  against 41660); DREIF returns while the line is still busy.
   Letter e times both spans on the TCB ruler and judges the second at
   two frames, within a bit.
   With only TWO frames loaded the "TXDATA full" state lasts a few dozen
@@ -994,13 +995,15 @@ OSCHF with the regulator asleep (313 us) and OSCHF with `PMODE = FULL`
     (letter B) arrives whole at 115200, 500 000, 1 000 000 and 1 250 000
     baud. The SAM C21's 24 MHz crystal reads -109 ppm against this
     board's quartz (letter x, at 4000 baud: BAUD 20000 here and 375.0 on
-    that peer's fractional generator, both exact).
+    that peer's fractional generator, both exact), printed: neither
+    crystal's tolerance is on record.
   - **SFDEN set in Active mode corrupts nothing here** (letter F, the EA's
     own): 256 back-to-back frames on the loop, each read three bit times
     after its RXCIF - inside the next frame's reception - arrive exact
     with SFDEN set as without it, three runs and ten (in `z`). DS80001048D
-    has no twin of the DB's 2.16.2 and the silicon agrees; the verb pair
-    stays, costing nothing.
+    has no twin of the DB's 2.16.2 and this die agrees; the suite prints
+    that leg (one die is no contract) and judges the control, and the
+    verb pair stays, costing nothing.
   - **The transmitter pulls an INPUT pad low** (letter u): the one-wire
     discipline - TXD an input under its pull-up, ODME set - reads its own
     frames back, and the loop-back receiver hears the peer driving the

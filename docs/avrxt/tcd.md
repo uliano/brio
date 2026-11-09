@@ -545,7 +545,8 @@ Implemented but not bench-verified:
   blocked in input mode 9). The erratum lists rev. A5 as affected and
   the bench chip is A5; the driver carries the item and names the
   workaround, and this page records the result as NOT REPRODUCED, not
-  as absent.
+  as absent. The suite prints what each prescaler leg loses and judges
+  only the workaround (CNTPRES = DIV1, SYNCPRES for the division).
 - **Errata 2.14.3 could not be provoked either.** With mode 7 and
   CMPASET forced to 0 through the raw verbs, the halt worked, it
   survived the input being released, and the RESTART strobe brought

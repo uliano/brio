@@ -364,8 +364,11 @@ measurand.
   LDR 23 + 8/16 (49 MHz), 127500 for a 96 MHz DCO divided by two and
   63750 for the same DCO divided by four.** A sixteenth of the
   reference is a real step.
-- **Lock takes about 40 us** from ENABLE to CLKRDY at a 2 MHz
-  reference, against table 45-52's 25..35 us for the lock alone.
+- **Lock takes about 40 us** from `init()` to CLKRDY at a 2 MHz
+  reference, against table 45-52's 25..35 us for the lock alone; the
+  window also holds the driver's register synchronizations, which
+  20.6.9 gives no duration, so the suite prints the figure and does not
+  judge it.
 - **INTFLAG.DPLLLTO does not mean what its name says.** With
   LTIME = 8 ms the loop comes up with CLKRDY = 1, LOCK = 1 and
   DPLLLTO = 1 together: the flag marks the lock TIMER reaching zero,

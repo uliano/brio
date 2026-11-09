@@ -188,7 +188,7 @@ bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 /// The console idle before a timed window opens: a line still going out
 /// puts the transmit interrupt inside the window. False, with a failed
 /// verdict, on a wedged console; the letter then returns.
-bool console_quiet() {
+bool drained_for_window() {
     if (console_drain()) {
         return true;
     }
@@ -442,11 +442,13 @@ void tc_oscillator() {
               offset_ms != 0u ? "late" : "early", crlf);
     }
 
-    // A generous band on the RATE itself: this is a check that the right
-    // clock counts the right number of cycles, not a calibration -
-    // OSCULP32K's tolerance is wide and the chapter says so.
-    bench.verdict("CLK_WDT_OSC is within 10% of its nominal 1.024 kHz",
-                  ordered && hz_x1000 > 921'600u && hz_x1000 < 1'126'400u);
+    // The band on the RATE itself, from the tables: OSCULP32K at 25 C
+    // over the supply range is 30.801..34.730 kHz (DS60001479M table
+    // 45-56), /32 0.9625..1.0853 kHz, read on CPU cycles of OSC48M,
+    // within 5 % of 48 MHz (table 45-57): 0.9167..1.1424 kHz. A wrong
+    // clock is a factor (32 for the undivided one).
+    bench.verdict("CLK_WDT_OSC is OSCULP32K / 32 within the tables' bands (0.917..1.142 kHz)",
+                  ordered && hz_x1000 > 916'700u && hz_x1000 < 1'142'400u);
     bench.verdict("the two offsets differ by exactly 512 cycles' worth of time "
                   "(the ratio is not 2:1, and that is the arming cost showing)",
                   ordered && t1024 < 2u * t512);
@@ -473,6 +475,10 @@ void tc_oscillator() {
           cycles_to_ms(window_cycles), " ms", crlf);
     bench.verdict("arming window mode succeeded", armed_window);
     bench.verdict("the warning marks the window opening", window_seen);
+    // Same clock, same ruler, the same 512 cycles: the two differ only by
+    // their arming's synchronization, a few watchdog cycles in 512; a
+    // different clock or count is a factor of two or more. +-10 % parts
+    // the two.
     bench.verdict("CONFIG.WINDOW counts the same clock as EWCTRL.EWOFFSET",
                   window_cycles != 0u && t512 != 0u &&
                       window_cycles > t512 - t512 / 10u &&
@@ -765,6 +771,11 @@ void td_delay() {
         print(serial, "  delay_us(", spans[i], ") -> ", took, " us measured", crlf);
         if (!ok || took < spans[i] || took > spans[i] + zero_max + 10u) all_exact = false;
     }
+    // The ruler and the SysTick delay_us() polls share OSC48M, so the span
+    // is exact but for what lands in it: the bracket's own reads (its
+    // zero, measured above), the poll's last turn (a SysTick read and a
+    // compare, well under a microsecond) and the 1 kHz tick's handler if
+    // it falls inside (a few microseconds): 10 us over the zero.
     bench.verdict("delay_us serves 5..900 us AT LEAST and within the bracket's "
                   "zero plus 10 us on the TC ruler",
                   all_exact);
@@ -802,6 +813,9 @@ void td_delay() {
     const bool served_999 = delay_us(clock, 999u);
     print(serial, "  delay_us(1000) refused=", refused, " in ", refusal_us,
           " us (min of 4); delay_us(999) served=", served_999, crlf);
+    // A refusal is the call and one compare - well under a microsecond -
+    // inside the bracket: its fastest reading, 3 us over the bracket's
+    // fastest zero, which covers the zero's own read-to-read jitter.
     bench.verdict("the CAP is real: a whole tick (1000 us) is REFUSED spending "
                   "nothing beyond the bracket's own zero - TimeEvent territory - "
                   "while 999 us is served",
@@ -1161,7 +1175,7 @@ Unheld unheld_sleep(SleepMode mode) {
 }
 
 void tw_edge() {
-    if (!console_quiet()) {
+    if (!drained_for_window()) {
         return;
     }
     const bool up = watch_up();
@@ -1403,7 +1417,7 @@ using QuietKernel = Tenuto<P, Quiet<1>, Quiet<2>, Quiet<0>>;
 }
 
 void tk_turns() {
-    if (!console_quiet()) {
+    if (!drained_for_window()) {
         return;
     }
     QuietKernel::init_all();

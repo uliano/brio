@@ -175,9 +175,10 @@ bool apply_cfg(const spilink::Cfg& c, bool drive_miso = true) {
 
 /// The run's budget for a millisecond: a count is four polls of INTFLAGS,
 /// an SBIC of the select pad and an eight-bit decrement, 24 cycles of the
-/// release listing, so 800 counts a millisecond at 24 MHz keep the budget
-/// inside the deadline the command names.
-constexpr uint32_t spins_per_ms = 800;
+/// release listing; counted as 30, a fifth over, the budget stays inside
+/// the deadline the command names at the board's rate (800 counts a
+/// millisecond at 24 MHz, 666 at 20).
+constexpr uint32_t spins_per_ms = SysClock::hz / 1000u / 30u;
 uint32_t spins_for_ms(uint16_t ms) { return (ms ? ms : 1u) * spins_per_ms; }
 
 // ---- answering ------------------------------------------------------------------

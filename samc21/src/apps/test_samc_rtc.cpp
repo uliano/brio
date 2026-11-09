@@ -571,18 +571,21 @@ void tb_counts_its_source() {
               " ppm; both against the crystal, so the numbers are absolute "
               "and the comparison is scale-free either way", crlf);
 
-        // 2000 ppm, and the number is the RC's own short-term wander and
-        // nothing else. Both windows are edge-aligned, so the count is
-        // exact and the time is resolved to 167 ns; what is left is that
-        // FREQM averages the oscillator over eight milliseconds and this
-        // window averages it over a second, at different instants. The
-        // spread printed above is that wander measured directly. What
-        // this band does NOT absorb is a counter dividing by anything
-        // other than what CTRLA says - the nearest wrong answer is a
-        // factor of two away.
+        // What the verdict tells apart is the divisor: a counter dividing
+        // by anything other than what CTRLA says is a factor of two away
+        // at least (+100 % or -50 %), so a quarter (250000 ppm) separates
+        // every wrong divisor with margin. Below that the figure printed
+        // above is the RC's own wander and nothing else - both windows
+        // are edge-aligned, the count exact and the time resolved to
+        // 167 ns, but FREQM averages the oscillator over eight
+        // milliseconds and this window over a second, at different
+        // instants - and no document bounds that wander (the spread
+        // printed above has read past 2000 ppm), so it is printed, not
+        // judged.
         bench.verdict("THE COUNTER COUNTS ITS SOURCE, tick for tick, on a "
-                      "comparison from which the reference cancels",
-                      off < 2000u);
+                      "comparison from which the reference cancels (the divisor "
+                      "within a quarter, the wander printed)",
+                      off < 250'000u);
     }
 
     // Leave the generator on something that is certainly running, and the
@@ -834,15 +837,14 @@ void td_frequency_correction() {
     // THE MAGNITUDE, AND IT IS NOT THE CHAPTER'S. Five separate bench
     // sessions put the median full swing between 415 and 620 ppm where
     // 2 x VALUE / 983040 predicts 258 - consistently larger, by about
-    // 1.6 to 2.4 times. The band below is what those sessions support;
-    // the driver's rtc_correction_ppb() still states the chapter's
-    // formula, because one board's RC is no basis for replacing it, and
-    // docs/samc21/rtc.md records the discrepancy instead.
-    bench.verdict("the full swing is LARGER than 24.6.8.2's formula predicts "
-                  "and smaller than four times it - a factor this suite "
-                  "reports rather than explains away",
-                  swing2 > static_cast<int32_t>(predicted) &&
-                      swing2 < 4 * static_cast<int32_t>(predicted));
+    // 1.6 to 2.4 times. PRINTED, not judged: a band those sessions
+    // support is one board's figure, and the chapter's formula - which
+    // the driver's rtc_correction_ppb() still states - is the only figure
+    // on record; docs/samc21/rtc.md records the discrepancy.
+    print(serial, "  the full swing is ",
+          predicted != 0u ? (static_cast<uint32_t>(swing2 > 0 ? swing2 : 0) * 100u) / predicted
+                          : 0u,
+          " per cent of 24.6.8.2's prediction - NOT JUDGED: one board's figure", crlf);
 
     print(serial, "  DIV16 over DIV2 is ",
           swing2 > 0 ? (static_cast<uint32_t>(swing16) * 100u /

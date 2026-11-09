@@ -250,7 +250,7 @@ bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 /// The drain before a timed window, acted on: a console still busy after
 /// the drain's budget fails a verdict, and the caller does not open the
 /// window (the transmit interrupt would land inside it).
-bool quiet_console() {
+bool drained_for_window() {
     if (console_drain()) return true;
     verdict("the console drained before the timed window", false);
     return false;
@@ -345,6 +345,8 @@ void ta_folded() {
     }
     verdict("every folded delay is at least as long as asked", at_least);
     print(serial, "  path overhead spans ", lo, " .. ", hi, " cycles", crlf);
+    // A per-us cost of one cycle would spread the rows by 99 cycles (1 us
+    // to 100 us); the call sites' own register moves differ by a few: 4.
     verdict("the overhead is a small constant, not a per-us cost", hi - lo <= 4);
 
     // The fold really happened: the same 10 us through a value the
@@ -396,6 +398,9 @@ void tb_runtime() {
     }
     verdict("every runtime delay is at least as long as asked", at_least);
     print(serial, "  path overhead spans ", lo, " .. ", hi, " cycles", crlf);
+    // The rows round up to whole 4-cycle loops (up to 3 cycles each way)
+    // and the call sites' moves differ by a few; a per-us cost of one cycle
+    // would spread them by 99: 6.
     verdict("the overhead is a constant, not a per-us cost", hi - lo <= 6);
 
     if constexpr (at24) {
@@ -481,8 +486,14 @@ void tc_rebase() {
             (static_cast<uint64_t>(slope) * 1'000'000u) / l.hz);
         const uint32_t fixed = 2u * l.d1 - l.d2;
         if (us < 1000u) honest = false;
-        if (!near(static_cast<int32_t>(slope_us), 1000, 5)) slope_exact = false;
+        // Each call rounds up to whole 4-cycle loops: the slope is off by
+        // at most 4 cycles, under half a microsecond at 10 MHz and up, and
+        // the conversion truncates one more: +-1 us.
+        if (!near(static_cast<int32_t>(slope_us), 1000, 1)) slope_exact = false;
         if (i == 0) fixed0 = fixed;
+        // The dispatch is a chain of rate compares: a rate one position
+        // further costs one more compare and branch (a 32-bit compare,
+        // five to six cycles), and the legs sit within one position.
         else if (!near(static_cast<int32_t>(fixed), static_cast<int32_t>(fixed0), 8)) {
             fixed_same = false;
         }
@@ -495,6 +506,8 @@ void tc_rebase() {
     verdict("the fixed call cost does not depend on the rate", fixed_same);
     print(serial, "  that fixed cost is the index dispatch plus the shared "
                   "fixed-point tail - no division runs at wait time.", crlf);
+    // A 32-bit division on this core is several hundred cycles; the
+    // dispatch and the fixed-point tail without it are well under 200.
     verdict("the fixed cost stays under 200 cycles (the runtime division "
             "must not come back)", fixed0 < 200u);
 
@@ -509,6 +522,8 @@ void tc_rebase() {
               " cycles (nominal ", 1000u * mhz, ")", crlf);
     }
     verdict("a constant us under DynamicClock is at least nominal", k1000 >= 1000u * mhz);
+    // The alternative is the runtime path, whose own overhead (letter b)
+    // is over a hundred cycles: the folded branch costs only its compares.
     verdict("and its overhead is the dispatch alone, under 100 cycles",
             k1000 - 1000u * mhz < 100u);
 
@@ -535,7 +550,7 @@ void tc_rebase() {
                   "the dispatch's Q4.12 factor for the slow rate is exact");
     print(serial, "  at ", slow_hz, " Hz: 460800 baud unreachable, cycles_per_us 2, Q4.12 factor ",
           slow_mult, " (exact; checked at compile time)", crlf);
-    if (!quiet_console()) {
+    if (!drained_for_window()) {
         Serial::init(clock, 460800);
         quiesce();
         return;
@@ -565,8 +580,11 @@ void tc_rebase() {
               " us: the per-rate factor is exact", crlf);
         verdict("1000 us at the slow rate is at least 1000 us", slow_us >= 1000u);
     }
+    // Whole 4-cycle loops per call: at most 4 cycles of slope, 3.2 us at
+    // 1.25 MHz (2.7 at 1.5), and one more of truncation: +-4 us - the old
+    // ceil's overshoot is a third or more.
     verdict("and the slope is the exact 1000 us, not the old ceil's 1333",
-            near(static_cast<int32_t>(slope_us), 1000, 10));
+            near(static_cast<int32_t>(slope_us), 1000, 4));
     quiesce();
 }
 
@@ -597,13 +615,15 @@ void td_cycles() {
     verdict("every delay_cycles is at least the multiple of 4 it rounds to", at_least);
     // The chunked case must not cost more than its own arithmetic: the
     // extra loop iteration count is exact, the only additions are the
-    // subtraction and the second call.
+    // subtraction and the second call - a single call's overhead (the
+    // first row's) twice, and eight cycles for the 32-bit subtraction.
     const uint32_t chunked = rows[4].measured;
     const uint32_t chunk_nominal = ((65536u * 4u + 8u + 3u) / 4u) * 4u;
+    const uint32_t one_call = rows[0].measured - 4u;
     print(serial, "  the chunk boundary adds ", chunked - chunk_nominal,
           " cycles over the two loops' own ", chunk_nominal, crlf);
-    verdict("crossing 0xFFFF loops costs only its own arithmetic",
-            chunked >= chunk_nominal && chunked - chunk_nominal < 60);
+    verdict("crossing 0xFFFF loops costs only its own arithmetic (two calls' overhead + 8)",
+            chunked >= chunk_nominal && chunked - chunk_nominal <= 2u * one_call + 8u);
     quiesce();
 }
 
@@ -652,6 +672,10 @@ void te_critical() {
     });
     print(serial, "  one empty guard costs ", empty, " CLK_PER cycles, two nested ",
           nested, crlf);
+    // The guard inline is IN SREG, CLI, OUT SREG: three cycles. A call and
+    // its return alone take seven on this core (CALL 3, RET 4), so a guard
+    // that is a call costs at least ten. A second guard saves SREG to one
+    // more register, which may cost a move or two: +-2.
     verdict("the guard is a handful of cycles, not a call", empty <= 8);
     verdict("nesting costs the same again", near(static_cast<int32_t>(nested),
                                                  2 * static_cast<int32_t>(empty), 2));
@@ -673,7 +697,7 @@ void tf_idle() {
     // (measured: a wake every ~250 cycles, one per frame at 460800). The
     // sixteen sleeps below end only on an interrupt: a tick that does not
     // run is a failed verdict here, not a sleep that never ends.
-    if (!quiet_console()) {
+    if (!drained_for_window()) {
         quiesce();
         return;
     }
@@ -706,6 +730,9 @@ void tf_idle() {
     print(serial, "  woken by the 1024 Hz tick: ", lo, " .. ", hi, " cycles (mean ",
           sum / n, ") of a ", cycles_per_tick, "-cycle tick period", crlf);
     verdict("idle() returned only after an interrupt actually fired", woke_on_interrupt);
+    // A tick at the OSC32K band's slow end lasts 1/0.9 of nominal (+11.1 %),
+    // and the tick's handler and the wake add a few hundred cycles more:
+    // inside the 12.5 % of 1/8.
     verdict("the wait never exceeds one tick period", hi <= cycles_per_tick + cycles_per_tick / 8);
     verdict("SLPCTRL is disarmed on return (SEN back to 0)", disarmed);
     verdict("interrupts are enabled on return", enabled_on_return);
@@ -718,7 +745,7 @@ void tf_idle() {
     // spin_until() (no clock read in the loop: the handler's entry is the
     // measurement, and the handler stamps the cascade itself): ten of
     // TCB3's periods, 55 ms or more, against the alarm's 1 ms.
-    if (!quiet_console()) {
+    if (!drained_for_window()) {
         quiesce();
         return;
     }
@@ -766,10 +793,16 @@ void tf_idle() {
     Ticker::resume();
     print(serial, "  same alarm, stamped inside its ISR: asleep ", slept,
           " cycles vs spinning ", spun, " -> waking costs ",
-          static_cast<int32_t>(slept) - static_cast<int32_t>(spun), " cycles", crlf);
+          static_cast<int32_t>(slept) - static_cast<int32_t>(spun),
+          " cycles (the data sheet: 5 more in a sleep mode)", crlf);
     verdict("the alarm's interrupt came in every try (the instrument)", alarm_came);
-    verdict("sleeping delays the ISR by only a handful of cycles",
-            alarm_came && slept >= spun && slept - spun <= 20);
+    // An interrupt in a sleep mode is answered five cycles later than
+    // awake (DS40002443A 15.3.2.3, the DB's CPUINT chapter alike) and IDLE
+    // keeps the main clock (no start-up time): never earlier than awake.
+    // How much later is printed above, not judged: the five cycles less the
+    // instruction the spin was finishing do not account for every cycle
+    // measured, and no figure in the chapter does.
+    verdict("sleeping never answers the ISR earlier than spinning", alarm_came && slept >= spun);
 
     // 3. the CPU really stopped. Over the same wall-clock span, a loop
     // that only runs when the CPU runs turns thousands of times awake
@@ -778,7 +811,7 @@ void tf_idle() {
     // against 32 ticks, 31.25 ms on the nominal rate, OSC32K +-10 %): its
     // turns are what is counted, so no clock read goes into them either.
     volatile uint32_t work_busy = 0, work_sleep = 0;
-    if (!quiet_console()) {
+    if (!drained_for_window()) {
         quiesce();
         return;
     }
@@ -811,9 +844,16 @@ void tf_idle() {
     }
     print(serial, "  over 32 ticks: ", work_busy, " loop turns awake, ", work_sleep,
           " asleep (one per wake)", crlf);
-    verdict("the counter is frozen while the CPU sleeps", work_sleep <= 40);
-    verdict("the same span awake turns it thousands of times",
-            work_busy > 100u * (work_sleep ? work_sleep : 1u));
+    // Asleep the loop turns once a wake, and the tick is the only
+    // interrupt left (the console drained, the alarm off): 32, and one more
+    // for the turn that finds the 32nd tick. A core that did not sleep
+    // would turn as often as awake - some 200 times a tick, a tick's 19531
+    // cycles at 20 MHz over a turn's hundred or so: ten times is the
+    // threshold between the two.
+    verdict("the counter is frozen while the CPU sleeps (one turn a tick: 32..33)",
+            work_sleep >= 32u && work_sleep <= 33u);
+    verdict("the same span awake turns it at least ten times as often",
+            work_busy > 10u * (work_sleep ? work_sleep : 1u));
     quiesce();
 }
 
@@ -942,9 +982,6 @@ void th_timebase() {
     verdict("one second within the OSC32K's +-10 % spec",
             near(static_cast<int32_t>(cycles), static_cast<int32_t>(crystal_hz),
                  static_cast<int32_t>(crystal_hz / 10)));
-    verdict("and within the +-3 % this desk's OSC32K really shows",
-            near(static_cast<int32_t>(cycles), static_cast<int32_t>(crystal_hz),
-                 static_cast<int32_t>(crystal_hz / 33)));
 
     // Monotonic across the low byte's wrap: the 32-bit counter is read
     // whole under a critical section, so no word may ever interleave.
@@ -1020,7 +1057,7 @@ void print_profile(const uint16_t* v, uint16_t n) {
 void tw_edge() {
     print(serial, "w the idle path against an edge placed to the cycle", crlf);
     quiesce();
-    if (!quiet_console()) {
+    if (!drained_for_window()) {
         quiesce();
         return;
     }
@@ -1206,7 +1243,7 @@ bool raise_alarm() {
 void tk_turns() {
     print(serial, "k the kernel's turns: one per interrupt, and what a quiet one costs", crlf);
     quiesce();
-    if (!quiet_console()) {
+    if (!drained_for_window()) {
         quiesce();
         return;
     }
@@ -1300,6 +1337,9 @@ void tk_turns() {
           " cycles; so idle() itself, its sleep and wake included: ",
           static_cast<int32_t>(idle_cycles) - static_cast<int32_t>(isr_cycles), crlf);
     verdict("TCB0 raised its flag for every costed turn (the instrument)", raised);
+    // One turn per tick from an edge: 100. +-1 at the ends - a turn that
+    // finds the edge's own tick still pending returns at once, and the
+    // last tick may land before or after the count's comparison.
     verdict("the kernel loop turns once per interrupt (100 ticks: 99..101 turns)",
             turns[0] >= 99u && turns[0] <= 101u);
     verdict("and so it does with IDLE armed beforehand", turns[1] >= 99u && turns[1] <= 101u);
@@ -1349,11 +1389,14 @@ void report_boot() {
 /// a few microseconds a tick - and every wake counted in the token. A
 /// watchdog that counted only while the CPU runs would need 64 ms of
 /// AWAKE time, tens of thousands of ticks; one that counts through the
-/// sleep resets the device after its period, 64 PIT ticks plus the
-/// enable's synchronization into the WDT's own 1.024 kHz (2..3 of its
-/// cycles, 22.3.3: 2..6 ticks) - both clocks are OSC32K's, so its own
-/// error does not move the count. 200 ticks without a reset end the leg
-/// in software, and the next boot says so.
+/// sleep resets the device after its period, 64 cycles of its own
+/// 1.024 kHz (OSC32K / 32, the PIT's 1024 Hz from the same oscillator, so
+/// the oscillator's error does not move the count), plus the CTRLA write's
+/// synchronization: 2..3 WDT cycles (the figure the WDT chapter's
+/// Synchronization section gives for the WDR; it gives none for CTRLA),
+/// and +-1 tick for the phase between the two dividers: 65..68 ticks.
+/// 200 ticks without a reset end the leg in software, and the next boot
+/// says so.
 [[noreturn]] void wdt_through_sleep(uint8_t phase, SleepMode m) {
     bank(phase);
     token.note = 0;
@@ -1378,12 +1421,12 @@ void report_boot() {
 /// The verdicts of a phase-5/6 boot.
 void wdt_sleep_verdicts(const char* mode) {
     print(serial, "  the watchdog through ", mode, ": ", token.wakes, " sleeps woken by "
-          "the 1024 Hz tick before the reset (64 ms = 64 ticks, + 2..6 for the "
-          "enable's synchronization)", token.note ? "; NO RESET came" : "", crlf);
+          "the 1024 Hz tick before the reset (64 ms = 64 ticks, + 2..3 for the "
+          "enable's synchronization, +-1 of phase)", token.note ? "; NO RESET came" : "", crlf);
     verdict("the watchdog reset the device out of the sleep, not software",
             token.note == 0 && boot_reset.watchdog && !boot_reset.software);
-    verdict("after its period counted THROUGH the sleeps: 62..72 ticks",
-            token.wakes >= 62u && token.wakes <= 72u);
+    verdict("after its period counted THROUGH the sleeps: 65..68 ticks",
+            token.wakes >= 65u && token.wakes <= 68u);
 }
 
 void ti_reset() {

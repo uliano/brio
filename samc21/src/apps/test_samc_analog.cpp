@@ -141,6 +141,40 @@ constexpr uint32_t main_gen_hz = SysClock::hz;
 /// is assumed.
 uint16_t vdd_mv = 0;
 
+/// How far the located supply can sit from the true one, per mille. The
+/// supply is the 1.024 V level read by ADC0 against VDDANA, so the true
+/// supply is vdd_mv x (the level + ADC0's error) / 1024: the level
+/// 1003..1045 mV (table 45-36, at 5.0 V) moved by the levels' supply
+/// coefficient over 2.7..5.5 V (-0.2..+0.3 %/V, the table's typical, the
+/// only figure it gives): 996..1050 mV, and ADC0's error reading it
+/// (table 45-24's maxima: offset 80 mV, gain 42 mV x 0.39 - the level's
+/// fraction of a 2.7 V supply - and INL 4 counts, 5.4 mV at 5.5 V: 102
+/// mV) - a factor of 894/1024 .. 1152/1024.
+constexpr uint32_t supply_lo_permille = 873;
+constexpr uint32_t supply_hi_permille = 1125;
+
+/// The most counts of 4096 a voltage of `mv` (up to 1000) can be against
+/// the true supply, given the located one (rounded up), or full scale
+/// when no supply has been located (nothing judged tight).
+uint32_t mv_counts(uint32_t mv) {
+    return vdd_mv != 0u
+               ? (mv * 4096u * 1000u + vdd_mv * supply_lo_permille - 1u) /
+                     (vdd_mv * supply_lo_permille)
+               : 4096u;
+}
+/// The same as DAC codes of 1024 (rounded up).
+uint32_t mv_codes(uint32_t mv) {
+    return vdd_mv != 0u
+               ? (mv * 1024u * 1000u + vdd_mv * supply_lo_permille - 1u) /
+                     (vdd_mv * supply_lo_permille)
+               : 1024u;
+}
+/// The fewest DAC codes a voltage of `mv` can be (rounded down), 0 when
+/// no supply has been located.
+uint32_t mv_codes_min(uint32_t mv) {
+    return vdd_mv != 0u ? (mv * 1024u * 1000u) / (vdd_mv * supply_hi_permille) : 0u;
+}
+
 // ---------------------------------------------------------------------------
 // The stopwatch: TC0 + TC1 as one 32-bit counter on the BOARD'S CRYSTAL.
 // A conversion time reported against OSC48M would carry that
@@ -350,9 +384,9 @@ void dac_set(uint16_t code) {
  * channel reads a flat zero without it) and table 45-22's 10 us of
  * sampling; SAMPLEN 20 at 1.5 MHz is 14 us. The level sits under every
  * supply the device runs on (2.7..5.5 V, DS60001479M table 45-2), so the
- * reading never saturates (and reads at least 747 counts); its accuracy
- * is the level's own, +-2.05 % (table 45-36). Once a boot: true when the
- * supply is located, now or before.
+ * reading never saturates; its accuracy is the level's and ADC0's, as
+ * supply_lo_permille spells out. Once a boot: true when the supply is
+ * located, now or before.
  */
 bool locate_supply() {
     if (vdd_mv != 0u) {
@@ -370,7 +404,12 @@ bool locate_supply() {
     (void)Adc0::sync_wait(ADC_SYNCBUSY_INPUTCTRL_Msk);
     settle();
     const uint32_t counts = mean_of<Adc0>(16);
-    if (counts > 100u) {
+    // What the level can read under any supply the device runs on: the
+    // level's 1003..1045 mV (table 45-36) with ADC0's offset and gain (80
+    // mV and 42 mV x the fraction, table 45-24), INL and quantization
+    // against 2.7..5.5 V (table 45-2) is 676..1737 counts; outside that
+    // no level was read.
+    if (counts >= 676u && counts <= 1737u) {
         vdd_mv = static_cast<uint16_t>((1024UL * 4096UL + counts / 2u) / counts);
     }
     Adc0::release();
@@ -388,12 +427,13 @@ bool need_vdd() {
 }
 
 /// Whether a bandgap level of `level_mv` can be reached under a supply
-/// located at `supply_mv`: the level at most 95 % of the supply. The 5 %
-/// is the level's own +-2.05 % at its top (table 45-36), the located
-/// supply's +-2.05 % at its bottom and the levels' 0.3 %/V supply
-/// coefficient.
+/// located at `supply_mv`: the level at its top (+2.05 %, table 45-36,
+/// and 0.69 % of typical supply coefficient: x 1.028) with 122 mV over
+/// it (ADC0's offset and gain at full scale, table 45-24, which covers
+/// the DAC's and the comparator's offsets too), under the least the true
+/// supply can be (supply_lo_permille).
 constexpr bool level_below_supply(uint32_t level_mv, uint32_t supply_mv) {
-    return level_mv * 20u < supply_mv * 19u;
+    return level_mv * 1028u + 122'000u < supply_mv * supply_lo_permille;
 }
 
 // =============================================================================
@@ -517,9 +557,12 @@ void ta_pair() {
                   "triggers, sixteen pairs, and nothing had to be asked of the "
                   "client at all",
                   both_pairs == 16u);
+    // Each converter within its tabled offset and gain at the rail (table
+    // 45-24: 80 + 42 mV, the larger of its 3.0 V and 5.0 V rows), so the
+    // two within twice that, and their INLs and quantization (10 counts).
     bench.verdict("...and on a shared pad the two results agree, which is what "
                   "'simultaneously' has to mean",
-                  worst <= 8u);
+                  worst <= mv_counts(244u) + 10u);
 
     // The other rail, so the agreement is not an artefact of one level.
     PadShared::clear();
@@ -532,8 +575,9 @@ void ta_pair() {
     const uint32_t low0 = Adc0::result();
     const uint32_t low1 = Adc1::result();
     print(serial, "  the same pair with PA08 at GND: ", low0, " / ", low1, crlf);
+    // At ground each reads its offset at most (80 mV) and 5 counts.
     bench.verdict("the pair agrees at the other rail too",
-                  low_pair && low0 < 40u && low1 < 40u);
+                  low_pair && low0 <= mv_counts(80u) + 5u && low1 <= mv_counts(80u) + 5u);
 
     // ---- the rate question, at a trigger period shorter than one conversion --
     //
@@ -618,7 +662,21 @@ void ta_pair() {
     const Run pair_both = run_window(true, AdcDual::both);
     const Run pair_ilv = run_window(true, AdcDual::interleave);
 
-    // 20 ms at 8.0 us is 2500 triggers.
+    // THE BANDS. The window is 19..20 ms (Ticker::millis() steps once a
+    // millisecond, and t0 is read anywhere inside a step), the pacer and
+    // the ticker both run on OSC48M, so no oscillator error lies between
+    // them. A conversion is 18 CLK_ADC cycles (table 45-22: SAMPLEN + 13),
+    // 12.0 us, after its start is synchronized to the converter's clock
+    // (38.6.2.8: under one CLK_ADC cycle, 0.7 us): 12.7 us, longer than
+    // one period (8 us) and shorter than two (16 us). So one converter
+    // answers every other trigger, 19000/16 - 1 = 1186 to 20000/16 + 1 =
+    // 1251 results; INTERLEAVE answers every trigger, 19000/8 - 2 = 2373
+    // to 20000/8 + 1 = 2501; BOTH answers every other trigger twice,
+    // 2372..2502.
+    constexpr uint32_t every_other_lo = 19'000u / 16u - 1u;
+    constexpr uint32_t every_other_hi = 20'000u / 16u + 1u;
+    constexpr uint32_t every_lo = 19'000u / 8u - 2u;
+    constexpr uint32_t every_hi = 20'000u / 8u + 1u;
     print(serial, "  20 ms at one trigger every 8.0 us (2500 triggers): "
           "ADC0 alone ", solo.results, " results, overrun ",
           yes_no(solo.over0), crlf);
@@ -627,25 +685,25 @@ void ta_pair() {
     print(serial, "  DUALSEL=INTERLEAVE ", pair_ilv.results,
           " results, overrun ", yes_no(pair_ilv.over0), " / ",
           yes_no(pair_ilv.over1), crlf);
-    bench.verdict("A SINGLE CONVERTER ANSWERS ABOUT HALF THE TRIGGERS at a "
+    bench.verdict("A SINGLE CONVERTER ANSWERS EVERY OTHER TRIGGER at a "
                   "trigger period shorter than its own conversion - AND ITS "
                   "OVERRUN FLAG STAYS CLEAR, because a trigger arriving during "
                   "a conversion is simply IGNORED: 38.6.5's OVERRUN is about a "
                   "RESULT nobody read, not about a trigger nobody took",
-                  solo.results < 1800u && !solo.over0);
+                  solo.results >= every_other_lo && solo.results <= every_other_hi &&
+                      !solo.over0);
     bench.verdict("INTERLEAVE DELIVERS ONE RESULT PER TRIGGER, i.e. EXACTLY "
                   "TWICE what one converter could - each converter takes every "
                   "other trigger and so has two periods to convert in, which is "
                   "the whole content of 38.6.3.1's second trigger mode",
-                  pair_ilv.results > 2u * solo.results - solo.results / 4u &&
-                      pair_ilv.results > 2300u);
+                  pair_ilv.results >= every_lo && pair_ilv.results <= every_hi);
     bench.verdict("...and BOTH mode is NOT the same thing: it doubles the "
                   "results by converting two INPUTS at one instant, so its "
                   "aggregate is exactly twice what the SAME converter managed "
                   "alone - each of the two is still as late as one alone, and "
                   "no signal is sampled any faster",
-                  near(pair_both.results, 2u * solo.results,
-                       solo.results / 4u + 8u));
+                  pair_both.results >= 2u * every_other_lo &&
+                      pair_both.results <= 2u * every_other_hi);
 
     // ---- the three restart options 38.6.3.1 lists ---------------------------
     //
@@ -864,9 +922,14 @@ void tb_sequence() {
     }
     print(serial, "  the closest two of the six are ", closest,
           " counts apart", crlf);
+    // Two 8-reading means of one input differ by their noise: table
+    // 45-24's 2 mV rms is 1 mV rms on such a difference, 4 mV at four
+    // sigma, and a count of rounding in each. A match judged at half the
+    // closest separation catches a swap only when that half clears it.
+    const uint32_t same_input = mv_counts(4u) + 2u;
     bench.verdict("THE SIX SLOTS CARRY SIX DISTINCT VALUES, so a swapped pair "
                   "would be caught and not averaged away",
-                  closest > 100u);
+                  closest > 2u * same_input);
 
     // ---- the sequence itself ------------------------------------------------
     Adc0::sequence(mask);
@@ -906,9 +969,9 @@ void tb_sequence() {
         if (state[i] != order[i]) {
             labels_ok = false;
         }
-        // 40 counts of 4096 is a per-cent band; the closest two slots
-        // are more than a hundred apart, so a swap could not hide in it.
-        if (!near(got[i], single[i], 40u)) {
+        // Half the closest separation: a slot that was another input sits
+        // at least `closest` away, the same input within its noise.
+        if (!near(got[i], single[i], closest / 2u)) {
             values_ok = false;
         }
     }
@@ -930,9 +993,12 @@ void tb_sequence() {
     const uint32_t plain = mean_of<Adc0>(8);
     print(serial, "  with SEQCTRL cleared the conversion follows MUXPOS again: ",
           plain, crlf);
+    // The same input through the same converter, a sequence slot or
+    // MUXPOS: a slot that was another input sits at least `closest`
+    // away, so half of that tells them apart.
     bench.verdict("'if no bits are set the sequence is disabled' - the "
                   "conversion is MUXPOS's again",
-                  near(plain, single[2], 40u) && !Adc0::sequence_busy());
+                  near(plain, single[2], closest / 2u) && !Adc0::sequence_busy());
 
     // ---- what it costs ------------------------------------------------------
     bench.verdict("the crystal stopwatch is running", stopwatch_start());
@@ -1074,10 +1140,17 @@ void tc_differential() {
                   "positive with the negative input at ground and negative "
                   "with it at the supply",
                   landed && d_positive > 0 && d_negative < 0);
+    // No table bounds these two readings: with CTRLC.R2R clear table
+    // 45-22 wants the common mode within VREF/2 +-0.2 V, and these pairs
+    // sit at about a third and five sixths of the supply. What the verdict
+    // asks is the SCALE, and the scale's alternative is a factor of two
+    // (a full scale of +/-VREF/2 would read the whole single-ended
+    // difference): half the prediction tells the two apart. The
+    // agreement itself is printed above.
     bench.verdict("AND THE MAGNITUDE IS HALF THE SINGLE-ENDED DIFFERENCE, "
                   "which is what a signed full scale of +/-VREF means",
-                  near_signed(d_positive, predict_pos, 60) &&
-                      near_signed(d_negative, predict_neg, 60));
+                  near_signed(d_positive, predict_pos, predict_pos / 2) &&
+                      near_signed(d_negative, predict_neg, -predict_neg / 2));
 
     // ---- a real zero crossing, swept ---------------------------------------
     //
@@ -1111,16 +1184,26 @@ void tc_differential() {
             monotone = false;
         }
     }
+    // Where each reading lands rests on the quarter-supply divider, whose
+    // ratio no table gives, and on a common mode table 45-22 does not
+    // cover with R2R clear (above). What the DAC alone decides is the
+    // SPAN between the ends: 600 codes, 1200 counts of this signed scale
+    // whatever the divider does, judged within half against the factor
+    // of two a wrong scale would make. The ends are not rails (+2047,
+    // -2048), and the sign changes between them.
+    const int32_t span = swept[0] - swept[6];
     bench.verdict("A SWEPT DIFFERENCE FALLS MONOTONICALLY THROUGH ZERO as the "
                   "DAC passes the fixed node - neither end is a rail and the "
-                  "middle is neither zero nor full scale",
-                  landed && monotone && swept[0] > 400 && swept[6] < -300);
+                  "span between them is the DAC's 600 codes",
+                  landed && monotone && swept[0] > 0 && swept[6] < 0 &&
+                      swept[0] < 2047 && swept[6] > -2048 &&
+                      near_signed(span, 1200, 600));
     // VDDANA/4 is code 256 of 1024 by construction, so that is where the
-    // difference has to vanish.
-    bench.verdict("...and it vanishes at the DAC code that IS a quarter of "
-                  "the supply, which is what makes the internal divider a "
-                  "witness and not just a level",
-                  near_signed(swept[3], 0, 60));
+    // difference would vanish with an exact divider: printed, not judged,
+    // since the divider's ratio is in no table.
+    print(serial, "  at the DAC code that is a quarter of the supply (256) the "
+          "difference reads ", swept[3], " counts - the quarter-supply "
+          "divider's own error, untabled", crlf);
 
     // ---- the signed window in differential mode ----------------------------
     //
@@ -1237,11 +1320,10 @@ void td_rail_to_rail() {
         return Reading{(s2 + 16) / 32, hi - lo};
     };
 
-    // Three common modes. The DIFFERENCE is kept roughly the same size
-    // in all three - about a fifth of the supply - so what changes
-    // between the rows is only where the pair sits: about 0.5 V, about
-    // 1.8 V (which is VREF/2, where 38.6.3.2 says the plain converter is
-    // at its best) and about 4.6 V.
+    // Three common modes. What changes between the rows is where the
+    // pair sits: on a 5.2 V supply about 0.5 V, about 1.8 V (a third of
+    // the supply, the row nearest VREF/2, where 38.6.3.2 says the plain
+    // converter is at its best) and about 4.7 V.
     struct Row {
         const char* name;
         uint16_t code;
@@ -1338,7 +1420,10 @@ void td_rail_to_rail() {
                   "SAMPLEN rather than adding to it, and the saving measured "
                   "against the crystal is the two CLK_ADC cycles table 45-22's "
                   "OFFCOMP row implies against a five-cycle sample",
-                  saved_ticks > 20 && saved_ticks < 44);
+                  // two CLK_ADC cycles are 32 crystal ticks at a nominal
+                  // OSC48M (CLK_ADC is OSC48M / 32), within its 5 % (table
+                  // 45-57: 1.6 ticks) and a tick of the rounding: 29..35
+                  saved_ticks >= 29 && saved_ticks <= 35);
     bench.verdict("...and R2R on top of it costs nothing at all: it changes "
                   "the input stage, not the timing",
                   near(t_r2r, t_off, t_off / 64u + 1u));
@@ -1529,6 +1614,8 @@ void te_dither() {
           fed_ms, " ms of about ", fed_events, " start events: one EMPTY per ",
           fed != 0u ? fed_events / fed : 0u, " events, where 41.6.8.4's "
           "sixteen sub-conversions a value say 16", crlf);
+    // The premise of the staircase below: six readings' span under six
+    // sub-LSB steps (24 counts), or the means cannot be told apart.
     bench.verdict("THE NOISE IS MEASURED FIRST and it is smaller than the "
                   "sub-LSB step this letter is about",
                   noise < 24u);
@@ -1558,10 +1645,14 @@ void te_dither() {
                   "the four dither bits give five means, each above the last, "
                   "all inside ONE code of the plain converter",
                   rising);
+    // Fifteen sixteenths of a DAC LSB is 60 counts here; the DAC's DNL at a
+    // VDDANA reference (0.3 LSB, table 45-32: 19 counts) and the
+    // readings' own noise (measured above) and two counts of rounding.
+    const int32_t dither_tol = 19 + static_cast<int32_t>(noise) + 2;
     bench.verdict("...and the whole range is fifteen sixteenths of one LSB, "
                   "which is what 41.6.8.4's sixteen sub-conversions can add up "
                   "to and nothing else is",
-                  swing > 36 && swing < 96);
+                  swing > 60 - dither_tol && swing < 60 + dither_tol);
     print(serial, "  over the whole right-adjusted measurement: ",
           dac_empty_irqs, " EMPTY interrupts, ", right_underruns,
           " UNDERRUN", crlf);
@@ -1584,9 +1675,10 @@ void te_dither() {
           "nothing between them", crlf);
     const int32_t step =
         static_cast<int32_t>(plain_c1) - static_cast<int32_t>(plain_c);
+    // One DAC LSB is 64 counts, within the same DNL and noise.
     bench.verdict("THE CONTROL: without dithering the same converter steps a "
                   "WHOLE LSB and can put nothing in between",
-                  step > 40 && step < 90);
+                  step > 64 - dither_tol && step < 64 + dither_tol);
     bench.verdict("...and the dithered swing is a fraction of that step, "
                   "measured on the same instrument in the same letter",
                   swing < step);
@@ -1605,7 +1697,9 @@ void te_dither() {
     bench.verdict("CTRLB.LEFTADJ IS A PLACEMENT AND NOT A SCALE - the same "
                   "code puts the same voltage on the pad through both "
                   "arrangements of table 41-1",
-                  near(left_plain, plain_c, 96u));
+                  // one voltage read twice: the readings' noise (measured
+                  // above) and two counts; a scale would be a factor of 16
+                  near(left_plain, plain_c, noise + 2u));
 
     // ERRATUM 1.9.1 says dithering with RIGHT-adjusted data gives an INL
     // of 16 LSB, and its E/G/J row carries one X and it is under B. The
@@ -1628,12 +1722,15 @@ void te_dither() {
     print(serial, "  the same staircase LEFT-adjusted: ", lmeans[0], " ",
           lmeans[1], " ", lmeans[2], " ", lmeans[3], " ", lmeans[4],
           " - swing ", lswing, " against the right-adjusted ", swing, crlf);
+    // Two swings are four accumulated readings, each within the noise
+    // measured above of its own level: twice that noise and two counts
+    // of rounding.
     bench.verdict("ERRATUM 1.9.1 IS NOT THIS SILICON, AND THE ROW SAYS SO "
                   "BEFORE THE BENCH DOES (E/G/J revision B alone): the two "
                   "adjustments give the same dithered staircase, where a 16 "
                   "LSB nonlinearity in one of them could not hide in a swing "
                   "of one",
-                  near_signed(lswing, swing, 24));
+                  near_signed(lswing, swing, 2 * static_cast<int32_t>(noise) + 2));
     bench.verdict("and the left-adjusted feed never fell behind either: zero "
                   "UNDERRUN",
                   left_underruns == 0u);
@@ -1701,9 +1798,17 @@ void tf_dac_interrupts() {
     print(serial, "  40 ms of start events with the handler refilling DATABUF: ",
           entries, " vector entries, ", empties, " EMPTY, ", dac_underrun_irqs,
           " UNDERRUN", crlf);
+    // One EMPTY a start event: the pacer's period is 46 x 1024 = 47104
+    // CPU cycles and the spin 40 ms of the same OSC48M, so 40.76 periods:
+    // 40 events, 41 if the spin overran by a quarter period.
+    constexpr uint32_t pacer_cycles = (45u + 1u) * 1024u;
+    constexpr uint32_t fed_events =
+        40'000u * (SysClock::hz / 1'000'000u) / pacer_cycles;
     bench.verdict("THE VECTOR IS BOUND AND THE FLAG REACHES IT - the DAC's "
-                  "EMPTY drove the NVIC, and the handler kept the buffer fed",
-                  empties > 20u && dac_underrun_irqs == 0u);
+                  "EMPTY drove the NVIC once a start event, and the handler "
+                  "kept the buffer fed",
+                  empties >= fed_events && empties <= fed_events + 1u &&
+                      dac_underrun_irqs == 0u);
 
     // Now stop feeding: the next start event finds DATABUF empty.
     dac_feed_from_isr = false;
@@ -1717,10 +1822,14 @@ void tf_dac_interrupts() {
     const uint32_t unders = dac_underrun_irqs;
     print(serial, "  with the handler no longer feeding it: ", unders,
           " UNDERRUN interrupts", crlf);
+    // 20 ms is 20.38 periods, 20 or 21 events, the first of which may
+    // still find the last value the handler wrote: 19..21 UNDERRUN.
+    constexpr uint32_t starved_events =
+        20'000u * (SysClock::hz / 1'000'000u) / pacer_cycles;
     bench.verdict("UNDERRUN DRIVES THE VECTOR TOO, and it exists only in the "
                   "event-driven shape - a start event arriving with DATABUF "
                   "empty",
-                  unders > 0u);
+                  unders + 1u >= starved_events && unders <= starved_events + 1u);
     bench.verdict("...and the ISR body's own contract holds: it CLEARS "
                   "UNDERRUN, because nothing else carries that information, "
                   "and leaves EMPTY to whoever feeds the buffer",
@@ -1911,13 +2020,23 @@ void th_bandgap() {
     print(serial, "  MUXNEG = bandgap at 1.024 V: with VREFOE CLEAR (read back ",
           yes_no(oe_off), ") the comparator flips at DAC code ", off_cross,
           ", with it SET at ", on_cross, crlf);
-    // 1.024 V is code 1024 x 1024 / VDDANA: 191..388 over the device's
-    // 2.7..5.5 V (table 45-2), inside the band judged.
+    // The level, 1003..1045 mV (table 45-36), against the DAC's offset
+    // and gain error (20 mV, and 20 mV at full scale, table 45-32: 4..8
+    // mV at these codes) and the comparator's offset (high speed,
+    // -12..+20 mV, table 45-34, taken as +-20): 959..1093 mV, codes
+    // 1024 x mV / VDDANA over the device's 2.7..5.5 V (table 45-2) with
+    // the DAC's INL (0.9 LSB) and the first code past the threshold:
+    // 177..417.
+    constexpr uint16_t bandgap_code_lo = 177;
+    constexpr uint16_t bandgap_code_hi = 417;
+    auto at_bandgap = [](uint16_t code) {
+        return code >= bandgap_code_lo && code <= bandgap_code_hi;
+    };
     bench.verdict("THE BANDGAP REACHES A COMPARATOR'S NEGATIVE INPUT AT ALL - "
                   "the output really does flip at the code where the DAC "
                   "makes about a volt, and not somewhere a floating input "
                   "would put it",
-                  on_cross != 0xFFFFu && on_cross > 100u && on_cross < 400u);
+                  at_bandgap(on_cross));
     bench.verdict("...AND IT DOES NOT NEED SUPC.VREF.VREFOE, WHICH CORRECTS "
                   "ac.hpp's OWN COMMENT: the crossing is the same code with "
                   "the bit clear and set, so the comparator's reference "
@@ -1926,8 +2045,10 @@ void th_bandgap() {
                   "bandgap INPUT CHANNEL is dead without the bit, which is the "
                   "distinction dac.md drew and nobody had carried across to "
                   "40.6.3",
-                  !oe_off && off_cross != 0xFFFFu &&
-                      near(off_cross, on_cross, 2u));
+                  // with the bit clear the crossing lies in the same band
+                  // the level puts it in; how far apart the two crossings
+                  // are is printed above
+                  !oe_off && at_bandgap(off_cross));
 
     // ---- and what is it worth? ---------------------------------------------
     //
@@ -1959,14 +2080,24 @@ void th_bandgap() {
           " / ", levels[1], " / ", levels[2], " = ", mv0, " / ", mv1, " / ",
           mv2, " mV against a supply this suite located at ", vdd_mv, " mV",
           crlf);
+    // Twice one crossing against the next, in DAC codes so the supply
+    // cancels but for the conversion of the tolerance. The levels' own
+    // spread (table 45-36: 2 x 1045 - 2007 = 83 mV, 2 x 2089 - 4014 = 164
+    // mV), the DAC's offset once (20 mV; its gain error doubles with the
+    // code and cancels), the comparator's offset at two common modes
+    // (2 x 20 + 12 = 52 mV) and the levels' supply coefficient away from
+    // the table's 5.0 V (-0.2..+0.3 %/V over 2.3 V on both: 24 and 47 mV):
+    // 179 and 283 mV, and six codes of the three crossings' INL and steps.
+    const auto doubles = [](uint16_t lower, uint16_t upper, uint32_t tol_mv) {
+        return lower < upper &&
+               near(2u * lower, upper, mv_codes(tol_mv) + 6u);
+    };
     bench.verdict("THE THREE LEVELS ARE THERE AND THEY DOUBLE - a comparator "
                   "and a DAC weigh the same bandgap the ADC and the AC's own "
                   "scaler weighed, and the 1:2:4 of 22.8.7 comes out of the "
                   "crossings",
-                  located && levels[0] < levels[1] &&
-                      near(mv1, 2u * mv0, 250u) &&
-                      (!top_held ||
-                       (levels[1] < levels[2] && near(mv2, 2u * mv1, 400u))));
+                  located && doubles(levels[0], levels[1], 179u) &&
+                      (!top_held || doubles(levels[1], levels[2], 283u)));
 
     // ---- erratum 1.5.6, staged with a control -------------------------------
     //
@@ -2150,10 +2281,16 @@ void ti_hysteresis() {
     }
     print(serial, "  four repeats of the same up-sweep with hysteresis OFF "
           "land between codes ", lo, " and ", hi, crlf);
+    // A sweep that never flips returns 0xFFFF, outside every band below:
+    // each verdict asks that its own sweeps flipped.
+    const auto flipped = [](uint16_t code) { return code <= centre + half_span; };
+    const uint16_t spread = static_cast<uint16_t>(hi - lo);
+    // The premise: the spread under the smallest hysteresis table 45-34
+    // allows (29 mV high speed), in the fewest codes that can be.
     bench.verdict("THE REPEATABILITY IS MEASURED FIRST, and it is a few DAC "
-                  "codes - so a gap of tens of codes is a signal and not a "
-                  "spread",
-                  static_cast<uint16_t>(hi - lo) <= 6u);
+                  "codes - under the smallest hysteresis the table allows, so "
+                  "the gap below is a signal and not a spread",
+                  flipped(hi) && spread < mv_codes_min(29u));
 
     const uint16_t up_off = sweep(false, AcSpeed::high, false, true);
     const uint16_t down_off = sweep(false, AcSpeed::high, false, false);
@@ -2182,15 +2319,33 @@ void ti_hysteresis() {
           static_cast<int32_t>(gap_lp) * static_cast<int32_t>(lsb_uv) / 1000,
           " mV (table 45-34: 25..248, typ 100)", crlf);
 
+    // With no hysteresis the up-sweep stops on the first code past the
+    // threshold and the down-sweep on the first code below it: a gap of
+    // one, each sweep within the spread measured above and a code of its
+    // own flip either way.
+    const int32_t scatter = static_cast<int32_t>(spread);
     bench.verdict("WITH HYSTERESIS OFF THE TWO SWEEPS MEET - the up-flip and "
                   "the down-flip are the same code to within the repeatability "
                   "measured above",
-                  gap_off <= 8 && gap_off >= -8);
-    const int32_t mv_on = gap_on * static_cast<int32_t>(lsb_uv) / 1000;
+                  flipped(up_off) && flipped(down_off) &&
+                      near_signed(gap_off, 1, 2 * scatter + 1));
+    // A hysteresis of H codes gives a gap of H to H + 2 (each sweep stops
+    // on a whole code) give or take the DAC's DNL (0.3 LSB at each edge,
+    // table 45-32) and the spread s: H lies within gap - 3 - 2s .. gap + 1
+    // + 2s codes, and a code is the located supply's LSB within the
+    // location's own 873..1125 per mille. The band judged is the
+    // table's, met by some value in that interval.
+    const auto in_band = [scatter, lsb_uv](int32_t gap, int32_t lo_mv, int32_t hi_mv) {
+        const int32_t low = (gap - 3 - 2 * scatter) * static_cast<int32_t>(lsb_uv) *
+                            static_cast<int32_t>(supply_lo_permille) / 1'000'000;
+        const int32_t high = (gap + 1 + 2 * scatter) * static_cast<int32_t>(lsb_uv) *
+                             static_cast<int32_t>(supply_hi_permille) / 1'000'000;
+        return high >= lo_mv && low <= hi_mv;
+    };
     bench.verdict("AND WITH IT ON THEY DO NOT: the gap between them IS the "
                   "hysteresis, and it lands inside table 45-34's own high-speed "
-                  "band",
-                  mv_on >= 29 && mv_on <= 190);
+                  "band, within this instrument's step and the supply's location",
+                  flipped(up_on) && flipped(down_on) && in_band(gap_on, 29, 190));
 
     // ERRATUM 1.5.1 says hysteresis is present ONLY for a falling
     // transition of the output, and its E/G/J row carries one X, under
@@ -2203,11 +2358,15 @@ void ti_hysteresis() {
     print(serial, "  against the hysteresis-free crossing at ", mid_off,
           " the two edges moved out by ", up_shift, " and ", down_shift,
           " codes", crlf);
+    // An edge that did not move sits within the crossing's own scatter
+    // of the hysteresis-free middle: the spread twice, a code of its flip
+    // and the hysteresis-free gap's one code. Both edges must clear it.
     bench.verdict("ERRATUM 1.5.1 IS NOT THIS SILICON (E/G/J revision B alone) "
                   "AND THE BENCH AGREES WITH THE ROW: BOTH edges move away "
                   "from the hysteresis-free crossing, where the item describes "
                   "only one of them moving",
-                  up_shift > 2 && down_shift > 2);
+                  flipped(up_on) && flipped(down_on) &&
+                      up_shift > 2 * scatter + 2 && down_shift > 2 * scatter + 2);
 
     // ERRATUM 1.5.2 - low-power mode WITH hysteresis - is marked B..E on
     // the E/G/J row and is NOT this revision, so the pairing is legal
@@ -2216,9 +2375,7 @@ void ti_hysteresis() {
                   "AT THIS REVISION (B..E on the E/G/J row) AND IT BEHAVES: "
                   "the slower comparator shows a hysteresis of the same order, "
                   "inside its own row of table 45-34",
-                  gap_lp > 4 &&
-                      (gap_lp * static_cast<int32_t>(lsb_uv) / 1000) >= 25 &&
-                      (gap_lp * static_cast<int32_t>(lsb_uv) / 1000) <= 248);
+                  flipped(up_lp) && flipped(down_lp) && in_band(gap_lp, 25, 248));
     print(serial, "  [erratum 1.5.4 - the hysteresis specification itself "
           "being wrong - is revisions B..E on this row, so table 45-34 as "
           "printed is the right band to judge against]", crlf);
@@ -2281,22 +2438,36 @@ void ti_hysteresis() {
           " DAC codes, so the comparator's input offset is about ", offset_uv,
           " uV - with ONE DAC code (", lsb_uv,
           " uV) as this instrument's own floor under that number", crlf);
+    // The two crossings straddle the true one by the comparator's offset
+    // each way: table 45-34's high-speed -12..+20 mV, so apart by at most
+    // twice 20 mV, and a code of each mean's step and the two spreads.
+    const bool swaps_flipped = flipped(static_cast<uint16_t>(plain_hi)) &&
+                               flipped(static_cast<uint16_t>(swap_hi));
+    const int32_t swap_spread =
+        (plain_hi - plain_lo) + (swap_hi - swap_lo);
     bench.verdict("40.6.10'S TWO-MEASUREMENT RECIPE RUNS AT ALL - the swapped "
                   "comparator keeps the SENSE of its output (the terminals and "
                   "the output are inverted together, which is what makes the "
                   "recipe an offset measurement and not a polarity change) and "
-                  "still crosses in the same place to within a code or two",
-                  plain_mean > 0 && swap_mean > 0 &&
-                      near_signed(plain_mean, swap_mean, 8));
-    bench.verdict("...AND WHAT IT MEASURES IS A BOUND AND NOT A NUMBER: half "
-                  "the difference between the two crossings is at most one DAC "
-                  "code, so this comparator's input offset is smaller than the "
-                  "5 mV step of the only source that can sweep it - consistent "
-                  "with table 45-34's typical -0.1/+1 mV, and the honest "
-                  "outcome of a procedure run with an instrument coarser than "
-                  "the quantity",
-                  (offset_codes < 0 ? -offset_codes : offset_codes) <= 4 &&
-                      near_signed(midpoint, nominal, 8));
+                  "still crosses within twice the comparator's tabled offset "
+                  "of the unswapped crossing",
+                  swaps_flipped &&
+                      near_signed(plain_mean, swap_mean,
+                                  static_cast<int32_t>(mv_codes(40u)) + 2 + swap_spread));
+    // Half the difference is the offset, inside the same row of the table
+    // with a code of rounding and half the spreads. Where the midpoint
+    // lands against the scaler's nominal is printed above, not judged: the
+    // scaler's offset and gain errors are typical figures only (table
+    // 45-34).
+    bench.verdict("...AND WHAT IT MEASURES IS THE COMPARATOR'S INPUT OFFSET: "
+                  "half the difference between the two crossings lies inside "
+                  "table 45-34's high-speed -12..+20 mV - and the figure "
+                  "printed above sits against the 5 mV step of the only "
+                  "source that can sweep it, an instrument coarser than the "
+                  "table's typical -0.1/+1 mV",
+                  swaps_flipped &&
+                      (offset_codes < 0 ? -offset_codes : offset_codes) <=
+                          static_cast<int32_t>(mv_codes(20u)) + 1 + swap_spread / 2);
 
     (void)Comp2::enable(false);
     Ac::release();
@@ -2498,6 +2669,17 @@ constexpr SdadcConfig sd_free{
     .free_running = true,
 };
 
+/// The least a differential at the pair's own rails can read. With
+/// VREF = VDDANA table 45-26 bounds the conversion range at 0.7 x VREF,
+/// 22937 counts; an input past it reads at least that less the gain
+/// error (3.4 %, table 45-27: 22157), the offset (6 mV, 73 counts at a
+/// 2.7 V reference) and the INL (11 counts): 22073.
+constexpr int32_t sd_past_range = 22073;
+
+/// One decimation window a conversion: GCLK 48 MHz / (2 x (3 + 1)) = 6
+/// MHz CLK_SDADC, 4 x OSR = 256 cycles, 42.7 us.
+constexpr uint32_t sd_window_ns = 2u * (3u + 1u) * 4u * 64u * 1000u / 48u;
+
 void tk_sdadc() {
     print(serial, "  [ANACTRL.CTLSDADC and ANACTRL.BUFTEST stay DECLINED: "
           "39.8.21 calls the first Debug/Characterization and lists no values, "
@@ -2524,7 +2706,7 @@ void tk_sdadc() {
     print(serial, "  with AINN0 at GND and AINP0 at VDD the converter reads ",
           steady, crlf);
     bench.verdict("a full-scale differential is what the pads make",
-                  steady_landed && steady > 20000);
+                  steady_landed && steady >= sd_past_range);
 
     // ---- the flush: what it costs, timed, and what it discards -------------
     //
@@ -2575,10 +2757,14 @@ void tk_sdadc() {
     print(serial, "  the four results after a SWTRIG.FLUSH arrived ",
           marks[0] - t0, " ", marks[1] - marks[0], " ", marks[2] - marks[1],
           " ", marks[3] - marks[2], " ticks apart", crlf);
+    // CLK_SDADC is OSC48M's, the stopwatch the crystal's: OSC48M's 5 %
+    // (table 45-57), and the poll turn at each end of the 32 periods
+    // (about 1.5 us, util/test_wait.hpp; 36 ticks over 32) and the
+    // division's tick: 51 + 3 ticks.
     bench.verdict("A FREE-RUNNING RESULT ARRIVES EVERY DECIMATION WINDOW, "
                   "which is 4 x OSR CLK_SDADC cycles and nothing else - the "
                   "period everything below is judged against",
-                  k_landed && near(period, window_ticks, window_ticks / 8u));
+                  k_landed && near(period, window_ticks, window_ticks / 20u + 3u));
     // What one flush costs is printed, not judged: no part of brio depends
     // on what a flush discards, and 39.8.17's "flush the pipeline and
     // restart" names no time (the flush events below are counted, not
@@ -2727,11 +2913,17 @@ void tk_sdadc() {
     print(serial, "  WINMONEO: 20 ms with the condition matching gave ", hits,
           " events, and the same 20 ms with a condition this reading cannot "
           "meet gave ", misses, crlf);
+    // One event a conversion: 20 ms of the ruler and the converter, both
+    // on OSC48M, is 20000000 / 42667 ns = 468.75 windows - 468 or 469,
+    // and one more at either edge. The control's condition cannot match:
+    // no event at all.
+    constexpr uint32_t windows_20ms = 20'000'000u / sd_window_ns;
     bench.verdict("EVCTRL.WINMONEO MOVES SOMETHING REAL, with a control that "
                   "moves nothing: the window monitor's match is an event "
                   "generator and a counter downstream sees one event per "
                   "matching conversion",
-                  hits > 200u && misses < hits / 8u);
+                  hits + 1u >= windows_20ms && hits <= windows_20ms + 2u &&
+                      misses == 0u);
 
     // ---- the three interrupts through the NVIC -----------------------------
     (void)Sdadc::window_off();
@@ -2749,12 +2941,16 @@ void tk_sdadc() {
     print(serial, "  10 ms of free-running conversions with RESRDY armed: ",
           sdadc_irqs, " vector entries, last mask ", Hex{sdadc_last_mask},
           ", last result ", sdadc_last_result, crlf);
+    // One entry a conversion: 10 ms is 234.4 windows, 234 or 235, one
+    // more for a result that landed between the flags' clearing and the
+    // vector's enabling, one fewer at the far edge.
+    constexpr uint32_t windows_10ms = 10'000'000u / sd_window_ns;
     bench.verdict("THE SDADC VECTOR IS BOUND UNDER THE DEVICE HEADER'S OWN "
-                  "NAME and its RESRDY drives the NVIC - the handler reads "
-                  "RESULT, which is what clears the flag",
-                  sdadc_irqs > 10u &&
+                  "NAME and its RESRDY drives the NVIC once a conversion - the "
+                  "handler reads RESULT, which is what clears the flag",
+                  sdadc_irqs + 1u >= windows_10ms && sdadc_irqs <= windows_10ms + 2u &&
                       (sdadc_last_mask & Sdadc::flag_resrdy) != 0u &&
-                      sdadc_last_result > 20000);
+                      sdadc_last_result >= sd_past_range);
 
     // OVERRUN through the same vector: arm it and stop reading.
     sdadc_irqs = 0;

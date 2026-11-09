@@ -44,13 +44,14 @@
 //   7  prescalers: free-running rate for each PRESC vs the formula
 //      (Ticker-timed, OSC32K tolerance);
 //   8  accumulation 1..128: mean stays, noise falls;
-//   9  sample_length / sample_delay / init_delay lengthen the
-//      conversion as the formula says;
+//   9  sample_length / sample_delay lengthen the conversion as the
+//      formula says; what init_delay costs a one-shot printed;
 //  10  event start: PIT/64 -> ADC start, 512 results/s (EVSYS user);
 //  11  window comparator, four modes, on a DAC ramp: WCMP at the exact
 //      codes;
 //  12  errata 2.3.2: with init_delay != 0, select() after enable gives
-//      the OLD input for one conversion - shown, then flush() fixes it;
+//      the OLD input for one conversion - whether this die shows it
+//      printed, then flush() judged to make the next read current;
 //  13  internal inputs: GND ~ 0, VDDDIV10 ~ VDD/10, VDDIO2DIV10 (DB
 //      only; on a DA the DAC-against-VDD reading repeats instead),
 //      TEMPSENSE plausible (15..45 C);
@@ -813,8 +814,12 @@ void t7_rates() {
 // for 50 ms, LOWLAT off then on: the difference per conversion is the
 // initialization the chapter tables - ADC 10 us, PGA 20, an internal
 // reference 60, the temperature sensor and the DAC input 35 (the slowest
-// in parallel). Bound: +-20 % + 4 us (the state machine's granularity is
-// not stated; the loop's own time cancels in the difference).
+// in parallel). The table states each time as a figure, no tolerance;
+// the loop's own time cancels in the difference, and the instrument's
+// resolution is what is left: a conversion period of about 30 us read as
+// 50 ms over the n conversions of the window (one conversion more or
+// less moves it by p / n, under 0.03 us), the difference truncated to
+// whole microseconds (under 1 us): +-2 us.
 struct InitCase { const char* name; AdcConfig c; uint8_t input; uint8_t exp_us; };
 
 uint32_t oneshot_period_ns(const AdcConfig& c, uint8_t input) {
@@ -824,6 +829,10 @@ uint32_t oneshot_period_ns(const AdcConfig& c, uint8_t input) {
     tbase_on();
     const uint16_t t0 = tbase();
     uint16_t n = 0;
+    // 62500 counts (50 ms) on a 16-bit difference: a turn (a conversion
+    // and its read, under 200 us = 250 counts) cannot carry the reading
+    // from below the window's end past the wrap at 65536.
+    static_assert(62500u + 250u < 65536u, "the window and one turn stay under the wrap");
     while (static_cast<uint16_t>(tbase() - t0) < 62500u) {   // 50 ms
         (void)A::read();
         ++n;
@@ -853,7 +862,7 @@ void t9_init_time() {
         const int32_t init_us = (static_cast<int32_t>(p_off) - static_cast<int32_t>(p_on)) / 1000;
         print(serial, "  ", k.name, ": ", p_off, " ns a conversion LOWLAT off, ", p_on, " on -> ", init_us,
               " us (table: ", k.exp_us, ")", crlf);
-        verdict(k.name, near(init_us, k.exp_us, k.exp_us / 5 + 4));
+        verdict(k.name, near(init_us, k.exp_us, 2));
     }
 }
 
@@ -1720,8 +1729,12 @@ void t7_prescalers() {
         const uint32_t exp = (SysClock::hz / cycles) / 10;   // per 100 ms
         print(serial, "  div", adc_presc_divisor(p), ": ", n, " results/100ms, formula ",
               exp, crlf);
-        verdict("rate within 8 %", near(static_cast<int32_t>(n), static_cast<int32_t>(exp),
-                                        static_cast<int32_t>(exp * 8 / 100) + 2));
+        // The rate is CLK_PER's (a crystal); the window is 100 Ticker
+        // milliseconds, the PIT on OSC32K: within its 10 % band a window
+        // is 0.909..1.111 of nominal (11.1 %), one millisecond of the
+        // count's granularity (1 %) and a result at each end: 13 % + 2.
+        verdict("rate within the window's 13 %", near(static_cast<int32_t>(n), static_cast<int32_t>(exp),
+                                        static_cast<int32_t>(exp * 13 / 100) + 2));
     }
     A::init(clock, AdcConfig{.reference = Ref::v2048});
 }
@@ -1780,8 +1793,10 @@ void t9_sampling() {
         A::stop();
         const uint32_t exp = (SysClock::hz / adc_conversion_cycles(k.c)) / 10;
         print(serial, "  ", k.name, ": ", n, "/100ms, formula ", exp, crlf);
+        // The same bound as letter 7's: the window's OSC32K band (11.1 %),
+        // its millisecond (1 %) and a result at each end.
         verdict(k.name, near(static_cast<int32_t>(n), static_cast<int32_t>(exp),
-                             static_cast<int32_t>(exp * 8 / 100) + 2));
+                             static_cast<int32_t>(exp * 13 / 100) + 2));
     }
     // init_delay: one-shot conversions per 100 ms with a big init delay
     // (each start pays the delay: 256 CLK_ADC at 375 kHz = 683 us)
@@ -1792,12 +1807,12 @@ void t9_sampling() {
     const uint32_t start = Ticker::millis();
     uint32_t n = 0;
     while (Ticker::millis() - start < 100) { (void)A::read(); ++n; }
-    // MEASURED on rev A5, where the formula reads otherwise: INITDLY is
-    // paid only for the first conversion after enable, not per start -
-    // one-shots run at the plain rate.
-    print(serial, "  init_delay 256 @ 375 kHz: ", n, " one-shots/100ms (bench: ~2240 - the delay "
-                  "is paid once after enable, not per start)", crlf);
-    verdict("init_delay applies once after enable (not per start)", n > 1500);
+    // Printed, not judged: on the AVR128DB48 rev A5 INITDLY was paid only
+    // for the first conversion after enable, not per start (one-shots at
+    // the plain rate, about 2240 in the window), where the chapter's
+    // formula reads otherwise - one die's behaviour, no contract.
+    print(serial, "  init_delay 256 @ 375 kHz: ", n, " one-shots/100ms (", n > 1500 ? "the delay "
+                  "paid once after enable, not per start" : "the delay paid per start", ")", crlf);
     A::init(clock, AdcConfig{.reference = Ref::v2048});
 }
 
@@ -1872,8 +1887,12 @@ void t12_errata() {
     A::select(Wire{});
     const uint16_t first = A::read();
     const uint16_t second = A::read();
-    print(serial, "  first read after select: ", first, "  second: ", second, " (wire ~3200)", crlf);
-    verdict("first conversion still on the OLD input (GND) - the erratum", first < 100 && second > 3000);
+    // Whether the erratum shows on this die is printed: an erratum is a
+    // silicon revision's, and the suite judges the driver's remedy below,
+    // which must hold either way.
+    print(serial, "  first read after select: ", first, "  second: ", second, " (wire ~3200): ",
+          first < 100 && second > 3000 ? "the erratum shows (the first on the old input)"
+                                       : "the erratum does not show", crlf);
     A::select(AdcInput::gnd);
     A::flush();                                    // the driver's remedy
     const uint16_t after_flush = A::read();

@@ -955,9 +955,17 @@ void td_stages() {
           width_min, "..", width_max, " cycles (one GCLK_CCL period = ",
           slow_period, ")", crlf);
     bench.verdict("a rising edge produces a PULSE and not a level", caught >= 6u);
+    // The band, derived: GCLK_CCL is OSC48M / 4096 and the CPU runs on
+    // OSC48M, so the period is exactly 4096 of the ruler's cycles, and
+    // each edge is seen late by a constant plus up to one poll turn (24
+    // cycles in the release listing: the pad read's call and seven
+    // instructions); one SysTick (entry, a fourteen-instruction handler,
+    // exit: about 60) may land between an edge and its sighting, and
+    // Ticker::cycles() reads twice across a reload (about 30). Under 128
+    // either way. Logged: 4082..4114.
     bench.verdict("and the pulse is one GCLK_CCL period long (37.6.2.6)",
-                  caught >= 6u && width_min > slow_period / 2u &&
-                      width_max < 2u * slow_period);
+                  caught >= 6u && width_min + 128u >= slow_period &&
+                      width_max <= slow_period + 128u);
 
     // Held high, the output stays low: it is an edge detector, not a
     // level pass.

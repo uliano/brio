@@ -404,7 +404,8 @@ at 2000 mV from the 2.048 V reference against VDD as the reference:
   clock.
 - `init_delay` is paid once, for the first conversion after enabling,
   not per start (2230 one-shots per 100 ms with 256 cycles of delay at
-  375 kHz: the plain rate).
+  375 kHz: the plain rate). The suite prints it: one die, where the
+  chapter's formula reads otherwise, is no contract.
 - The result and its flags are ready ~2 CLK_PER after the conversion
   bit clears: wait on RESRDY, not on STCONV, or you read the previous
   result.
@@ -419,7 +420,7 @@ at 2000 mV from the 2.048 V reference against VDD as the reference:
   tolerance).
 - Errata 2.3.2 reproduced: with `init_delay` set, a `select()` after
   enabling returns the old input for one conversion; `flush()` cures
-  it.
+  it. The suite prints whether the erratum shows and judges the cure.
 - VDD/10 reads 3280 mV on a 3.3 V rail and 5170 on a 5 V one; die
   temperature 27-28 C from the signature-row factors; GND reads 5-6
   counts (the offset).
@@ -723,7 +724,9 @@ resistor, 96 nF - the 1/e time 0.96 ms, the e^-2 time twice that within
   DIFF; on SAMPLE a burst matches per sample.
 - **Initialization per trigger** (table 31-5), software-started one-shots
   with LOWLAT off against on: the ADC 9 us, the PGA 20, the 1.024 V
-  reference 59, TEMPSENSE and the DAC input 35 - the table's figures. A
+  reference 59, TEMPSENSE and the DAC input 35 - the table's figures,
+  which the suite holds to +-2 us (the instrument's resolution: the
+  table gives no tolerance). A
   free-running conversion or a burst pays none: their rates are the
   same with LOWLAT off.
 - **PGACTRL** reads 0x00 after reset (its register box says 0x04, its

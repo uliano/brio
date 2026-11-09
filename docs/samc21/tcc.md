@@ -656,8 +656,12 @@ and `tc.md` carries the capture side's own findings.
   the first pulse is then taken. Why the fault input waits on the count
   is not established.
 - **A blanking window gates the input, not its edge.** With the pad held
-  high for 150 ms, a fault valid with no window was still valid with a
-  5.4 ms one, because the window closes long before the period does.
+  high for 150 ms, a fault valid with no window was still valid with
+  BLANKVAL 255, because the window closes long before the 100 ms period
+  does. How long that window is the chapter says two ways - 256
+  prescaled clocks in the bit description (5.5 ms at /1024), a fixed /64
+  in its worked examples (the BLANKPRESC bit the device header carries
+  and the register table omits) - and this finding holds under either.
 - **FCTRLn.QUAL ties the fault to the waveform, and to THE FAULT'S OWN
   CHANNEL.** Fault B qualifies on channel 1's output: with CC1 at zero
   the same held input raised nothing, and with CC1 at half the period it

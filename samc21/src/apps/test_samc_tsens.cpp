@@ -669,15 +669,32 @@ void tb_calibration() {
         print(serial, "  the same die with CAL cleared has a gain term of ",
               static_cast<int32_t>(term), " at GAIN ", factory.gain,
               "; at 2^24 that predicts ", predicted, crlf);
+        // The bound, from the CAL-cleared batch's own spread s (centi-C at
+        // the factory GAIN): its mean sits within s/2 of the die's reading,
+        // and the long conversion is one more reading of the same die, no
+        // further than s from that mean (a wander slower than a conversion
+        // is not averaged away by a longer one) - so 1.5 s + 2 counts of
+        // rounding, mapped by the same 2^24 / GAIN. Logged: up to 0.72 of
+        // it, about 0.3 % of the prediction.
+        const int64_t noise = without.spread() * 3 / 2 + 2;
+        const int32_t tol = static_cast<int32_t>(
+            (noise * gain_zero_means) / static_cast<int64_t>(factory.gain));
+        print(serial, "  measured ", blank_value - predicted, " off the prediction, "
+              "against the CAL-cleared batch's noise mapped by the same factor, +-",
+              tol, crlf);
         bench.verdict("GAIN'S RESET VALUE IS NOT NO GAIN - IT IS 2^24. The "
                       "reading is the CAL-cleared gain term multiplied by "
-                      "2^24 / GAIN, to under a per cent, which no other "
-                      "reading of a zero GAIN can produce",
-                      near_signed(blank_value, predicted,
-                                  abs_signed(predicted) / 50 + 200));
+                      "2^24 / GAIN, within that batch's own noise mapped by the "
+                      "same factor, which no other reading of a zero GAIN can "
+                      "produce",
+                      near_signed(blank_value, predicted, tol));
         // (2) THE TIME. Letter e measures a conversion at 2 x GAIN
         // GCLK_TSENS periods; 2 x 2^24 at 48 MHz is about 700 ms, and
-        // that is what the stopwatch above just saw.
+        // that is what the stopwatch above just saw. The bound: GCLK_TSENS
+        // and the ruler are both OSC48M, so its error cancels, and what
+        // separates the two figures is the two truncations to whole
+        // milliseconds (under 1 ms each) and the conversion's fixed
+        // overhead (about 2000 periods, 0.04 ms: letter e) - 2 ms.
         const uint32_t predicted_ms = static_cast<uint32_t>(
             (2u * gain_zero_means * 1000) / nominal_hz);
         print(serial, "  and 2 x 2^24 periods at 48 MHz is ", predicted_ms,
@@ -685,7 +702,7 @@ void tb_calibration() {
         bench.verdict("...and the SECOND witness agrees: the measurement takes "
                       "the seven hundred milliseconds 2^24 periods cost, "
                       "against the four a factory-GAIN one does",
-                      near(blank_ms, predicted_ms, predicted_ms / 5u + 10u));
+                      near(blank_ms, predicted_ms, 2u));
         bench.verdict("WHICH IS WHY THE DRIVER REFUSES A ZERO GAIN: the reset "
                       "value is not a benign nothing but a two-hundredfold "
                       "amplifier with a 0.7-second conversion, and the number "
@@ -851,10 +868,11 @@ void td_scale_lever() {
     print(serial, "  OSC48M measures ", *osc_hz, " Hz on the crystal's scale, ",
           osc_ppm, " ppm ", *osc_hz < nominal_hz ? "SLOW" : "FAST",
           " of the 48 MHz the factory GAIN assumes", crlf);
-    bench.verdict("the internal RC is inside table 45-57's +-5 % but is NOT "
-                  "at its nominal rate - which is what makes this letter "
-                  "possible at all",
-                  osc_ppm > 500u && osc_ppm < 50'000u);
+    bench.verdict("the internal RC is inside table 45-57's +-5 %", osc_ppm < 50'000u);
+    // How far from nominal this die's OSC48M runs is the experiment's
+    // signal, not a contract: under 500 ppm the comparison below has
+    // nothing to map and is a skip.
+    const bool signal = osc_ppm >= 500u;
 
     bench.verdict("THE DPLL LOCKS TO THE CRYSTAL at a true 48 MHz", dpll_up());
     const auto dpll_hz = measure_hz(gen_dpll);
@@ -867,9 +885,8 @@ void td_scale_lever() {
           ppm_off(*dpll_hz, nominal_hz), " ppm off nominal - the crystal's own "
           "error and nothing else, and it CANCELS out of the comparison "
           "because both frequencies were weighed on the same reference", crlf);
-    bench.verdict("the crystal-locked loop is at 48 MHz to a few hundred ppm, "
-                  "where OSC48M is thousands off",
-                  ppm_off(*dpll_hz, nominal_hz) < osc_ppm);
+    // Printed above, not judged: the loop's error is the crystal's, and no
+    // crystal tolerance is on record to bound it.
 
     // ---- the interleaved comparison -------------------------------------
     constexpr uint8_t cycles = 4;
@@ -949,17 +966,31 @@ void td_scale_lever() {
                   "cycles agree with each other far better than a single "
                   "reading's own spread",
                   cycle_spread < worst_spread);
-    bench.verdict("THE SAME DIE READ ON TWO REFERENCES DIFFERS BY THE "
-                  "REFERENCE'S OWN ERROR MAPPED THROUGH 43.6.1 - a "
-                  "measurement no thermometer could have made, and one no "
-                  "other chapter in this stratum offered",
-                  near_signed(median, predicted,
-                              abs_signed(predicted) / 4 + cycle_spread + 4));
-    bench.verdict("...and the error rides on the SPAN and not on the "
-                  "temperature, so a reading near zero degrees is off by far "
-                  "more than its own ppm would suggest",
-                  abs_signed(predicted) * 3 >
-                      (abs_signed(osc_mean) * static_cast<int32_t>(osc_ppm)) / 1'000'000 * 3 + 1);
+    if (signal) {
+        // The bound: the median lies among the four differences, and the
+        // die's true difference within their spread of them (the spread
+        // carries the readings' noise and what the A-B-B-A shape leaves of
+        // the drift); 4 counts more for the rounding - each batch mean and
+        // the half-sums (1), the median's halving (1), the prediction's
+        // truncation (1), and FREQM's one count in 127500 at refnum 255
+        // (8 ppm of the span: under 1). No share of the prediction itself
+        // is allowed: the ppm it scales is measured, not assumed.
+        // Logged: up to 5 against bounds of 7..21 over twenty runs.
+        bench.verdict("THE SAME DIE READ ON TWO REFERENCES DIFFERS BY THE "
+                      "REFERENCE'S OWN ERROR MAPPED THROUGH 43.6.1 - a "
+                      "measurement no thermometer could have made, and one no "
+                      "other chapter in this stratum offered",
+                      near_signed(median, predicted, cycle_spread + 4));
+        // The same ppm applied to the temperature instead of the span,
+        // printed: it is arithmetic on the figures above, not a measurement.
+        print(serial, "  the same ppm on the temperature instead of the span would "
+              "move it ", (abs_signed(osc_mean) * static_cast<int32_t>(osc_ppm)) / 1'000'000,
+              " centi-C: the error rides on the SPAN, so a reading near zero "
+              "degrees is off by far more than its own ppm suggests", crlf);
+    } else {
+        bench.skip("the two references' difference: this die's OSC48M sits within 500 ppm "
+                   "of nominal, which leaves no error to map");
+    }
 
     // ---- the structural half: half the clock, the same GAIN --------------
     bench.verdict("the sensor moves to the bare crystal at 24 MHz",
@@ -974,10 +1005,16 @@ void td_scale_lever() {
         print(serial, "  halving the clock should DOUBLE the span from the "
                       "offset: predicted ", predicted_24, " centi-C, measured ",
               on_xtal.mean, crlf);
+        // The bound: a batch mean sits within half its spread of the die's
+        // reading, and a mean carried through a factor k carries k times
+        // that - the 24 MHz batch's s/2, the DPLL means' worst_spread/2
+        // doubled, the cycle spread for the die's drift between the
+        // batches, 4 counts of rounding. Logged: up to 15 against 67..105.
         bench.verdict("THE 1/f LAW IS THE SILICON'S AND NOT AN INFERENCE: the "
                       "span from the OFFSET doubles when the ruler halves",
                       near_signed(on_xtal.mean, predicted_24,
-                                  2 * on_xtal.spread() + 150));
+                                  on_xtal.spread() / 2 + worst_spread +
+                                      cycle_spread + 4));
         bench.verdict("...and the raw number at 24 MHz is nowhere near a "
                       "temperature, which is the trap 43.6.1's note warns "
                       "about in one sentence and nowhere else",
@@ -1002,8 +1039,14 @@ void td_scale_lever() {
                       "on a clock the factory never calibrated for - the "
                       "escape 43.6.1's note offers in half a sentence, made "
                       "arithmetic",
+                      // The same rule: s/2 of this batch, worst_spread/2
+                      // of the DPLL means, the cycle spread for the drift,
+                      // 3 counts of rounding (the scaled GAIN's own rounding
+                      // is 1 in 87513 of the span: nothing). Logged: up to
+                      // 7 against 41..60.
                       near_signed(corrected.mean, dpll_mean,
-                                  corrected.spread() + worst_spread + 60));
+                                  corrected.spread() / 2 + worst_spread / 2 +
+                                      cycle_spread + 3));
     }
     if (on_xtal.ok) {
         const int32_t rescaled =
@@ -1012,8 +1055,12 @@ void td_scale_lever() {
               " centi-C against the true-48 MHz reading ", dpll_mean, crlf);
         bench.verdict("...and rescaling the READING instead of the GAIN gets "
                       "to the same place",
+                      // Rescaling halves the span, so the 24 MHz batch's
+                      // s/2 is halved: s/4, worst_spread/2, the cycle
+                      // spread, 3 counts. Logged: up to 8 against 36..61.
                       near_signed(rescaled, dpll_mean,
-                                  on_xtal.spread() + worst_spread + 60));
+                                  on_xtal.spread() / 4 + worst_spread / 2 +
+                                      cycle_spread + 3));
     }
 
     clocks_down();
@@ -1145,7 +1192,9 @@ void te_timing() {
     bench.verdict("a single measurement costs at least what a free-running "
                   "one does - the start is on top of the measurement, not "
                   "instead of it",
-                  p_full == 0u || single + 4u >= p_full);
+                  // +1: each figure is a 64-run average truncated to a
+                  // whole tick, so each reads under a tick low.
+                  p_full == 0u || single + 1u >= p_full);
 
     // The averaging verb's cost, which is ten of those.
     const uint32_t a0 = ticks_now();
@@ -1156,8 +1205,12 @@ void te_timing() {
     const uint32_t avg_cost = (a1 - a0) / 8u;
     print(serial, "  43.6.2.3's recommended average of ten costs ",
           ticks_us(avg_cost), " us", crlf);
-    bench.verdict("the average of ten costs about ten measurements",
-                  near(avg_cost, single * 10u, single * 2u + 100u));
+    // The claim is a COUNT - ten conversions, not nine or eleven - so the
+    // band is half a conversion either side; the averaging arithmetic and
+    // the truncations are microseconds against 3.7 ms. Logged: 33 us over
+    // ten measurements' 37150.
+    bench.verdict("the average of ten costs ten measurements - not nine, not eleven",
+                  near(avg_cost, single * 10u, single / 2u));
 
     Tsens::release();
     (void)Stopwatch::enable(false);
@@ -1189,15 +1242,20 @@ void te_timing() {
 // so rather than pretending otherwise.
 void tf_datapath_width() {
     bench.verdict("the sensor comes up fully calibrated", tsens_up(gen_sys, base_cfg()));
-    const auto base = Tsens::measure_average(10);
-    bench.verdict("and gives a reference reading", base.has_value());
-    if (!base) {
+    // A batch rather than one average, for its spread s: every bound below
+    // is that noise. The batch mean sits within s/2 of the die's reading,
+    // and a single conversion within s of the mean, so a single reading's
+    // distance from the term below is at most 1.5 s + 2 counts of rounding.
+    const Batch ref = take(20);
+    bench.verdict("and gives a reference reading", ref.ok);
+    if (!ref.ok) {
         Tsens::release();
         return;
     }
-    const int32_t span = *base - factory.offset;
-    print(serial, "  reference reading ", *base, " centi-C, gain term ", span,
-          " at GAIN ", factory.gain, crlf);
+    const int32_t span = ref.mean - factory.offset;
+    const int32_t noise = ref.spread() * 3 / 2 + 2;
+    print(serial, "  reference reading ", ref.mean, " centi-C (spread ", ref.spread(),
+          "), gain term ", span, " at GAIN ", factory.gain, crlf);
     bench.verdict("the gain term is a few thousand counts, which is what makes "
                   "both levers below work",
                   abs_signed(span) > 1000 && abs_signed(span) < 100000);
@@ -1219,10 +1277,13 @@ void tf_datapath_width() {
                       "43.8.7's 'more than 24'",
                       abs_signed(*wide) > 32767 && !Tsens::overflowed() &&
                           !Tsens::overflow_flag());
+        // Eight times the term, within eight times a single reading's noise.
+        // Logged: up to 129 counts.
+        print(serial, "  eight times the gain term is ", span * 8, "; the amplified "
+              "term is ", *wide - factory.offset, ", allowed +-", 8 * noise, crlf);
         bench.verdict("and the amplified result is eight times the gain term, "
                       "so GAIN really is a linear multiplier and not a mode",
-                      near_signed(*wide - factory.offset, span * 8,
-                                  abs_signed(span) / 2 + 200));
+                      near_signed(*wide - factory.offset, span * 8, 8 * noise));
     }
 
     // ---- lever 2: walk OFFSET down to the rail --------------------------
@@ -1275,7 +1336,11 @@ void tf_datapath_width() {
         bench.verdict("THE RAIL IS AT -2^23, LOCATED TO A FEW HUNDRED COUNTS "
                       "IN EIGHT MILLION - the VALUE register is a signed "
                       "24-bit datum, exactly as its own bit table draws it",
-                      near_signed(rail, tsens_value_min, 2 * scan_step + 400));
+                      // The first overflow is under one step past the
+                      // rail, and the term added is one single reading's
+                      // noise away from the batch's: a step plus that
+                      // noise. Logged: 19..73 below -2^23.
+                      near_signed(rail, tsens_value_min, scan_step + noise));
         bench.verdict("...and the last result before it is nowhere near a "
                       "16-bit ceiling, which no reading of 43.6.4 survives",
                       abs_signed(last_ok) > 8'000'000);
@@ -1295,7 +1360,11 @@ void tf_datapath_width() {
                       "a caller who ignores STATUS.OVF gets a plausible "
                       "number OF THE WRONG SIGN, where this stratum's other "
                       "converter saturates at its rail instead",
-                      near_signed(tsens_signed(ovf_raw), wrapped, 4 * scan_step) &&
+                      // The register holds that conversion's own result
+                      // wrapped, and `wrapped` is the same OFFSET plus the
+                      // batch's term: they differ by one reading's noise.
+                      // Logged: up to 38.
+                      near_signed(tsens_signed(ovf_raw), wrapped, noise) &&
                           tsens_signed(ovf_raw) > 0);
     }
     print(serial, "  THE POSITIVE RAIL IS OUT OF REACH: the gain term is "
@@ -1343,18 +1412,27 @@ void tf_datapath_width() {
 // verdicts and neither is a coin.
 void tg_window() {
     bench.verdict("the sensor comes up fully calibrated", tsens_up(gen_sys, base_cfg()));
-    const auto here = Tsens::measure_average(10);
-    bench.verdict("and locates the current reading", here.has_value());
-    if (!here) {
+    const Batch here = take(20);
+    bench.verdict("and locates the current reading", here.ok);
+    if (!here.ok) {
         Tsens::release();
         return;
     }
-    const int32_t t = *here;
-    // Wide enough that the reading's own noise cannot cross it: letter c
-    // measures the spread in single digits of centi-degrees.
+    const int32_t t = here.mean;
+    // Each probe compares ONE conversion against a threshold, and one
+    // conversion sits within 1.5 spreads of the batch mean (the mean within
+    // half a spread of the die's reading, the conversion within a spread of
+    // the mean) - tens of centi-degrees, letter c. The margin has only to
+    // clear that and whatever the die drifts while the letter runs, which
+    // no document bounds; 20 C is far past both and far inside the 24-bit
+    // field, and a margin wider than the noise hides nothing a mode could
+    // get wrong. What is judged is that it does clear the noise.
     constexpr int32_t margin = 2000;   // 20 C
-    print(serial, "  the die reads ", t, " centi-C; every window below is "
-                  "placed +-", margin, " centi-C around that", crlf);
+    const int32_t noise = here.spread() * 3 / 2 + 2;
+    print(serial, "  the die reads ", t, " centi-C, a single conversion within +-",
+          noise, "; every window below is placed +-", margin,
+          " centi-C around that", crlf);
+    bench.verdict("the margin clears a single conversion's own noise", noise < margin);
 
     /// Arm one window and say whether it matched; nothing when the block
     /// did not come up or the measurement did not land. The block is disabled
@@ -1549,12 +1627,17 @@ void th_event_chain() {
     chain_cfg.calibration.gain = chain_gain;
     bench.verdict("a reference reading is taken AT THE CHAIN'S OWN GAIN",
                   tsens_up(gen_sys, chain_cfg));
-    const auto chain_ref = Tsens::measure_average(10);
-    bench.verdict("and it measures", chain_ref.has_value());
-    const int32_t reference = chain_ref ? *chain_ref : 0;
+    // A batch, for its spread s: every value the interrupt brings back is
+    // one conversion at this GAIN, within 1.5 s + 2 counts of the batch
+    // mean (the mean within s/2 of the die's reading, a conversion within
+    // s of the mean) - the tolerance of "the same measurement" below.
+    const Batch chain_ref = take(20);
+    bench.verdict("and it measures", chain_ref.ok);
+    const int32_t reference = chain_ref.ok ? chain_ref.mean : 0;
+    const int32_t chain_noise = chain_ref.spread() * 3 / 2 + 2;
     print(serial, "  at GAIN ", chain_gain, " the same die reads ", reference,
-          " - not a temperature any more, and the yardstick for every value "
-          "the interrupt brings back below", crlf);
+          " (spread ", chain_ref.spread(), ") - not a temperature any more, and "
+          "the yardstick for every value the interrupt brings back below", crlf);
 
     /// Arm the capture: the buffer marked unwritten, RESRDY armed into
     /// the NVIC. After tsens_up(), whose init() disables the vector.
@@ -1615,15 +1698,24 @@ void th_event_chain() {
         return filled;
     };
 
-    /// Are all sixteen values the same measurement the reference was?
-    auto all_near_reference = [reference]() {
+    /// Are all sixteen values the same measurement the reference was? The
+    /// largest distance is printed, beside the tolerance.
+    auto all_near_reference = [reference, chain_noise]() {
+        int32_t worst = 0;
+        bool all = true;
         for (uint16_t i = 0; i < chain_results; ++i) {
-            if (results[i] == 0xFFFFFFFFul ||
-                !near_signed(tsens_signed(results[i]), reference, 400)) {
-                return false;
+            if (results[i] == 0xFFFFFFFFul) {
+                all = false;
+                continue;
+            }
+            const int32_t d = abs_signed(tsens_signed(results[i]) - reference);
+            if (d > worst) {
+                worst = d;
             }
         }
-        return true;
+        print(serial, "  the values' largest distance from the reference is ", worst,
+              ", allowed ", chain_noise, crlf);
+        return all && worst <= chain_noise;
     };
 
     // The ASYNCHRONOUS path takes no channel clock at all, but the channel
@@ -1694,18 +1786,12 @@ void th_event_chain() {
                   "has no clock to sample with, so a 21 ns pulse reaches a "
                   "channel clocked at 32 kHz and every event lands",
                   narrow_async == chain_results);
-    bench.verdict("A SAMPLED PATH DOES: the same narrow event on a channel "
-                  "clocked SLOWER than the generator is mostly not there when "
-                  "the channel looks, and 24 MHz against 48 is no better than "
-                  "32 kHz",
-                  narrow_slow < chain_results / 2u && narrow_half < chain_results / 2u);
-    bench.verdict("AND WIDENING THE PULSE IS NOT THE WHOLE ANSWER EITHER: a "
-                  "synchronous channel on a 96 kHz generator loses a pulse as "
-                  "wide as its OWN PERIOD, so 'synchronous' is not a licence "
-                  "to clock the channel slowly - the channel clock is "
-                  "ON-DEMAND, which erratum 1.12.1 leaves no alternative to, "
-                  "and starting it costs about a period",
-                  wide_slow_sync < chain_results / 2u);
+    // The sampled paths' counts are printed above, not judged: the chapter
+    // requires an event to outlast the channel's clock and says nothing of
+    // how often a shorter one is caught, so "mostly not there" (1..7 of 16
+    // on the crystal-resynchronized path here) is this die's statistic -
+    // and the wide pulse a 96 kHz on-demand channel loses rests on
+    // erratum 1.12.1's start-up period, likewise.
     bench.verdict("the channel goes back to a clock the chain can use",
                   GclkChannel::connect(Evsys::gclk_id(ev_start_channel),
                                        gen_slow));
@@ -1735,7 +1821,7 @@ void th_event_chain() {
         // block reads at this GAIN, and placing a threshold from a
         // factory-GAIN reading instead makes this control fire when it
         // should not.
-        const bool here = chain_ref.has_value();
+        const bool here = chain_ref.ok;
         bench.verdict("the current reading at the chain's GAIN is in hand",
                       here);
         if (here) {
@@ -1955,11 +2041,9 @@ void tj_drift() {
         } else {
             bench.skip("the trend: inside the reading's own spread");
         }
-        bench.verdict("A MINUTE UNDER LOAD, SAMPLED EVERY TEN SECONDS, DOES NOT "
-                      "WALK THE READING AWAY - whatever the trend is, it stays "
-                      "inside a couple of degrees, which is the only claim "
-                      "this bench is entitled to make about it",
-                      hi - lo < 200);
+        // The range is printed above, not judged: how far a die wanders in
+        // a minute is the room's business as much as the load's, and no
+        // document bounds either.
     }
 
     if (before.ok && after.ok) {
@@ -1980,9 +2064,11 @@ void tj_drift() {
         bench.verdict("the reading stayed a plausible temperature throughout "
                       "the load",
                       after.mean > 0 && after.mean < 10000);
+        // "An order of magnitude" is the claim's own definition: ten times
+        // the baseline's spread, + 2 counts for the two spreads' rounding.
         bench.verdict("and the noise did not grow by an order of magnitude "
                       "under a busy bus",
-                      after.spread() <= before.spread() * 10 + 50);
+                      after.spread() <= before.spread() * 10 + 2);
     }
 
     Tsens::release();
@@ -2055,17 +2141,16 @@ void tp_pac_protection() {
     print(serial, "  a PAC-protected write does not fault this core: 11.5.2.4's "
                   "'peripheral returns an access error' is not a bus error here",
           crlf);
-    bench.verdict("ERRATUM 1.19.1 IS REPRODUCED: with PAC write protection set "
-                  "for the TSENS the START does nothing, so 43.5.8's list of "
-                  "the two registers protection 'does not apply to' is wrong "
-                  "about CTRLB on this silicon",
-                  !started);
-    bench.verdict("AND IT IS WORSE THAN THE ERRATUM SAYS: no PAC interrupt "
-                  "flag is raised either, so 11.5.2.4's 'the corresponding "
-                  "interrupt flag bit will be set' does not happen and the "
-                  "write is dropped in COMPLETE SILENCE - nothing a program "
-                  "can read tells it the measurement never started",
-                  (intflaga & (1ul << 12)) == 0u);
+    // Printed, not judged: whether the erratum reproduces, and whether the
+    // PAC flags the dropped write, are this die's answers - the erratum
+    // describes a defect, not a behaviour every part must show, and
+    // 11.5.2.4 promises the flag.
+    print(serial, "  erratum 1.19.1 (CTRLB not functional under PAC protection): ",
+          started ? "NOT reproduced, the START took effect"
+                  : "reproduced, the START did nothing", crlf);
+    print(serial, "  the PAC flag for the TSENS (11.5.2.4 says it sets): ",
+          (intflaga & (1ul << 12)) != 0u ? "set" : "NOT set, the write dropped silently",
+          crlf);
 
     bench.verdict("with the protection cleared the block measures again",
                   Tsens::measure().has_value());

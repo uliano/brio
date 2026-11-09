@@ -206,7 +206,10 @@ Handle the shared interrupt, line 0, whose vector is `SYSTEM_Handler`:
 ## Bench findings
 
 `test_samc_debug` letters a, b and c on the ATSAMC21J18A rev F. Letter c
-sits outside `z` because it reboots the board twice.
+sits outside `z` because it reboots the board twice. Whether each
+erratum below shows, and the undocumented reset bit, are printed by the
+suite rather than judged: an erratum is its silicon revision's, and one
+die is no contract; the controls each claim needs are verdicts.
 
 **The reset state, and a bit neither document has.** STATUSA reads 0,
 STATUSB reads 0x00000002 (the DSU, alone), and **STATUSC reads

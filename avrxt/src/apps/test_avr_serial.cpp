@@ -16,8 +16,8 @@
 // one BAUD register): every single-board letter that moves frames also
 // times a run of them on the ruler (TCB1 + TCB2 cascaded at CLK_PER)
 // from the first store to the last stop bit's end, against the run's
-// length at the rate ASKED, and judges the reading in thousandths, -1 %
-// to +3 % - b every one of the 36 formats at 115200 (the frame's length:
+// length at the rate ASKED, and judges the reading in thousandths, +-1 %
+// (the generator's rounding and the run's fixed cost) - b every one of the 36 formats at 115200 (the frame's length:
 // parity and stop bits really sent) and USART0, USART1 and USART3 each on
 // its own generator; c 8N1 and d nine data bits at 115200; e 8N1 at 9600;
 // f every rung from the register's floor (1465 baud) through every rate
@@ -322,10 +322,13 @@ const char* fmt_name(const UsartFormat& f) {
 // A RUN of them on the ruler, from the first store to the last stop bit's
 // end (TXCIF, 27.3.2.3), against the run's length AT THE RATE ASKED - never
 // at the rate the register produced, which is what a wrong divisor would
-// hide - and judges the reading in thousandths: -1 % to +3 %, the window
-// every family's suites share. The fractional generator rounds BAUD to
-// the nearest 64th of a sample (27.3.2.2.1), at most 0.78 % at BAUD = 64,
-// the register's floor, and 0.16 % at every rung these letters ask.
+// hide - and judges the reading in thousandths. The fractional generator
+// rounds BAUD to the nearest 64th of a sample (27.3.2.2.1), at most 0.78 %
+// at BAUD = 64, the register's floor (0.16 % at every rung these letters
+// ask); the run's fixed cost stays under a thousandth (wire_run()'s
+// length), and the reading truncates one more: +-1 %, 990..1010. Both
+// ends are the crystal's, and a wrong divisor - a sample count, a clock
+// rate - is a factor, not a per cent.
 
 /// A frame's bit periods: the start bit, the data, the parity, the stops.
 uint8_t frame_bits(const UsartFormat& f) {
@@ -343,7 +346,7 @@ uint32_t permille(uint32_t took, uint64_t wire) {
     return wire == 0u ? 0u : static_cast<uint32_t>(1000ull * took / wire);
 }
 
-bool wire_ok(uint32_t pm) { return pm >= 990u && pm <= 1030u; }
+bool wire_ok(uint32_t pm) { return pm >= 990u && pm <= 1010u; }
 
 /// A run long enough that the ruler's tick and the run's fixed cost (the
 /// two reads and the TXCIF poll, under a hundred cycles) stay under a
@@ -454,7 +457,7 @@ uint32_t task_wire_permille(uint32_t baud, uint16_t frames, uint8_t value = 0x55
 void wire_verdict(const char* what, uint32_t baud, uint16_t frames, uint32_t pm) {
     print(serial, "  ", what, ": ", frames, " frames at ", baud, " baud in ", pm,
           " thousandths of their wire time", crlf);
-    verdict("the line runs at the rate asked (-1 % to +3 %): ", what, wire_ok(pm));
+    verdict("the line runs at the rate asked (+-1 %): ", what, wire_ok(pm));
 }
 
 // ---- a: instances, routes, teardown ------------------------------------------
@@ -706,7 +709,7 @@ void tb_frames() {
     print(serial, "  256 frames of each of the 36 formats in ", pm_low, " to ", pm_high,
           " thousandths of their wire time at 115200", crlf);
     verdict("EVERY FORMAT TAKES ITS FRAME'S LENGTH ON THE WIRE: start, data, parity and stops "
-            "at the rate asked, -1 % to +3 %", timed);
+            "at the rate asked, +-1 %", timed);
     // The other instances get an 8N1 pass: same code path, other
     // silicon, and a real TXD pad each (see the header for the routes) -
     // and each its own baud generator, timed on the wire.
@@ -917,6 +920,10 @@ void measure_baud(uint32_t baud, bool clk2x) {
     print(serial, "  ", baud, clk2x ? " (CLK2X)" : "", ": BAUD=", reg,
           " actual=", real, " bit=", exp10 / 10u, ".", exp10 % 10u,
           " ticks, measured=", w, crlf);
+    // A bit is a whole number of CLK_PER cycles whose mean is S x BAUD /
+    // 64: the fractional generator (25.3.2.2.1 on the EA, 27.3.2.2.1 on
+    // the DB) dithers one bit a cycle either side, and the meter's capture
+    // quantizes one more: +-2 ticks.
     verdict("start bit within 2 ticks of the divisor",
             captures >= 8 && near(static_cast<int32_t>(w) * 10, static_cast<int32_t>(exp10), 20));
     T0::enable_capt_interrupt(false);
@@ -1019,6 +1026,12 @@ void tg_rebase() {
     print(serial, at24 ? "  24 MHz: " : "  20 MHz: ", t24, " ticks = ", us24,
           at24 ? " us; 12 MHz: " : " us; 10 MHz: ", t12,
           " ticks = ", us12, " us", crlf);
+    // Each width is its divisor's mean within one cycle of the fractional
+    // generator's dither, and reads one tick short (the capture): twice
+    // the 12 MHz width carries twice that, the two divisors' means differ
+    // by under half a tick - within 4. In microseconds the jitter is under
+    // 0.3 us and each reading truncates: within 1. Back at the first rate
+    // the same divisor twice: within two dithers, 2.
     verdict("ticks follow CLK_PER (halved +-2)", met24 && met12 && near(t12 * 2, t24, 4));
     verdict("the bit time stands still (+-1 us)",
             met24 && met12 && near(static_cast<int32_t>(us12), static_cast<int32_t>(us24), 1));
@@ -1196,7 +1209,7 @@ void ti_mspi() {
     const uint32_t pm = wire_permille<Ul>(1'000'000u, 8u, 1024u);
     print(serial, "  1024 frames at 1 MHz in ", pm, " thousandths of eight XCK periods each",
           crlf);
-    verdict("XCK runs at the rate asked: 1024 frames of eight periods, -1 % to +3 %",
+    verdict("XCK runs at the rate asked: 1024 frames of eight periods, +-1 %",
             wire_ok(pm));
     quiesce();
 }
@@ -1437,11 +1450,14 @@ void tF_sfden_active() {
         if (leg == 1) Ul::disarm_start_of_frame();
         Ul::release();
     }
+    // The control is judged; the leg with SFDEN is printed: whether an
+    // erratum the AVR EA's errata do not list shows on a die is that
+    // die's silicon revision's business, not a contract (the driver keeps
+    // SFDEN a verb pair either way).
     print(serial, "  without SFDEN: ", got[0], " frames, ", bad[0], " wrong; with SFDEN set: ",
-          got[1], " frames, ", bad[1], " wrong", crlf);
+          got[1], " frames, ", bad[1], " wrong", got[1] == 256u && bad[1] == 0u
+              ? " (no twin of DB 2.16.2 here)" : " (a twin of DB 2.16.2 here)", crlf);
     verdict("the control: 256 frames read back to back, none wrong", got[0] == 256u && bad[0] == 0u);
-    verdict("with SFDEN set in Active mode the same 256 arrive, none wrong (no twin of DB "
-            "2.16.2 on this die)", got[1] == 256u && bad[1] == 0u);
     quiesce();
 }
 #endif
@@ -2101,8 +2117,8 @@ void tx_clocks() {
               static_cast<uint32_t>(b_fast >= 0 ? b_fast : -b_fast),
               at24 ? " ppm against this board's crystal (single tick = 17 ppm)"
                    : " ppm against this board's crystal (single tick = 22 ppm)", crlf);
-        verdict("the two clocks agree within 200 ppm",
-                b_fast > -200 && b_fast < 200);
+        // Printed, not judged: neither board's crystal has a part number
+        // on record, so no tolerance bounds their difference.
     }
     quiesce();
     (void)link_command_mode();
@@ -2520,7 +2536,7 @@ void tm_errors() {
     {
         const int8_t errs[] = {0, 2, 4, 5, 6, 8, -2, -4, -5, -6, -8};
         int16_t first_pos = 0, first_neg = 0;
-        bool refused = false;
+        bool refused = false, clean_at_2 = true, ferr_at_8 = true;
         for (int8_t e : errs) {
             const uint32_t rate =
                 static_cast<uint32_t>(115'200L + (115'200L * e) / 100L);
@@ -2545,16 +2561,24 @@ void tm_errors() {
                 if (e > 0 && first_pos == 0) first_pos = e;
                 if (e < 0 && first_neg == 0) first_neg = e;
             }
+            if ((e == 2 || e == -2) && d.ferr != 0) clean_at_2 = false;
+            if ((e == 8 || e == -8) && d.ferr == 0) ferr_at_8 = false;
             if (e == 0) verdict("no error at the nominal rate", d.frames == 8 && d.ferr == 0);
             (void)link_command_mode();
         }
         print(serial, "  FERR onset: +", first_pos, " %, ", first_neg, " % (table 27-4 "
               "gives -4.19/+4.14 % for D = 9)", crlf);
         leg_refused = refused;          // a refused rate takes the sweep's verdicts with it
-        verdict("a rate error inside the operational range is clean",
-                first_pos == 0 || first_pos >= 4);
-        verdict("a rate error outside it does flag FERR",
-                first_pos != 0 || first_neg != 0);
+        // Where the onset lands between the table's limits and the sweep's
+        // ends is printed. Judged: +-2 % is inside table 27-4's -4.19/+4.14 %
+        // by over 2 %, against both generators' rounding (0.16 % each at
+        // most) and two crystals' difference; at +-8 % the receiver's
+        // stop-bit sample (the middle of the tenth bit) lands in the next
+        // frame's start bit (+8 %) or the frame's last data bit (-8 %),
+        // both low for 0x00 frames back to back: FERR cannot be missed.
+        verdict("a rate error of +-2 %, well inside the operational range, is clean",
+                clean_at_2);
+        verdict("a rate error of +-8 %, well outside it, flags FERR", ferr_at_8);
     }
 
     // 4. A flood into a receiver that reads late: BUFOVF on the right frame.
@@ -2668,8 +2692,14 @@ void tn_waveforms() {
         print(serial, "  narrowest accepted low pulse: ", first_accepted,
               " CPU cycles of a 2500-cycle bit", crlf);
         leg_refused = refused;          // a refused width takes the sweep's verdict with it
-        verdict("the start-bit threshold sits between a half and a whole bit",
-                all_ran && first_accepted >= 1250 && first_accepted <= 2500);
+        // The start bit is believed when two of samples 8, 9, 10 read low,
+        // sample 1 being the first low one (25.3.3.2.1 on the EA, 27.3.3.2.1
+        // on the DB), up to a sixteenth of a bit after the edge: the middle
+        // sample sits 8/16..9/16 of a bit after it. A pulse of 8/16 (1250
+        // cycles) is believed only on a zero phase, one of 10/16 (1562)
+        // always: of the widths swept, 1250 or 1562.
+        verdict("the start-bit threshold sits between 8/16 and 10/16 of a bit",
+                all_ran && first_accepted >= 1250 && first_accepted <= 1562);
     }
 
     // 2. A UNIFORM rate error, generated by counting cycles instead of by
@@ -2695,6 +2725,10 @@ void tn_waveforms() {
         }
         print(serial, "  bit-banged FERR onset: +", pos, " %, ", neg, " %", crlf);
         leg_refused = refused;          // a refused rate takes the sweep's verdict with it
+        // Table 27-4's range is -4.19/+4.14 % for nine bits (the EA's 25-3
+        // alike); the bit-banged rate is the peer's cycle count, exact to a
+        // cycle in 2500 (0.04 %), on its crystal: +-3 % sits over 1 % inside,
+        // so clean through 3; where the onset lands past 4 is printed.
         verdict("the measured operational range brackets the data sheet's +-4 %",
                 (pos == 0 || pos >= 4) && (neg == 0 || neg <= -4));
     }
@@ -2715,8 +2749,14 @@ void tn_waveforms() {
         }
         print(serial, "  one stretched cell breaks the frame at +", onset, " %", crlf);
         leg_refused = refused;          // a refused cell takes the sweep's verdict with it
-        verdict("a single stretched cell survives far past the rate tolerance",
-                onset == 0 || onset >= 30);
+        // The stop bit's middle sample sits 8/16..9/16 of a cell into it
+        // (the start edge's sixteenth of phase), and two of the three
+        // centre samples decide: the stretched data cell reaches the middle
+        // one from +50 % on a zero phase and always from +56.25 %. Of the
+        // steps swept, the onset is +50 % (a stretch ending on the sample)
+        // or +60 %.
+        verdict("a single stretched cell survives to half a cell and breaks by +60 %",
+                onset == 50 || onset == 60);
     }
 
     // 4. The LIN auto-baud window: the sync field's bit pair is what ABW
@@ -3216,9 +3256,12 @@ void tr_rs485() {
               " want=", hex(sum), " ferr=", have ? r.ferr : 0, crlf);
         verdict(num(rate), " baud: the peer receives every RS-485 frame",
                 up && have && r.count == 4 && r.sum == sum && r.ferr == 0);
+        // What a wrong guard would change is a whole bit; half a bit tells
+        // it, plus the integer bit_ticks' truncation over the eleven bits
+        // (under a tick each) and the meter's tick: bit / 2 + 12.
         verdict(num(rate), " baud: XDIR is guard + frame long",
                 caught >= 1 && near(w, static_cast<int32_t>(want),
-                                    static_cast<int32_t>(bit_ticks / 2 + 4)));
+                                    static_cast<int32_t>(bit_ticks / 2 + 12)));
         (void)link_command_mode();
     }
     quiesce();

@@ -175,9 +175,10 @@ OSC48M multiplied by a NOMINAL 48 MHz - and OSC48M, weighed against the
 crystal, is about **5100 ppm SLOW on this die** with a +-5% calibration
 spec and a thermal wander of its own ([clock.md](clock.md)). So these
 numbers overread by about half a per cent, they move a little between
-power-ons, and the suite's near-nominal verdict carries a 3% band for
-exactly that reason - the band covers the reference more than the
-oscillator under test. The per-step and percent-class findings below
+power-ons, and the suite judges each trimmed oscillator against its
+table's 25 C band (OSC32K 29.491..36.044 kHz, table 45-54; OSCULP32K
+30.801..34.730 kHz, table 45-56) widened by the reference's own 5 %
+(table 45-57). The per-step and percent-class findings below
 are unaffected; the crystal-scale values live in
 [clock.md](clock.md).
 

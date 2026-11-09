@@ -192,7 +192,10 @@ inside the chip.
   nominal 48 MHz. What the 3 Hz agreement proves is the consistency of
   the two measurement chains, not the frequency - and the crystal says
   OSC48M is about 5100 ppm slow on this die ([clock.md](clock.md)),
-  which rescales both readings to about **32907 Hz**.
+  which rescales both readings to about **32907 Hz**. The suite prints
+  the comparison with the platform suite's figure (one die's) and judges
+  the reading within the two RCs' tables instead (29334..36558 Hz:
+  OSCULP32K's 25 C band read against an OSC48M within 5 %).
 - **OSCULP32K runs fast of its nominal 32768 Hz** - about 5 to 6 per
   mille on the OSC48M-nominal scale these suites report in, about 4 per
   mille on the crystal's scale ([clock.md](clock.md)). Every timeout

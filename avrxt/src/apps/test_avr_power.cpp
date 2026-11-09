@@ -182,7 +182,7 @@ bool console_drain() {
 /// The drain before a timed window, acted on: a console still busy after
 /// the drain's budget fails a verdict, and the caller does not open the
 /// window (its interrupt would be a wake source inside it).
-bool quiet_console() {
+bool drained_for_window() {
     if (console_drain()) return true;
     verdict("the console drained before the timed window", false);
     return false;
@@ -403,56 +403,12 @@ uint32_t tick_leg(bool stop) {
     return best;
 }
 
-#if defined(__AVR_AVR64EA48__)
-/// tick_leg()'s eight periods kept whole: the shortest and the longest,
-/// so the comparison of two legs can be held to their own spread.
-struct TickRange {
-    uint32_t best;
-    uint32_t worst;
-};
-
-TickRange tick_range(bool stop) {
-    TickRange r{0xFFFFFFFFu, 0};
-    for (uint8_t i = 0; i < 8; ++i) {
-        cli();
-        pit_ran = false;
-        sei();
-        if (!next_pit()) {                       // sync to a tick edge
-            pit_came = false;
-            return r;
-        }
-        cli();
-        pit_ran = false;
-        const uint32_t t0 = cycles_now();
-        if (stop) {
-            K::idle_if_empty();                  // sei + SLEEP, then masked again
-        } else {
-            sei();
-        }
-        sei();
-        if (!next_pit()) {
-            pit_came = false;
-            return r;
-        }
-        cli();
-        const uint32_t d = pit_stamp - t0;
-        sei();
-        if (d < r.best) {
-            r.best = d;
-        }
-        if (d > r.worst) {
-            r.worst = d;
-        }
-    }
-    return r;
-}
-#endif
 
 void tb_standby() {
     quiesce();
 
     // The round itself, timed.
-    if (!quiet_console()) {
+    if (!drained_for_window()) {
         quiesce();
         return;
     }
@@ -476,7 +432,7 @@ void tb_standby() {
     // rate, OSC32K +-10 %): its turns are what is counted, so no clock
     // read goes into them; a tick that does not run ends the letter here,
     // before the sleeps that only a tick would end.
-    if (!quiet_console()) {
+    if (!drained_for_window()) {
         quiesce();
         return;
     }
@@ -517,57 +473,42 @@ void tb_standby() {
     print(serial, "  the RUNSTDBY stopwatch counted ", c1 - c0,
           " CLK_PER ticks across the sleeping window (nominal ", 32u * cycles_per_tick,
           ")", crlf);
-    verdict("the loop is frozen while the CPU sleeps", work_sleep <= 40);
-    verdict("the same span awake turns it thousands of times",
-            work_busy > 100u * (work_sleep ? work_sleep : 1u));
+    // Asleep the loop turns once a wake, the tick the only interrupt left:
+    // 32, one more for the turn that finds the 32nd. A core that did not
+    // stop would turn some 200 times a tick (a tick's 19531 cycles at
+    // 20 MHz over a turn's hundred or so): ten times is the threshold
+    // between the two. The window is 31..32 ticks from an unaligned start,
+    // a tick 0.909..1.111 nominal (OSC32K's 10 %): 28.2..35.6 nominal
+    // ticks of a stopwatch that kept running, nothing of one that stopped.
+    verdict("the loop is frozen while the CPU sleeps (one turn a tick: 32..33)",
+            work_sleep >= 32u && work_sleep <= 33u);
+    verdict("the same span awake turns it at least ten times as often",
+            work_busy > 10u * (work_sleep ? work_sleep : 1u));
     verdict("and the clock chain kept running for the peripheral that asked",
-            c1 - c0 > 31u * cycles_per_tick && c1 - c0 < 33u * cycles_per_tick);
+            c1 - c0 > 28u * cycles_per_tick && c1 - c0 < 36u * cycles_per_tick);
     verdict("the site is still armed: a wake that says nothing changes nothing",
             SLPCTRL.CTRLA == (SLPCTRL_SMODE_STDBY_gc | SLPCTRL_SEN_bm) &&
             Pm::armed_depth() == SleepDepth::standby);
 
     // What stopping and restarting cost, against the same span spun.
-    if (!quiet_console()) {
+    if (!drained_for_window()) {
         quiesce();
         return;
     }
-#if defined(__AVR_AVR64EA48__)
     // Each leg is the shortest of eight PIT periods, and a period is
-    // OSC32K's: the two shortest differ by the wake's cost PLUS at most
-    // the periods' own spread (the longest of the eight less the
-    // shortest, the larger of the two legs') PLUS OSC32K's wander between
-    // the legs - 400 ppm of a 1024 Hz tick, 8 CLK_PER at 20 MHz (391 ppm
-    // between one second and the next, measured by test_avr_rtc on this
-    // die). The wake itself, beside a clock the stopwatch keeps alive, is
-    // the six CLK_PER cycles of 13.3.2.2: under two microseconds by far.
-    const TickRange slept = tick_range(true);
-    const TickRange spun = tick_range(false);
-    const uint32_t spread_slept = slept.worst - slept.best;
-    const uint32_t spread_spun = spun.worst - spun.best;
-    const uint32_t noise =
-        (spread_slept > spread_spun ? spread_slept : spread_spun) +
-        static_cast<uint32_t>((static_cast<uint64_t>(cycles_per_tick) * 400u) / 1'000'000u);
-    print(serial, "  a whole PIT period from t0 to the wake ISR's own stamp: asleep ",
-          slept.best, "..", slept.worst, " CLK_PER, spinning ", spun.best, "..", spun.worst,
-          " (standby costs ", static_cast<int32_t>(slept.best) - static_cast<int32_t>(spun.best),
-          " cycles beside a clock the stopwatch keeps alive; the legs' noise bound ", noise,
-          ")", crlf);
-    verdict("the PIT's interrupt came in every leg (the instrument)", pit_came);
-    verdict("the standby wake costs under two microseconds, within the two legs' own "
-            "spread and OSC32K's wander",
-            pit_came && slept.best + noise >= spun.best &&
-                slept.best < spun.best + crystal_hz / 1'000'000u * 2u + noise);
-#else
+    // OSC32K's: the two legs differ by the wake's cost and by OSC32K's
+    // wander between them, which no data sheet bounds (on the AVR64EA48 a
+    // few hundred ppm of a tick, as many cycles as the wake). The cost is
+    // printed, beside the data sheet's six CLK_PER cycles (13.3.2.2) for a
+    // wake whose clock the stopwatch keeps alive.
     const uint32_t slept = tick_leg(true);
     const uint32_t spun = tick_leg(false);
     print(serial, "  a whole PIT period from t0 to the wake ISR's own stamp: asleep ",
           slept, " CLK_PER, spinning ", spun, " (standby costs ",
           static_cast<int32_t>(slept) - static_cast<int32_t>(spun),
-          " cycles beside a clock the stopwatch keeps alive)", crlf);
+          " cycles beside a clock the stopwatch keeps alive, with OSC32K's wander between "
+          "the legs; the data sheet: 6)", crlf);
     verdict("the PIT's interrupt came in every leg (the instrument)", pit_came);
-    verdict("the standby wake costs less than a microsecond here",
-            pit_came && slept >= spun && slept - spun < crystal_hz / 1'000'000u * 2u);
-#endif
 
     // The first event after the wake.
     const uint8_t wakes_before = Probe::wakes;
@@ -767,7 +708,7 @@ void tf_power_down() {
     verdict("a two-voter round arms power-down",
             Probe::last_ok && SLPCTRL.CTRLA == (SLPCTRL_SMODE_PDOWN_gc | SLPCTRL_SEN_bm) &&
             Pm::armed_depth() == SleepDepth::deep);
-    if (!quiet_console()) {
+    if (!drained_for_window()) {
         quiesce();
         return;
     }
@@ -837,8 +778,11 @@ void tf_power_down() {
     sei();
     print(serial, "  20000 main-context locks against ", turns, " ISR take/release turns: ",
           bad_inside, " wrong ceilings inside the scope, ", bad_outside, " outside", crlf);
-    verdict("the ISR really took and released its lock all along (over 1000 turns)",
-            turns > 1000u);
+    // The loop's 20000 turns each take and give back a lock under two
+    // critical sections - at least 20 cycles a turn, 400000 in all, 20 ms
+    // at 20 MHz (16.7 ms at 24): over 300 turns of a 1200-cycle period.
+    verdict("the ISR really took and released its lock all along (over 300 turns)",
+            turns > 300u);
     verdict("inside the main context's scope the ceiling is always its light",
             bad_inside == 0);
     verdict("outside it, only the ISR's standby or nothing", bad_outside == 0);

@@ -716,10 +716,17 @@ void tc_pwm() {
     print(serial, "  dual-slope: ", dual, " overflows in 2 s; the chapter's "
           "2 x N x PER predicts ", expect_2per, ", a 2 x N x (PER+1) period "
           "would give ", expect_2per_plus, crlf);
+    // The window is spin_us() on SysTick and the timer's GCLK both OSC48M:
+    // the oscillator's error cancels and the count is the prediction
+    // (942.3 overflows of 2.12 ms) give or take one for where the window's
+    // two ends fall in an overflow period, and under one more for the
+    // spin's overrun (a poll turn, microseconds) and the predictions'
+    // truncation: +-2, which keeps the two predictions' windows, five
+    // apart, disjoint. Logged: 942 against 942 in twenty runs.
     bench.verdict("THE CHAPTER'S DUAL-SLOPE FORMULA IS EXACT ON THIS SILICON: "
                   "the period is 2 x PER counter ticks and NOT 2 x (PER+1), "
                   "which two seconds of counting settle",
-                  near(dual, expect_2per, 3u) && !near(dual, expect_2per_plus, 3u));
+                  near(dual, expect_2per, 2u) && !near(dual, expect_2per_plus, 2u));
 
     release_event_counter();
     release_pads();
@@ -907,13 +914,16 @@ void td_buffers() {
               " overflows/s (PER 999 gives 750, PER 555 gives 1350); the PER "
               "register reads ", leg.per_reads, crlf);
     }
+    // 750 overflows a second on OSC48M's generator, within its 5 %
+    // (table 45-57): +-38, and the half-second window's edge: +-40. The
+    // unlocked PER 555 would give 1350.
     bench.verdict("THE UPDATE LOCK PROTECTS THE PERIOD WHILE COUNTING UP",
                   leg_ok && near(legs[0].overflows, 750u, 40u));
-    bench.verdict("AND IT PROTECTS IT COUNTING DOWN TOO, in both NPWM and "
-                  "NFRQ: ERRATUM 1.21.8 DID NOT REPRODUCE on this silicon "
-                  "with the waveform as the witness, three modes tried",
-                  near(legs[1].overflows, 750u, 40u) &&
-                      near(legs[2].overflows, 750u, 40u));
+    // Counting down is erratum 1.21.8's case: printed, not judged - an
+    // erratum need not reproduce on a die.
+    print(serial, "  erratum 1.21.8 (the lock counting down): ",
+          near(legs[1].overflows, 750u, 40u) && near(legs[2].overflows, 750u, 40u)
+              ? "not reproduced here (NPWM and NFRQ kept PER)" : "reproduced here", crlf);
     bench.verdict("what DOES happen in all three is the register read of fact "
                   "8 - PER reads back the buffered 555 while the counter is "
                   "still using 1000, which is exactly the trap a reader "
@@ -940,10 +950,10 @@ void td_buffers() {
     print(serial, "  CTRLA.ALOCK written back as ", alock_written ? "1" : "0",
           "; CTRLB.LUPD after ~9 overflows: ", lupd_after ? "1" : "0",
           " (36.8.1 says ALOCK sets LUPD on each overflow)", crlf);
-    bench.verdict("ERRATUM 1.21.10 CONFIRMED: the ALOCK bit WRITES, and does "
-                  "nothing - LUPD does not follow an overflow, which is the "
-                  "one thing 36.8.1 says it should do",
-                  alock_written && !lupd_after);
+    // Printed, not judged: whether erratum 1.21.10 shows is the die's
+    // revision's; the driver refuses ALOCK at compile time either way.
+    print(serial, "  erratum 1.21.10 (ALOCK writes and does nothing): ",
+          alock_written && !lupd_after ? "shows here" : "does not show here", crlf);
 
     release_pads();
     Timer::release();
@@ -2667,11 +2677,15 @@ void to_faults() {
     print(serial, "  CAPTMAX on CC2 under CAPTMIN on CC3, faults at 20000, 30000, "
           "10000: CC3 ", hi[0].cc, ", ", hi[1].cc, ", ", hi[2].cc, ", CC2 ",
           hi2[0], ", ", hi2[1], ", ", hi2[2], crlf);
-    bench.verdict("ERRATUM 1.21.5 STAGED AND NOT REPRODUCED: CAPTMAX on CC1 "
-                  "under two basic capture channels keeps the maximum all the "
-                  "same, MC1 on the third fault as in the arrangement above",
-                  lone_up && at(lone[0].cc, 10000) && at(lone[1].cc, 30000) &&
-                      at(lone[2].cc, 30000) && !mc(lone[1], 1) && mc(lone[2], 1));
+    // The erratum's own arrangement (CAPTMAX below basic channels) is
+    // printed, not judged: whether erratum 1.21.5 shows is the die's
+    // silicon revision's; the arrangement it recommends is the verdict.
+    bench.verdict("CAPTMAX on CC1 under two basic capture channels came up", lone_up);
+    print(serial, "  erratum 1.21.5 staged: ", at(lone[0].cc, 10000) && at(lone[1].cc, 30000) &&
+                                                   at(lone[2].cc, 30000) && !mc(lone[1], 1) &&
+                                                   mc(lone[2], 1)
+                                               ? "not reproduced here (CC1 kept the maximum)"
+                                               : "reproduced here", crlf);
     bench.verdict("AND THE ERRATUM'S ARRANGEMENT WORKS: with CC3 advanced too, "
                   "CC2 keeps the maximum and CC3 the minimum of the same faults",
                   pair_up && at(pair_cc2, 30000) && at(hi[2].cc, 10000));

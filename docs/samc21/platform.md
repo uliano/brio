@@ -484,13 +484,17 @@ Stopping:
   i.e. a WFI and an exception entry. **IDLE2 costs 24 to 36 us more
   than IDLE0** on a board with no CAN traffic at all - chapter 19
   presents IDLE2 as IDLE0 with one more clock gated and says nothing
-  about paying for it at the wake.
+  about paying for it at the wake. The figure moves with the code after
+  the wake (3 to 5 us in other builds of the same suite, the measuring
+  code unchanged), so the suite prints it and does not judge it.
 - **Waking from STANDBY costs about 106 us** more than waking from
   IDLE0 (mean of 64 single wakes on the crystal ruler). That is the
   whole bill: **nothing in STDBYCFG or SUPC.VREG moves it**. Six
   combinations of VREGSMOD (AUTO / PERFORMANCE / LP) x SUPC.VREG.
   RUNSTDBY x BBIASHS spread under 2 us, inside twice the scatter of
-  the same measurement repeated first and last. This family therefore
+  the same measurement repeated first and last (printed, not judged: one
+  repeat is no noise floor, and table 45-13 gives one typical standby
+  wake with no regulator dependence). This family therefore
   has NO separate regulator bill, unlike AVR DA/DB where the regulator
   is a distinct ~290 us item on top of the oscillator's - and 106 us
   is far below the AVR's 290 us + 1.77 ms crystal restart.
@@ -521,10 +525,13 @@ Stopping:
   with ONDEMAND = 0 and RUNSTDBY = 0 as stopped. The same shape errata
   1.3.1 records for the FDPLL and marks revision B. The practical
   consequence is large: **a standby on this board costs no crystal
-  restart**, where AVR DA/DB pays 1.77 ms out of every deep sleep.
+  restart**, where AVR DA/DB pays 1.77 ms out of every deep sleep. The
+  suite prints this rather than judging it: it contradicts the table on
+  one die, and nothing in brio may rely on it.
 - **The watchdog runs through standby and its early warning wakes the
   device** - 123 ms measured for a 128-cycle offset on its nominal
-  1.024 kHz. It is also this suite's anti-wedge backstop: a wake that
+  1.024 kHz: OSCULP32K / 32, the RTC's own oscillator, so the suite
+  judges it at 4096 RTC ticks +-4 ms whatever the oscillator's rate. It is also this suite's anti-wedge backstop: a wake that
   never arrives costs a reboot and a banner instead of a mute board.
 - **The power model is realized here as written.** `util/power.hpp`
   needs nothing of its own on this silicon: the vote round, the
@@ -941,7 +948,8 @@ every pin-driven sleep measurement here is built on:
 device from standby in 7 us; and ERRATUM 1.11.6 - which the errata
 matrix marks LIVE ON EVERY REVISION of E/G/J, "with the asynchronous
 edge detection enabled and the system in Standby mode, only the first
-edge will be detected" - DOES NOT REPRODUCE at revision F. Inside one
+edge will be detected" - DOES NOT REPRODUCE at revision F (on this
+die: the suite prints it, an erratum being no die's contract). Inside one
 standby of a hundred offered edges an asynchronous line detected a
 hundred, exactly as a sampled one did, and with the interrupt armed a
 hundred of them woke the device as fast as it could be put back to

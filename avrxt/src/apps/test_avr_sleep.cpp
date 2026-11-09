@@ -273,9 +273,13 @@ bool console_drain() { return wait_for([] { return Serial::tx_idle(); }, 200'000
 
 /// The drain before a timed window - a sleep measured, a clock moved:
 /// a wedged console fails a verdict instead of leaving a byte inside the
-/// window unremarked.
-void drain_for_window() {
-    if (!console_drain()) verdict("the console drained before the timed window", false);
+/// window unremarked. The callers of this suite go on after a failure
+/// and ignore the answer: the verdict has already failed, and the
+/// letter's tail must still run to disarm its backstop.
+bool drained_for_window() {
+    if (console_drain()) return true;
+    verdict("the console drained before the timed window", false);
+    return false;
 }
 
 // ---- the stopwatch ----------------------------------------------------------------
@@ -394,7 +398,7 @@ constexpr uint32_t pit_wait_us = 1'500'000;
 /// busy wait for the same wake-up - the baseline every latency figure is
 /// measured against.
 SleepRun sleep_once(SleepMode m, bool sync = true, bool spin = false) {
-    drain_for_window();
+    drained_for_window();
     if (sync && !pit_sync()) {
         verdict("the PIT ticked before the sleep (its waker)", false);
         return SleepRun{};
@@ -445,7 +449,7 @@ void escape_disarm() {
 
 /// The same, in POWER-DOWN, inside the escape hatch.
 SleepRun power_down_once(uint8_t stage, bool sync = true) {
-    drain_for_window();
+    drained_for_window();
     if (sync && !pit_sync()) {
         verdict("the PIT ticked before the sleep (its waker)", false);
         return SleepRun{};
@@ -705,7 +709,7 @@ void tb_idle() {
     verdict("the 2 ms alarm started", PeriodicTick<Waker>::init(clock, 500u));
     Pit::enable_interrupt(false);            // one wake source at a time
 
-    drain_for_window();
+    drained_for_window();
     bool woke = true, disarmed = true, ints_on = true;
     constexpr uint8_t n = 16;
     // The alarms counted by their own handler across the n sleeps: the
@@ -758,7 +762,10 @@ void tb_idle() {
     print(serial, "  ", n, " loop turns asleep across ", asleep_alarms, " alarms; ",
           awake_turns, " turns awake across 16", crlf);
     // Turns per alarm, asleep n / asleep_alarms and awake awake_turns / n,
-    // compared without a division: awake more than a hundred times asleep.
+    // compared without a division. Asleep a turn an alarm; awake a turn is
+    // wait_for()'s 1 us delay, the predicate and the 32-bit count - under
+    // 4 us (80 cycles at 20 MHz) - so over 500 a 2 ms alarm, at the alarm's
+    // crystal-timed period: a hundred sits between the two with room.
     verdict("the same span awake turns the loop a hundred times as often per alarm",
             spanned && static_cast<uint32_t>(asleep_alarms) * awake_turns > 100ul * n * n);
 
@@ -767,7 +774,7 @@ void tb_idle() {
     // alarm's interrupt - an idle() that returned without sleeping would
     // see none. The console is drained first: the line printed above is
     // still leaving, and its transmit interrupt would end the sleep.
-    drain_for_window();
+    drained_for_window();
     cli();
     w0 = waker_irqs;
     const uint32_t before = Watch::read();
@@ -1027,17 +1034,24 @@ void tf_power_down() {
     print(serial, "  power-down: RTC counter +", pd.rtc, " / +", pd_settled,
           " the same two ways; stopwatch +", pd.ticks, " ticks; PIT interrupts ",
           pd.pits, crlf);
+    // The counter and the PIT share CLK_RTC, so a PIT period is exactly
+    // pit_cycles_used counts; the settled read adds the 1 ms delay - 29..37
+    // counts at OSC32K's 10 % - and a count of read phase: +0..+40. In
+    // power-down the counter counts only that awake millisecond: under 40.
+    // CLK_PER over a PIT period carries OSC32K's 10 %: an eighth.
     verdict("in standby the RTC counter runs (RUNSTDBY): one PIT period of "
-            "CLK_RTC ticks", near_u32(standby_settled, pit_cycles_used, 256));
+            "CLK_RTC ticks", standby_settled >= pit_cycles_used &&
+                             standby_settled <= pit_cycles_used + 40u);
     verdict("in standby a fully armed chain keeps CLK_PER alive",
             near_u32(standby.ticks, ticks_per_pit, ticks_per_pit / 8));
     verdict("in power-down the RTC COUNTER stops even with RUNSTDBY set",
-            pd_settled < 256);
+            pd_settled < 40u);
     verdict("in power-down CLK_PER stops whatever any RUNSTDBY says",
             pd.ticks < ticks_per_pit / 100);
     verdict("and the PIT half of the same block still fires", pd.pits == 1);
-    verdict("CNT read at the instant of the wake is STALE: it still reads the "
-            "value it had at the SLEEP instruction", standby.rtc < 8);
+    // What CNT reads at the instant of the wake is printed above ("read at
+    // once"), not judged: that the read path is still stale then is this
+    // die's behaviour; the chapter says only that the read is synchronized.
     // The two counters measure the same interval in two clock domains,
     // which is what makes OSC32K's own error a number here.
     const uint32_t rtc_hz = standby.ticks
@@ -1074,7 +1088,7 @@ void tg_wake_ticks() {
                      .run_standby = true});
 
     auto wake_ticks = [](bool spin) -> int16_t {
-        drain_for_window();
+        drained_for_window();
         if (!pit_sync()) {                    // the PIT is this sleep's waker
             verdict("the PIT ticked before the sleep (its waker)", false);
             return INT16_MAX;
@@ -1162,7 +1176,7 @@ void tg_vreg() {
                      .run_standby = true});
 
     auto wake_ticks = [](bool spin) -> int16_t {
-        drain_for_window();
+        drained_for_window();
         if (!pit_sync()) {                    // the PIT is this sleep's waker
             verdict("the PIT ticked before the sleep (its waker)", false);
             return INT16_MAX;
@@ -1673,7 +1687,7 @@ bool apply_leg_clock(LegClock c) {
 /// PIT's history, not the stimulus.
 bool run_leg(LegClock c, SleepMode m, uint8_t stage, Train& t) {
     if (!train_arm(train_shots)) return false;
-    drain_for_window();
+    drained_for_window();
     const bool moved = apply_leg_clock(c);
     Pit::enable_interrupt(false);
     token.magic = token_magic;
@@ -1741,7 +1755,7 @@ bool apply_leg_clock(LegClock c) {
 /// .noinit token, which is what every power-down leg asks for.
 bool run_leg(LegClock c, bool perf, SleepMode m, uint8_t stage, Train& t) {
     if (!train_arm(train_shots)) return false;
-    drain_for_window();
+    drained_for_window();
     const bool moved = apply_leg_clock(c);
     if (perf) Vreg::power(VregPower::performance);
     if (stage) {
@@ -1874,6 +1888,13 @@ void ti_idle_latency() {
             awake.woke == train_shots && awake.hits == train_shots);
     verdict("from IDLE, every stimulus was answered and captured",
             idle.woke == train_shots && idle.hits == train_shots);
+    // The awake path is the interrupt response (6 cycles, table 15-1), the
+    // handler's way to its pin store and the peer's capture of the edge:
+    // a couple of microseconds; 10 us (240 ticks) is that claim's bound,
+    // below which no oscillator start-up of this family fits. A sleep in
+    // IDLE adds the five-cycle response of a sleeping core (15.3.2.3) and
+    // the six-cycle wake (13.3.2.2) with the clock kept: 11 cycles, 0.55 us
+    // at 20 MHz, with a peer tick at each median - under a microsecond.
     verdict("the awake baseline is a couple of microseconds: interrupt latency "
             "plus the ISR prologue", ba != slink::no_capture && ba < 240u);
 #if defined(__AVR_AVR64EA48__)
@@ -1934,34 +1955,28 @@ void tj_standby_latency() {
     const int32_t bill = static_cast<int32_t>(med[4]) - static_cast<int32_t>(med[2]);
     print(serial, "  OSCHF alone minus OSCHF beside the crystal: ", bill, " ticks = ",
           bill / 24, " us - what letting go of every oscillator adds", crlf);
+    // A clock kept alive wakes in six CLK_PER cycles (13.3.2.2) plus the
+    // path to the pin the peer captures (the response, the vector, the
+    // store: a couple of microseconds); 50 us sits below any oscillator or
+    // regulator start-up of this family (hundreds of microseconds) and far
+    // above that path.
     verdict("a clock kept alive by its own RUNSTDBY costs almost nothing (under 50 us), "
             "the crystal's and OSCHF's", med[1] < 1'200u && med[3] < 1'200u);
-    // tOSCHF_ST (DS40002443A 35.10.1, table 35-10) is 10 us typical "from
-    // the wake-up event to code execution", with no limits: the restart
-    // over the kept-alive OSCHF of the same path is held to that figure
-    // halved and doubled, 5..20 us = 120..480 ticks - a band no regulator
-    // start-up of this family (125 us on the DA, 290 us on the DB) fits in.
+    // What OSCHF's restart costs over the kept OSCHF, and what letting go of
+    // every oscillator adds (a regulator start-up, 13.3.2.2's clause), are
+    // printed, not judged: tOSCHF_ST is a typical 10 us with no limits
+    // (DS40002443A table 35-10), and whether the regulator stops in standby
+    // the chapter leaves to the part.
     const uint32_t restart = med[2] > med[3] ? med[2] - med[3] : 0;
     print(serial, "  OSCHF's restart over the kept OSCHF: ", restart, " ticks = ",
           (restart * 125u) / 3u, " ns (tOSCHF_ST: 10 us typical)", crlf);
-    verdict("OSCHF restarting beside a running crystal costs its own start-up: 5..20 us "
-            "over the kept OSCHF (tOSCHF_ST, 10 us typical)",
-            restart > 120u && restart < 480u);
-    // THE REGULATOR QUESTION. Each median is one of eight shots quantized
-    // to a tick (41.7 ns), the shots of one leg spread by two ticks: a
-    // microsecond (24 ticks) is twelve times that, and a hundredth of the
-    // smallest regulator start-up this family has shown (the DA's 125 us).
-    verdict("OSCHF restarting with EVERY other oscillator stopped costs the same to a "
-            "microsecond: this die pays no regulator start-up (13.3.2.2's clause is "
-            "never met)", (bill < 0 ? -bill : bill) < 24);
     // A crystal's restart is CSUTHF's 4096 counted cycles (204.8 us at
     // 20 MHz, the boot's and use_crystal()'s setting) after the oscillation
     // has built up; the chapter gives no figure for that build-up (table
-    // 35-12's start-up row is empty), so the upper bound is the class's - three
-    // milliseconds - not a derivation.
+    // 35-12's start-up row is empty): the counted part is the bound, the
+    // rest printed above.
     verdict("a crystal that has to restart costs its counted start-up at least (4096 "
-            "cycles at 20 MHz = 204.8 us) and less than 3 ms",
-            med[0] > 4'915u && med[0] < 72'000u);
+            "cycles at 20 MHz = 204.8 us)", med[0] > 4'915u);
     quiesce();
 }
 
@@ -2000,15 +2015,13 @@ void tk_power_down_latency() {
     verdict("a pin edge wakes this device from POWER-DOWN, every time, on all three "
             "configurations", all_woke && captured);
     if (!captured) { quiesce(); return; }
-    verdict("a crystal main clock costs its counted start-up at least (204.8 us) and "
-            "less than 3 ms (letter j's bounds)", med[0] > 4'915u && med[0] < 72'000u);
+    verdict("a crystal main clock costs its counted start-up at least (204.8 us)",
+            med[0] > 4'915u);
     verdict("OSCHF's RUNSTDBY buys nothing in POWER-DOWN: the two OSCHF legs within "
             "a microsecond (letter j's resolution argument)",
             (med[1] > med[2] ? med[1] - med[2] : med[2] - med[1]) < 24u);
-    // tOSCHF_ST doubled (20 us) plus a kept clock's whole path (letter j:
-    // 2.2 us, the peer's capture and this chip's vector included): 22 us.
-    verdict("and OSCHF out of POWER-DOWN costs its own start-up and nothing more: under "
-            "22 us, no regulator start-up here either", med[2] < 528u);
+    // OSCHF out of POWER-DOWN is printed above (the train's median), not
+    // judged: tOSCHF_ST is a typical figure with no limits (table 35-10).
     quiesce();
 }
 #else
@@ -2050,45 +2063,30 @@ void tj_standby_latency() {
     if (!ok) { quiesce(); return; }
     for (uint8_t i = 0; i < 6; ++i) print_train(legs[i].what, t[i]);
     verdict("every configuration woke on every stimulus", all_woke);
+    // The bounds come from DS40002247B table 39-9 (the DA's table 37-10
+    // alike): OSCHF wakes from idle or standby with PMODE = FULL in 30 us
+    // at most (24 typical), plus the path the peer captures (2.2 us, the
+    // kept-alive legs) - 33 us, 792 ticks. A clock kept alive wakes in six
+    // CLK_PER cycles (13.3.2.2) plus that path: under 50 us sits far below
+    // any oscillator or regulator start-up and far above the path. Every
+    // other band - a crystal's restart, the regulator's start-up and its
+    // profile's effect, the external clock's - has no figure in the table
+    // (no minimum, or no row at all) and is printed above, not judged.
     if constexpr (has_xoschf) {
-        verdict("a crystal that has to restart costs the milliseconds phase one "
-                "inferred from 48 RTC ticks (0.8 .. 3 ms)",
-                med[0] != slink::no_capture && med[0] > 19'200u && med[0] < 72'000u);
         verdict("a crystal kept alive by its own RUNSTDBY costs almost nothing "
                 "(under 50 us)", med[1] != slink::no_capture && med[1] < 1'200u);
-        verdict("OSCHF restarting with the crystal still oscillating is the data "
-                "sheet's own 24-30 us and NOTHING MORE (10 .. 60 us here)",
-                med[2] != slink::no_capture && med[2] > 240u && med[2] < 1'440u);
-        verdict("and the regulator's profile does not move it by a microsecond: "
-                "there is no regulator start-up to pay for",
-                med[3] != slink::no_capture &&
-                    (med[3] > med[2] ? med[3] - med[2] : med[2] - med[3]) < 24u);
+        verdict("OSCHF restarting with the crystal still oscillating is within the data "
+                "sheet's 30 us (and the 2.2 us path)",
+                med[2] != slink::no_capture && med[2] < 792u);
     } else {
-        // The DA: no crystal to restart, so legs 0 and 1 are the external
-        // clock with and without OSCHF held up, and legs 2 and 3 OSCHF held up
-        // by its own bit. With nothing held up the wake pays the regulator's
-        // start-up - the band DB's OSCHF-alone leg was given, 100 .. 800 us,
-        // the data sheet's 100 us (table 37-10, power-down, AUTO) its floor;
-        // with something held up it pays nothing the 50 us of a kept-alive
-        // clock does not cover.
-        verdict("the external clock with nothing held up pays the regulator's start-up "
-                "and nothing else (100 .. 800 us)",
-                med[0] != slink::no_capture && med[0] > 2'400u && med[0] < 19'200u);
         verdict("with OSCHF held up by its RUNSTDBY it costs almost nothing (under 50 us)",
                 med[1] != slink::no_capture && med[1] < 1'200u);
         verdict("OSCHF held up by its own RUNSTDBY costs almost nothing too (under 50 us)",
                 med[2] != slink::no_capture && med[2] < 1'200u);
-        verdict("and the regulator's profile does not move it by a microsecond: the "
-                "regulator never dropped",
-                med[3] != slink::no_capture &&
-                    (med[3] > med[2] ? med[3] - med[2] : med[2] - med[3]) < 24u);
     }
-    verdict("stop the crystal too and the SAME OSCHF restart suddenly costs "
-            "hundreds of microseconds (100 .. 800 us)",
-            med[4] != slink::no_capture && med[4] > 2'400u && med[4] < 19'200u);
-    verdict("because that cost is the REGULATOR, and PMODE = performance pays it "
-            "in advance: back to the bare oscillator restart",
-            med[5] != slink::no_capture && med[5] < 1'440u && med[5] * 3u < med[4]);
+    verdict("PMODE = performance leaves the bare oscillator restart: within the data "
+            "sheet's 30 us (and the 2.2 us path)",
+            med[5] != slink::no_capture && med[5] < 792u);
     if constexpr (has_xoschf) {
         print(serial, "  that is the standby rule this bench found: VREGCTRL's AUTO profile "
                       "drops the regulator only when OSC32K is the last clock left, so an "
@@ -2142,28 +2140,14 @@ void tk_power_down_latency() {
     for (uint8_t i = 0; i < 3; ++i) print_train(legs[i].what, t[i]);
     verdict("a pin edge wakes this device from POWER-DOWN, every time, on all "
             "three configurations", all_woke);
-    if constexpr (has_xoschf) {
-        verdict("out of power-down a crystal main clock costs milliseconds (0.5 .. 6 ms)",
-                med[0] != slink::no_capture && med[0] > 12'000u && med[0] < 144'000u);
-    } else {
-        // Power-down stops every oscillator whatever its RUNSTDBY: the
-        // external clock has none to restart, so it pays the regulator
-        // alone - the 100 .. 800 us band - and never more than OSCHF,
-        // which pays that and its own start-up.
-        verdict("out of power-down the external clock pays the regulator's start-up and no "
-                "oscillator's (100 .. 800 us), no more than OSCHF's restart",
-                med[0] != slink::no_capture && med[0] > 2'400u && med[0] < 19'200u &&
-                    med[0] <= med[1]);
-    }
-    verdict("OSCHF out of power-down costs hundreds of microseconds (100 .. 800 us): "
-            "the oscillator's 24 us plus the regulator's own start-up",
-            med[1] != slink::no_capture && med[1] > 2'400u && med[1] < 19'200u);
-    verdict("PMODE = performance removes the regulator's share and leaves the bare "
-            "oscillator restart (under 60 us)",
-            med[2] != slink::no_capture && med[2] < 1'440u);
-    verdict("which is a factor of several, not a rounding: this is the one place "
-            "the regulator's profile is worth its quiescent current",
-            med[2] * 3u < med[1]);
+    // DS40002247B table 39-9: OSCHF out of power-down with PMODE = AUTO
+    // wakes in 600 us at most (220 typical), plus the 2.2 us path: 603 us,
+    // 14472 ticks. The crystal's restart, the external clock's, and the
+    // performance profile's restart out of power-down have no row there:
+    // printed above, not judged.
+    verdict("OSCHF out of power-down costs no more than the data sheet's 600 us (and "
+            "the 2.2 us path)",
+            med[1] != slink::no_capture && med[1] < 14'472u);
     if constexpr (has_xoschf) {
         print(serial, "  the crystal's start-up buries the regulator entirely: its restart "
                       "is the same milliseconds in standby and in power-down.", crlf);
@@ -2278,7 +2262,7 @@ bool sfd_once(const SfdLeg& leg, bool& woke, bool& intact, bool& arrived,
     sei();
     LinkUart::enable_rxs_interrupt(true);
 
-    drain_for_window();
+    drained_for_window();
     const bool moved = apply_sfd_clock(leg.clk);
     // Armed only around the transition, and only here: with SFDEN set in
     // Active mode a read of RXDATA restarts the frame (errata 2.16.2).
@@ -2382,18 +2366,15 @@ void tl_sfd() {
     verdict("and the WAKING FRAME survives at all three: the clock is back 0.5 us after "
             "the edge, inside even 460800's 1.09 us half-bit", intact[0] && intact[1] &&
                                                                  intact[2]);
-    verdict("an OSCHF restart (9.7 us) keeps the frame at 9600 (52 us half-bit) and "
-            "loses it at 115200 (4.3 us half-bit), though 17.4 us of low wake it",
-            woke[3] && intact[3] && woke[4] && !intact[4]);
-    verdict("THE WAKE-UP RULE at OSCHF's 9.7 us: 0xFF at 115200 (low for 8.7 us) does not "
-            "wake, 0x00 (78 us) does - and its frame is lost or garbled", !woke[5] && woke[6] &&
-                                                                         !intact[6]);
-    verdict("at 9600 OSCHF is back inside the start bit's first half: 0xFF and 0x00 both "
-            "wake and both frames survive", woke[7] && intact[7] && woke[8] && intact[8]);
-    verdict("the same rule at the crystal's restart: 104 us of low is not enough even "
-            "just after a run (0.16 ms), 938 us is enough even cold (0.67 ms) - and that "
-            "frame is lost",
-            !woke[9] && woke[10] && !intact[10]);
+    // The OSCHF legs and the crystal's cold restart are printed above, not
+    // judged: OSCHF's start-up is a typical 10 us only (DS40002443A table
+    // 35-10) and the crystal's amplitude build-up has no figure, so which
+    // of those lows outlast them - 8.7 us against 9.7, 938 us against
+    // 0.67 ms - is this die's and this crystal's. What the counted part of
+    // the crystal's start-up decides is judged: 4096 cycles (CSUTHF 4K,
+    // 204.8 us at 20 MHz) outlast a 104 us low whatever the crystal does.
+    verdict("a 104 us low cannot outlast the crystal's counted start-up (4096 cycles): "
+            "no wake", !woke[9]);
     verdict("from IDLE the start-of-frame flag never fires - RXSIF is set only in "
             "Standby (25.3.4.2) - and the frame is simply received",
             !woke[11] && intact[11] && !woke[12] && intact[12]);
@@ -2470,30 +2451,19 @@ void tl_sfd() {
         verdict("and the WAKING FRAME itself survives at 9600 and 115200 (half-bits of 52 "
                 "and 4.3 us against a wake of about 1 us)", intact[0] && intact[1]);
     }
+    // OSCHF's wake from standby is 30 us at most (DS40002247B table 39-9,
+    // 24 typical): inside 9600's 52 us half-bit, so that frame is kept.
     verdict("a restart well inside the start bit's first half keeps the frame too: "
-            "24 us against a 52 us half-bit at 9600", woke[3] && intact[3]);
-    verdict("THE WAKE-UP RULE, at a 24 us restart: 0xFF (low for 8.7 us) does not "
-            "wake, 0x00 (low for 78 us) does", !woke[4] && woke[5]);
-    verdict("the same rule at a 300 us restart: 104 us of low is not enough, "
-            "938 us is", !woke[6] && woke[7]);
-    if constexpr (has_xoschf) {
-        verdict("and at a 1.5 ms crystal restart: 417 us of low is not enough, 3.75 ms "
-                "is", !woke[8] && woke[9]);
-    } else {
-        // The external clock alone pays the regulator, about 130 us (test
-        // j): inside 2400 baud's 208 us half-bit, so the start bit of 0xFF
-        // is low long enough AND the frame is back in time.
-        verdict("and at the external clock's 130 us (the regulator alone): 417 us of low is "
-                "enough, and both 2400-baud frames survive (130 us is inside a 208 us "
-                "half-bit)", woke[8] && woke[9] && intact[8] && intact[9]);
-    }
+            "OSCHF's 30 us at most against a 52 us half-bit at 9600", woke[3] && intact[3]);
+    // Which lows outlast the slower restarts - 8.7 us against OSCHF's 24,
+    // 104 against 300, 417 against the crystal's 1.5 ms or the external
+    // clock's 130 us regulator - is printed above, not judged: the table
+    // gives no minimum for OSCHF and no figure for the crystal's build-up
+    // or the regulator, so each outcome is this die's.
     print(serial, "  so the detector does not latch an EDGE: it needs the line still "
                   "LOW when the peripheral clock comes back, which is why the byte's "
                   "own bit pattern decides whether a slow-restarting device wakes at "
                   "all.", crlf);
-    verdict("every wake that arrived after the middle of the start bit cost the "
-            "frame", has_xoschf ? !intact[5] && !intact[7] && !intact[9]
-                                : !intact[5] && !intact[7]);
     if constexpr (!has_xoschf) {
         // The external clock alone at 9600: the same wake-up rule at the
         // regulator's 130 us - a start bit alone (104 us) is too short, nine
@@ -2519,9 +2489,6 @@ void tl_sfd() {
         }
         verdict("the three 9600-baud legs on the external clock alone got through the link",
                 xok);
-        verdict("the rule at the external clock's 130 us: a start bit alone (104 us) does "
-                "not wake, nine bit times do - and that frame is lost or garbled",
-                !xw[0] && xw[1] && !xi[1]);
     }
     verdict("from IDLE the start-of-frame flag never fires - RXSIF is set only in "
             "Standby (27.5.5) - and the frame is simply received",
@@ -2663,14 +2630,18 @@ void tm_twi_wake() {
                        (standby.flags & slink::report_acked));
     verdict("POWER-DOWN: it wakes there too, frame intact",
             pd_n == 3 && pd_ok && (pd.flags & slink::report_acked));
+    // Kept alive, the wake is six CLK_PER cycles (13.3.2.2) and the
+    // handler's path, under the 10 us (240 ticks) any start-up exceeds.
     verdict("waking from STANDBY with the main clock kept alive costs the bus "
             "nothing measurable: the tenure is the awake one to within 10 us",
             standby.ticks > awake.ticks ? standby.ticks - awake.ticks < 240u
                                         : awake.ticks - standby.ticks < 240u);
+    // The crystal's counted start-up (4096 cycles, 204.8 us at 20 MHz) is
+    // the bound; its build-up has no figure (letter j), so how much more it
+    // costs is printed below.
     verdict("waking from POWER-DOWN costs the bus the crystal's restart - more than its "
-            "counted 204.8 us and less than 3 ms (letter k's bounds), held on SCL by the "
-            "client", pd.ticks > awake.ticks && pd.ticks - awake.ticks > 4'915u &&
-                          pd.ticks - awake.ticks < 72'000u);
+            "counted 204.8 us, held on SCL by the client",
+            pd.ticks > awake.ticks && pd.ticks - awake.ticks > 4'915u);
     print(serial, "  the stretch over the awake baseline: standby +",
           static_cast<int32_t>(standby.ticks / 24u) - static_cast<int32_t>(awake.ticks / 24u),
           " us, power-down +", (pd.ticks - awake.ticks) / 24u, " us", crlf);
@@ -2729,20 +2700,23 @@ void tm_twi_wake() {
     // serviced byte, so the whole wake-up is paid by the HOST on the
     // wire - and it is the SAME wake-up test j and test k measured on a
     // pin, seen from the other side of the bus.
+    // Kept alive, the wake is six CLK_PER cycles (13.3.2.2) and the
+    // handler's path, under the 10 us (240 ticks) any start-up exceeds.
     verdict("waking from STANDBY with the main clock kept alive costs the bus "
             "nothing measurable: the tenure is the awake one to within 10 us",
             standby.ticks > awake.ticks ? standby.ticks - awake.ticks < 240u
                                         : awake.ticks - standby.ticks < 240u);
     if constexpr (has_xoschf) {
-        verdict("waking from POWER-DOWN costs the bus the whole crystal restart - the "
-                "0.8 .. 3 ms test k measured on a pin",
-                pd.ticks > awake.ticks && pd.ticks - awake.ticks > 19'200u &&
-                    pd.ticks - awake.ticks < 72'000u);
+        // How long the crystal's restart holds the bus (letter k's 0.8 .. 3
+        // ms on a pin) is printed below, not judged: table 39-9 gives the
+        // crystal's build-up no figure.
+        verdict("waking from POWER-DOWN costs the bus a crystal restart: longer than awake",
+                pd.ticks > awake.ticks);
     } else {
-        verdict("waking from POWER-DOWN costs the bus the regulator's start-up - the "
-                "100 .. 800 us test k measured on a pin",
-                pd.ticks > awake.ticks && pd.ticks - awake.ticks > 2'400u &&
-                    pd.ticks - awake.ticks < 19'200u);
+        // The external clock pays the regulator's start-up (letter k's
+        // 100 .. 800 us), which table 37-10 gives no limits: printed below.
+        verdict("waking from POWER-DOWN costs the bus the regulator's start-up: longer than "
+                "awake", pd.ticks > awake.ticks);
     }
     if constexpr (has_xoschf) {
         print(serial, "  the stretch over the awake baseline: standby +",
@@ -2903,7 +2877,7 @@ constexpr uint32_t tca_per_pit = ticks_per_pit / 64u;      ///< 46875 at CLK_PER
 /// One 125 ms standby with TCA0 counting, CNT read at the wake. `spin`
 /// is the awake baseline over the same PIT period.
 uint16_t tca_leg(bool run_standby, bool spin) {
-    drain_for_window();
+    drained_for_window();
     if (!pit_sync()) {                        // the PIT is this sleep's waker
         verdict("the PIT ticked before the sleep (its waker)", false);
         return 0;
@@ -3028,8 +3002,10 @@ void to_runstdby() {
     // TCA0: the asleep count differs from the awake one only by the wake
     // path - CLK_PER kept alive by the TCA's own request, no oscillator
     // restart - and 64 counts (4096 CLK_PER, 205 us at 20 MHz) bound that
-    // tenfold. Without the flag only the 2 ms console drain before the
-    // sleep counts (625 counts at 20 MHz / 64), plus 1/100 of the period.
+    // tenfold. Without the flag only the code outside the sleep counts -
+    // the drained console's check, the way to SLEEP and back, tens of
+    // microseconds - against a whole period counted by a TCA that kept
+    // running: a tenth of the period parts the two.
     const uint16_t tca_awake = tca_leg(false, true);
     const uint16_t tca_on = tca_leg(true, false);
     const uint16_t tca_off = tca_leg(false, false);
@@ -3039,7 +3015,7 @@ void to_runstdby() {
     verdict("TCA0 with RUNSTDBY counts through STANDBY as it does awake",
             near_u32(tca_on, tca_awake, 64));
     verdict("without it TCA0 stops with CLK_PER: only the code outside the sleep counts",
-            tca_off < 750u + tca_per_pit / 100u);
+            tca_off < tca_per_pit / 10u);
 
     // AC0 on PD2's 32 Hz square (EVOUTD from the PIT), its CMP interrupt
     // against the PIT's 125 ms: the standby table (13-1) does not list the
@@ -3070,8 +3046,9 @@ void to_runstdby() {
     // wake-up path - CLK_PER kept alive by the TCA's own request, so no
     // oscillator restart, a few microseconds - and 64 counts (4096 CLK_PER
     // cycles, 171 us) bounds that tenfold. Without the flag the count is
-    // what runs outside the sleep: sleep_once's 2 ms console drain (750
-    // counts) plus test c's 1/100 of the period for the rest.
+    // what runs outside the sleep - the drained console's check, the way
+    // to SLEEP and back, tens of microseconds - against a whole period
+    // counted by a TCA that kept running: a tenth of the period parts them.
     const uint16_t tca_awake = tca_leg(false, true);
     const uint16_t tca_on = tca_leg(true, false);
     const uint16_t tca_off = tca_leg(false, false);
@@ -3081,7 +3058,7 @@ void to_runstdby() {
     verdict("TCA0 with RUNSTDBY counts through STANDBY as it does awake",
             near_u32(tca_on, tca_awake, 64));
     verdict("without it TCA0 stops with CLK_PER: only the code outside the sleep counts",
-            tca_off < 750u + tca_per_pit / 100u);
+            tca_off < tca_per_pit / 10u);
 
     // AC0. The square toggles every 15.6 ms, the PIT ends the sleep at
     // 125 ms: a comparator alive in standby wakes the CPU on the first

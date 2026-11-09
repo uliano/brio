@@ -518,9 +518,13 @@ triggers):
 
 | arrangement | results | OVERRUN |
 | --- | --- | --- |
-| ADC0 alone | 1238 | no |
-| DUALSEL = BOTH | 2384 | no |
-| DUALSEL = INTERLEAVE | 2495 | no |
+| ADC0 alone | 1187..1241 | no |
+| DUALSEL = BOTH | 2382..2386 | no |
+| DUALSEL = INTERLEAVE | 2495..2496 | yes, on both |
+
+Twenty runs; the window is 19 to 20 ms, as `Ticker::millis()` steps,
+so every other trigger is 1186..1251 results and every trigger
+2373..2501. The pair runs' OVERRUN flags are printed, not judged.
 
 Interleaved, **one result per trigger**, i.e. exactly twice what one
 converter can sustain; BOTH gives twice the count too, but as

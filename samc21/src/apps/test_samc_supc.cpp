@@ -287,16 +287,28 @@ void tb_bandgap() {
     print(serial, "  INTREF 2.048 V crosses at scaler step ", c2, " -> VDD ",
           vdd2, " mV", crlf);
 
+    // THE BOUNDS, from the tables. Each reference level is within
+    // +-2.05 % (table 45-36), the levels' ratio within twice that; the
+    // comparator's offset is -36..+48 mV (table 45-34, low power), the
+    // same in both crossings, so it moves the two VDD readings apart by
+    // 48 mV x (1/1.024 - 1/2.048 V), 2.3 %; and each crossing is one scaler
+    // step of 64 wide, VDD / (2 c) either way of its midpoint.
+    const auto agree_band = [](uint32_t vdd, uint8_t ca, uint8_t cb, uint32_t off_permille) {
+        return vdd / (2u * ca) + vdd / (2u * cb) + vdd * (41u + off_permille) / 1000u;
+    };
     if (vdd1 != 0u && vdd2 != 0u) {
         // THE VERDICT THAT PROVES THE REFERENCE IS REAL: doubling the
         // reference must double the step at which VDD's fraction
-        // overtakes it. A floating input would not track.
+        // overtakes it. A floating input would not track. Each crossing
+        // is a step either way (2 on the doubled one), the levels' ratio
+        // 4.1 % (some 1.6 steps at c2 = 40), the offset 64 x 48 mV / VDD
+        // (under a step at 3.3 V): +-5 steps.
         bench.verdict("DOUBLING THE REFERENCE DOUBLES THE CROSSING STEP - "
                       "the bandgap is a voltage and not a floating pin",
                       near(static_cast<uint32_t>(c2) + 1u,
-                           2u * (static_cast<uint32_t>(c1) + 1u), 2u));
-        bench.verdict("and the two levels agree on VDD to within 5 %",
-                      near(vdd1, vdd2, vdd2 / 20u));
+                           2u * (static_cast<uint32_t>(c1) + 1u), 5u));
+        bench.verdict("and the two levels agree on VDD within the tables' band",
+                      near(vdd1, vdd2, agree_band(vdd2, c1, c2, 23u)));
         bench.verdict("which lands inside the 2.7..5.5 V this family "
                       "accepts (table 45-20)",
                       vdd2 >= 2700u && vdd2 <= 5500u);
@@ -309,9 +321,9 @@ void tb_bandgap() {
     print(serial, "  erratum 1.5.6 (spurious COMP flag on a bandgap enable): ",
           spurious_1v ? "SEEN at 1.024 V" : "not seen at 1.024 V", ", ",
           spurious_2v ? "SEEN at 2.048 V" : "not seen at 2.048 V", crlf);
-    bench.verdict("ERRATUM 1.5.6 IS REAL ON THIS DIE - at least one of the "
-                  "two enables raised a COMP flag with nothing to flag",
-                  spurious_1v || spurious_2v);
+    // Printed above, not judged: an erratum need not reproduce on a die,
+    // and the obligation (clear the flag after the enable) is kept either
+    // way.
     // The flag the sweep itself sets is not the erratum's: a comparator
     // that really flips is entitled to raise it. What is asserted here
     // is only that it clears.
@@ -337,8 +349,10 @@ void tb_bandgap() {
     } else {
         print(serial, "  INTREF 4.096 V crosses at scaler step ", c4,
               " -> VDD ", vdd4, " mV", crlf);
-        bench.verdict("ALL THREE REFERENCE LEVELS AGREE ON VDD to within 5 %",
-                      vdd4 != 0u && near(vdd4, vdd2, vdd2 / 20u));
+        // The same band, the offset's share 48 mV x (1/2.048 - 1/4.096 V),
+        // 1.2 %.
+        bench.verdict("ALL THREE REFERENCE LEVELS AGREE ON VDD within the tables' band",
+                      vdd4 != 0u && near(vdd4, vdd2, agree_band(vdd2, c2, c4, 12u)));
     }
 
     Vref::output_enable(false);

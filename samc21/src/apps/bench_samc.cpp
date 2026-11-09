@@ -552,6 +552,10 @@ void tr_ruler() {
           whole_ms_refused, crlf);
     bench.verdict("the ruler reads delay_us(999) at least the due cycles",
                   served && took >= probe_due);
+    // The ruler and delay_us() share the core clock, so the span is the due
+    // cycles and what lands in it: the poll's last turn and the ruler's
+    // reads (tens of cycles) and the 1 kHz tick's handler, at most one in
+    // 999 us (a few hundred cycles) - under 1 %, inside the 5 per cent.
     bench.verdict("and under the due cycles + 5 per cent", took <= probe_due + probe_due / 20u);
 
     // ruler: one read

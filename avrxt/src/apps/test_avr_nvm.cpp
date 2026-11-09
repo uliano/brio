@@ -656,15 +656,19 @@ void tb_eeprom() {
               " CLK_PER cycles)", crlf);
     }
     if (!rows_ended) verdict("every timed operation ended within 50 ms", false);
-    verdict("a bare byte write is the table's ~70 us",
-            near(static_cast<int32_t>(us_of(rows[0].cycles)), 70, 25));
-    verdict("erase-and-write is the table's ~10 ms",
-            near(static_cast<int32_t>(us_of(rows[1].cycles)), 10070, 2000));
-    verdict("a byte erase is the table's ~10 ms",
-            near(static_cast<int32_t>(us_of(rows[2].cycles)), 10000, 2000));
-    verdict("erasing 32 bytes costs the same as erasing one",
-            near(static_cast<int32_t>(us_of(rows[3].cycles)),
-                 static_cast<int32_t>(us_of(rows[2].cycles)), 1000));
+    // Against table 39-7's maxima (DS40002247B; the DA's table is the
+    // same): a byte write 75 us, an erase of a byte, 32 bytes or the whole
+    // EEPROM 11.7 ms (tD_CE), an erase-and-write no maximum of its own -
+    // the erase's and the write's, 11.775 ms. Each reading is late by the
+    // poll's turn and the two stamps, a few microseconds: +5 us.
+    verdict("a bare byte write within the table's 75 us",
+            us_of(rows[0].cycles) <= 75u + 5u);
+    verdict("erase-and-write within the erase's 11.7 ms and the write's 75 us",
+            us_of(rows[1].cycles) <= 11775u + 5u);
+    verdict("a byte erase within the table's 11.7 ms",
+            us_of(rows[2].cycles) <= 11700u + 5u);
+    verdict("a 32-byte erase within the same 11.7 ms (tD_CE covers both)",
+            us_of(rows[3].cycles) <= 11700u + 5u);
 
     // The CPU is NOT halted by an EEPROM write: it is halted only by a
     // second NVM access while one is running (11.3.2.3.4).

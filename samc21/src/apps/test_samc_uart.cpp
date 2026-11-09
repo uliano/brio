@@ -54,7 +54,7 @@
 // divisor its transmitter shifts on. So every letter that loops or sets a
 // rate also times a run of frames through the transmit engine against the
 // wire's time at the rate ASKED, prints the reading in thousandths and
-// judges it within -1 % and +3 % (wire_permille(), in the loop's section).
+// judges it within +-1 % (wire_permille(), in the loop's section).
 // The host letters need no such reading: their far end is the bridge's
 // own divisor, and a wrong rate there is a broken stream.
 //
@@ -374,7 +374,7 @@ bool drain() {
 /// The console drained before a TIMED WINDOW, whose span a console byte's
 /// interrupt would lengthen: false, with a failed verdict, when it did not
 /// drain - the letter's figures would then mean nothing, and it returns.
-bool console_quiet() {
+bool drained_for_window() {
     if (drain()) {
         return true;
     }
@@ -688,7 +688,7 @@ void ta_baud() {
     // ASKED - the arithmetic above is checked against its own inverse, and
     // only the wire can tell a divisor that is wrong in both. Every rung
     // timed with the console quiet, the readings printed after the last.
-    if (!console_quiet()) {
+    if (!drained_for_window()) {
         return;
     }
     constexpr uint32_t rungs = sizeof rates / sizeof rates[0];
@@ -704,7 +704,7 @@ void ta_baud() {
     }
     print(plain, crlf);
     bench.verdict("EVERY RUNG RUNS AT THE RATE ASKED: 9600 baud to 3 Mbaud, a run of frames on the "
-                  "loop in its wire time within -1 % and +3 % (the divisor's own rounding is 0.14 % "
+                  "loop in its wire time within +-1 % (the divisor's own rounding is 0.14 % "
                   "at 9600 and less above)",
                   ladder_ok);
 }
@@ -783,7 +783,7 @@ void tb_format() {
     // timed against its frame's own length at 115200 - start, data,
     // parity and stop bits - which the register readback above cannot
     // show. Timed with the console quiet, printed after the last.
-    if (!console_quiet()) {
+    if (!drained_for_window()) {
         return;
     }
     constexpr uint32_t formats = sizeof rows / sizeof rows[0];
@@ -804,7 +804,7 @@ void tb_format() {
     }
     print(plain, crlf);
     bench.verdict("every frame takes its own length on the wire: a run of each format on the loop "
-                  "within -1 % and +3 % of its bits at 115200",
+                  "within +-1 % of its bits at 115200",
                   frames_ok);
 }
 
@@ -1365,9 +1365,13 @@ uint32_t frame_bits(const UartFormat& f) {
     return 1u + data + (f.parity != UartParity::none ? 1u : 0u) + (f.two_stop ? 2u : 1u);
 }
 
-/// The verdict on a reading: never faster than the rate asked by more than
-/// the ruler's own grain, at most three per cent slower.
-bool wire_ok(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
+/// The verdict on a reading: the generator and the ruler are one
+/// oscillator, so the reading is the divisor's rounding alone - the
+/// arithmetic generator's sixteen bits a part in thousands at these rungs
+/// at most, the fractional one's eighths exact at the top rates - with the
+/// run's fixed cost (a thousandth, above) and the truncation: +-1 %. A
+/// wrong divisor is a factor, a sample count or a mode.
+bool wire_ok(uint32_t permille) { return permille >= 990u && permille <= 1010u; }
 
 uint32_t wire_permille(uint32_t baud, const UartFormat& format) {
     static uint8_t run[1024];
@@ -1412,7 +1416,7 @@ uint32_t wire_permille(uint32_t baud, const UartFormat& format) {
 bool wire_rungs(std::initializer_list<uint32_t> rates) {
     constexpr uint32_t most = 4;
     uint32_t pms[most] = {};
-    if (rates.size() > most || !console_quiet()) {
+    if (rates.size() > most || !drained_for_window()) {
         return false;
     }
     uint32_t i = 0;
@@ -1562,7 +1566,7 @@ void tg_resource() {
     // Every rung run with the console quiet - a polled run that both feeds
     // DATA and reads the loop back has a frame of slack at 2 Mbaud, less
     // than a console interrupt - and printed after the last.
-    if (!console_quiet()) {
+    if (!drained_for_window()) {
         return;
     }
     std::optional<uint16_t> regs[rung_n];
@@ -1594,7 +1598,7 @@ void tg_resource() {
     // The synchronous host, both clock polarities, the internal XCK at 1 MHz.
     {
         const uint8_t reg = sercom_sync_baud_reg(SysClock::hz, 1'000'000).value();
-        if (!console_quiet()) {
+        if (!drained_for_window()) {
             return;
         }
         ResourceRun pols[2];
@@ -1724,7 +1728,7 @@ void tg_resource() {
         const uint16_t reg = sercom_baud_reg(SysClock::hz, 9600).value();
         // The frame is sampled with the console quiet: a console interrupt
         // inside it would take samples from its pulses.
-        if (!console_quiet()) {
+        if (!drained_for_window()) {
             return;
         }
         bool up = resource_up({.pads = loop_pads, .baud = reg, .irda = true});
@@ -1752,6 +1756,11 @@ void tg_resource() {
         print(plain, "  IrDA at 9600: the pad idles ", idle_high ? "HIGH" : "LOW",
               "; a 0x00 frame high in ", high, " of ", samples, " samples (", pc,
               " %, 17 % if a 0 is a high pulse of 3/16); read back clean: ", clean ? 1 : 0, crlf);
+        // A 0x00 frame is nine 0 bits and a stop: nine pulses of 3/16 in the
+        // ten-bit window are 16.9 %, eight (a window started after the start
+        // bit's pulse) 15.0 %. The alternatives sit outside 12..22: an NRZ
+        // line high only in its stop bit reads 10 %, a quarter-bit pulse
+        // 22.5 %, an inverted coder about 85 %.
         bench.verdict("IrDA: TxD idles LOW and a 0 bit leaves as a HIGH pulse of about 3/16",
                       up && !idle_high && pc >= 12u && pc <= 22u);
         bench.verdict("so the coder's own receiver, which takes a LOW pulse as a 0, cannot "
@@ -1896,7 +1905,7 @@ TxcProbe txc_under_the_engine() {
 void tq_tx_idle() {
     // Every probe run with the console quiet - a console interrupt inside a
     // probe lengthens the turns it averages - and printed after the last.
-    if (!console_quiet()) {
+    if (!drained_for_window()) {
         return;
     }
     const TxcProbe txc = txc_under_the_engine();
@@ -1932,7 +1941,7 @@ void tq_tx_idle() {
         judge_idle(engine_rates[i], engine_probes[i]);
     }
     bench.verdict("and the loop runs at the rates asked: 115200, 1 and 3 Mbaud, a run of frames in "
-                  "its wire time within -1 % and +3 %",
+                  "its wire time within +-1 %",
                   wire_rungs({115'200u, 1'000'000u, 3'000'000u}));
 }
 
@@ -2075,7 +2084,7 @@ void tr_receiver_edge() {
     bench.verdict("the release recovers: the next burst whole, in order, the epoch still",
                   c.got == after && c.bad == 0u && skips_end == 1u);
     bench.verdict("and the loop runs at the rates asked: 1 and 3 Mbaud, a run of frames in its "
-                  "wire time within -1 % and +3 %",
+                  "wire time within +-1 %",
                   wire_rungs({1'000'000u, 3'000'000u}));
 }
 
@@ -2209,7 +2218,7 @@ void tt_levels() {
                   received == n && bad == 0u);
     bench.verdict("no hardware overrun", hw == 0u);
     bench.verdict("and the loop runs at the rate asked: 3 Mbaud, a run of frames in its wire time "
-                  "within -1 % and +3 %",
+                  "within +-1 %",
                   wire_rungs({3'000'000u}));
 }
 
@@ -2419,7 +2428,7 @@ void tw_released_requester() {
                   "fault",
                   next_whole);
     bench.verdict("and the loop runs at the rate asked: 1 Mbaud, a run of frames in its wire time "
-                  "within -1 % and +3 %",
+                  "within +-1 %",
                   wire_rungs({baud}));
 }
 
@@ -3712,7 +3721,7 @@ void tK_rate() {
             have && r.span != 0u ? static_cast<int32_t>((1'000'000ull * grain) / r.span) : 0;
         const bool reference = !offset_read && g.generator != 0u && g.rate == 1'000'000u &&
                                uart_fractional(g.sampling) && uart_samples(g.sampling) == 16u;
-        const int32_t tol = reference ? 200 : grain_ppm + offset_grain + 10;
+        const int32_t tol = grain_ppm + offset_grain + 10;
 
         // The echo: the far UART sends this end's frames back.
         link::Params e{};
@@ -3757,17 +3766,17 @@ void tK_rate() {
                              r.perr == 0u && r.ovf == 0u;
         judge(rung_name(g), ": the far receiver takes every frame of the gapless burst",
               counted);
-        if (g.generator == 0u) {
-            judge(rung_name(g), ": OSC48M within table 31-3's recommended 2 %",
-                  counted && abs32(ppm) <= 20'000);
-        } else if (reference) {
+        // The OSC48M rung's reading is that oscillator's offset, and the
+        // reference rung's the two crystals' difference: both printed above,
+        // not judged - OSC48M is specified to 5 % (table 45-57), wider than
+        // table 31-3's recommended 2 % for a link, and neither crystal's
+        // tolerance is on record. The reference's offset is the instrument
+        // every other rung is judged with.
+        if (reference) {
             offset = ppm - want;
             offset_grain = grain_ppm;
             offset_read = counted && r.span != 0u;
-            judge(rung_name(g), ": an exact register, so the reading is the far crystal against "
-                                "this one - under 200 ppm",
-                  offset_read && abs32(offset) <= tol);
-        } else {
+        } else if (g.generator != 0u) {
             judge(rung_name(g), ": the far crystal times the rate the register predicts, its "
                                 "offset added",
                   counted && r.span != 0u && offset_read && abs32(ppm - want - offset) <= tol);
@@ -4266,11 +4275,16 @@ void tN_waveforms() {
                 if (e > 0 && fast == 0) fast = e;
                 if (e < 0 && slow == 0) slow = e;
             }
-            if (e >= -4 && e <= 5 && !clean) inside = false;
+            // Table 31-3 (D = 8) allows -4.00 % / +5.26 %; the peer's rate is
+            // its generator's rounding of 9600 x (1 + e) - a -4 % asked of a
+            // 20 MHz AVR's comes out -4.005 %, past the limit - and two
+            // crystals apart: the rungs judged clean are -3..+5, each a
+            // quarter per cent or more inside.
+            if (e >= -3 && e <= 5 && !clean) inside = false;
         }
         print(plain, "  frames of zeros break from ", static_cast<int32_t>(slow), " % slow and +",
               static_cast<int32_t>(fast), " % fast (table 31-3, D = 8: -4.00 % / +5.26 %)", crlf);
-        bench.verdict("every rate error inside table 31-3's range reads clean", inside);
+        bench.verdict("every rate error inside table 31-3's range (-3..+5 %) reads clean", inside);
         bench.verdict("and a rate error past it breaks the frame on both sides",
                       fast != 0 && fast <= 8 && slow != 0 && slow >= -8);
     }
@@ -4341,6 +4355,7 @@ void tN_waveforms() {
     //    bit's decision. Widths in thirty-seconds of a 9600 bit.
     {
         uint32_t decided[2] = {0, 0};
+        uint32_t bracket[2] = {0, 0};   // each decision's bracket width
         const uint8_t sampa[2] = {0, 2};
         for (uint8_t w = 0; w < 2u; ++w) {
             SercomUartConfig u = base;
@@ -4375,6 +4390,11 @@ void tN_waveforms() {
             // mean of an unseen side's initial value would wrap.
             const bool bracketed = rejected_most != 0u && taken_least != 0xFFFFFFFFu;
             decided[w] = bracketed ? (rejected_most + taken_least) / 2u : 0u;
+            // An overlap (a pulse taken narrower than one ignored) is
+            // the same reading error the other way round.
+            bracket[w] = !bracketed ? 0u
+                         : taken_least > rejected_most ? taken_least - rejected_most
+                                                       : rejected_most - taken_least;
             print(plain, crlf, "    ignored up to ");
             print_millibits(rejected_most);
             print(plain, ", taken from ");
@@ -4386,11 +4406,17 @@ void tN_waveforms() {
         bench.verdict("SAMPA 0 decides a start bit at its vote, 6/16 to 8/16 of a bit",
                       decided[0] >= 375u && decided[0] <= 500u);
         // Each decided instant is one frame's, its count started up to a
-        // sample early (31.6.3.10's note): the shift is four samples to
-        // one either way.
-        bench.verdict("SAMPA 2 decides four samples later, a quarter bit (to a sample)",
-                      decided[0] != 0u && decided[1] >= decided[0] + 188u &&
-                          decided[1] <= decided[0] + 312u);
+        // sample early (31.6.3.10's note): the shift is four samples (250
+        // thousandths) to one either way (63). And each instant is read
+        // as the middle of its bracket - the widest pulse ignored, the
+        // narrowest taken, a step of the sweep apart - so each carries up
+        // to half its bracket of reading error: the two halves are added.
+        const uint32_t slack = 63u + (bracket[0] + bracket[1] + 1u) / 2u;
+        bench.verdict("SAMPA 2 decides four samples later, a quarter bit (to a sample and "
+                      "the sweep's two half steps)",
+                      decided[0] != 0u && decided[1] != 0u &&
+                          decided[1] + slack >= decided[0] + 250u &&
+                          decided[1] <= decided[0] + 250u + slack);
     }
     link_end();
 }

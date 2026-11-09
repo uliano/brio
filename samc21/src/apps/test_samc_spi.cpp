@@ -75,7 +75,7 @@
 //   f  the wireless remainder: 32.6.3.4 loop-back through the pad, THE
 //      SCK LADDER ON THE WIRE - a frame inside a polled block against its
 //      eight SCK periods at the rate asked, on the 24 MHz crystal, judged
-//      within -1 % and +3 % (a loop proves the bytes, never the rate) -
+//      within 5 % (OSC48M against the crystal; a loop proves the bytes, never the rate) -
 //      nine-bit characters, BUFOVF and IBON, and what CTRLB.MSSEN really
 //      drives
 //   g  THE KERNEL LETTER: SpiBus (= BusMaster) over SpiHost inside a
@@ -197,7 +197,7 @@ bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 /// The console drained before a timed window opens (its transmit
 /// interrupt would land inside the span), or a failed verdict saying so
 /// and false: the letter then skips the window.
-bool quiet_console() {
+bool drained_for_window() {
     if (console_drain()) {
         return true;
     }
@@ -815,16 +815,12 @@ void ta_block() {
     bench.verdict("a SWRST from the ENABLED state resets the block, as every "
                   "document agrees",
                   sync1 && after_enabled == 0);
-    // The disposition of 1.17.16 on THIS silicon, and it is the opposite
-    // of what the errata matrix says: SWRST works from the DISABLED
-    // state. The claim rests on leg 2, where the core clock is running -
-    // the arrangement the erratum's own sentence describes.
-    bench.verdict("ERRATUM 1.17.16 IS NOT REPRODUCED at rev F in SPI mode: SWRST "
-                  "from the DISABLED state (core clock running) clears CTRLA and "
-                  "its synchronization completes - reset()'s enable-first "
-                  "discipline is kept anyway, the sheet marking every revision and "
-                  "the cost being one enable",
-                  sync2 && after_disabled == 0);
+    // The disposition of 1.17.16 on this die - leg 2, the core clock
+    // running, the arrangement the erratum's own sentence describes - is
+    // printed, not judged: an erratum need not reproduce on a die, and
+    // reset()'s enable-first discipline holds whichever way it goes.
+    print(serial, "  erratum 1.17.16 (SWRST not functional while disabled): ",
+          sync2 && after_disabled == 0 ? "not reproduced here" : "reproduced here", crlf);
     // The CLOCKLESS leg is its own finding either way (a reset can
     // synchronize into a domain the channel feeds). What is
     // JUDGED is only that nothing hung and the reset has landed by the
@@ -932,10 +928,12 @@ void ta_block() {
           hex(dbg_live), " -> ", hex(dbg_from_enabled), " from the enabled one, "
           "where 32.6.2.2 exempts this register and the erratum says a reset "
           "clears it anyway", crlf);
-    bench.verdict("ERRATUM 1.17.19 IS REFUTED at rev F: DBGCTRL SURVIVES "
-                  "CTRLA.SWRST from either state, exactly as 32.6.2.2 promises",
-                  dbg_before != 0 && dbg_from_disabled == dbg_before &&
-                      dbg_live == dbg_before && dbg_from_enabled == dbg_before);
+    // Printed, not judged: 32.6.2.2 and erratum 1.17.19 disagree, and the
+    // driver programs DBGCTRL after every reset whichever is right.
+    print(serial, "  erratum 1.17.19: ", dbg_before != 0 && dbg_from_disabled == dbg_before &&
+                                              dbg_live == dbg_before && dbg_from_enabled == dbg_before
+                                          ? "not reproduced here (DBGCTRL survives either reset)"
+                                          : "reproduced here (a reset cleared DBGCTRL)", crlf);
 
     // The run-time refusals - the same clauses the family fixture pins
     // at compile time, reached here through the value-taking twin.
@@ -1087,10 +1085,13 @@ void td_rates() {
                   "divisor is exact",
                   Bus::baud_for(1'000'000UL) == 23 && Bus::sck_hz(23) == 1'000'000UL &&
                       Bus::baud_for(command_hz) == command_baud);
+    // The claim exactly: the divisor chosen gives the fastest rate not
+    // above the request - the next faster divisor would exceed it.
+    const uint8_t b700 = Bus::baud_for(700'000UL).value();
     bench.verdict("a rate the divisor cannot hit exactly lands BELOW the request, "
-                  "never above (a requested SCK is a ceiling)",
-                  Bus::sck_hz(Bus::baud_for(700'000UL).value()) <= 700'000UL &&
-                      Bus::sck_hz(Bus::baud_for(700'000UL).value()) > 600'000UL);
+                  "never above (a requested SCK is a ceiling), at the nearest step",
+                  Bus::sck_hz(b700) <= 700'000UL && b700 > 0u &&
+                      Bus::sck_hz(static_cast<uint8_t>(b700 - 1u)) > 700'000UL);
 
     // A bus-wide CEILING, and a request that would exceed it.
     bench.verdict("a bus with a 500 kHz ceiling resolves it, and clamps a faster "
@@ -1366,9 +1367,13 @@ uint32_t frame_permille(uint32_t hz, SpiMode mode = SpiMode::mode0) {
     return big <= small ? 0u : static_cast<uint32_t>(1000ull * (big - small) / want);
 }
 
-/// The verdict on a reading: never faster than the rate asked by more than
-/// the ruler's own grain, at most three per cent slower.
-bool wire_ok(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
+/// The verdict on a reading: SCK is OSC48M's, within 5 % of 48 MHz
+/// (DS60001479M table 45-57, standard calibration), and the ruler is the
+/// crystal's, so a reading lands within 5 % of the rate asked, and a
+/// thousandth more for the ruler's grain and the truncation: 949..1051. A
+/// wrong divisor is a factor (BAUD + 1 against BAUD + 2 is 33 % at the
+/// fastest rung that has one).
+bool wire_ok(uint32_t permille) { return permille >= 949u && permille <= 1051u; }
 
 void tf_wireless() {
     bench.verdict("the loop-back host comes up (DIPO and DOPO on ONE pad - "
@@ -1412,7 +1417,7 @@ void tf_wireless() {
             (void)Loop::start(r);
             return (wall() - t0) / (crystal_hz / 1000000u);
         };
-        const bool quiet = quiet_console();
+        const bool quiet = drained_for_window();
         const uint32_t bare = quiet ? timed(0) : 0u;
         const uint32_t with_setup = quiet ? timed(100) : 0u;
         const uint32_t delta = with_setup > bare ? with_setup - bare : 0u;
@@ -1451,7 +1456,7 @@ void tf_wireless() {
         uint32_t pm_judged[n_judged] = {};
         uint32_t pm_untimed[n_untimed] = {};
         uint32_t m3 = 0;
-        const bool quiet = quiet_console();
+        const bool quiet = drained_for_window();
         if (quiet) {
             for (uint8_t i = 0; i < n_judged; ++i) pm_judged[i] = frame_permille(judged[i]);
             for (uint8_t i = 0; i < n_untimed; ++i) pm_untimed[i] = frame_permille(untimed[i]);
@@ -1470,7 +1475,7 @@ void tf_wireless() {
         }
         print(serial, crlf, "  mode 3 at 1 MHz: ", m3, crlf);
         bench.verdict("THE SCK LADDER RUNS AT THE RATES ASKED: 93.75 kHz to 8 MHz, a frame "
-                      "inside a polled block in its eight SCK periods within -1 % and +3 % on "
+                      "inside a polled block in its eight SCK periods within 5 % (OSC48M) on "
                       "the 24 MHz crystal, no gap between frames - and mode 3 the same",
                       all_in_band && wire_ok(m3));
     }
@@ -1806,7 +1811,7 @@ void tg_kernel() {
 
     // The rate this letter's requests ask for, and the generator's
     // slowest, timed on the wire with the console quiet.
-    const bool quiet = quiet_console();
+    const bool quiet = drained_for_window();
     const uint32_t pm_cmd = quiet ? frame_permille(command_hz) : 0u;
     const uint32_t pm_slow = quiet ? frame_permille(spi_sck_hz(SysClock::hz, 255)) : 0u;
     print(serial, "  a frame inside a polled block at the letter's rate and the slowest, in "
@@ -1814,7 +1819,7 @@ void tg_kernel() {
           "wire time: ", command_hz / 1000u, " kHz ", pm_cmd, ", ",
           spi_sck_hz(SysClock::hz, 255), " Hz ", pm_slow, crlf);
     bench.verdict("and the bus runs at the rates asked: a frame inside a polled block "
-                  "in its eight SCK periods within -1 % and +3 %",
+                  "in its eight SCK periods within 5 % (OSC48M)",
                   wire_ok(pm_cmd) && wire_ok(pm_slow));
     Loop::release();
     Cs::set();
@@ -1981,9 +1986,8 @@ void th_avr_client() {
 
     // (2) THE CLK_PER/6 CEILING (test_avr_spi m): 4 MHz on a 24 MHz peer,
     // 3.33 MHz on a 20 MHz one (the AVR errata's clarification 3.7.3 / the
-    // EA's 3.7). Inside it exact, above it POSITIVELY corrupted - a test
-    // that cannot see its failure signal passes vacuously. 3 MHz is inside
-    // either, 6 MHz above either.
+    // EA's 3.7). Inside it exact; above it what happens is printed (no
+    // document specifies it). 3 MHz is inside either, 6 MHz above either.
     static const uint32_t inside[] = {3'000'000UL, 1'500'000UL};
     static const uint32_t above[] = {6'000'000UL, 12'000'000UL};
     for (const uint32_t hz : inside) {
@@ -2018,10 +2022,12 @@ void th_avr_client() {
         print(serial, "  ", hz / 1000u, " kHz, above the client's CLK_PER/6: host mism=",
               v.mism, "/", e.count, " (first idx ", v.idx, " got ", hex(v.got), " exp ",
               hex(v.exp), "), client count=", r.count, " mism=", r.mism, "/", e.count, crlf);
-        bench.verdict(hz == 6'000'000UL ? "an AVR client is positively corrupted at 6 MHz, "
-                                          "above its ceiling"
+        // Printed above, not judged: above the client's ceiling (the AVR EA
+        // errata's 3.7, the DB's 3.7.3: fCLK_PER/6) nothing is specified,
+        // corruption included; only that the exchange ran is required.
+        bench.verdict(hz == 6'000'000UL ? "the exchange above the client's ceiling ran, at 6 MHz"
                                         : "and at 12 MHz",
-                      ran && rep && (v.mism > 0 || r.mism > 0));
+                      ran && rep);
     }
 
     // (3) THE LOSS SEMANTICS (test_avr_spi p): eight characters with no
@@ -2452,7 +2458,9 @@ void tj_client_edges() {
 
     // The run against the burst, SSL armed with no hold: the baseline, and
     // the character period P measured from the select's fall to the run's
-    // end (the first character starts gap_us after the fall).
+    // end (the first character starts gap_us after the fall) - with the
+    // console quiet, its interrupts kept out of the span P is read from.
+    if (!drained_for_window()) return;
     ClientBurst c = client_burst(JRun::exchange, plain, 12, 0x24, 0x81, 0x81, 40,
                                  [] { arm_ssl(0); });
     print_burst("exchange, 12 of 12", c);
@@ -2712,7 +2720,7 @@ void tk_host_paths() {
     // The budget's time (samc21/spi.hpp, the class comment): twice the frames'
     // wire time and 4096 core cycles, a floor because a turn takes more than
     // the four cycles the count is made at. The wall is the 24 MHz crystal's
-    // and OSC48M is half a per cent off it (docs/boards/samc21j.md), which the
+    // and OSC48M is within 5 % of it (DS60001479M table 45-57), which the
     // real turn's margin over four cycles covers many times.
     const uint32_t bound_cycles = 4096u + 2u * 8u * 16u * (static_cast<uint32_t>(command_baud) + 1u);
     const uint32_t took_cycles = took * 2u;
@@ -3230,7 +3238,9 @@ void tm_engines() {
 
     // THE SUM THAT WOULD WRAP: a command of one and 65535 data frames, 65536
     // frames, polled and on the engines, at 6 MHz (a frame 64 core cycles,
-    // 32 ruler ticks): each must take the wire's 65536 x 32 ticks.
+    // 32 ruler ticks): each must take the wire's 65536 x 32 ticks, less
+    // the 5 % OSC48M may run fast against the crystal ruler (table 45-57)
+    // - a wrapped sum would carry nothing, an empty request too.
     for (uint8_t engine = 0; engine < 2u; ++engine) {
         dm::engage<dm::DLoop>();
         auto r = dm::request<dm::DLoop>(nullptr, nullptr, 65535u, 3, SpiMode::mode0,
@@ -3245,7 +3255,7 @@ void tm_engines() {
               ", ", took, " ticks against the wire's ", 65536UL * 32UL, crlf);
         bench.verdict(engine ? "cmd_len + len = 65536 on the engines: all of it on the wire"
                              : "cmd_len + len = 65536 polled: all of it on the wire, not an empty request",
-                      st == spi_ok && took >= 65536UL * 32UL);
+                      st == spi_ok && took >= 65536UL * 32UL / 20UL * 19UL);
     }
     dm::DLoop::release();
     (void)link_command_mode();

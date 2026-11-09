@@ -796,7 +796,8 @@ tick being 30.18 us.
   value it had when the SLEEP instruction ran, in both deep modes; read
   1 ms later it is right. The read is synchronized into CLK_PER (26.10)
   and that path needs the clock back and a CLK_RTC edge. Anything
-  timing a sleep by the RTC counter must settle first - the suite does.
+  timing a sleep by the RTC counter must settle first - the suite does,
+  and prints the raw read as the finding it is.
 - **What an oscillator's RUNSTDBY buys is the wake-up.** Measured as
   CLK_RTC ticks (30.18 us) between the PIT's own edge and the woken
   program, with a spinning baseline subtracted: crystal with its
@@ -998,7 +999,11 @@ as its escape hatch, for the reason the crystal gives below:
   bill and 13.3.2.2's regulator clause is never met. The DA/DB's rule -
   hold an oscillator up or pay the regulator - does not exist here: a
   wake on OSCHF costs 9 us whatever else stopped, and an oscillator's
-  `RUNSTDBY` buys exactly its own start-up.
+  `RUNSTDBY` buys exactly its own start-up. The suite prints these
+  figures rather than judging them: table 35-10 gives tOSCHF_ST no
+  limits and the chapter does not say whether the part stops its
+  regulator, so one die is no contract; what it judges is each wake's
+  counted floor (CSUTHF's 4096 cycles) and the kept clock's few cycles.
 - **A crystal's restart is its build-up plus CSUTHF's count, and its
   history moves it.** Cold - 100 ms after the crystal last ran, nothing
   else waking the device - the 20 MHz quartz restarts in 0.61..0.67 ms:
@@ -1104,15 +1109,13 @@ among them; `test_avr_power` green (a to f: the ladder, a real
 standby round, the deadline guard, the voters, the standing
 restrictions, a power-down round) - the power model over the EA's
 three modes with no regulator verb - in twelve runs of twelve. Letter
-b's wake cost is held there to a DERIVED bound: each leg is the shortest
-of eight PIT periods, so the two shortest differ by the wake's cost
-plus at most the legs' own spread (the longer of the two, longest less
-shortest) plus OSC32K's wander between the legs (400 ppm of a tick, 8
-cycles at 20 MHz; [rtc.md](rtc.md)), and the wake beside a clock the
-stopwatch keeps alive measures -3..+12 CLK_PER cycles against a noise
-bound of 19..40 (19567..19591 asleep, 19561..19585 spinning, shortest
-of eight). The DA/DB path keeps its `slept >= spun`, a bound their
-larger wake cost meets but nothing derives (below). In every EA release image each
+b prints the wake cost on every part rather than judging it: each leg
+is the shortest of eight PIT periods, so the two differ by the wake's
+cost and by OSC32K's wander between the legs, which no data sheet
+bounds and which on this part is as large as the cost (a few hundred
+ppm of a tick, [rtc.md](rtc.md)); the wake beside a clock the
+stopwatch keeps alive measured -3..+12 CLK_PER cycles here (19567..19591
+asleep, 19561..19585 spinning, shortest of eight). In every EA release image each
 SLPCTRL.CTRLA store follows a non-store instruction (the NOP of
 DS80001048D 2.2.3's workaround, or a load between it and the store).
 

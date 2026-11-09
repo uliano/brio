@@ -297,6 +297,21 @@ constexpr uint8_t host_flags = TWI_RIF_bm | TWI_WIF_bm | TWI_ARBLOST_bm | TWI_BU
 /// a time-out). The budget, 100 ms, is a thousand times a 9-bit frame at
 /// 100 kHz (90 us) and outlasts the 200 us bus time-out letter h waits
 /// through.
+/// The client served for a fixed span after the host's last action, so
+/// that what the bus carries then (a STOP, a byte to a loser's client)
+/// reaches it: `Ms` milliseconds of the kernel tick, at least Ms - 1
+/// whole ones (the tick's granularity) - each far longer than the few
+/// SCL periods it waits for.
+template <typename C, uint8_t Ms>
+void serve_client_for() {
+    (void)brio::wait_ticks<P>(
+        [] {
+            service_client<C>();
+            return false;           // a span, not a condition: it always runs out
+        },
+        brio::ticks_from_ms<P>(Ms));
+}
+
 template <typename C>
 uint8_t pump_to_host_flag() {
     uint8_t s = 0;
@@ -333,7 +348,7 @@ uint8_t run_request(const Host::Request& r) {
         brio::ticks_from_ms<P>(500));
     if (!done) return 0xFE;
     // Let the client see the STOP that just went out.
-    for (uint16_t k = 0; k < 4000; ++k) service_client<C>();
+    serve_client_for<C, 2>();
     return Host::status();
 }
 
@@ -802,12 +817,20 @@ void measure_speed(I2cSpeed s, const char* name, uint16_t rise = 0, uint16_t fal
           "floor ", floor_ticks, ") -> ", hz, " Hz; tLOW=", low, " of ", reg_low,
           " ticks = ", low_ns, " ns (floor ", twi_low_min_ns(s), "); measured tR=",
           rise_ns, " ns tOF=", fall_ns, " ns", crlf);
+    // The meter reads a capture one CLK_PER tick short of the interval
+    // and its edges are synchronized: every reading is the bus's within a
+    // tick, so each bound below grants one. The fall the register's low
+    // loses is the specification's tOF at most (300 ns, Fm+ 120): 6
+    // ticks at 20 MHz, 8 at 24, ceil(300 x MHz / 1000).
+    constexpr uint16_t tof_ticks = static_cast<uint16_t>((300u * mhz + 999u) / 1000u);
     verdict("the period never runs under the register's floor ", name,
-            period >= floor_ticks);
+            period + 1u >= floor_ticks);
     verdict("tLOW is equation 29-4 minus a bounded fall time ", name,
-            low <= reg_low && low + 8 >= reg_low);
-    verdict("tLOW meets the mode's specified minimum ", name, low_ns >= twi_low_min_ns(s));
-    verdict("SCL does not exceed the mode's nominal rate ", name, hz <= twi_scl_hz(s));
+            low <= reg_low + 1u && low + tof_ticks + 1u >= reg_low);
+    verdict("tLOW meets the mode's specified minimum ", name,
+            low_ns + 1000ul / mhz >= twi_low_min_ns(s));
+    verdict("SCL does not exceed the mode's nominal rate ", name,
+            period != 0u && SysClock::hz / (period + 1u) <= twi_scl_hz(s));
     scl_verdict(name, run, SysClock::hz, s, fall != 0u ? fall : twi_fall_budget_ns(s),
                 period > floor_ticks ? period - floor_ticks : 0u);
     T::release();
@@ -969,7 +992,7 @@ bool refused_quietly(uint8_t addr) {
     tx_buf[0] = 0x5A;
     const bool sync = Host::start({addr, lend<Lease::reply>(tx_buf), 1, {}, 0, {}});
     const uint8_t st = Host::status();
-    for (uint16_t i = 0; i < 20'000u; ++i) service_client<C>();
+    serve_client_for<C, 10>();
     return sync && st == i2c_rejected && cl_addr_hits == 0u;
 }
 
@@ -1043,7 +1066,7 @@ void te_cases() {
     verdict("S1: the client matched the address with DIR = 0",
             cl_addr_hits == 1 && !cl_dir_read);
     T::host_command(TwiHostCmd::stop);
-    for (uint16_t k = 0; k < 4000; ++k) service_client<Client>();
+    serve_client_for<Client, 2>();
     verdict("S3: the client saw the STOP (AP = 0)", cl_stops == 1);
 
     // M2: address+R ACKed -> the client owns the bus, a byte follows.
@@ -1056,7 +1079,7 @@ void te_cases() {
     verdict("S2: the client matched the address with DIR = 1",
             cl_addr_hits == 1 && cl_dir_read && cl_sent >= 1);
     T::host_command(TwiHostCmd::stop, TwiAck::nack);
-    for (uint16_t k = 0; k < 4000; ++k) service_client<Client>();
+    serve_client_for<Client, 2>();
 
     // M3: nobody answers -> WIF and RXACK both set.
     cl_reset();
@@ -1126,7 +1149,7 @@ uint8_t manual_read(uint8_t addr, uint8_t* dst, uint8_t len, bool smart) {
     }
     T::host_command(TwiHostCmd::stop, TwiAck::nack);
     ++mcmd_writes;
-    for (uint16_t k = 0; k < 4000; ++k) service_client<Client>();
+    serve_client_for<Client, 2>();
     T::host_smart(false);
     return i2c_ok;
 }
@@ -1367,12 +1390,20 @@ void th_busstate() {
         went_busy[i] = T::bus_state() == TwiBusState::busy;
         t[i] = time_to_idle();
     }
+    // How long each takes is printed, not judged here: on the DA/DB the
+    // supervisor's base "is dependent on the baud rate setting" (29.3.3.1)
+    // and no figure ties it to microseconds; on the AVR EA letter v times
+    // it against its documented base (MCLKTIMEBASE) from the last bus
+    // activity. Judged: each setting does return the bus to Idle, and the
+    // three in the order the register names them.
     for (uint8_t i = 0; i < 3; ++i) {
-        print(serial, "  TIMEOUT ", names[i], ": Busy -> Idle after ", t[i], " us", crlf);
+        print(serial, "  TIMEOUT ", names[i], ": Busy -> Idle after ", t[i], " us (the setting ",
+              nominal[i], ")", crlf);
         verdict("the inactive-bus time-out returns the bus to Idle at ", names[i],
-                went_busy[i] && t[i] != 0xFFFF && t[i] >= nominal[i] / 2 &&
-                    t[i] <= nominal[i] * 3);
+                went_busy[i] && t[i] != 0xFFFF);
     }
+    verdict("the three settings release in their order, 50 < 100 < 200",
+            t[0] < t[1] && t[1] < t[2]);
     T::timeout(TwiTimeout::disabled);
     inject_stop();
     T::force_idle();
@@ -1416,18 +1447,14 @@ void th_busstate() {
     const uint8_t imm = T::host_status();
     print(serial, "  a STOP injected mid-byte: MSTATUS=", hex(imm), ", client matches=",
           cl_addr_hits, crlf);
-    if constexpr (avr_die == AvrDie::avr64ea) {
-        // Measured: the AVR EA's bus-state logic takes that STOP as the
-        // end of the foreign tenure - no BUSERR - and launches the START it
-        // has been holding at once (27.5.6's BUSERR text is the DA/DB's).
-        verdict("on the AVR EA a STOP inside a byte is NOT a violation: no BUSERR, and the "
-                "held START goes out at once (the bus Owner)",
-                !(imm & TWI_BUSERR_bm) && (imm & TWI_BUSSTATE_gm) == TWI_BUSSTATE_OWNER_gc &&
-                    cl_addr_hits == 0);
-    } else {
-        verdict("a STOP inside a byte is a violation: BUSERR, and the address still has "
-                "not gone out", (imm & TWI_BUSERR_bm) && cl_addr_hits == 0);
-    }
+    // Printed, not judged: 27.5.6 (the AVR EA) carries the DA/DB's 29.5.6
+    // text word for word, and the two families were measured to answer
+    // differently - BUSERR with the address held (the DA/DB), the STOP
+    // taken as the tenure's end and the held START launched (the AVR EA).
+    // One die per family is no contract; what follows recovers either way.
+    print(serial, "  a STOP inside a byte: ", (imm & TWI_BUSERR_bm) ? "BUSERR" : "no BUSERR",
+          ", BUSSTATE ", static_cast<uint8_t>(imm & TWI_BUSSTATE_gm), crlf);
+    verdict("the address did not reach the client on the STOP itself", cl_addr_hits == 0);
 
     // The START the host has been holding all this time is still
     // pending: clearing BUSERR and declaring the bus idle lets it go.
@@ -1440,7 +1467,7 @@ void th_busstate() {
     verdict("the held transaction survives the wait and goes out on the idle bus",
             (after & TWI_WIF_bm) && !(after & TWI_RXACK_bm) && cl_addr_hits == 1);
     T::host_command(TwiHostCmd::stop);
-    for (uint16_t k = 0; k < 4000; ++k) service_client<Client>();
+    serve_client_for<Client, 2>();
 
     // The other legal way out of a bus somebody else left Busy: the
     // inactive-bus time-out (29.3.2.2.2) returns the bus to Idle without
@@ -1486,7 +1513,7 @@ void th_busstate() {
             (again & TWI_WIF_bm) && !(again & TWI_RXACK_bm) && cl_addr_hits == 1);
     T::host_command(TwiHostCmd::stop);
     T::timeout(TwiTimeout::disabled);
-    for (uint16_t k = 0; k < 4000; ++k) service_client<Client>();
+    serve_client_for<Client, 2>();
 
     // The recovery verb the errata prescribe instead of FLUSH.
     Host::recover();
@@ -1864,12 +1891,14 @@ constexpr int16_t poll_late = poll_turn + 3;
 /// stopwatch's first LDS (about 2) - 12, give or take 2.
 constexpr int16_t release_lag = 12;
 
-/// The budget of a leg: 60000 ticks, 3 ms at 20 MHz - fifteen times the
-/// longest time-out timed, and under the 16-bit stopwatch's wrap, so a
-/// reading never folds over it.
-constexpr uint16_t leg_budget = 60'000;
-static_assert(static_cast<uint32_t>(leg_budget) >= 15ul * 200ul * mhz,
-              "the budget must outlast the 200 us setting with room to spare");
+/// The budget of a leg: four times the longest time-out timed (200 us of
+/// the clock's time base; 16000 ticks, 0.8 ms at 20 MHz), under the
+/// 16-bit stopwatch's wrap so a reading never folds over it. A leg runs
+/// with interrupts masked, so a leg that fails holds them that long and
+/// no longer.
+constexpr uint16_t leg_budget = static_cast<uint16_t>(4u * 200u * mhz);
+static_assert(static_cast<uint32_t>(leg_budget) >= 4ul * 200ul * mhz && leg_budget < 32768u,
+              "the budget must outlast the 200 us setting, within half the wrap");
 
 /// The injector of inject_start_and_leave(), its edges stamped as they
 /// are made, then the bus state polled from its return. Each stamp is
@@ -1987,8 +2016,8 @@ void tv_ea_facts() {
         }
         ClockTimebase::write(tb_clock);
         bool full_diff = true, full_abs = true, half_diff = true, half_abs = true;
-        // Every figure below fits 16 bits: a stamp is under the 60000-tick
-        // budget, which `came` checks first, and a setting is at most 200 x 20
+        // Every figure below fits 16 bits: a stamp is under leg_budget,
+        // which `came` checks first, and a setting is at most 200 x 20
         // ticks; the differences are taken between two such readings.
         for (uint8_t k = 0; k < 3; ++k) {
             const TimeoutLeg* l = legs[k];
@@ -2053,9 +2082,10 @@ void tv_ea_facts() {
                                                               w[2] != 0xFFFFu && w[3] != 0xFFFFu);
         verdict("the codes are in their own order, short to long (no swap: code 1 the "
                 "shortest added hold)", w[0] <= w[1] && w[1] < w[2] && w[2] < w[3]);
-        verdict("code 1 adds at most two ticks (its 50 ns, a tick each side)",
+        // Each window is read to a tick, so a difference of two carries two.
+        verdict("code 1 adds at most two ticks (its 50 ns, a tick in each window)",
                 w[1] - w[0] <= 2u);
-        verdict("code 3 adds 300..900 ns (table 35-21; a tick each side)",
+        verdict("code 3 adds 300..900 ns (table 35-21; a tick in each window)",
                 w[3] > w[0] &&
                     static_cast<uint32_t>(w[3] - w[0] + 2u) * 1000u >= 300ul * mhz16 &&
                     static_cast<uint32_t>(w[3] - w[0]) * 1000u <= 900ul * mhz16 + 2000u);
@@ -2067,10 +2097,12 @@ void tv_ea_facts() {
         const bool out_ok = st == i2c_ok && cl_rx_n == 2 && cl_rx[0] == 0x6A && cl_rx[1] == 0x6B;
         Sda::clear();
         Scl::clear();
+        // Printed, not judged: whether an erratum the AVR EA's errata do not
+        // list shows on a die is that die's business, and the driver clears
+        // PORT.OUT at init either way.
         print(serial, "  with PORT.OUT = 1 on PA2/PA3 under the TWI: status ", st, ", client got ",
-              cl_rx_n, crlf);
-        verdict("PORT.OUT = 1 on SDA and SCL does not hold the bus: a write completes (no "
-                "twin of DB 2.15.1 / DA 2.14.1 on this die)", out_ok);
+              cl_rx_n, out_ok ? " (a write completes: no twin of DB 2.15.1 / DA 2.14.1 here)"
+                              : " (the bus held: a twin of DB 2.15.1 / DA 2.14.1 here)", crlf);
         // 4. FLUSH strobed a thousand times on an idle host.
         uint16_t not_idle = 0;
         for (uint16_t i = 0; i < 1000; ++i) {
@@ -2081,10 +2113,11 @@ void tv_ea_facts() {
             }
         }
         const uint8_t st2 = run_request<Client>({client_addr, lend<Lease::reply>(tx_buf), 2, {}, 0, {}});
+        // Printed, not judged, for the same reason: the driver recovers with
+        // an ENABLE cycle, never FLUSH, whatever a die does with it. What a
+        // correct program relies on - the bus usable afterwards - is judged.
         print(serial, "  1000 FLUSH strobes: BUSSTATE left not Idle after ", not_idle,
               "; a write after them: status ", st2, crlf);
-        verdict("1000 FLUSH strobes on an idle host never leave the bus state other than Idle",
-                not_idle == 0);
         verdict("and the bus works after them", st2 == i2c_ok);
         quiesce();
     }
@@ -2127,6 +2160,10 @@ struct LinkPort {
             {addr, lend<Lease::reply>(tx), tx_len, lend<Lease::reply>(rx), rx_len, {}});
     }
     static void ready() { Host::recover(); }
+    /// A wait of at least `ms`: the delay verb on the board's static rate,
+    /// so under letter s's halved DynamicClock it lasts twice as long -
+    /// every wait here is a floor (the peer's recovery, the arm margin),
+    /// never a deadline, so a longer one is still right.
     static void wait_ms(uint32_t ms) { delay_us(clock, ms * 1000ul); }
 };
 /// The shared choreography: three attempts with the peer's 400 ms
@@ -2350,10 +2387,17 @@ void tl_stretch() {
         const uint32_t got = r[i].ticks > base ? r[i].ticks - base : 0;
         print(serial, "  elongation at ", names[i], ": ", got, " ticks, model ", want,
               " (", stretch_bytes, " bytes x ", tiers[i], " us)", crlf);
+        // The peer times its hold on its own core clock; the SAM C21 peer
+        // runs on OSC48M, within 5 % (DS60001479M table 45-57, standard
+        // calibration) - the widest of the peers. Each held byte also ends
+        // up to a few microseconds late (the spin's last turn, a SysTick
+        // handler): 5 us a byte. A byte more or less held is a sixth of the
+        // model, outside either bound.
         verdict("the tenure grows by count x hold ", names[i],
-                got > want - want / 5u && got < want + want / 5u + 3000u);
+                got > want - want / 20u &&
+                    got < want + want / 20u + static_cast<uint32_t>(stretch_bytes) * 5u * mhz);
         verdict("and the longest SCL low is that hold, not the divider's ", names[i],
-                r[i].low_max > static_cast<uint16_t>(tiers[i] * (mhz * 5u / 6u)));
+                r[i].low_max > static_cast<uint16_t>(static_cast<uint32_t>(tiers[i]) * mhz * 19u / 20u));
     }
 
     verdict("the HOST holds the clock while its own flag stands (CLKHOLD)",
@@ -2505,7 +2549,7 @@ ArbRound arb_round(uint8_t a_target, uint16_t t_us) {
         brio::ticks_from_ms<P>(100));
     r.status = ended ? Host::status() : uint8_t{0xFE};
     // Whoever won, the loser's client is about to be written to.
-    for (uint32_t k = 0; k < 200'000u; ++k) service_client<Client>();
+    serve_client_for<Client, 20>();
     r.rx_n = cl_rx_n;
     r.rx0 = cl_rx[0];
     r.hits = cl_addr_hits;
@@ -2803,7 +2847,7 @@ void tq_reserved() {
     const uint8_t st_call = Host::status();
     const bool sync_prefix = Host::start({0x7A, lend<Lease::reply>(tx_buf), 1, {}, 0, {}});
     const uint8_t st_prefix = Host::status();
-    for (uint16_t i = 0; i < 20'000u; ++i) service_client<Client>();
+    serve_client_for<Client, 10>();
     const uint16_t local_hits = cl_addr_hits;
     for (uint8_t i = 0; i < 3; ++i) tx_buf[i] = static_cast<uint8_t>(0x81 + i);
     const uint8_t st2 = run_request<Client>({twilink::command_addr, lend<Lease::reply>(tx_buf), 3,
@@ -2904,9 +2948,12 @@ void speed_round(I2cSpeed s, const char* name) {
           ") gave ", hex(rx_buf[4]), " ", hex(rx_buf[5]), " ", hex(rx_buf[6]), " ",
           hex(rx_buf[7]), crlf);
     verdict("the exchange is exact against the peer at ", name, exact);
+    // The meter's reading is the bus's within a tick (a capture reads one
+    // short, letter b): each bound grants it.
     verdict("SCL never runs faster than the register allows at ", name,
-            period >= floor_ticks);
-    verdict("nor above the mode's nominal rate at ", name, hz <= twi_scl_hz(s));
+            period + 1u >= floor_ticks);
+    verdict("nor above the mode's nominal rate at ", name,
+            period != 0u && SysClock::hz / (period + 1u) <= twi_scl_hz(s));
     scl_verdict(name, run, SysClock::hz, s, twi_fall_budget_ns(s),
                 period > floor_ticks ? period - floor_ticks : 0u);
     const uint16_t nominal_low = twi_low_ticks(baud, s);
@@ -2962,6 +3009,10 @@ bool two_board_step(uint32_t hz, const char* what) {
           ", actual_scl_hz(0) = ", Host::actual_scl_hz(0), " Hz, actual_scl_hz(166 ns) = ",
           Host::actual_scl_hz(166), " Hz; exchange status ", st, crlf);
     verdict("the exchange across the wire is exact ", what, exact);
+    // A BAUD left from the other clock is a factor of two off (about 50 or
+    // 200 kHz); a re-derived one is at most 100 kHz and at least the tLOW
+    // floor's rate with the rise charged (4.7 + 0.3 us low, as long high,
+    // 1 us of rise: 91 kHz): 80 kHz parts the two.
     if constexpr (twi_ea_scl) {
         // The AVR EA's duty: at tR = 0 the floor step's period runs a
         // percent fast (letter b), at the rise the speed charges it does not.

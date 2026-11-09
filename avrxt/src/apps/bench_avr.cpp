@@ -539,6 +539,11 @@ void tr_ruler() {
               probe_due, "), ", s.irq, " handler(s) inside it, ", s.isr, " cycles between their stamps",
               crlf);
         bench.verdict("the ruler reads delay_us(999) at least the due cycles", took >= probe_due);
+        // The folded delay is exact; over it, the ruler's start and read
+        // (under a hundred cycles) and the ticks that land inside: at most
+        // two in 999 us (1024 Hz within OSC32K's 10 %), each handler under
+        // two hundred cycles (the line above prints them) - 500 cycles,
+        // inside 5 per cent of the due (999 at 20 MHz, 1199 at 24).
         bench.verdict("and under the due cycles + 5 per cent", took <= probe_due + probe_due / 20u);
     }
 
@@ -669,6 +674,14 @@ void tp_print() {
 // =============================================================================
 void tt_tick() {
     drain();
+    // The idle turns below end only on an interrupt, the tick the one left:
+    // a tick that does not run ends the letter here, an edge waited for at
+    // most 10 ms (ten periods) on the ruler.
+    const uint32_t k0 = P::now();
+    if (!wait_until<Ruler>([k0] { return P::now() != k0; }, 10'000u)) {
+        bench.verdict("the 1024 Hz tick runs (an edge within 10 ms)", false);
+        return;
+    }
     Stopwatch<Ruler> sw;
     const BenchCounters c0 = counters();
     sw.start();
@@ -794,8 +807,34 @@ void req() {
 
 }  // namespace de
 
+/// Whether nothing else holds the host's driven pads (MOSI PE0, SCK PE2)
+/// low: on a board whose PE pads are one net with PC4..PC7 and run on to
+/// the partner board (board::pc_pe_jumpers), each read with its pull-up
+/// on after 100 us (a pull-up of tens of kilohms charges a pad, a jumper
+/// and a wire within microseconds), then handed back with no pull. A pad
+/// read low is driven from the other side, and a high driven from here
+/// would fight it; a partner driving high reads as the pull-up does,
+/// which this check cannot tell apart.
+bool spi_pads_free() {
+    if constexpr (!board::pc_pe_jumpers) {
+        return true;
+    } else {
+        using Pads = PinSet<Pin<'E', 0>, Pin<'E', 2>>;
+        Pads::input(PinPull::up);
+        delay_us(clock, 100);
+        const bool high = Pads::read() == Pads::mask;
+        Pads::input();
+        return high;
+    }
+}
+
 void te_spi() {
     using namespace de;
+    if (!spi_pads_free()) {
+        bench.skip("PE0 or PE2 is held low from the partner's side: the SPI host's legs");
+        drain_misses = 0;
+        return;
+    }
     for (uint16_t i = 0; i < 256u; ++i) {
         mem_src[i] = static_cast<uint8_t>(i * 7u + 1u);
     }

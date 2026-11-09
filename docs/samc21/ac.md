@@ -80,9 +80,9 @@ Family fixture `test/family_samc21/ac.cpp` plus four negatives under
 distinction matters: `test_samc_ac` (6 letters, 93 verdicts, wireless;
 a letter is one command key of a suite's console and the group of
 verdicts that key runs) is the chapter's own, `test_samc_analog`
-carries what needs the DAC as a swept source (letters g to j), and
-`ac_sync_probe` is a probe - it answers one timing question and is not
-a reference test.
+carries what needs the DAC as a swept source (letters g to j), and a
+separate timing probe answers one timing question (below) and is not a
+reference test.
 
 The errata, read on the E/G/J row at silicon revision F: of six AC
 items plus one device-level one, **two apply** and neither is
@@ -354,7 +354,7 @@ own offset - so that pair is the two ladders agreeing and nothing else.
 The comparator also follows the DAC to both ends of its range. Details
 in [dac.md](dac.md).
 
-### From `ac_sync_probe` (a PROBE, not a suite)
+### From the timing probe (a PROBE, not a suite)
 
 The numbers behind the timing statements above, all
 (GCLK_AC = OSC48M/4096 = 11.719 kHz unless said otherwise, one
@@ -389,8 +389,10 @@ about 14 ms - the moment the pad was due to move - against a 91 ms RTC
 backstop. With RUNSTDBY CLEAR it woke nothing, in eight rounds of
 eight, **whether GCLK_AC stopped with the CPU or was force-fed by a
 generator that runs in standby**: COMPCTRL.RUNSTDBY gates the
-COMPARATOR and not merely its clock. The force-fed arrangement does
-produce ONE stray wake in thirty-two rounds across four runs. And
+COMPARATOR and not merely its clock. The force-fed arrangement once
+produced ONE stray wake in thirty-two rounds across four runs, and none
+in twenty later runs; the suite judges that leg by table 40-1's row
+(no wake at all), so a stray wake fails it. And
 40.6.14.2's single-shot SleepWalking runs: an RTC periodic event on the
 ASYNCHRONOUS path - all table 29-3 grants the SOC users - starts a
 comparison DURING a standby and its INTFLAG is read at the wake.

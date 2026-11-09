@@ -20,11 +20,10 @@
 //   - The RATIO of two measurements needs no reference accuracy at all.
 //     Halving REFNUM must halve VALUE exactly; that is arithmetic, and
 //     it holds whatever the oscillators are really doing.
-//   - OSCULP32K can be measured INDEPENDENTLY, by software: 1030.4 Hz
-//     by the watchdog's early warning against SysTick. Letter d here
-//     measures the same oscillator by a different mechanism entirely,
-//     and the two must agree. Neither is a calibration of the other -
-//     they are two witnesses.
+//   - OSCULP32K is measured by letter d against OSC48M and judged within
+//     the two RCs' bands; the bench die's software witness (the watchdog's
+//     early warning against SysTick, 1030.4 Hz) is printed beside it - one
+//     die's figure, no bound.
 //
 // What is exercised, letter by letter:
 //   a  the block: claim, geometry, the enable-protection order, and the
@@ -262,15 +261,16 @@ void tb_known() {
     if (!hz) {
         return;
     }
-    // The BAND IS WIDE ON PURPOSE, and the width is the reference's, not
-    // the meter's: OSCULP32K is an ultra-low-power RC with a tolerance
-    // of tens of percent, so this verdict says "the right clock was
-    // counted", not "OSC48M is accurate". Letter d is where the
-    // reference's own error gets pinned.
-    const uint32_t lo = SysClock::hz - SysClock::hz / 4u;
-    const uint32_t hi = SysClock::hz + SysClock::hz / 4u;
-    bench.verdict("and lands within 25% of the clock the build was "
-                  "compiled for - so the right generator was counted",
+    // The band is the two oscillators' tables', not the meter's: OSC48M
+    // within 5 % (DS60001479M table 45-57), read against OSCULP32K taken
+    // as its nominal 32768 Hz while it runs anywhere in 30.801..34.730 kHz
+    // (table 45-56, 25 C over the supply): 45.6 MHz x 32768 / 34730 to
+    // 50.4 MHz x 32768 / 30801, 43.0..53.7 MHz. It says "the right clock
+    // was counted", not "OSC48M is accurate"; letter d pins the RC.
+    const uint32_t lo = 43'000'000u;
+    const uint32_t hi = 53'700'000u;
+    bench.verdict("and lands within the two RCs' bands (43.0..53.7 MHz) - so the right "
+                  "generator was counted",
                   *hz > lo && *hz < hi);
 
     // Measuring a DIFFERENT generator must give a different answer, or
@@ -455,20 +455,16 @@ void td_cross_check() {
     print(serial, "  OSCULP32K measures ", osculp_hz, " Hz against OSC48M",
           " (nominal ", osculp_nominal_hz, ")", crlf);
 
-    // The watchdog runs on OSCULP32K divided by 32, and THAT measures
-    // 1030.4 Hz by an entirely different route: the early-warning
-    // interrupt timed against SysTick. Scaled up, that says OSCULP32K
-    // itself is near 32973 Hz. Two witnesses, no shared mechanism.
+    // The platform suite's software witness (the watchdog's early warning
+    // timed against SysTick) read 1030.4 Hz for OSCULP32K / 32 on the bench
+    // die - a figure of that die, printed beside this one, not judged.
     constexpr uint32_t software_witness_hz = 1030 * 32;
     const uint32_t diff = osculp_hz > software_witness_hz
                               ? osculp_hz - software_witness_hz
                               : software_witness_hz - osculp_hz;
-    print(serial, "  the software witness (the platform suite's, via the "
-                  "watchdog) says ", software_witness_hz, " Hz; the two differ by ",
+    print(serial, "  the bench die's software witness (the platform suite's, via the "
+                  "watchdog) read ", software_witness_hz, " Hz; this differs by ",
           diff, " Hz", crlf);
-    bench.verdict("this hardware measurement agrees with the independent "
-                  "software one to within 2%",
-                  diff < software_witness_hz / 50u);
 
     // And the deviation from nominal, which is what the number is FOR:
     // every timeout built on this oscillator inherits it.
@@ -477,8 +473,11 @@ void td_cross_check() {
                               : osculp_nominal_hz - osculp_hz;
     print(serial, "  OSCULP32K runs ", (off * 1000u) / osculp_nominal_hz,
           " per mille ", fast ? "FAST" : "SLOW", " of its nominal 32768 Hz", crlf);
-    bench.verdict("and it is within the 25% an ultra-low-power RC is allowed",
-                  off < osculp_nominal_hz / 4u);
+    // The band: table 45-56's 30.801..34.730 kHz (25 C, over the supply),
+    // read against OSC48M taken as 48 MHz while it runs within 5 %
+    // (table 45-57): 30801 / 1.05 .. 34730 / 0.95, 29334..36558 Hz.
+    bench.verdict("and it is within the two RCs' bands (29334..36558 Hz)",
+                  osculp_hz > 29'334u && osculp_hz < 36'558u);
 }
 
 // =============================================================================

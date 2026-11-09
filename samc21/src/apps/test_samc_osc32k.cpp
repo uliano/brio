@@ -130,6 +130,14 @@ uint32_t per_mille_off(uint32_t hz) {
     return (d * 1000u) / nominal_hz;
 }
 
+/// Every rate here is a FREQM ratio against OSC48M times its NOMINAL
+/// 48 MHz, and OSC48M is within 5 % (table 45-57): a true rate f reads
+/// anywhere in f / 1.05 .. f / 0.95. So a band [lo, hi] on the oscillator
+/// is [lo x 20 / 21, hi x 20 / 19] on the meter.
+bool reads_within(uint32_t hz, uint32_t lo_hz, uint32_t hi_hz) {
+    return hz >= (lo_hz * 20u) / 21u && hz <= (hi_hz * 20u + 18u) / 19u;
+}
+
 // =============================================================================
 // a - the block
 // =============================================================================
@@ -198,8 +206,9 @@ void ta_block() {
     if (hz) {
         print(serial, "  XOSC32K -> ", *hz, " Hz (", per_mille_off(*hz),
               " per mille off, through OSC48M's own error)", crlf);
-        bench.verdict("and it is a 32 kHz crystal, within 3% of nominal on the RC's scale",
-                      per_mille_off(*hz) <= 30u);
+        // The crystal's own tolerance is ppm; the band is OSC48M's 5 %.
+        bench.verdict("and it is a 32 kHz crystal, at nominal within OSC48M's own 5 %",
+                      reads_within(*hz, nominal_hz, nominal_hz));
     }
     // Back onto a running root before the crystal stops: a generator
     // cannot be moved off a stopped source.
@@ -343,23 +352,19 @@ void tc_roots() {
         // chapter is talking about stability across conditions, which a
         // single measurement at one operating point cannot see.
         //
-        // What IS assertable is that both trimmed oscillators are near
-        // nominal, which is the claim an application actually depends on.
-        //
-        // THE BAND IS 3%, NOT 1%, AND THE REFERENCE IS WHY. This number
-        // is a ratio against OSC48M times a NOMINAL 48 MHz, and OSC48M
-        // is itself an RC: measured 5100 ppm SLOW on this die against
-        // the crystal, with a +-5% standard calibration spec and a
-        // thermal wander of its own. A 1% band would be mostly consumed
-        // by the REFERENCE's error - it passes at +9.3 per mille one
-        // power-on and fails at +11.5 the next, with the oscillator
-        // under test blameless both times. 3% still fails an untrimmed
-        // OSC32K (+44%) by an order of magnitude, which is this
-        // verdict's actual job; the crystal-scale truth about these
-        // oscillators is in docs/samc21/clock.md.
-        bench.verdict("both trimmed oscillators land within 3% of nominal "
-                      "(measured through OSC48M, whose own error dominates)",
-                      per_mille_off(*osc) < 30u && per_mille_off(*ulp) < 30u);
+        // What IS assertable is that both trimmed oscillators are inside
+        // their tables' bands, which is the claim an application actually
+        // depends on - read through the meter's own reference, OSC48M,
+        // within 5 % (reads_within()). The bands are the 25 C rows over
+        // the supply, the bench being a room: OSC32K 29.491..36.044 kHz
+        // (table 45-54), OSCULP32K 30.801..34.730 kHz (table 45-56). That
+        // still fails an untrimmed OSC32K (+44 %) several times over,
+        // which is this verdict's actual job; the crystal-scale truth
+        // about these oscillators is in docs/samc21/clock.md.
+        bench.verdict("both trimmed oscillators land inside their tables' 25 C "
+                      "bands (tables 45-54 and 45-56, read through OSC48M's 5 %)",
+                      reads_within(*osc, 29'491u, 36'044u) &&
+                          reads_within(*ulp, 30'801u, 34'730u));
         print(serial, "  the two are within ",
               per_mille_off(*osc) > per_mille_off(*ulp)
                   ? per_mille_off(*osc) - per_mille_off(*ulp)

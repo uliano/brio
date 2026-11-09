@@ -247,7 +247,11 @@ interval below is latched by hardware, not by an ISR.
   counter second measures 23.76..23.79 M crystal ticks against a
   nominal 24 M (+9000..+9800 ppm), and consecutive one-second
   measurements differ by 100..300 ppm. That wander is the noise floor
-  of every ppm-level measurement here.
+  of every ppm-level measurement here, and no data sheet bounds it: the
+  suite prints the comparisons it limits (the prescalers' agreement,
+  the period with and without the PIT, OSC1K against OSC32K, the
+  compare's phase) and judges the trim against its pairs' own standard
+  error.
 - **The prescaler divides exactly**: DIV1/PER=32767, DIV2/PER=16383 and
   DIV32/PER=1023 - all 32768 CLK_RTC cycles - give the same period
   within the oscillator's own wander.
@@ -328,9 +332,11 @@ oscillating, as its board file states -
   over twenty-four runs one second against the mean of the next eight
   differs by up to 391 ppm, two seconds a moment apart through
   different prescalers by up to 663, and a second from OSC1K against one
-  from OSC32K by up to 345, where the AVR128DB48's stayed within 300 -
-  the three verdicts' bound is the die's own (800 ppm on the EA, 500
-  and 333 on the DA/DB). Its cycle-to-cycle jitter shows in a single
+  from OSC32K by up to 345, where the AVR128DB48's stayed within 300.
+  No data sheet bounds that wander, so the suite prints those
+  comparisons and judges only what the 10 % band decides (each period
+  within it; two windows of the oscillator within 22 % of each other,
+  enough to tell a divider from its neighbour). Its cycle-to-cycle jitter shows in a single
   period of four cycles (one DIV4 slot period read 0.24 % short once in
   ten runs; sixteen consecutive ones spread over 5..6 ticks of 2473),
   hence letter p's mean of sixteen.

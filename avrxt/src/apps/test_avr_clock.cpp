@@ -150,7 +150,7 @@ bool console_drain() {
 /// The drain before the console goes silent at a rate it cannot follow,
 /// acted on: a console still busy after the drain's budget fails a
 /// verdict, and the caller does not move the clock.
-bool quiet_console() {
+bool drained_for_window() {
     if (console_drain()) return true;
     verdict("the console drained before the clock moved", false);
     return false;
@@ -681,7 +681,7 @@ void t8_autotune() {
     }
     // The console falls silent before OSCHF becomes CLK_PER below; nothing
     // prints between here and the end of B.
-    if (!quiet_console()) {
+    if (!drained_for_window()) {
         Xosc32k::stop();
         Ticker::init();
         return;
@@ -1086,10 +1086,9 @@ void tr_reset() {
     verdict("CLKSEL at reset is OSCHF", (boot_mclkctrla & CLKCTRL_CLKSEL_gm) == 0);
     verdict("MCLKCTRLB at reset is 0x11 (PEN, DIV6: 12.5.2)", boot_mclkctrlb == 0x11);
     verdict("TIMEBASE at reset is 0 (12.5.7)", boot_timebase == 0);
-    // 12.5.8 gives the reset value 0x0C (bits 3:2 set, undocumented);
-    // the rev B1 part reads 0x00 there (ten runs of ten).
-    verdict("OSCHFCTRLA at reset reads 0x00 (12.5.8 says 0x0C: bits 3:2 read 0 on rev B1)",
-            boot_oschfctrla == 0x00);
+    // 12.5.8 gives the reset value 0x0C with bits 3:2 undocumented; what
+    // a die reads there is printed above, not judged (nothing depends on
+    // those two bits, and one die is no contract).
     verdict("the Clock type's claim matches the fuse (20 MHz)", boot_matches);
     verdict("the init started the crystal", boot_xtal);
     const uint8_t tb = ClockTimebase::read();
@@ -1228,7 +1227,7 @@ void t3_tune() {
     if (!ruler) return;
     constexpr int8_t steps[] = {-32, -24, -16, -8, 0, 8, 16, 24, 31};
     int32_t ppm[9];
-    if (!quiet_console()) return;
+    if (!drained_for_window()) return;
     Oschf::autotune(false);
     Oschf::tune(0);
     (void)MainClock::select(MainSource::oschf);
@@ -1270,7 +1269,7 @@ void t4_autotune() {
     const bool ruler = ruler_up();
     verdict("ruler B runs", ruler);
     if (!ruler) return;
-    if (!quiet_console()) return;
+    if (!drained_for_window()) return;
     Oschf::autotune(false);
     Oschf::tune(0);
     (void)MainClock::select(MainSource::oschf);
@@ -1327,7 +1326,7 @@ void t5_32k() {
     if constexpr (!xtal_ruler) {
         // OSC32K as CLK_PER untimed: its init, TIMEBASE at 32 kHz, the way
         // back. The crystal as the main clock is not tried.
-        if (!quiet_console()) return;
+        if (!drained_for_window()) return;
         Serial::rebase(32'768);
         Ticker::pause();
         const bool osc_ok = Clock<ClockSource::osc32k, 32'768>::init();
@@ -1441,7 +1440,7 @@ void t6_cfd() {
     }
     verdict("A: the main clock untouched", a_src == MainSource::extclk);
     // B: the console cannot know the fallback rate until it is read back.
-    if (!quiet_console()) {
+    if (!drained_for_window()) {
         ClockFailure::interrupt(false);
         return;
     }
@@ -1542,7 +1541,7 @@ void t8_xtal_startup() {
     Wide::init(TcbClock::div1, ChCarry{}, ChSnap{});
     ChSnap::off();
     Wide::reset();
-    if (!quiet_console()) return;
+    if (!drained_for_window()) return;
     (void)MainClock::select(MainSource::oschf);
     constexpr XoschfStartup suts[] = {XoschfStartup::cycles256, XoschfStartup::cycles1k,
                                       XoschfStartup::cycles4k};

@@ -20,7 +20,7 @@
 // its data: a frame inside a polled block of the engine timed on the
 // ruler (TCB3 + TCB2 cascaded at CLK_PER) by the difference of a 2048-
 // and a 256-frame block, against eight SCK periods at the division asked
-// plus the block's two-cycle gap, -1 % to +3 % - b at all seven divisions
+// plus the block's two-cycle gap, +-1 % - b at all seven divisions
 // (and the gap printed and judged the same at every one), d in all four
 // modes at CLK_PER/64, i under the 1.5 MHz ceiling at 24, 12 and 24 MHz
 // again, j under the 400 kHz ceiling. The divisions letters c, e, f, g, h
@@ -229,9 +229,10 @@ volatile uint8_t hold_fired = 0;
 volatile uint8_t hold_lost = 0;
 
 /// The handler's own pad waits, bounded by one shared budget: SCK at
-/// `high`, or SCK low for 16 reads in a row (about 5 us at seven cycles a
-/// read - three times a half period at 375 kHz, a quarter of the host's
-/// 20 us gap: a gap between characters and never a low phase inside one).
+/// `high`, or SCK low for 16 reads in a row (at seven cycles a read 4.7 us
+/// at 24 MHz, 5.6 at 20 - over three times a half period at 375 kHz, at
+/// most a quarter of the host's 20 us gap: a gap between characters and
+/// never a low phase inside one).
 [[gnu::always_inline]] inline bool sck_level(bool high, uint16_t& budget) {
     while (Sck::read() != high) {
         if (--budget == 0) return false;
@@ -253,7 +254,8 @@ void hold_arm(HoldShape shape, uint16_t offset_us, uint16_t spin_us, uint8_t ski
     Hold::disable();
     hold_shape = shape;
     hold_offset = static_cast<uint16_t>(offset_us * mhz);   // TCA1 at CLK_PER
-    hold_spin = static_cast<uint16_t>(spin_us * 6u);        // four cycles a turn
+    // SBIW and a taken BRNE: four cycles a turn, mhz / 4 turns a microsecond.
+    hold_spin = static_cast<uint16_t>(spin_us * mhz / 4u);
     hold_skip = skip;
     hold_fired = 0;
     hold_lost = 0;
@@ -373,7 +375,10 @@ void raw_flush() {
 // cycles between frames that leave back to back (docs/avrxt/spi.md, the
 // engine's cost: the data sheet's own buffer-mode sequence measures the
 // same), and letter b prints the gap it measures at every division.
-// The window is every family's: -1 % to +3 %.
+// The division is exact (no rounding, the ruler on the same crystal) and
+// the reading truncates to a thousandth: 999..1001 when the gap is the
+// two cycles; the window is +-1 %, which a wrong division - a factor of
+// two - cannot enter.
 
 constexpr uint32_t block_gap = 2;     ///< CLK_PER cycles between two frames of a block
 
@@ -485,7 +490,7 @@ uint32_t frame_permille(uint32_t mc, uint32_t division) {
     return static_cast<uint32_t>(static_cast<uint64_t>(mc) / (8u * division + block_gap));
 }
 
-bool wire_ok(uint32_t pm) { return pm >= 990u && pm <= 1030u; }
+bool wire_ok(uint32_t pm) { return pm >= 990u && pm <= 1010u; }
 
 /// Thousandths of a cycle as "c.ddd", a sign in front when negative.
 void print_milli(int32_t m) {
@@ -511,7 +516,7 @@ void frame_verdict(const char* what, uint32_t division, uint32_t mc) {
     print(serial, " CLK_PER, eight SCK at CLK_PER/", division, " and a gap of ");
     print_milli(gap_mc(mc, division));
     print(serial, " -> ", pm, " thousandths of its wire time", crlf);
-    verdict("SCK runs at the division asked: a frame inside a block, -1 % to +3 % - ", what,
+    verdict("SCK runs at the division asked: a frame inside a block, +-1 % - ", what,
             wire_ok(pm));
 }
 
@@ -556,15 +561,15 @@ void ea_route_legs() {
                 !Pin<'C', 1>::is_output() && S0::routed() == SpiRoute::none);
         // A pinless host whose SSD is cleared after init (init refuses
         // it): what NONE's internal select reads, which no data-sheet
-        // text states.
+        // text states - printed.
         verdict("pinless host init (SSD set)", S0::init({.route = SpiRoute::none}));
         S0::client_select_disable(false);
         const auto got = S0::transfer(0xA5);
         const bool still_host = S0::is_host();
         print(serial, "  pinless host, SSD cleared by hand: transfer ", got ? "completed" : "did not",
               ", MASTER ", still_host ? "kept" : "CLEARED (demoted)", crlf);
-        verdict("on NONE the internal select reads high: SSD = 0 does not demote a pinless host",
-                got.has_value() && still_host);
+        // Printed above, not judged: no data-sheet text states it, and brio
+        // depends on neither answer (init() refuses that configuration).
         S0::release();
     }
 }
@@ -1164,7 +1169,9 @@ void th_interrupts() {
     const uint16_t n = isr_count;
     print(serial, "  buffer-mode interrupts for 8 bytes: ", n,
           " (one RXC each, plus the TXC of every idle gap)", crlf);
-    verdict("the buffer body fires and stays quiet afterwards", n >= 8 && n <= 24);
+    // Each byte raises RXC once, and TXC at most once (the shifter
+    // empties once a byte, and the body clears it): 8..16.
+    verdict("the buffer body fires and stays quiet afterwards", n >= 8 && n <= 16);
     const uint16_t settled = isr_count;
     delay_us(clock, 2000);
     verdict("no interrupt storm: the body clears what it must",

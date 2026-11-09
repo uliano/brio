@@ -488,12 +488,17 @@ the SDADC's are in their own suites.
 - First-to-last -8 centi-C, whole-minute range 15, against the baseline
   batch's own spread of 45. **DECLINED**: the trend is inside the
   reading's own spread, so this bench cannot tell self-heating from noise
-  and claims nothing (the suite skips that check). What is claimed is only
-  that a minute under load does not walk the reading away.
+  and claims nothing (the suite skips that check). The minute's range is
+  printed and not judged either: how far a die wanders in a minute is the
+  room's business as much as the load's, and no document bounds it.
 - 64 single measurements spread **39 centi-C**; averaging ten narrows that
   to **12**, which is why 43.6.2.3 asks for it.
 
 ### Erratum 1.19.1, reproduced - and worse than it says
+
+What this die did; the suite prints both answers below and judges
+neither, because an erratum describes a defect a part may show, not a
+behaviour every part must show.
 
 Letter `p`, **outside `z`** because 11.5.2.4's "the peripheral returns an
 access error" might have been a bus error, and a HardFault mid-suite would

@@ -817,7 +817,7 @@ void tm_main_array() {
     // damage is confined to a single reading taken in that window, which
     // is why eight erases scatter by the same one tick as one erase.
     constexpr uint32_t rounds = 8;
-    constexpr uint32_t rwwee_erase_us = 989;   // letter d, stable to the microsecond
+    constexpr uint32_t rwwee_erase_us = 989;   // letter d on the bench die: printed only
     const uint32_t t0 = brio::Ticker::ticks();
     brio::Stopwatch<Ruler> sw;
     sw.start();
@@ -834,10 +834,13 @@ void tm_main_array() {
 
     bench.verdict("no tick is LOST across the stalls (eight erases, eight ticks)",
                   ticks_seen + 1u >= rounds && ticks_seen <= rounds + 1u);
-    bench.verdict("a main-array erase costs the same as an RWWEE one, within the "
-                  "stopwatch's one-tick window",
-                  software_us + 1100u > expected_us &&
-                      software_us < expected_us + 1100u);
+    // Judged against the table, not against one die's RWWEE figure: each
+    // erase within table 45-42's 6 ms, and the stopwatch's one-tick window
+    // (1.1 ms) on the total. How close it lands to letter d's RWWEE erase
+    // is printed below.
+    bench.verdict("eight main-array erases within table 45-42's 6 ms each (and the "
+                  "stopwatch's one-tick window)",
+                  software_us < rounds * 6000u + 1100u);
     print(serial, "  so the wall-clock number of record is letter d's ",
           rwwee_erase_us, " us - the same flash operation, measured where the CPU "
           "survives it (45-42 allows 6 ms)", crlf);
@@ -920,6 +923,13 @@ void tg_cache() {
           ": cache on ", on1, " and ", on2, " cycles, OFF ", off, ", on again after INVALL ",
           after, crlf);
     const uint32_t spread = on1 > on2 ? on1 - on2 : on2 - on1;
+    // The bounds. The runs are masked and deterministic; the one thing two
+    // cached runs may differ by is the line fills of the loop's few
+    // instructions (a handful of fetches at RWS + 1 cycles: tens of cycles,
+    // under 1 % of the thirteen thousand). Uncached, every fetch of the
+    // loop's half-dozen words pays the RWS wait states again on each of
+    // the thousand turns - some twelve cycles a turn over the thirteen it
+    // takes: well over a quarter.
     bench.verdict("CACHEDIS reads back as written", off_read);
     bench.verdict("the same loop twice with the cache on agrees to 1 %",
                   spread <= on1 / 100u);

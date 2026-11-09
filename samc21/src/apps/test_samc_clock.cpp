@@ -582,18 +582,28 @@ void td_dpll() {
     const uint32_t lock_us = static_cast<uint32_t>(
         (static_cast<uint64_t>(static_cast<uint16_t>(t1 - t0)) * 1'000'000ULL) /
         fine_hz);
-    print(serial, "  enable to CLKRDY: ", lock_us,
-          " us, against table 45-52's 25..35 us at a 2 MHz reference", crlf);
-    bench.verdict("the lock time is in the tens of microseconds the table "
-                  "gives for a 2 MHz reference",
-                  lock_us < 500u);
+    // Printed, not judged: the window is the whole of init() - three
+    // register synchronizations (20.6.9, which gives them no duration) as
+    // well as the lock - and table 45-52 states tLOCK only at a 96 MHz
+    // output. That the loop locked at all is judged above.
+    print(serial, "  init() to CLKRDY: ", lock_us,
+          " us, against table 45-52's tLOCK of 25..35 us at a 2 MHz reference "
+          "(the window also holds init()'s own synchronizations)", crlf);
 
     bench.verdict("generator 4 takes the DPLL",
                   GenDpll::configure(GclkConfig{.source = GclkSource::dpll96m}));
 
     // THE MEASUREMENT THAT SETTLES THE ARITHMETIC. Both the DPLL and the
     // reference come from the same crystal, so the crystal's own error
-    // cancels: what is left is the ratio the LDR/LDRFRAC pair claims.
+    // cancels: what is left is the ratio the LDR/LDRFRAC pair claims. The
+    // band on every crystal-derived count below: one count for where the
+    // REFNUM window's two ends fall in a measured period (the count
+    // is the measured periods inside the window, 44.6.1), one for a fractional
+    // ratio's dither - the loop alternates two integer ratios, which over
+    // a window leaves under one output period of phase - and the
+    // prediction's truncation inside those: +-2 (logged: exact, or one
+    // off on the fractional ratio).
+    constexpr uint32_t exact_band = 2;
     const auto c48 = measure_count(gen_dpll, gen_xtal, refnum_full);
     bench.verdict("the DPLL measures against the crystal", c48.has_value());
     if (c48) {
@@ -601,7 +611,7 @@ void td_dpll() {
         print(serial, "  LDR 23  gives count ", *c48, ", predicted ", want, " (",
               count_to_hz(*c48, xtal_ref_hz, refnum_full), " Hz)", crlf);
         bench.verdict("48 MHz from 24 MHz is exact to the meter's resolution",
-                      near(*c48, want, 50u));
+                      near(*c48, want, exact_band));
     }
 
     // THE FRACTIONAL RATIO, changed ON THE FLY. Two errata meet here:
@@ -626,7 +636,7 @@ void td_dpll() {
               " (", count_to_hz(*c49, xtal_ref_hz, refnum_full), " Hz)", crlf);
         bench.verdict("A SIXTEENTH OF THE REFERENCE IS A REAL STEP: 49 MHz, "
                       "not 48 and not 50",
-                      near(*c49, want, 50u));
+                      near(*c49, want, exact_band));
     }
 
     // The top of the DCO's range, brought back down by the OUTPUT
@@ -650,7 +660,7 @@ void td_dpll() {
         print(serial, "  DCO 96 MHz / 2 gives count ", *c96, ", predicted ", want,
               crlf);
         bench.verdict("a 96 MHz DCO divided by two IS 48 MHz out",
-                      near(*c96, want, 50u));
+                      near(*c96, want, exact_band));
     }
     bench.verdict("the prescaler moves on a running loop",
                   Fdpll::prescaler(DpllPrescaler::div4));
@@ -660,7 +670,7 @@ void td_dpll() {
         const uint32_t want = expect_count(24'000'000UL);
         print(serial, "  DCO 96 MHz / 4 gives count ", *c24, ", predicted ", want,
               crlf);
-        bench.verdict("and it is a quarter of the DCO", near(*c24, want, 50u));
+        bench.verdict("and it is a quarter of the DCO", near(*c24, want, exact_band));
     }
 
     // THE GCLK REFERENCE PATH. A generator is the third reference the
@@ -681,15 +691,17 @@ void td_dpll() {
     const auto cg = measure_count(gen_dpll, gen_xtal, refnum_full);
     bench.verdict("and measures", cg.has_value());
     if (cg) {
-        // This one is NOT crystal-derived, so the crystal's own error is
-        // in the answer and the band has to allow for the RC that made
-        // the reference. A per-cent band is the honest one.
+        // This one is NOT crystal-derived: the reference is OSC48M / 48,
+        // and OSC48M is within 5 % (table 45-57), so the loop's output is
+        // too - against the crystal-derived meter, whose own error is
+        // ppm. The band is that 5 %.
         const uint32_t want = expect_count(48'000'000UL);
         print(serial, "  GCLK reference 1 MHz x 48 gives count ", *cg,
               ", predicted ", want,
               "  (this path is RC-derived: the band is per cent, not ppm)", crlf);
-        bench.verdict("48 MHz from a 1 MHz generator, inside the RC's own error",
-                      near(*cg, want, want / 50u));
+        bench.verdict("48 MHz from a 1 MHz generator, inside the RC's own 5 % "
+                      "(table 45-57)",
+                      near(*cg, want, want / 20u));
     }
 
     // THE LOCK TIMER, which table 20-3 describes and no sentence of the

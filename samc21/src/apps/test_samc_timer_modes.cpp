@@ -1322,9 +1322,14 @@ void te_fault_b() {
 
     // ---- BLANKING. The input is held HIGH for the whole measurement,
     // so the only thing that can keep the fault from being valid is the
-    // blanking window - and BLANKVAL 255 at /1024 is 5.4 ms against a
-    // 100 ms period, so the two settings below differ in whether the
-    // window covers the moment the input rises.
+    // blanking window. Its length is (1 + BLANKVAL) clocks of a rate the
+    // chapter names two ways: "prescaled GCLK_TCC periods" (the bit
+    // description; at /1024 that is 256 x 21.3 us = 5.5 ms), while its own
+    // worked examples scale by a fixed 64 (the BLANKPRESC bit the device
+    // header carries and the register table omits, left at zero here:
+    // 256 GCLK_TCC cycles, 5.3 us). Whichever it is, the window is at most
+    // 5.5 ms against a 100 ms period, so it closes long before the period
+    // does.
     bench.verdict("the fault is re-armed with BLANKVAL = 0", 
                   fault_b_up(TccFaultConfig{.source = TccFaultSource::event,
                                             .halt = TccFaultHalt::hardware,
@@ -1346,11 +1351,11 @@ void te_fault_b() {
     const bool blank_wide = fault_b_seen(150);
     EicPad::clear();
     print(serial, "  input held HIGH for 150 ms: BLANKVAL 0 -> FAULTB ",
-          blank_none ? "valid" : "never", ", BLANKVAL 255 (5.4 ms of a "
+          blank_none ? "valid" : "never", ", BLANKVAL 255 (at most 5.5 ms of a "
           "100 ms period) -> ", blank_wide ? "valid" : "never", crlf);
     bench.verdict("A BLANKING WINDOW GATES THE INPUT AND NOT ITS EDGE: with "
                   "the pad held high throughout, a fault that is valid with "
-                  "no window is still valid with a 5.4 ms one, because the "
+                  "no window is still valid with BLANKVAL 255, because the "
                   "window closes long before the period does",
                   blank_none && blank_wide);
     Evsys::disconnect(Wave::fault_user(TccFault::b));

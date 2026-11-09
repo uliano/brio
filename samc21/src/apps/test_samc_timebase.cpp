@@ -19,15 +19,18 @@
 // wall-clock claim below is crystal-referenced; the kernel's own
 // millis() is the SUBJECT here and never the judge.
 //
-// THE BANDS, derived and not guessed: the site's default rtc_hz is a
-// deliberate OVER-estimate (33500 against an OSCULP32K this bench has
-// measured at 32907..33074), and the rule is directional by design -
-// the alarm is placed by rounding UP and the resync converts DOWN, so
-// every error lands on the LATE side. Concretely: a 500 ms deadline
-// becomes ceil(500 x 33.5) = 16750 counts, which the real oscillator
-// takes ~509 ms to count; the resync under-advances by the same ratio.
-// The verdicts therefore accept [nominal .. nominal + 3.5%] of wall
-// and REJECT anything early - the lower bound is the contract.
+// THE BANDS, from the table: the site's default rtc_hz is 33500 and
+// the rule is directional by design - the alarm is placed by rounding UP
+// and the resync converts DOWN, so every error lands on the LATE side
+// while the true rate is not above 33500. OSCULP32K at 25 C over the
+// supply range is 30.801..34.730 kHz (DS60001479M table 45-56): a die
+// at the slow end counts a 500 ms deadline's ceil(500 x 33.5) = 16750
+// counts in 544 ms, 8.8 % late, and the resync under-advances by the
+// same ratio. The verdicts accept [nominal .. nominal + 8.8 %] of wall
+// and REJECT anything early - the lower bound is the contract, and it
+// holds only for a die not above 33.5 kHz (the default's own rule; a
+// faster die within the table would wake early - a finding on the
+// driver's default, not on this suite).
 //
 // Letters (all in z):
 //  a  the site's own surface: no deadline = no alarm, a deadline = a
@@ -245,10 +248,11 @@ bool drained_before_sleep() {
 
 bool within(uint32_t v, uint32_t lo, uint32_t hi) { return v >= lo && v <= hi; }
 
-/// nominal .. nominal + the over-estimate ratio + slack for the wake
-/// and the vote round (a handful of ms).
+/// nominal .. nominal + 33500 / 30801 - 1 (8.8 %, the table's slowest
+/// OSCULP32K against the default rate) + slack for the wake and the vote
+/// round (a handful of ms).
 uint32_t band_hi(uint32_t nominal_ms) {
-    return nominal_ms + (nominal_ms * 35u) / 1000u + 6u;
+    return nominal_ms + (nominal_ms * 88u) / 1000u + 6u;
 }
 
 void watchdog_backstop(bool on) {
@@ -346,14 +350,20 @@ void tb_round_trip() {
                   "never early",
                   Probe::blips == 1u &&
                       within(to_blip, 500u, band_hi(500u)));
+    // The resync advances the frozen span converted at 33500: about 500 ms
+    // of sleep counted at the true 30.801..34.730 kHz is 460..518 ticks,
+    // less the awake part of the round before the standby; a frozen span
+    // that was not put back is zero.
     bench.verdict("the sleep was real: the resync put back a frozen span "
                   "of hundreds of ticks",
                   TimedSite::last_advance() > 350u &&
                       TimedSite::last_advance() < 520u);
+    // Behind the wall by the same under-advance at most: 8.8 %, and 3 ms of
+    // the two readings' truncation.
     bench.verdict("millis() is honest against the crystal: no more than "
                   "the wall, and behind it only by the stated bias",
                   mill_span <= wall_span + 1u &&
-                      mill_span + (wall_span * 25u) / 1000u + 3u >= wall_span);
+                      mill_span + (wall_span * 88u) / 1000u + 3u >= wall_span);
     bench.verdict("the round closed by the convention: a wake report, an "
                   "ok vote, the alarm down",
                   Probe::wakes >= 1u && Probe::last_ok &&

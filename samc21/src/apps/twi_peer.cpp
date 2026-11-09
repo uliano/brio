@@ -422,10 +422,13 @@ twilink::Report run_hold_sda(const twilink::Params& a) {
     Sda::output();
     r.flags |= twilink::report_host_ran;
 
+    // The deadline is read every 256 samples - a sample is an SCL read and
+    // a compare, a few dozen cycles at most, so it is late by well under
+    // a millisecond, and no SCL low phase (5 us at 100 kHz) goes unseen.
     const uint32_t t0 = Ticker::millis();
     uint16_t falls = 0;
     bool prev = Scl::read();
-    uint16_t guard = 0;
+    uint8_t guard = 0;
     for (;;) {
         const bool now = Scl::read();
         if (prev && !now) {
