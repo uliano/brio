@@ -605,10 +605,10 @@ int main() {
 ## Bench findings
 
 The reference suite is `test_vx03_platform`, at 144 MHz from the HSI:
-on the CH32V203C8T6 fifty-six verdicts in `z` - letters `a` to `g`
+on the CH32V203C8T6 fifty-two verdicts in `z` - letters `a` to `g`
 (forty), the bus in sleep, the mask's shadow, the idle hook against the
 tick's edge, the kernel's turn and the runtime's functions - on the
-CH32V303VCT6 seventy-one, the same with the floating-point unit's three
+CH32V303CBT6 sixty-six, the same with the floating-point unit's
 letters beside them - and on both nine more in letter `i`,
 which reboots the board three times. On the 32 KB parts the suite is
 two images (`-1` with `a` to `g`, `i`, `t` and `w`, `-2` with `m`, `n`

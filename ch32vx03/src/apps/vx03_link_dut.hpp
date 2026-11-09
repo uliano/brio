@@ -20,14 +20,24 @@
 // crystals' disagreement, which a suite measures from both sides.
 //
 // THE STAMP BOUND, every span's. A span is the first-to-last of a gapless
-// run, stamped by a polled loop at each end of it - the far peer's
-// run_receive, timed_blast() here - each stamp up to ONE TURN of its loop
-// late (the release listings: the peer's idle turn 17 instructions with
-// one APB load and four loads from SRAM, the stack's among them,
-// timed_blast()'s 14 with one APB load and three from SRAM - some 30 core
-// cycles at most, bounded at 64)
-// and a Report's span quantized to the 24 MHz tick (six cycles). So a span
-// of S core cycles is good to (2 x 64 + 6) / S: span_bound_ppm().
+// run, stamped by ONE polled loop - the far peer's run_receive, or
+// timed_blast() here - each stamp taken up to one turn of that loop after
+// its RXNE, so the span is off by under one turn for where the two RXNEs
+// fell in their turns, and by the two stamps' paths (the first frame's
+// branch and the last's, a few instructions) - under a second turn - and
+// a Report's span is quantized to the 24 MHz tick (six cycles). So a span
+// of S core cycles is good to (2 x T + 6) / S, T a turn of the loop:
+// span_bound_ppm(), with T = poll_cycles = 96. THE TURN, from the release
+// listings and a measurement: timed_blast()'s idle turn is 15 instructions
+// (one APB load, three from SRAM, two stores, three taken branches, its
+// turn counter among them), the peer's 16 (the same APB load, six from
+// SRAM, one store, three taken branches) - one instruction and three loads
+// from SRAM more, less than a whole turn of this end's again. timed_blast()
+// measures its own turn (Timed::turn: the span over the turns between the
+// stamps, a frame's turn longer than an idle one, so the figure is an idle
+// turn's ceiling) and letter 1 of test_vx03_serial judges it within half of
+// T, 48 cycles, so that the peer's turn, under twice this end's, stays
+// within T.
 //
 // THE BOUND DESCRIBES THE LOOPS ALONE (the lengtheners rule): an interrupt
 // handler served between the turn that last saw the receiver empty and a
@@ -425,10 +435,10 @@ struct Dut {
     /// THE STAMP BOUND (the header) for a span of `frames` frames of
     /// `half_bits` half bits at `rate`, in ppm, rounded up.
     static uint32_t span_bound_ppm(uint32_t rate, uint32_t frames, uint32_t half_bits = 20) {
-        constexpr uint64_t poll_cycles = 64;
         const uint64_t span =
             (static_cast<uint64_t>(frames - 1u) * half_bits * hclk) / (2u * static_cast<uint64_t>(rate));
-        return span == 0u ? 1'000'000u : static_cast<uint32_t>(((2u * poll_cycles + 6u) * 1'000'000u) / span + 1u);
+        return span == 0u ? 1'000'000u
+                          : static_cast<uint32_t>(((2u * static_cast<uint64_t>(poll_cycles) + 6u) * 1'000'000u) / span + 1u);
     }
 
     /// One timed run: `ok` when a run came back counted whole and clean
@@ -440,7 +450,17 @@ struct Dut {
         int32_t ppm = 0;
         uint32_t span = 0;
         uint8_t lengthened = 0;
+        /// timed_blast(): its loop's turn in core cycles, the span over the
+        /// turns between the two stamps, rounded up (the header's THE TURN);
+        /// 0 from timed_run(), whose loop is the far chip's.
+        uint32_t turn = 0;
     };
+
+    /// THE STAMP BOUND's turn (the header), in core cycles, for both loops;
+    /// and the most this end's measured turn may be for the peer's, under
+    /// twice this end's, to stay within it.
+    static constexpr uint32_t poll_cycles = 96;
+    static constexpr uint32_t turn_ceiling = poll_cycles / 2u;
 
     /// The console drained before a timed run: no transmit interrupt of it
     /// live inside the span. False when it did not go idle in 200 ms - a
@@ -526,6 +546,7 @@ struct Dut {
             bool clean = true;
             bool quiet = true;
             uint32_t first = 0, last = 0;
+            uint32_t turns = 0;   // between the two stamps: the turn's measurement
             const uint32_t t0 = brio::Ticker::ticks();
             uint32_t seen = t0;
             while (got < n) {
@@ -537,6 +558,7 @@ struct Dut {
                 if (seen - t0 >= a.ms) {
                     break;
                 }
+                ++turns;
                 const uint16_t st = W::status();
                 if ((st & brio::usart_rxne) == 0u) {
                     continue;
@@ -545,6 +567,7 @@ struct Dut {
                 if (got == 0u) {
                     first = brio::Ticker::cycles();
                     quiet = quiet && brio::Ticker::ticks() == before;
+                    turns = 0;
                 } else if (got + 1u == n) {
                     last = brio::Ticker::cycles();
                     quiet = quiet && brio::Ticker::ticks() == before;
@@ -573,6 +596,7 @@ struct Dut {
             k.ok = true;
             k.span = measured;
             k.ppm = ppm;
+            k.turn = turns == 0u ? 0u : (measured + turns - 1u) / turns;
             return k;
         }
         brio::print(Out{}, "    every blast of ", n, " at ", rate, " was lengthened: nothing to judge", brio::crlf);

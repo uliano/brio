@@ -228,7 +228,7 @@ silicon questions a driver has no reason to ask.
 ## Bench findings
 
 `test_vx03_misc` measured the chapter on a CH32V203C8T6, at 96 MHz from
-the internal oscillator, with nothing wired: fourteen verdicts in `z`
+the internal oscillator, with nothing wired: thirteen verdicts in `z`
 and two in the letter that reboots the board.
 
 - **The silicon computes CRC-32/MPEG-2 and nothing else.** Eight
@@ -268,7 +268,7 @@ and two in the letter that reboots the board.
   and the data register as the word before it, both stores were lost,
   and re-opening the gate found the block exactly as it had been left.
 - **The CH32V303VCT6** (`test_vx03_misc`, every letter of `z`): the
-  fourteen verdicts above hold on that part as they do on the
+  thirteen verdicts above hold on that part as they do on the
   CH32V203C8T6.
 
 ## Not covered yet

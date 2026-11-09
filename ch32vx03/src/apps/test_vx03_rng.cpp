@@ -27,10 +27,10 @@
 // the statistics a random source passes (rng.hpp's fact 7): they come
 // from a small set, a chi-square over their bytes is two orders of
 // magnitude off, FIPS PUB 140-2's tests do not all pass, and DRDY rises
-// over an unchanged word now and then. Letters d to g print the numbers
-// and ASSERT THAT FINDING beside the driver's own guarantees; on a die
-// whose words pass, those verdicts turn red, and the document is then
-// what changes.
+// over an unchanged word now and then. Letters b and d to g print the
+// numbers and that FINDING beside the driver's own guarantees, which they
+// judge: one die's habit, stated in no chapter, is printed and not
+// judged, so a die whose words pass says so on its FINDING lines.
 //
 // NOTHING IS WIRED AND NOTHING WEARS. Every letter costs the board
 // nothing, so `z` carries all of them. Letter c moves the clock tree and
@@ -273,8 +273,12 @@ void tb_word() {
     const WordTime w = word_time(256);
     print(serial, "  DRDY right after a read of RNG_DR: ", down ? "down" : "STILL UP", crlf);
     print_word_time("from a read to the next DRDY at 144 MHz", w);
-    bench.verdict("reading RNG_DR puts DRDY down, and the next word stands tens of core cycles "
-                  "later every time", down && w.lost == 0u && w.taken == 256u && w.max < 1000u);
+    // How soon the next word stands is printed above, not bounded: no
+    // chapter states the generator's word time. What is judged is that it
+    // stood within the poll's 5000 reads every time.
+    bench.verdict("reading RNG_DR puts DRDY down, and the next word stands within the poll's "
+                  "budget every time (its time printed)",
+                  down && w.lost == 0u && w.taken == 256u);
 
     // The throughput through the driver's own protocol, the refusals
     // told apart: a repeat is the comparison at work, an error is not.
@@ -320,8 +324,10 @@ void tb_word() {
     }
     print(serial, "  20000 words at DRDY's pace, read raw: ", raw_repeats,
           " equal to the word before", crlf);
-    bench.verdict("DRDY rises over an UNCHANGED word now and then - what read()'s comparison "
-                  "refuses (fact 7)", raw_repeats != 0u);
+    // Fact 7 is one die's habit (the CH32V303VCT6), stated in no chapter:
+    // printed, not judged (here and at every "fact 7" line below).
+    print(serial, "  FINDING (fact 7, not a verdict): DRDY ",
+          raw_repeats != 0u ? "rose" : "never rose", " over an UNCHANGED word", crlf);
 }
 
 // ===========================================================================
@@ -511,8 +517,11 @@ void td_small_set() {
     }
     print(serial, "  ", got, " words through read(): ", distinct, " distinct, the most frequent ",
           hex(most_word), " seen ", most, " times", crlf);
-    bench.verdict("the words come from a SMALL SET: fewer than 4000 distinct among 4096 "
-                  "(fact 7)", got == 4096u && distinct < 4000u);
+    bench.verdict("read() hands out the 4096 words asked of it", got == 4096u);
+    print(serial, "  FINDING (fact 7, not a verdict): the words ",
+          distinct < 4000u ? "come from a SMALL SET, fewer than 4000 distinct among 4096"
+                           : "are 4000 or more distinct among 4096",
+          crlf);
 
     // The bit balance of each lane over 20000 words, printed: a binomial
     // of 20000 fair bits is 10000 with a standard deviation of 70.7.
@@ -634,8 +643,10 @@ void te_fips() {
     print(serial, crlf, "  monobit ", monobit_ok ? "passes" : "FAILS", ", poker ",
           poker_ok ? "passes" : "FAILS", ", runs ", runs_ok ? "pass" : "FAIL", ", long run ",
           long_ok ? "passes" : "FAILS", crlf);
-    bench.verdict("the words FAIL FIPS PUB 140-2 over 20000 bits: not all four of its tests "
-                  "pass (fact 7)", got == 625u && !(monobit_ok && poker_ok && runs_ok && long_ok));
+    bench.verdict("read() hands out the 625 words of 20000 bits", got == 625u);
+    print(serial, "  FINDING (fact 7, not a verdict): the words ",
+          (monobit_ok && poker_ok && runs_ok && long_ok) ? "PASS" : "FAIL",
+          " FIPS PUB 140-2 over 20000 bits", crlf);
 }
 
 // ===========================================================================
@@ -678,8 +689,11 @@ void tf_chi_square() {
     print(serial, "  ", got * 4u, " bytes: each value seen ", lo, " to ", hi,
           " times (256 expected); chi-square ", chi10 / 10u, ".", chi10 % 10u,
           " on 255 degrees of freedom (a uniform source: 175..350)", crlf);
-    bench.verdict("the 256 byte values are NOT uniform: a chi-square past ten times its "
-                  "degrees of freedom (fact 7)", got == 16'384u && chi10 > 25'500u);
+    bench.verdict("read() hands out the 16384 words of 65536 bytes", got == 16'384u);
+    print(serial, "  FINDING (fact 7, not a verdict): the 256 byte values are ",
+          chi10 > 25'500u ? "NOT uniform, a chi-square past ten times its degrees of freedom"
+                          : "within ten times the chi-square's degrees of freedom",
+          crlf);
 }
 
 // ===========================================================================
@@ -718,8 +732,10 @@ void tg_continuous() {
     bench.verdict("of a hundred thousand words read() handed out none equal to the one "
                   "before it, and refused none for an error",
                   words == 100'000u && handed_equal == 0u && errors == 0u);
-    bench.verdict("and the comparison it makes on every word refused some - the generator "
-                  "repeats a word at DRDY's pace (fact 7)", repeats != 0u);
+    print(serial, "  FINDING (fact 7, not a verdict): the comparison ",
+          repeats != 0u ? "refused some words - the generator repeats a word at DRDY's pace"
+                        : "refused none",
+          crlf);
 }
 
 // ===========================================================================

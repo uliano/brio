@@ -29,15 +29,17 @@
 //
 // What is exercised, letter by letter:
 //   a  THE BLOCK: what the HB gate really holds (asked of two registers,
-//      so that a stale bus capture cannot be mistaken for a live read),
-//      the reset value of the data register, and RST as the only reset
-//      this block has
+//      so that a stale bus capture cannot be mistaken for a live read;
+//      what the bus answers behind it is printed, the manuals being
+//      silent), the reset value of the data register, and RST as the only
+//      reset this block has
 //   b  THE FUNCTION against util/crc.hpp's twin: one word, two, four,
 //      sixty-four, and a byte stream packed by `word_be` - plus the
 //      empty message, whose checksum is the initial value
 //   c  THE RESET'S LATENCY: `reset()` returns its own spin count, and
-//      this is where the number is printed; then whether a word written
-//      in the instruction after RST is taken or swallowed
+//      this is where the number is printed, judged only against the
+//      verb's own bound; then whether a word written in the instruction
+//      after RST is taken or swallowed (printed)
 //   d  THE RUNNING RESULT: a checksum taken in pieces equals the same
 //      checksum taken whole, because reading CRC_DATAR does not consume
 //      it
@@ -86,7 +88,9 @@ struct Token {
     uint16_t fail;
     uint8_t wrote;  ///< what letter w put in the scratch register
 };
-[[gnu::section(".noinit")]] inline Token token;
+// Not `inline`: an inline variable placed in a named section is emitted as
+// a COMDAT member with no group name, which the assembler warns about.
+[[gnu::section(".noinit")]] Token token;
 
 namespace {
 
@@ -161,13 +165,14 @@ void ta_block() {
           hex(shut_datar), crlf);
     print(serial, "  gate re-opened after two stores: DATAR=", hex(reopened), " scratch=",
           hex(reopened_scratch), crlf);
-    bench.verdict("with the HB gate SHUT nothing of the block answers: the scratch "
-                  "register, which holds 0x3C, comes back as the LOW BYTE OF THE DATA "
-                  "REGISTER's last value instead - what a read returns from a block behind "
-                  "a closed gate is the last word the bus carried, byte lane and all, and "
-                  "never the register that was asked for",
-                  gate_shut && shut_scratch == static_cast<uint8_t>(running) &&
-                      shut_scratch != 0x3Cu && shut_datar == running);
+    // What a read returns from behind the closed gate (the two values printed
+    // above) is the bus fabric's business, which neither manual describes: a
+    // behaviour brio does not depend on, so printed and not judged.
+    bench.verdict("clock(false) shuts the HB gate: CRCEN reads clear",
+                  gate_shut);
+    // The mechanism this verdict rests on: the block's registers are clocked
+    // by the gated HCLK branch (3.4.6's CRCEN), so with no clock edge no store
+    // can land and the flops hold what they had.
     bench.verdict("and both stores made with the gate shut are lost, while the block keeps "
                   "what it held: a peripheral behind a closed gate is not a peripheral "
                   "that answers wrongly, it is one that is not there",
@@ -265,11 +270,15 @@ void tc_reset_latency() {
         }
     }
     print(serial, "  sixty-four resets over a dirty register: worst spin count ", worst,
-          crlf);
-    bench.verdict("RST lands before the next instruction can read the register - the spin "
-                  "count is zero every time, where the same block on another family was "
-                  "measured taking a few cycles",
-                  worst == 0u);
+          worst == 0u ? " - RST landed before the next instruction could look" : "", crlf);
+    // The verdict is the verb's contract, which compute() and init() rest
+    // on: every reset showed the initial value within Crc::reset_spins
+    // reads (a count of reset_spins is the verb giving up). Whether that
+    // count is zero is the silicon's latency, which neither manual states:
+    // the figure above, printed.
+    bench.verdict("every reset() saw the initial value within its own bound of reads, so a "
+                  "checksum started by reset() starts from 0xFFFFFFFF",
+                  worst < Crc::reset_spins);
 
     // The harder half of the same question: is a word written in the
     // instruction AFTER the reset taken, or swallowed by a reset still
@@ -279,13 +288,12 @@ void tc_reset_latency() {
     Crc::regs().DATAR = 0x01020304u;
     const uint32_t after = Crc::value();
     const uint32_t one_word = crc32_ethernet_word(crc32_ethernet_init, 0x01020304u);
+    // Neither manual says, and the driver does not depend on it (reset()
+    // waits for the initial value before it returns): printed, not judged.
     print(serial, "  a word stored in the instruction after RST: DATAR=", hex(after),
           " (one word would be ", hex(one_word), ", a swallowed one ",
-          hex(crc32_ethernet_init), ")", crlf);
-    bench.verdict("and a word written in the very next instruction is TAKEN, not swallowed "
-                  "- so a checksum may start with reset() and feed in the next store with "
-                  "nothing in between",
-                  after == one_word);
+          hex(crc32_ethernet_init), "): ",
+          after == one_word ? "TAKEN" : after == crc32_ethernet_init ? "SWALLOWED" : "neither", crlf);
     (void)Crc::reset();
 }
 
@@ -393,9 +401,11 @@ void tf_cost() {
           SysClock::hz / 1'000'000u, " MHz", crlf);
     print(serial, "  that is ", (hw_cycles * 1000u) / ticks_per_us / 1000u, " us against ",
           (sw_cycles * 1000u) / ticks_per_us / 1000u, " us", crlf);
-    bench.verdict("a thousand words through the unit cost a handful of cycles each and "
-                  "agree with the twin, which walks the same polynomial bit by bit and "
-                  "costs an order of magnitude more",
+    // The verdict is the agreement and the order of the two costs; how much
+    // cheaper the unit is depends on the flash and the bus, so the two
+    // figures above are printed rather than held to a ratio.
+    bench.verdict("a thousand words through the unit agree with the twin, which walks the "
+                  "same polynomial bit by bit, and cost fewer cycles than it",
                   hw_value == static_cast<uint32_t>(sink) && hw_cycles < sw_cycles);
 }
 

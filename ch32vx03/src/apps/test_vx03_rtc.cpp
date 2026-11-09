@@ -343,16 +343,26 @@ void td_counter() {
 
     // The read discipline: RSF cleared and waited for. It costs up to
     // one RTCCLK period, which on the crystal is thirty microseconds.
+    // THE BOUND: RSF comes back at the first RTCCLK edge after the clear
+    // (6.2.3), so at most one period, 1/32768 s = 30.52 us (a crystal's
+    // 100 ppm moves it by 0.003 us); then the flag's crossing into the
+    // bus clock, one turn of the driver's poll (six instructions and one
+    // APB1 load in the release listing), the ruler's two reads (about
+    // twenty instructions each) and at most one kernel tick handler
+    // (nineteen instructions; the span is 1/33 of its period) - under
+    // 192 cycles, 2 us at 96 MHz. 32.5 us, whole microseconds: 32. The
+    // console is drained first so no transmit handler lands inside.
+    (void)brio::console_drain<Ruler, Serial>();
     brio::Stopwatch<Ruler> sync_watch;
     sync_watch.start();
     const bool synced = Rtc::synchronize();
     const uint32_t sync_us = us_of(sync_watch.elapsed());
     print(serial, "  synchronize(): ", synced ? "RSF back" : "TIMED OUT", " in ", sync_us,
-          " us (one RTCCLK period is 30 us)", crlf);
+          " us (one RTCCLK period is 30.5 us; the bound with the instrument is 32)", crlf);
     bench.verdict("the read synchronization costs at most one period of the RTC's own "
                   "clock, which is what 6.2.3 promises and what a program pays ONCE after "
-                  "a reset",
-                  synced && sync_us <= 200u);
+                  "a reset: 32 us with the poll and the instrument",
+                  synced && sync_us <= 32u);
 
     // The prescaler's arithmetic: exact or nothing.
     bench.verdict("the prescaler is exact-or-nothing: 32768 Hz makes a one-second tick "
@@ -423,18 +433,28 @@ void td_counter() {
     }
     const uint32_t span = last - 0x0000FF00u;
     print(serial, "  four seconds at 32768 ticks a second: the count advanced ", span,
-          " through ", span / 65536u, " roll-over(s) of its low half, over ", reads,
+          " through ", last >> 16, " roll-over(s) of its low half, over ", reads,
           " reads", crlf);
     print(serial, "  the raw three-read sequence disagreed ", disagreements,
           " time(s); count() stepped BACK ", backwards, " time(s), the worst by ",
           worst_back, ", and forward at most ", worst_forward, crlf);
-    bench.verdict("NO READ WAS EVER TORN across the low half's roll-over - the worst step "
-                  "in either direction is a tick or two and never the 65536 a half-read "
-                  "counter would give - but THE COUNT DOES STEP BACK by a tick now and "
-                  "then, which is the bus reading a register of another clock domain and "
-                  "seeing a stale copy: a program that reads this counter faster than it "
-                  "ticks cannot assume the number only grows",
-                  span > 100'000u && worst_back <= 16u && worst_forward <= 16u);
+    // THE BOUND. A read torn across the roll-over is off by 65536 in one
+    // direction or the other; a turn of the loop (3.7 to 4.1 million of
+    // them in four seconds) is far under one tick, so an honest step is
+    // the tick or two the counter moved plus however far a stale copy
+    // lags. How far that lag reaches is not written - the dies differ
+    // (rtc.md, "The carry between two halves") and it is printed above
+    // - so the verdict draws its line at half a roll-over, 32768, which
+    // no stale copy of a few ticks approaches and every torn read
+    // crosses. The window itself: from 0xFF00, four seconds at 32768 Hz
+    // within 200 ppm (the two crystals, 100 ppm each) is 131046 ticks at
+    // the least, so the count passes 0x20000 - two roll-overs - by
+    // nearly two seconds.
+    bench.verdict("NO READ WAS EVER TORN across the low half's two roll-overs: the worst "
+                  "step in either direction stays under half a roll-over, 32768, where a "
+                  "half-read counter gives 65536 (how far back a stale copy of the other "
+                  "clock domain steps is the die's, printed above)",
+                  last >= 0x00020000u && worst_back < 32768u && worst_forward < 32768u);
 
     // The counter moves on its own, which is the one thing a counter
     // has to do.
@@ -444,9 +464,15 @@ void td_counter() {
     const uint32_t c2 = Rtc::count();
     print(serial, "  CNT ", hex(c1), " then ", hex(c2), " some sixty milliseconds later at "
           "64 ticks a second", crlf);
+    // THE BOUND: sixty milliseconds (the spin, plus a turn) at 64 Hz
+    // within 200 ppm is 3.84 ticks - three or four whole ones; plus one
+    // the prescaler may owe at once (the hammer above left it at zero,
+    // so the first edge after the window ticks); and a stale copy at
+    // either read moves one tick at most (it lags by up to three RTCCLK
+    // periods, ch32vx03/rtc.hpp's count(), under a 64 Hz tick). 2 to 6.
     bench.verdict("the counter counts: at sixty-four ticks a second it advanced by two to "
-                  "five over sixty milliseconds",
-                  c2 > c1 && (c2 - c1) <= 8u);
+                  "six over sixty milliseconds",
+                  c2 - c1 >= 2u && c2 - c1 <= 6u);
 }
 
 // ===========================================================================
@@ -493,10 +519,21 @@ void te_rate() {
     print(serial, "  that is ", ppm >= 0 ? "+" : "-",
           static_cast<uint32_t>(ppm < 0 ? -ppm : ppm), " us a second, ",
           ppm >= 0 ? "slow" : "fast", crlf);
+    // THE BOUND. The boards name neither crystal's part: each is taken
+    // as a quartz of 100 ppm with its temperature stability, so the
+    // ratio of the two - which is what this letter measures - is within
+    // 200 ppm, 2000 us over ten seconds. Each end of the window sees
+    // SECF at most one RTCCLK period after its edge (the crossing, as
+    // letter d's synchronization: 30.5 us), one turn of the loop and
+    // one kernel tick handler later (both under 1 us at 96 MHz); and
+    // the microseconds are whole. 2000 + 2 x 32 + 1 = 2065 us.
+    constexpr uint32_t rate_window_us = 10'000'000u;
+    constexpr uint32_t rate_bound_us = 2'000u + 2u * 32u + 1u;
     bench.verdict("ten ticks of the second event against the core's crystal-rooted counter "
-                  "put the low-speed crystal within a hundred parts per million of 32.768 "
-                  "kHz - which is what a watch crystal is sold as",
-                  ticks == 10u && period_us > 999'000u && period_us < 1'001'000u);
+                  "span ten seconds within 2065 us: the two crystals' 100 ppm each and the "
+                  "flag's crossing at both ends",
+                  ticks == 10u && span_us > rate_window_us - rate_bound_us &&
+                      span_us < rate_window_us + rate_bound_us);
 }
 
 // ===========================================================================
@@ -553,9 +590,12 @@ void tf_alarm() {
                   "which is 6.2.2's list of the four backup-domain registers read for "
                   "what it does NOT contain: the interrupt enables are not one of them",
                   ints_read && outside_window);
-    bench.verdict("and it arrived four to five ticks of a sixty-four hertz counter later, "
-                  "which is the time the program asked for",
-                  own_us > 40'000u && own_us < 100'000u);
+    // Printed, not judged: the span from the count read to the handler
+    // waits on the first tick after the prescaler was rewritten, and
+    // when that tick comes (whether RTC_DIV reloads at the write) is not
+    // written; the count the handler read is the verdict above.
+    print(serial, "  the alarm arrived ", own_us, " us after it was armed four ticks of a "
+          "64 Hz counter ahead (one tick is 15625 us)", crlf);
 
     // ---- EXTI line 17, the path that survives a low-power mode -----------
     // First WITHOUT the alarm's own interrupt enable, which is the
@@ -625,21 +665,29 @@ void tg_overflow() {
     const uint32_t us = took ? us_of(*took) : 500'000u;
     const uint32_t at_flag = Rtc::count();
     brio::spin_us<Ruler>(2'000u);
+    const bool after_synced = Rtc::synchronize();
     const uint32_t after = Rtc::count();
     print(serial, "  set two ticks short of 0xFFFFFFFF: OWF after ", us,
-          " us, CNT read at the flag ", hex(at_flag), " and two milliseconds later ",
-          hex(after), crlf);
+          " us, CNT read at the flag ", hex(at_flag), " and two milliseconds later, "
+          "synchronized, ", hex(after), crlf);
+    // The span is printed, not judged: it waits on the first tick after
+    // the prescaler was rewritten, which is not written (letter f).
     bench.verdict("the counter wraps and raises the overflow event - the only warning a "
                   "thirty-two-bit number gives, which at one tick a second is a hundred "
                   "and thirty-six years away and is why a program that cares keeps the "
                   "epoch itself",
-                  Rtc::overflowed() && us > 20'000u && us < 200'000u);
-    bench.verdict("AND THE FLAG ARRIVES BEFORE THE COUNT THE BUS READS: at the moment OWF "
-                  "stands the counter still reads its last value, and the wrapped one "
-                  "appears afterwards - the two registers cross a clock domain and the "
-                  "flag is the faster of the two, so a handler that wants the count reads "
-                  "it and not the event",
-                  at_flag == 0xFFFFFFFFu && after < 0x10u);
+                  Rtc::overflowed());
+    // Which count the bus reads at the instant OWF stands is the race of
+    // two clock domains, which no chapter specifies: printed. What the
+    // driver promises is judged - after synchronize() the count is the
+    // RTC's own, and two milliseconds after the wrap a 64 Hz counter
+    // (15.6 ms a tick) still stands at zero.
+    print(serial, "  FINDING: at the instant OWF stood the bus read ",
+          at_flag == 0xFFFFFFFFu ? "the count BEFORE the wrap: the flag crossed first"
+                                 : "the count after the wrap", crlf);
+    bench.verdict("and the count read after synchronize(), two milliseconds after the flag, "
+                  "is the wrapped value: zero",
+                  after_synced && after == 0u);
     Rtc::clear(rtc_owf);
     bench.verdict("and the flag is rw0: a store of ones everywhere but its own bit is what "
                   "clears it, and it stays down",
@@ -829,7 +877,19 @@ void tw_domain_reset() {
     const uint32_t implied = period_us == 0u ? 0u
                                              : static_cast<uint32_t>((static_cast<uint64_t>(
                                                    reload + 1u) * 1'000'000ULL) / period_us);
-    const uint32_t div = implied == 0u ? 0u : xtal_hz / implied;
+    // The division ROUNDED to the nearest whole: the crystal over the
+    // tick's (reload + 1) RTCCLK periods. RTCCLK and the ruler are the
+    // same crystal, so the ratio is exact but for the measurement: the
+    // flag's crossing at each end (one RTCCLK period, 16 or 64 us), a
+    // turn of the poll and the whole microseconds - under 150 us on a
+    // tick of 250 ms or 1 s, 0.06 %, so the quotient lies within 0.08 of
+    // 128 or 0.3 of 512 and the rounding lands on the divider (a floor
+    // would take 127.99 to 127).
+    const uint64_t div_den = (static_cast<uint64_t>(reload) + 1u) * 1'000'000ULL;
+    const uint32_t div =
+        period_us == 0u ? 0u
+                        : static_cast<uint32_t>((static_cast<uint64_t>(xtal_hz) * period_us +
+                                                 div_den / 2u) / div_den);
     print(serial, "  RTCSEL on the HSE: a tick asked for at one hertz through a reload of ",
           reload, " took ", period_us, " us - RTCCLK is ", implied, " Hz, the crystal over ",
           div, crlf);

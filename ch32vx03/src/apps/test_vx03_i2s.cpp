@@ -761,9 +761,20 @@ void tf_flags() {
     bench.verdict("UDR stands on a client transmitter nobody feeds and reaches the vector under "
                   "ERRIE",
                   udr && udr_vec >= 1u && (udr_flags & SpiFlag::underrun) != 0u);
-    bench.verdict("TXE and RXNE reach their instances' vectors under their own enables, some "
-                  "sixty of each in two milliseconds of a 16 kHz stream",
-                  tx_vec >= 40u && rx_vec >= 40u);
+    // THE COUNTS. A 16-bit frame carries two words, so the stream moves
+    // 2 x FS words a second - i2s_fs_hz() of the divider, 16014 Hz here:
+    // `words` in the 2000 us. The transmitter's vector also runs once on
+    // the empty buffer as TXE is enabled, before the stream starts, and
+    // once as the shifter takes the first word at the enable; the window's
+    // two ends each add or lose a word (the spin ends late by microseconds,
+    // a word is 31 us). The receiver's vector runs once a word received.
+    constexpr uint32_t words =
+        2u * i2s_fs_hz(i2s_hz, pre16.div, pre16.odd, false, false) / 500u;
+    static_assert(i2s_fs_hz(i2s_hz, pre16.div, pre16.odd, false, false) == 16'014u && words == 64u);
+    bench.verdict("TXE and RXNE reach their instances' vectors under their own enables, one "
+                  "entry a word of a 16 kHz stream for two milliseconds",
+                  tx_vec + 1u >= words && tx_vec <= words + 3u && rx_vec + 1u >= words &&
+                      rx_vec <= words + 1u);
     all_off();
 }
 

@@ -269,7 +269,7 @@ by their own port and the output is read as an analog channel - or, on
 the CH32V303's port E, as a level. On the CH32V203C8T6 the five letters
 of that part: **19 pass, 0 fail, 1 skipped** in `z`, ten runs alike (the
 skip is OPA1's CH1 pair, below). On the CH32V303CBT6 all eight, over
-the pads its LQFP48 bonds: **25 pass, 0 fail**, ten runs alike. The
+the pads its LQFP48 bonds: **24 pass, 0 fail**, ten runs alike. The
 CH32V303VCT6 was not run with today's suite; the findings that name it
 were measured on it, with the evaluation board's own wires on several of
 those pads (each to another pad left a floating input, which the driven

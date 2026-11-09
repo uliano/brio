@@ -119,6 +119,26 @@ struct Ruler {
 /// Microseconds on a stopwatch over the ruler.
 uint32_t elapsed_us(const Stopwatch<Ruler>& w) { return w.elapsed() / ticks_per_us; }
 
+/// HOW LATE A POLL SEES ITS EVENT, letter b's budget: one turn of its loop
+/// (the channel's flags, a clear, remaining() and Ticker::cycles(), about
+/// 40 instructions in the release listing, four of them loads across the
+/// peripheral bus: under 150 cycles) and the handlers that can be pending
+/// at the event, each served once - the tick and the console's transmit,
+/// each under 200 cycles (a tick's entry some 200 cycles,
+/// docs/ch32vx03/i2c.md; a console byte about 150, usart.md). 550 cycles,
+/// four microseconds at 144 MHz, rounded up.
+constexpr uint32_t poll_late_cycles = 150u + 2u * 200u;
+constexpr uint32_t poll_late_us = (poll_late_cycles + ticks_per_us - 1u) / ticks_per_us;
+
+/// A staircase's step, judged (letters e and k): the datum and the pacer
+/// divide one HCLK by the same prescaler, so the datum moves exactly one
+/// count a microsecond between two updates 500 us apart, and the
+/// controller reads it a service latency after each update - a few bus
+/// cycles of arbitration that move from sample to sample, far under the
+/// 144 cycles of a count, but able to straddle a count's edge: 500, give
+/// or take one.
+constexpr bool staircase_step(uint16_t step) { return step >= 499u && step <= 501u; }
+
 // ---------------------------------------------------------------------------
 // The handlers' counters
 // ---------------------------------------------------------------------------
@@ -241,9 +261,15 @@ void tb_circular() {
     bench.verdict("and the count WALKS: remaining() was seen stepping down through the run "
                   "and the value that landed in the timer is one the run carries",
                   walked_down >= 8u && landed >= 100u && landed <= 170u);
+    // THE BOUND. The first update comes 200 us after CEN and the
+    // thirty-second ends the fourth lap at 6400 us; the window opens after
+    // CEN (a few cycles: the bound's floor, one microsecond under, covers
+    // elapsed_us()'s truncation) and closes when the poll sees that flag,
+    // poll_late_us at most after it.
     bench.verdict("the laps are paced by the REQUEST and not by the bus: thirty-two updates "
-                  "of 200 us are 6400 us, which is what the core's counter says to a tenth",
-                  laps_us > 5800UL && laps_us < 7600UL);
+                  "of 200 us are 6400 us, which is what the core's counter says to within "
+                  "the poll's lateness",
+                  laps_us >= 6399UL && laps_us <= 6400UL + poll_late_us);
     all_off();
 }
 // ===========================================================================
@@ -291,15 +317,15 @@ void te_request() {
     uint16_t steps_right = 0;
     for (uint16_t i = 1; i < sample_count; ++i) {
         const uint16_t step = static_cast<uint16_t>(work[i] - work[i - 1u]);
-        if (step >= 495u && step <= 505u) {
+        if (staircase_step(step)) {
             ++steps_right;
         }
     }
     print(serial, "  sixteen samples of a 1 MHz counter 500 us apart: ", work[0], " ", work[1],
           " ", work[2], " ... ", work[sample_count - 1u], crlf);
     bench.verdict("a timer's update request moves one sample per period with no pad and no "
-                  "core: sixteen samples of another timer's counter, each a period after the "
-                  "last to within one per cent",
+                  "core: sixteen samples of another timer's counter, each a period (500 "
+                  "counts) after the last to within one count",
                   armed && sampled && steps_right == sample_count - 1u);
 
     // THE BURST ENGINE. One request, several registers: each access to
@@ -398,11 +424,19 @@ struct Drink {
 
 /// Read `target` elements off the ring as fast as the core can, every one
 /// judged against the one before it: a counter sampled every `period`
-/// cycles steps by `period`, give or take the controller's service. Every
-/// `stall_every` elements (0: never) the consumer first stands still for
-/// `stall` cycles.
+/// cycles steps by `period`, give or take how the controller's service
+/// latency moves from one sample to the next. Every `stall_every`
+/// elements (0: never) the consumer first stands still for `stall` cycles.
+///
+/// THE STEP'S JUDGEMENT is the nearest whole number of periods: a step
+/// within half a period of one period is the next update's sample. What
+/// the judgement exists to catch is a whole number of periods away - a
+/// skipped sample two, a repeated one none, a slot still holding the
+/// previous lap's sample a lap's worth (256 periods, modulo the counter's
+/// sixteen bits 8192 cycles at 288 and 12288 at 48) - while the service
+/// latency's wander, which no written figure bounds, would have to reach
+/// half a period (24 cycles at the fast pace) to be taken for one.
 Drink drink(uint32_t target, uint32_t period, uint32_t stall_every = 0, uint32_t stall = 0) {
-    constexpr uint32_t slack = 16;
     Drink d;
     bool have_last = false;
     uint16_t last = 0;
@@ -429,7 +463,7 @@ Drink drink(uint32_t target, uint32_t period, uint32_t stall_every = 0, uint32_t
         for (const uint16_t v : run) {
             if (have_last) {
                 const uint32_t step = static_cast<uint16_t>(v - last);
-                if (step + slack < period || step > period + slack) {
+                if (2u * step <= period || 2u * step >= 3u * period) {
                     ++d.bad_steps;
                 }
             }
@@ -786,7 +820,7 @@ void dma2_staircase(const char* verdict) {
         uint16_t steps_right = 0;
         for (uint16_t i = 1; i < sample_count; ++i) {
             const uint16_t step = static_cast<uint16_t>(work[i] - work[i - 1u]);
-            if (step >= 495u && step <= 505u) {
+            if (staircase_step(step)) {
                 ++steps_right;
             }
         }
@@ -866,12 +900,18 @@ void tl_dma2_engines() {
         print(serial, "  the loop engine on DMA2 channel ", Player::channel, ": ", laps,
               " laps of eight 200 us updates in ", laps_us, " us, CH1CVR=", landed,
               ", faults ", Player::faults(), crlf);
+        // THE BOUND, as letter b's: the sixty-fourth update at 12800 us
+        // after CEN, seen poll_late_us at most after the channel's handler
+        // counted the lap - a handler more before the count, under 200
+        // cycles.
+        constexpr uint32_t lap_late_us = (poll_late_cycles + 200u + ticks_per_us - 1u) / ticks_per_us;
         bench.verdict("DmaLoopEngine plays a table for ever on DMA2: eight laps of eight "
-                      "updates counted by the channel's own handler at the timer's pace, the "
-                      "value that landed one the table carries",
-                      playing && still_running && laps >= 8u && laps_us > 11'000UL &&
-                          laps_us < 15'000UL && landed >= 100u && landed <= 170u &&
-                          Player::faults() == 0u);
+                      "updates counted by the channel's own handler at the timer's pace "
+                      "(12800 us to within the poll's lateness), the value that landed one "
+                      "the table carries",
+                      playing && still_running && laps >= 8u && laps_us >= 12'799UL &&
+                          laps_us <= 12'800UL + lap_late_us && landed >= 100u &&
+                          landed <= 170u && Player::faults() == 0u);
 
         // THE SOURCE: TIM8's update, on its own channel, filling two
         // caller-owned blocks with samples of a free-running counter - the

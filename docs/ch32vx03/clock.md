@@ -375,8 +375,11 @@ HALVED input, which is what exercises the EXTEN bit.
   computed for the rate they name. Twenty switches up and down the pack,
   each rate then measured against the RTC on the board's 32.768 kHz
   crystal (ten runs on each desk board): HCLK 64 to 114 ppm over the
-  rate asked on every crystal-rooted rate (bound 19 in 10000) and
-  +0.42 to +0.62 % on every HSI-rooted one (bound 197 in 10000), the
+  rate asked on every crystal-rooted rate (bound 19 in 10000, two
+  crystals taken at 100 ppm each, the boards naming no part) and
+  +0.42 to +0.62 % on every HSI-rooted one (bound the part's datasheet
+  accuracy after calibration and 18 in 10000 of instrument and crystal:
+  +178 and -118 on a CH32V203, 198 either way on a CH32V303), the
   kernel tick counting 125 or 126 ticks in 125 ms of the RTC (bound 2
   on the crystal, 4 on the HSI), and `delay_us(500)` never early and 75
   to 98 core cycles over the cycles asked at every rate, against the
@@ -451,10 +454,12 @@ HALVED input, which is what exercises the EXTEN bit.
   is counted** where PA8 is strapped to PA6 (the strap probed first,
   both levels against the opposite pull): TIM3 in external clock mode
   1 on PA6, over a 5 ms gate of a core clock made from the crystal,
-  reads the HSE at **7 999 911 to 8 000 111 Hz** - one edge either side
-  of 8 MHz exactly, the gate's resolution - and the HSI at **+0.59 to
-  +0.67 %** (8 046 909 to 8 053 309 Hz) over ten runs, inside the
-  datasheets' calibrated accuracy. SYSCLK and the PLL halved are 48 to
+  reads the HSE at **7 999 844 to 8 000 188 Hz** - within one edge of
+  8 MHz, the gate's resolution, against a bound of one edge and one
+  retry of the core counter's read (400 Hz) - and the HSI at **+0.54 to
+  +0.62 %** on the CH32V203C8T6 and **+0.46 to +0.54 %** on the
+  CH32V303CBT6 (8 036 830 to 8 049 306 Hz) over ten runs each, inside
+  each part's datasheet accuracy after calibration. SYSCLK and the PLL halved are 48 to
   144 MHz at the rates that make them, past the pad's fastest class (50
   MHz in the datasheets' I/O tables) and past what a timer clocked at
   HCLK can count of an outside edge, so the letter reads them back and

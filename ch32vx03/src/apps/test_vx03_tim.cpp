@@ -241,6 +241,19 @@ struct Ruler {
 /// Microseconds on a stopwatch over the ruler.
 uint32_t elapsed_us(const Stopwatch<Ruler>& w) { return w.elapsed() / ticks_per_us; }
 
+/// HOW LATE A spin_us() ENDS, the budget of every bound below that times a
+/// window the CPU opens and closes around spins (letters d, e and h). A
+/// spin never ends early: it compares two reads of the ruler, which counts
+/// the timers' own HCLK. It ends late by one poll turn - the 22
+/// instructions of Ticker::cycles() and the loop in the release listing,
+/// under 100 cycles - plus the handlers pending at its deadline, each
+/// served once: the tick, the console's transmit and the letter's own
+/// capture vector, each under 200 cycles (a tick's entry some 200 cycles,
+/// docs/ch32vx03/i2c.md; a console byte about 150, usart.md). 700 cycles,
+/// five microseconds at 144 MHz, rounded up.
+constexpr uint32_t spin_late_cycles = 100u + 3u * 200u;
+constexpr uint32_t spin_late_us = (spin_late_cycles + ticks_per_us - 1u) / ticks_per_us;
+
 /// Every timer and pad this suite touches, back to reset. Called at the
 /// top of each letter, so no letter inherits another's state.
 void all_off() {
@@ -759,10 +772,16 @@ void td_meters() {
     print(serial, "  the interval meter over six edges 1000 us apart: last interval ",
           interval.has_value() ? *interval : 0u, " us, ", missed,
           " readings overwritten before the loop took them", crlf);
-    bench.verdict("consecutive rising edges are one interval apart to within a per cent, "
-                  "and the latch counted every reading the loop did not take",
-                  interval.has_value() && *interval >= 990u && *interval <= 1010u &&
-                      missed >= 3u);
+    // THE BOUND. The edges are 1000 us of the ruler apart plus how late the
+    // two spins between them end (spin_late_us each) and two output_mode()
+    // writes, and the capture is good to one count: 999 to 1001 +
+    // 2 x spin_late_us. Six edges make five intervals (the first edge only
+    // opens one), the loop takes the last: four overwritten.
+    bench.verdict("consecutive rising edges are one interval apart, 1000 us to within the "
+                  "capture's count and the two spins' lateness, and the latch counted the "
+                  "four readings the loop did not take",
+                  interval.has_value() && *interval >= 999u &&
+                      *interval <= 1001u + 2u * spin_late_us && missed == 4u);
 
     // A STALE SOURCE IS SILENT (design/meters.md): the latch was
     // emptied by that take(), and with the timer stopped the next one
@@ -807,10 +826,15 @@ void td_meters() {
     print(serial, "  the period meter on the TI1 XOR, the CPU making the wave: period ",
           per.has_value() ? *per : 0u, " us, high ", wid.has_value() ? *wid : 0u,
           " us (1000 and 300 asked)", crlf);
+    // THE BOUND, as the interval meter's: a period is two spins (300 and
+    // 700 us) and a high time one, each ending late by up to spin_late_us,
+    // each capture good to one count.
     bench.verdict("PWM input mode measures the period and the high time of a wave the "
-                  "timer's own output stage puts on the pad, within two per cent",
-                  per.has_value() && wid.has_value() && *per >= 980u && *per <= 1030u &&
-                      *wid >= 295u && *wid <= 320u);
+                  "timer's own output stage puts on the pad, 1000 and 300 us to within a "
+                  "count and the spins' lateness",
+                  per.has_value() && wid.has_value() && *per >= 999u &&
+                      *per <= 1001u + 2u * spin_late_us && *wid >= 299u &&
+                      *wid <= 301u + spin_late_us);
     all_off();
 }
 
@@ -843,9 +867,17 @@ void te_counters() {
     Wave::enable(false);
     const uint32_t counted = TimEventCounter<Meas>::count();
     print(serial, "  20 ms of a 10 kHz update on TRGO: the slave counted ", counted, crlf);
+    // THE COUNT. configure() writes SWEVGR.UG while CTLR2.MMS is still at
+    // reset, which publishes UG on TRGO (RM 14.4.2, MMS 000): one event
+    // before the master runs. Then an update every 100 us from CEN, the
+    // two-hundredth at 20000 us; the spin opens a few cycles after CEN and
+    // ends late by at most spin_late_us, so the stop falls within cycles
+    // after that update and long before the next: 201, or 200 with the
+    // last update a resynchronization behind the stop.
     bench.verdict("external clock mode 1 over an internal trigger counts the master's "
-                  "update events exactly - two hundred of them, no pad in the path",
-                  counted >= 199u && counted <= 201u);
+                  "update events exactly - two hundred of them and configure()'s UG, no pad "
+                  "in the path",
+                  counted >= 200u && counted <= 201u);
 
     // THE GATED COUNTER: the master publishes its channel-1 waveform
     // on TRGO and the slave counts ITS OWN clock while that is high -
@@ -883,9 +915,18 @@ void te_counters() {
     const uint32_t high_us = TimGatedCounter<Meas>::count();
     print(serial, "  twenty periods of a 25 % duty: the gated counter ran for ", high_us,
           " us of them (5000 expected)", crlf);
-    bench.verdict("gated mode measures a duty cycle from the master's own waveform, within "
-                  "a per cent and with nothing on a pad",
-                  periods == 20u && high_us >= 4975u && high_us <= 5060u);
+    // THE BOUND. Master and slave divide one HCLK by the same prescaler, so
+    // each high phase (36000 cycles at 144 MHz) holds exactly 250 slave
+    // counts whatever the two prescalers' phase: 5000 in twenty, one count
+    // off at most where the gate's resynchronization meets a prescaler
+    // wrap. The twenty-first period's high phase has begun when the loop
+    // sees the twentieth update, and the slave counts it until the stop: a
+    // poll turn plus the tick's and the console's handlers, the
+    // spin_late_cycles budget, under spin_late_us counts.
+    bench.verdict("gated mode measures a duty cycle from the master's own waveform - 5000 "
+                  "us in twenty periods to within a count and the poll's lateness - with "
+                  "nothing on a pad",
+                  periods == 20u && high_us >= 4999u && high_us <= 5001u + spin_late_us);
     all_off();
 }
 
@@ -1192,9 +1233,12 @@ void th_chains() {
     Meas::enable(false);
     print(serial, "  reset mode: the slave's counter sat at ", held,
           " after 5 ms of 200 us triggers, TIF ", triggered ? "raised" : "absent", crlf);
+    // THE BOUND. Both count 1 MHz of one HCLK and every master update (200
+    // counts apart) clears the slave: it reads 0 to 199, and one count more
+    // where the trigger's resynchronization lands across a slave count.
     bench.verdict("a trigger in reset mode reinitializes the slave's counter, which "
                   "therefore never passes one trigger period",
-                  held <= 205u && triggered);
+                  held <= 200u && triggered);
 
     // TRIGGER MODE: the slave starts on the first trigger and runs on
     // by itself - CEN set by hardware, which is what the readback says.
@@ -1215,9 +1259,18 @@ void th_chains() {
     const uint32_t ran = Meas::count();
     print(serial, "  trigger mode: the slave was ", idle_before ? "idle" : "NOT idle",
           " before the master and had counted ", ran, " us after 3 ms of it", crlf);
+    // WHICH TRIGGER STARTS IT. configure() writes SWEVGR.UG while
+    // CTLR2.MMS is still at reset, and MMS 000 publishes UG on TRGO (RM
+    // 14.4.2): the slave starts there, before the master runs, not at the
+    // master's first update 1000 us later (which would read about 2000).
+    // From that UG to the spin's start a few register writes, under a
+    // microsecond; the spin is 3000 us late by at most spin_late_us; the
+    // count good to one: 2999 to 3002 + spin_late_us.
     bench.verdict("a trigger STARTS the slave (CEN set by hardware) and does not reset it, "
-                  "so it counts on from the first trigger",
-                  idle_before && running && ran >= 1900u && ran <= 3100u);
+                  "so it counts on from the first trigger - configure()'s UG, published on "
+                  "TRGO while MMS is at reset: 3000 us to within a count and the spin's "
+                  "lateness",
+                  idle_before && running && ran >= 2999u && ran <= 3002u + spin_late_us);
 
     // GATED MODE on the master's ENABLE signal: the slave runs exactly
     // while the master does.
@@ -1239,9 +1292,13 @@ void th_chains() {
     const uint32_t later = Meas::count();
     print(serial, "  gated on the master's enable: the slave counted ", after - before,
           " us while the master ran and ", later - after, " us after it stopped", crlf);
+    // THE BOUND. The window is CEN's: two register writes around a 2000 us
+    // spin that ends late by at most spin_late_us, the count good to one.
     bench.verdict("the slave counts its own clock only while the master's enable signal is "
-                  "high - a window opened and closed with no pad",
-                  after - before >= 1900u && after - before <= 2100u && later == after);
+                  "high - a window opened and closed with no pad, 2000 us to within a count "
+                  "and the spin's lateness",
+                  after - before >= 1999u && after - before <= 2001u + spin_late_us &&
+                      later == after);
     all_off();
 }
 
@@ -1284,11 +1341,16 @@ void ti_vectors() {
     print(serial, "  TIM1's four lines: ", up_calls, " update, ", cc_calls, " compare, ",
           trg_calls, " trigger, ", brk_calls, " break (masks ", hex(cc_mask), " / ",
           hex(brk_mask), ")", crlf);
+    // THE COUNTS. 100 us periods from CEN for a 2000 us spin: the compares
+    // at 50 us into each period, twenty of them, the last 50 us before the
+    // stop; the updates at the end of each, the twentieth within the
+    // spin's lateness of the stop and served or not before it - 19 or 20.
+    // configure() cleared the UG's flag before the vectors were enabled.
     bench.verdict("each of the advanced timer's four vectors ran for its own events - "
-                  "twenty updates and twenty compares on two different lines, one trigger "
-                  "and one break",
-                  up_calls >= 19u && up_calls <= 21u && cc_calls >= 19u && cc_calls <= 21u &&
-                      trg_calls == 1u && brk_calls == 1u);
+                  "twenty updates (the last one at the stop) and twenty compares on two "
+                  "different lines, one trigger and one break",
+                  up_calls >= 19u && up_calls <= 20u && cc_calls == 20u && trg_calls == 1u &&
+                      brk_calls == 1u);
     bench.verdict("and each body saw only the flags ITS vector answers for",
                   cc_mask == Adv::compare_flag(0) && brk_mask == Adv::break_flag);
 
@@ -1309,8 +1371,12 @@ void ti_vectors() {
     Pfic::disable(Irq::tim3);
     print(serial, "  TIM3's one line ran ", wave_calls, " times for ten periods of two "
                   "events each", crlf);
+    // THE COUNT, as TIM1's: ten compares and ten updates in the 1000 us,
+    // the tenth update at the stop - 19 or 20 entries, the two events 50
+    // us apart, so never one entry for both.
     bench.verdict("a general-purpose timer's single vector answers for every one of its "
-                  "events", wave_calls >= 15u && wave_calls <= 25u);
+                  "events - ten compares and ten updates, the last one at the stop",
+                  wave_calls >= 19u && wave_calls <= 20u);
 
     // A FLAG WHOSE INTERRUPT IS NOT ENABLED is left standing: isr()
     // returns nothing and clears nothing, which is what makes every
@@ -1941,14 +2007,22 @@ void basic_round(volatile uint32_t& calls) {
     const uint32_t counted = TimEventCounter<Slave>::count();
     Slave::release();
     const bool refused = !T::master(TimMasterMode::oc1ref);
+    // THE BOUNDS. The span: twenty 100 us periods from CEN, the window
+    // opened a few cycles after it and closed by the poll that sees the
+    // twentieth flag, late by spin_late_us at most - 1999 to 2000 +
+    // spin_late_us (elapsed_us() truncates). The vector: the counter
+    // resumes where the stop left it, within those few microseconds of a
+    // wrap, so 50 updates in the 5000 us, the last at the stop - 49 or
+    // 50. The count: letter e's, 200 updates and configure()'s UG on TRGO,
+    // the last update at the stop - 200 or 201.
     print(serial, "  TIM", B, ": twenty update periods of 100 us in ", span, " us, ", vector_calls,
           " calls of its vector in 5 ms, and TIM9 on ITR", itr, " counted ", counted,
           " of its TRGO updates in 20 ms (a channel's TRGO code refused: ", refused, ")", crlf);
     bench.verdict(B == 6 ? "TIM6 keeps the core's time, its vector is its own, and its TRGO "
                            "reaches TIM9's ITR2 - every update"
                          : "TIM7 the same, over TIM9's ITR3",
-                  span + 20u >= 2000u && span <= 2020u && vector_calls >= 49u &&
-                      vector_calls <= 51u && counted >= 199u && counted <= 201u && refused);
+                  span >= 1999u && span <= 2000u + spin_late_us && vector_calls >= 49u &&
+                      vector_calls <= 50u && counted >= 200u && counted <= 201u && refused);
     T::release();
 }
 
@@ -2160,7 +2234,13 @@ uint32_t link_count() {
 template <uint8_t S, uint8_t M>
 bool link_line(uint8_t& good) {
     const uint32_t c = link_count<S, M>();
-    const bool ok = c >= 199u && c <= 201u;
+    // THE COUNT. configure() writes UG while the master's MMS is still at
+    // reset, which publishes UG on TRGO (RM 14.4.2; 16.4.2 for a basic
+    // timer): one event. Then an update every 1440 cycles from CEN; the
+    // window opens a few cycles before CEN and closes 2000 us later and
+    // late by a turn at most, so the two-hundredth update lands at the
+    // stop, counted or not: 200 or 201.
+    const bool ok = c >= 200u && c <= 201u;
     print(serial, "  TIM", S, " ITR", tim_trigger_index_for(S, M), " <- TIM", M, ": ", c,
           ok ? "" : "  <- NOT the 200 the master made", crlf);
     if (ok) {
@@ -2212,8 +2292,8 @@ void ts_links() {
         print(serial, "  TIM2 ITR1 <- TIM8: ", at0, " with TIM2ITR1_RM at 0, ", at1,
               " with it at 1", can1 ? "" : " (not writable)", crlf);
         bench.verdict("TIM2's ITR1 carries TIM8's TRGO with its AFIO field at the reset value, "
-                      "which is the link the driver's table names",
-                      at0 >= 199u && at0 <= 201u);
+                      "which is the link the driver's table names (link_line()'s count)",
+                      at0 >= 200u && at0 <= 201u);
         upper_timers_off<A>();
     }
 }
@@ -2224,14 +2304,19 @@ void ts_links() {
 
 /// THE BOUND OF EVERY INTERVAL BELOW. The timers count HCLK, the ruler
 /// counts HCLK: an interval between two flags is an exact number of
-/// counter clocks, and what a stamp adds is its poll's lateness - one turn
-/// of the loop (a flag read and a ruler read, some forty cycles) and at
-/// most one handler between the flag and its stamp (the tick's - the
-/// console is drained before each window, so its vector is quiet and the
-/// tick's is the only live one - well under the 200 cycles this family's
-/// images are counted at, spi.md's hold-off) - so an interval is good to
-/// 2 x 240 cycles: 500 at 144 MHz, three and a half microseconds.
-constexpr uint32_t stamp_slack_cycles = 500;
+/// counter clocks, and a stamp is late by a constant (the ruler's read
+/// after the flag's) plus a variable part: up to one turn of the poll (a
+/// flag read, Ticker::cycles() and the compare, 27 instructions in the
+/// release listing, two of them loads across the peripheral bus: under
+/// 100 cycles) and at most one handler between the flag and its stamp
+/// (the tick's - the console is drained before each window, so its vector
+/// is quiet and the tick's is the only live one - a tick's entry some 200
+/// cycles, docs/ch32vx03/i2c.md). An interval is the difference of two
+/// stamps, so the constant cancels and the variable parts, each 0 to 300,
+/// leave it within 300 cycles either way. The first interval opens on the
+/// stopwatch's start, which follows wait_flag()'s turn that saw the flag
+/// as a stamp follows its own poll: the same lateness.
+constexpr uint32_t stamp_slack_cycles = 100u + 200u;
 
 /// `n` consecutive intervals, in core cycles, between rises of `flag` on
 /// timer T - each rise stamped on the ruler and the flag cleared - and the
@@ -2337,7 +2422,7 @@ void tt_repetition() {
     const uint8_t exact1 = repetition_round<1>(cases);
     bench.verdict("TIM1's REPETITION COUNTER: one update in RPTCR + 1 periods, edge-aligned at 0, 1, 4 and 255 "
                   "and centre-aligned at 0, 1 and 3 counting the overflow and the underflow each - every "
-                  "interval within 500 cycles of the counts",
+                  "interval within 300 cycles of the counts",
                   exact1 == cases);
     if constexpr (tim_present(8)) {
         const uint8_t exact8 = repetition_round<8>(cases);
@@ -2459,7 +2544,7 @@ void tu_centre() {
     const bool m3 = centre_flags(TimAlignment::center_both, "mode 3 (CMS 11)");
     bench.verdict("CENTRE-ALIGNED, the three compare-flag policies: CC1IF only counting down in mode 1, only "
                   "counting up in mode 2, a period apart; on both in mode 3, the gaps alternating 600 and 400 "
-                  "us - every gap within 500 cycles",
+                  "us - every gap within 300 cycles",
                   m1 && m2 && m3);
     all_off();
 

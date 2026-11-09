@@ -759,12 +759,22 @@ they differ. In this section a letter with no suite named is `test_vx03_i2c`'s.
   a reads TIM4's clock on the core's counter first - 96000 kHz, the
   tree's figure - and the letter's three rungs (100 kHz, 400 kHz at
   DUTY 2, 400 kHz at DUTY 16/9) against it in thousandths of the rate
-  asked: 1001, 1004 and 963. Against the far chip (letter f), a period
-  captured at the end of a write reads the same three, the far target's
-  polled core stretching none of those periods.
+  asked: 1001 or 1002, 1004 or 1008, and 963. Against the far chip
+  (letter f), a period captured at the end of a write reads the same
+  three, the far target's polled core stretching none of those periods.
+  The readings above a thousand are the capture's and not the bus's:
+  TIM4 runs on the same PLL at twice PB1, so CCR's period is a whole
+  number of its ticks (960, 240 and 250), and every rung on both chips
+  captured that number less one tick (959, 239 and 249; 958 and 238 in a
+  few runs, the rise crossing its threshold beside a tick). The verdict
+  is the ceiling: TIM4's clock within one count of the tree's and every
+  period no shorter than the arithmetic less those two ticks; how much
+  longer a period is than the arithmetic is printed.
 - **An address nobody answers is `i2c_nack_addr`**, for a probe and for
-  a write alike, and the bus is idle again 6 to 7 us after the host
-  answers - the time the STOP takes to leave the wire.
+  a write alike, and the bus is idle again 9 us after the host answers
+  in every run on both chips - the time the STOP takes to leave the
+  wire, what is left of SCL's low half and its high half, against a
+  bound of one SCL period, the rise and the polls' turns (under 12 us).
 - **A tenure into a wire another chip holds down is answered
   `i2c_arb_lost`**, by the silicon, when it is the first: the START, stored
   once the host's 100 us wait for BUSY has run out, leaves at the controller's tick
@@ -774,7 +784,9 @@ they differ. In this section a letter with no suite named is `test_vx03_i2c`'s.
 - **`unstick()` is a measurement.** With the far chip holding SDA low
   from its own port and letting go after four SCL falling edges (the
   first being that START's), the verb reported 3 pulses and TIM4 counted
-  3 rising edges on the pad, both ways. The STOP it makes by hand raises
+  3 rising edges on the pad, both ways: the counts the letter derives
+  and judges exactly, the STOP the verb makes by hand adding no rising
+  edge of SCL, which its last pulse left high. The STOP it makes by hand raises
   STOPF on the instance's own target half, and that flag stands in
   silence: the event vector is the tenure's (raised by `start()`, down at
   the completion), so it never enters for it, and the next tenure's
@@ -903,7 +915,11 @@ they differ. In this section a letter with no suite named is `test_vx03_i2c`'s.
   and `I2cClient<1>` at its own address, the far controller wrote six
   bytes into it: one address match, six bytes byte-exact, the tenure
   closed on its STOP - and the command channel came back after the role
-  swap. The same target with a second address armed took the far
+  swap. `service()` reported two STOP events for that one tenure in 2
+  runs of 33 on the CH32V303CBT6 and 1 of 13 on the CH32V203C8T6, bytes
+  and match exact; whether the second is the STOP this board makes by
+  hand to open the window, which an unaddressed target should not flag,
+  or one STOP reported twice is not established. The same target with a second address armed took the far
   controller's two-byte write there, DUALF naming the match; a general
   call commanded of the far controller was refused there (its report
   `i2c_rejected`) and this target, the general call armed, matched
@@ -944,14 +960,16 @@ they differ. In this section a letter with no suite named is `test_vx03_i2c`'s.
   at 48 MHz 987 and 964 to 967, 986 and 962 to 963; at 8 MHz 958 to 961
   and 821 to 828, 953 to 956 and 803 to 808 - where
   400 kHz is CCR 7 at 8 MHz of PB1, 381 kHz and 952 thousandths by the
-  arithmetic. Each sits inside the bracket the suite derives. SCL and the
-  counter share HCLK. The upper bound is half a period of the 153 SCL periods a
-  write of sixteen takes (nine for the address and nine a byte). The lower bound
-  takes off the START's lead and the completion's 2.5 periods plus four vector
-  entries of 200 core cycles at most (a write of 16's longest entries are 143 to
-  175, `bench_vx03` letter `i` below): 963 thousandths at 96 MHz and 400 kHz, 753
-  at 8 MHz. The 8 MHz figures are the host's own: an 8 MHz core's 200-cycle entry
-  is ten periods at 400 kHz.
+  arithmetic. The verdict is the ceiling: SCL and the counter share HCLK,
+  so a reading is above the rate CCR makes by at most half a period of the
+  153 SCL periods a write of sixteen takes (nine for the address and nine a
+  byte). How far below is printed and not judged: the START's lead, the
+  completion's half period and the vector entries that hold the bus (a
+  write of 16's longest are 143 to 175 core cycles, `bench_vx03` letter `i`
+  below) are what it is made of, and no written source gives the cycles of
+  the peripheral loads in those entries. The 8 MHz figures are the host's
+  own: an 8 MHz core's entry of some 175 cycles is about nine periods at
+  400 kHz.
 - **A held request on the host's channels** (letters `q` and `s`): this
   host's DMA read abandoned with RxNE standing under DMAEN and the host
   released, then the same host initialized again, reads sixteen bytes in
@@ -994,9 +1012,12 @@ they differ. In this section a letter with no suite named is `test_vx03_i2c`'s.
 Eighteen runs on each part at the suite's 96 MHz, all green. The time is the ticker's
 cycle count around the call, 10.4 ns a count, a read of it some 60 cycles inside each
 figure, so a figure reads high by that and never low. Each verdict takes the name as
-its floor and, as its ceiling, the name plus the free bus's own figure, one poll, a
-tick's entry and the ruler. A floor on a figure that holds those cycles would pass a
-wait up to 1.5 us short; what keeps the wait from being short is the sum read below.
+its floor; the ceiling is printed and not judged, since what `start()` costs around
+the wait, a poll and a tick landing in it are cycles of peripheral loads no written
+source prices (the watch's poll is 23 instructions in the release listing, 30 cycles
+at one an instruction with one more a load and a taken branch, against 40 measured
+below). A floor on a figure that holds those cycles would pass a wait up to 1.5 us
+short; what keeps the wait from being short is the sum read below.
 
 | wait | named | CH32V203C8T6 | CH32V303VCT6 | how it was staged |
 |---|---|---|---|---|
@@ -1041,10 +1062,9 @@ client lets go. Nothing of the request reached the wire, so it can be posted aga
 
 Eighteen runs on each part, 12 rounds a run, all sound: CTLR1's STOP up, START down and
 BUSY up at the reply, no reset, no vector, and behind the hold STOP and BUSY down with
-nothing done. The ceiling beside the letter is `stop_drain_us`, what `start()` costs
-around the wait, a poll, a tick's entry, the ruler and the kernel's own turn, read in
-the same round as the post-to-reply of a request refused with nothing on the wire
-(7 us).
+nothing done. The letter judges `stop_drain_us` as the floor and prints the rest
+beside the kernel's own turn, read in the same round as the post-to-reply of a
+request refused with nothing on the wire (7 us).
 
 What a program sees of it: a client that stretches past 5 ms after a write loses the
 request behind it to `i2c_timeout` however long the per-bus timeout is, and that

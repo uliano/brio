@@ -265,6 +265,22 @@ uint32_t fall_us(WwdgPrescaler p, uint8_t down_to) {
     return safe ? seen : 0u;
 }
 
+/// THE BOUND ON A TIMED FALL of `ticks` counts of the armed counter, in
+/// microseconds, DERIVED: the block counts PCLK1 and the ruler HCLK, both
+/// of this PLL, so no clock error enters; the refresh lands at any phase
+/// of the 4096 x 2^WDGTB prescaler (nothing in chapter 8 says it restarts
+/// it), so the fall is more than ticks - 1 and at most `ticks` whole ticks;
+/// the poll that sees it adds one turn (a register read and a ruler read,
+/// tens of cycles) and, if the kernel tick lands in it, that vector's
+/// service - under a microsecond together at 144 MHz - and the figure is
+/// truncated to whole microseconds: (ticks - 1) x tick to ticks x tick + 2.
+bool fall_in_bound(uint32_t seen_us, uint32_t ticks, WwdgPrescaler p) {
+    const uint32_t per_us = pclk1 / 1'000'000u;
+    const uint32_t lo = (ticks - 1u) * wwdg_cycles_per_tick(p) / per_us;
+    const uint32_t hi = ticks * wwdg_cycles_per_tick(p) / per_us + 2u;
+    return seen_us >= lo && seen_us <= hi;
+}
+
 void tb_wwdg_armed() {
     wwdg_off();
     // ARMED, AND NOT ONE CONSOLE LINE WHILE IT IS. WDGA is one-way in
@@ -334,21 +350,19 @@ void tb_wwdg_armed() {
           " half a millisecond later", crlf);
     bench.verdict("the counter starts falling when the watchdog is armed, and that is the "
                   "only time it moves", armed && after < at_start);
-    // THE BOUND: the refresh lands at any phase of the 4096 x 2^WDGTB
-    // prescaler, so the fall is 46 to 47 whole ticks - up to 1/47 = 2.1 %
-    // short - and the poll that sees 0x50 adds microseconds; three per
-    // cent covers both.
+    // THE BOUND: fall_in_bound(), 46 to 47 whole ticks and the poll.
     uint8_t rates_ok = 0;
     for (uint8_t i = 0; i < rate_count; ++i) {
-        if (seen[i] * 100u > want[i] * 97u && seen[i] * 97u < want[i] * 100u) {
+        if (fall_in_bound(seen[i], 47u, rates[i])) {
             ++rates_ok;
         }
         print(serial, "  WDGTB /", 1u << static_cast<uint8_t>(rates[i]),
               ": 0x7F to 0x50 in ", seen[i], " us, ", want[i], " us from PCLK1 = ",
               pclk1 / 1000000u, " MHz", crlf);
     }
-    bench.verdict("the counter's tick is the peripheral clock over 4096 and over WDGTB, "
-                  "within three per cent of the core's own counter at all four prescalers",
+    bench.verdict("the counter's tick is the peripheral clock over 4096 and over WDGTB on the "
+                  "core's own counter at all four prescalers: 46 to 47 ticks and the poll "
+                  "(fall_in_bound())",
                   rates_ok == rate_count);
     print(serial, "  a window at 0x60: refused at 0x7F, allowed at ", at_window, crlf);
     bench.verdict("in_window() refuses while the counter is above the window and allows it "
@@ -359,8 +373,7 @@ void tb_wwdg_armed() {
     bench.verdict("the early-wake-up flag is raised when the counter reaches 0x40 whether "
                   "or not the interrupt is enabled, sixty-three ticks after a refresh, and "
                   "a zero clears it",
-                  raised && cleared && to_flag * 100u > flag_want * 97u &&
-                      to_flag * 97u < flag_want * 100u);
+                  raised && cleared && fall_in_bound(to_flag, 63u, WwdgPrescaler::div8));
     bench.verdict("the block's reset line clears WDGA and the board is still here - the "
                   "only software way out of an armed window watchdog",
                   disarmed && still_here);
@@ -570,22 +583,22 @@ void tp_iwdg_prescalers() {
     tp_start_leg(0);
 }
 
-/// The window of a leg's implied LSI against the reference leg's, in
-/// parts per million - DERIVED: each leg's span is the tick's
+/// The quantization window of a leg's implied LSI against the reference
+/// leg's, in parts per million: each leg's span is the tick's
 /// millisecond (the last mark is written at most one tick before the
 /// reset) plus one prescaled LSI tick (the refresh reloads the counter,
 /// and nothing in chapter 7 says it restarts the prescaler, so the first
 /// tick may be short by up to one), both over the leg's own span; the
-/// reference leg carries the same two terms; and the LSI's own wander
-/// over the few seconds between the legs, taken at 0.5 % (the RC's
-/// rate at a constant temperature and supply - what both parts measured
-/// to the millisecond in two runs of letter w).
+/// reference leg carries the same two terms. PRINTED beside each leg's
+/// offset, not judged: the LSI's own wander over the seconds between the
+/// legs has no figure in the data sheets, only the part's rated range
+/// (device::lsi_min_hz..lsi_max_hz), which is what the verdict judges.
 uint32_t p_window_ppm(uint8_t leg, uint32_t lsi_hz, uint32_t ms, uint32_t ref_ms) {
     const uint64_t tick_i_us = 1'000'000ULL * iwdg_prescaler_divider(p_order[leg]) / lsi_hz;
     const uint64_t tick_r_us = 1'000'000ULL * iwdg_prescaler_divider(p_order[0]) / lsi_hz;
     const uint64_t a = (1000ULL + tick_i_us) * 1'000'000ULL / (ms * 1000ULL);
     const uint64_t b = (1000ULL + tick_r_us) * 1'000'000ULL / (ref_ms * 1000ULL);
-    return static_cast<uint32_t>(a + b + 5000u);
+    return static_cast<uint32_t>(a + b);
 }
 
 void tp_resume() {
@@ -607,8 +620,9 @@ void tp_resume() {
         if (leg < 7u) {
             tp_start_leg(leg);
         }
-        // Every leg back: each implied LSI against the reference leg's.
-        uint8_t agree = 0;
+        // Every leg back: each implied LSI against the reference leg's,
+        // printed, and each against the part's rated range, judged.
+        uint8_t in_range = 0;
         const uint32_t ref = token.lsi_hz[0];
         const uint32_t ref_ms = static_cast<uint32_t>(
             (p_reload(0) + 1ULL) * iwdg_prescaler_divider(p_order[0]) * 1000ULL /
@@ -623,17 +637,16 @@ void tp_resume() {
             const int64_t off_ppm = ref == 0u ? 1'000'000LL
                                               : (static_cast<int64_t>(got) - ref) * 1'000'000LL /
                                                     static_cast<int64_t>(ref);
-            const bool ok = off_ppm <= static_cast<int64_t>(window) &&
-                            -off_ppm <= static_cast<int64_t>(window);
-            agree = static_cast<uint8_t>(agree + (ok ? 1u : 0u));
+            const bool ok = got >= device::lsi_min_hz && got <= device::lsi_max_hz;
+            in_range = static_cast<uint8_t>(in_range + (ok ? 1u : 0u));
             print(serial, "  /", iwdg_prescaler_divider(p_order[k]), ": ", got, " Hz, ",
-                  static_cast<int32_t>(off_ppm), " ppm from /32's, window ", window, " ppm", crlf);
+                  static_cast<int32_t>(off_ppm), " ppm from /32's (quantization ", window,
+                  " ppm, the LSI's wander between legs beside it)", crlf);
         }
-        judge("every prescaler divides the SAME oscillator by 4 << code: the seven implied LSI "
-              "rates agree with /32's within each leg's derived window",
-              agree == 7u);
-        judge("and that LSI lies in the part's rated 25 to 60 kHz",
-              ref >= device::lsi_min_hz && ref <= device::lsi_max_hz);
+        judge("every prescaler divides by 4 << code: the LSI each of the seven implies lies in "
+              "the part's rated range (device::lsi_min_hz to lsi_max_hz) - their agreement "
+              "printed above",
+              in_range == 7u);
         print(serial, "  leg 8: Iwdg::force_reset(), the tick's vector timing it", crlf);
         Reset::clear_flags();
         mark_leg('p', 8);
@@ -733,6 +746,28 @@ void tw_resume() {
 // ===========================================================================
 // v - the window watchdog's three resets, by name
 // ===========================================================================
+
+/// THE WINDOW OF A MEASURED WINDOW-WATCHDOG TIME-OUT, in whole ticks of
+/// the kernel, DERIVED: the block counts PCLK1 and the tick counts HCLK,
+/// both of this PLL, so no clock error enters. The time-out is figure
+/// 8-2's (wwdg_timeout_us(): 64 ticks of the block's own from a refresh
+/// with 0x7F), less up to one of those ticks (455 us at /8 of 72 MHz),
+/// since nothing in chapter 8 says a refresh restarts the prescaler. The
+/// measurement is a difference of two tick counts, which reads a span of
+/// T ms as floor(T) or ceil(T) (the loop's last mark is a few cycles
+/// before the reset). So: floor((time-out - one block tick) / 1 ms) to
+/// ceil(time-out / 1 ms) - 28 to 30 ms at /8.
+struct WwdgWindow {
+    uint32_t lo_ms;
+    uint32_t hi_ms;
+};
+constexpr WwdgWindow wwdg_window_ms(WwdgPrescaler p, uint8_t counter) {
+    const uint32_t timeout_us = wwdg_timeout_us(pclk1, p, counter);
+    const uint32_t tick_us = static_cast<uint32_t>(
+        (static_cast<uint64_t>(wwdg_cycles_per_tick(p)) * 1'000'000ULL + pclk1 - 1u) / pclk1);
+    return {(timeout_us - tick_us) / 1000u, (timeout_us + 999u) / 1000u};
+}
+
 void tv_wwdg_reset() {
     token.pass = 0;
     token.fail = 0;
@@ -766,9 +801,10 @@ void tv_resume() {
             const uint32_t want = wwdg_timeout_us(pclk1, WwdgPrescaler::div8, 0x7F) / 1000u;
             print(serial, "  its own arithmetic says ", want, " ms from the last refresh",
                   crlf);
-            judge("the measured time-out is the one PCLK1 and WDGTB compute, to a "
-                  "millisecond",
-                  ms + 2u >= want && ms <= want + 2u);
+            constexpr WwdgWindow win = wwdg_window_ms(WwdgPrescaler::div8, 0x7F);
+            judge("the measured time-out is the one PCLK1 and WDGTB compute, within the "
+                  "prescaler's first tick and the tick count's millisecond (wwdg_window_ms())",
+                  ms >= win.lo_ms && ms <= win.hi_ms);
             print(serial, "  leg 2: a refresh BEFORE the window opens - the other way to "
                           "fail this watchdog", crlf);
             Reset::clear_flags();
@@ -787,8 +823,11 @@ void tv_resume() {
             judge("a refresh outside the window resets the board at once - the window's "
                   "whole point, and the half a plain watchdog has not got",
                   (boot_flags & ResetFlag::window_watchdog) != 0u);
-            judge("and it did so IMMEDIATELY, not after the counter's own fall",
-                  ms <= 2u);
+            // The early refresh IS the reset (8.2), microseconds after the
+            // mark, and a span of microseconds reads as 0 or 1 whole tick.
+            judge("and it did so IMMEDIATELY, within one tick, not after the counter's "
+                  "own fall",
+                  ms <= 1u);
             print(serial, "  leg 3: the early wake-up interrupt, one tick before the reset "
                           "it does not prevent", crlf);
             Reset::clear_flags();
@@ -812,9 +851,10 @@ void tv_resume() {
                   token.handler_calls >= 1u);
             judge("and the reset came anyway, the handler not having refreshed",
                   (boot_flags & ResetFlag::window_watchdog) != 0u);
-            const uint32_t want = wwdg_timeout_us(pclk1, WwdgPrescaler::div8, 0x7F) / 1000u;
-            judge("at the same time-out as the first leg, the interrupt costing nothing",
-                  ms + 2u >= want && ms <= want + 2u);
+            constexpr WwdgWindow win = wwdg_window_ms(WwdgPrescaler::div8, 0x7F);
+            judge("at the same time-out as the first leg, within the same derived window, the "
+                  "interrupt costing nothing",
+                  ms >= win.lo_ms && ms <= win.hi_ms);
             bench.end_letter();
             break;
         }

@@ -796,7 +796,8 @@ Step step_cycles(bool rising) {
     const bool at_start = Out::pin::read() != rising;
     const TickWitness<P> witness;
     B::out_write(others | (rising ? p : m));
-    // 1 ms: two hundred times the 5 us the letter's bound allows.
+    // 1 ms: a time-out, some eight hundred times the microsecond or so a
+    // step takes on the desk; only a dead output reaches it.
     const auto took =
         cycles_until<Ruler>([rising] { return Out::pin::read() == rising; }, 1'000u);
     r.quiet = witness.quiet();
@@ -916,17 +917,22 @@ void th_high_speed() {
         response<4>(normal[3], fast[3], fast_taken[3]);
         constexpr uint32_t per_us = SysClock::hz / 1'000'000u;
         bool all_followed = true;
-        bool quiet_in_bound = true;
         uint32_t lengthened = 0;
-        // One step judged: it must follow at all; its span is held to the
-        // bound only where no tick landed inside it.
+        uint32_t slowest = 0;
+        // One step judged: it must follow at all. How fast is PRINTED, not
+        // bounded: the slew rates (8 V/us, 16 in high-speed mode, tables
+        // 4-46-1 and 4-46-2) would put a whole rail-to-rail swing under half
+        // a microsecond, but a step of the inputs' difference drives the
+        // open-loop amplifier into saturation, whose recovery no table
+        // rates - and the desk reads a fall at 1.1 to 1.4 us. The slowest
+        // quiet span is printed beside the spans a tick lengthened.
         auto judge = [&](const Step& st) {
             if (!st.followed) {
                 all_followed = false;
             } else if (!st.quiet) {
                 ++lengthened;
-            } else if (st.cycles > 5u * per_us) {
-                quiet_in_bound = false;
+            } else if (st.cycles > slowest) {
+                slowest = st.cycles;
             }
         };
         auto show = [](const Step& st) {
@@ -955,14 +961,14 @@ void th_high_speed() {
             print(serial, crlf);
         }
         print(serial, "  (the datasheet rates the slew at 8 V/us, and 16 in high-speed mode; the "
-                      "counts include the pads' own synchronizers and the poll; ",
-              lengthened, " span(s) a tick lengthened, left out of the bound)", crlf);
+                      "counts include the pads' own synchronizers and the poll; the slowest "
+                      "span no tick lengthened ",
+              slowest / per_us, ".", ((slowest % per_us) * 10u) / per_us, " us; ", lengthened,
+              " span(s) a tick lengthened)", crlf);
         bench.verdict("every amplifier's output sits at one rail and reaches the other within "
                       "1 ms of a rail-to-rail step of its inputs' difference, in each mode the "
                       "die has",
                       all_followed);
-        bench.verdict("and does so within 5 us, every span no tick lengthened",
-                      all_followed && quiet_in_bound);
         all_off();
     }
 }

@@ -362,10 +362,14 @@ void ta_enumerate() {
                   Usb::pulled_up() && took != 0u && Device::configured());
     bench.verdict("the host reset the bus at least once and assigned a non-zero address",
                   Device::resets() >= 1u && Device::address() != 0u);
-    bench.verdict("the enumeration took at least the four requests a host must make, and few "
-                  "stalls (a device qualifier and a string this device has not are stalled by "
-                  "the rules)",
-                  Device::setups() - setups_before >= 4u && Device::stalls() - stalls_before <= 8u);
+    // The stalls are printed, not judged: which requests a host makes,
+    // and so how many the rules stall (a device qualifier, a string this
+    // device has not), is the host's and no figure bounds it.
+    print(serial, "  this enumeration: ", Device::setups() - setups_before, " SETUP(s), ",
+          Device::stalls() - stalls_before, " stalled by the rules", crlf);
+    bench.verdict("the enumeration took at least the four requests a host must make (the "
+                  "device descriptor, SET_ADDRESS, the configuration, SET_CONFIGURATION)",
+                  Device::setups() - setups_before >= 4u);
     bench.verdict("the port is configured with its bulk OUT armed and nothing in flight",
                   Port::configured() && Port::out_armed() && !Port::in_armed() && Port::tx_idle());
 
@@ -383,7 +387,13 @@ void ta_enumerate() {
           Port::line_coding().baud, "/", Port::line_coding().data_bits, "/",
           Port::line_coding().parity, "/", Port::line_coding().stop_bits, " dtr=",
           Port::dtr() ? 1 : 0, crlf);
-    bench.verdict("the host's start-of-frame counter advances a frame a millisecond",
+    // THE BOUND: a full-speed host sends a frame every 1.000 ms within
+    // 500 ppm (USB 2.0, 7.1.12) and the window is 10 ms on the crystal's
+    // ruler (100 ppm) plus a turn, so it spans 9.994 to 10.007 frame
+    // periods, and a counter read at both ends moves by the floor or the
+    // ceiling of that: 9 to 11.
+    bench.verdict("the host's start-of-frame counter advances a frame a millisecond: 9 to 11 "
+                  "in 10 ms",
                   frames >= 9u && frames <= 11u);
     // THE BUS ERROR COUNT IS A MEASUREMENT, NOT A VERDICT. ERR counts
     // the packets the block saw arrive damaged (a missing handshake, a
@@ -410,13 +420,16 @@ void ta_enumerate() {
         P::idle();
     }
     const uint32_t idle_ms = Ticker::millis() - t0;
+    // The time is printed, not judged: the loop is thirteen instructions
+    // a turn in the release listing, two of them CSR accesses, and no
+    // cycle figure for those is written where a bound could cite it. The
+    // count the idle path reads is what the verdict judges.
     print(serial, "  bus masters=", masters, "; a thousand idle() calls took ", idle_ms,
           " ms (a thousand tick periods is what they would cost at a count of zero)", crlf);
     bench.verdict("the attached controller counts itself one bus master, so the kernel's idle "
                   "path returns at once instead of sleeping - and the port survives a loop "
                   "that idles, which is what the count is for",
-                  masters == 1u && idle_ms <= 20u && Device::configured() &&
-                      Usb::overruns() == overruns_before);
+                  masters == 1u && Device::configured() && Usb::overruns() == overruns_before);
 }
 
 // =============================================================================
@@ -572,14 +585,15 @@ void tv_throughput() {
     }
     const uint32_t sent = Port::tx_bytes() - tx0;
     print(serial, "  the device sent ", sent, " bytes in 3 s = ", sent / 3000u, " KB/s", crlf);
-    if (sent < 8192u) {
+    // A host that reads nothing lets one packet out - the one submitted
+    // and never collected - and tx_bytes() counts what was handed to the
+    // controller (util/usb/cdc.hpp), so more than a packet is a host
+    // reading.
+    if (sent <= Port::packet) {
         bench.skip("no host read the port: the transmit ring filled and stayed full, which is "
                    "what this count is");
         return;
     }
-    bench.verdict("the device pours into a host that is reading, one packet per IN token and no "
-                  "double buffer on this block",
-                  sent >= 8192u);
 
     print(serial, "  now the other way: the two seconds count from the host's first byte", crlf);
     if (wait_for_traffic(5000u) == 0u) {
@@ -730,10 +744,15 @@ void td_overflow() {
     // drains the receive ring while the core sleeps, so a full ring
     // would stop the bytes too, by flow control and not by loss. What
     // only a lost packet explains is the overflow.
-    bench.verdict("A SLEEPING CORE COSTS THE CONTROLLER ITS PACKET MEMORY: under the same pour "
-                  "that the awake window carried, the sleeping one counts overflows - the "
-                  "measurement the bus-master count exists to make unreachable",
-                  overflowed > 0u);
+    //
+    // Printed, not judged: that the controller cannot reach its packet
+    // memory while the core sleeps is what this die does under a bare
+    // wfi, and no chapter writes it - the platform's contract is that its
+    // idle() does not sleep while the controller is attached, which
+    // letter c of test_vx03_sleep judges.
+    print(serial, "  FINDING: ", overflowed > 0u ? "A SLEEPING CORE COST THE CONTROLLER ITS "
+                  "PACKET MEMORY: the sleeping window counted overflows under the pour the awake "
+                  "one carried" : "the sleeping window counted NO overflow under the pour", crlf);
 
     // WHAT THE OVERFLOW DID TO THE ENDPOINT. The halfword that carries
     // the buffer's size is the one the hardware writes the received
@@ -814,6 +833,7 @@ void tk_divider() {
     bench.verdict("at 96 MHz the divider is /2, and the tree at 48 MHz writes /1 - code 00 - "
                   "before the controller's gate opens",
                   code96 == 1u && tree && code48 == 0u && up);
+    // The frames: letter a's bound, 9 to 11 in a 10 ms window.
     bench.verdict("and on /1 the host enumerates the device to CONFIGURED, the port armed, a "
                   "frame a millisecond, no overflow",
                   took != 0u && port_ok && frames >= 9u && frames <= 11u && overruns == 0u);

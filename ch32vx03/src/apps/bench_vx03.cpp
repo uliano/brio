@@ -79,10 +79,10 @@
 //
 //   r  THE RULER'S SELF-CHECK. delay_us(clock, 999) - the longest wait
 //      this family serves, one tick period and above being refused
-//      (ch32vx03/delay.hpp) - read on the ruler from a fresh tick: at
-//      least the 143856 cycles due, and under them + 5 per cent (the
-//      wait is documented late by some 40 cycles of polling,
-//      docs/ch32vx03/platform.md).
+//      (ch32vx03/delay.hpp) - read on the ruler from the middle of a
+//      period: at least the 143856 cycles due, and late by what
+//      delay_us(clock, 1) is late to within one turn of its spin (the
+//      bound derived beside the verdict).
 //      Then the instrument's cost, five lines with n=0 and wire=0; in
 //      the four averaged ones EVERY FIELD IS THE RUN'S TOTAL DIVIDED BY
 //      ITS UNITS, and the note line before each states the units and the
@@ -495,24 +495,79 @@ BenchSample quiet_batches(Unit ten_units) {
     return total;
 }
 
-void tr_ruler() {
-    constexpr uint32_t asked_us = 999;
-    constexpr uint32_t due = asked_us * (Ruler::hz() / 1'000'000u);
-
-    console_drain();
+/// Spin to the middle of a tick period: a fresh tick, then the STK's
+/// position past half its period - so a wait shorter than a period that
+/// starts here ends at least a quarter period away from the next tick.
+void mid_period() {
     fresh_tick();
+    const uint32_t half = (stk()->CMPLR + 1u) / 2u;
+    // Not acted on: the ruler of the wait is this same counter, so a counter
+    // that did not run would have hung fresh_tick() first.
+    (void)wait_until<WaitRuler>([half] { return stk()->CNTL >= half; }, 1'000u);
+}
+
+/// One delay_us() of `us` timed on the ruler from the middle of a period,
+/// with the counters around it. Out of line, so that every wait it times
+/// runs the one same fixed path around the spin.
+struct TimedWait {
+    bool served;
+    uint32_t took;
+    BenchSample d;
+};
+[[gnu::noinline]] TimedWait timed_wait(uint32_t us) {
+    console_drain();
+    mid_period();
     const BenchCounters b = counters();
     Stopwatch<Ruler> sw;
     sw.start();
-    const bool served = delay_us(clock, asked_us);
+    const bool served = delay_us(clock, us);
     const uint32_t took = sw.elapsed();
-    const BenchSample d = bench_sample(took, b, counters());
-    print(serial, "  delay_us(clock, ", asked_us, ") ", served ? "served" : "REFUSED", ": ", took,
-          " cycles on the ruler, ", due, " due, ", d.irq, " interrupts in it", crlf);
-    bench.verdict("999 us on the ruler is at least the due cycles (at least, never early)",
-                  served && took >= due);
-    bench.verdict("and under the due cycles + 5 per cent", took < due + due / 20u);
+    return {served, took, bench_sample(took, b, counters())};
+}
 
+void tr_ruler() {
+    constexpr uint32_t asked_us = 999;
+    constexpr uint32_t due = asked_us * (Ruler::hz() / 1'000'000u);
+    constexpr uint32_t short_us = 1;
+    constexpr uint32_t short_due = short_us * (Ruler::hz() / 1'000'000u);
+
+    // THE BOUND, from delay_us's own arithmetic (qingke/delay.hpp): the
+    // factor is 144 cycles a microsecond exactly at 144 MHz, the spin sums
+    // the counter's real deltas - so a handler run inside the wait counts
+    // toward it - and it leaves at its first counter read at or past the
+    // due cycles, at most one turn of its loop after them. So every wait is
+    // late by one fixed path (the stopwatch's reads, the call, the gates,
+    // the return) plus zero to one turn, and a handler lengthens a wait
+    // only when it covers that last turn. Both waits start at mid-period
+    // and last under a period, so each ends at least a quarter period
+    // (36000 cycles) from a tick, and the console is drained: nothing else
+    // is armed. The 999 us wait is therefore exactly as late as the 1 us
+    // one, to within one turn either way. THE TURN, counted in the release
+    // listing (delay_us's loop on both series' builds): seven instructions,
+    // two taken transfers and one load of the STK - at most 7 + 2 x 3 + 13
+    // = 26 cycles (docs/ch32vx03/platform.md: one cycle an instruction in
+    // a loop, a taken transfer one to three more; a load of the STK at most
+    // all the cycles a whole Ruler::now() spends over its 18 instructions,
+    // five loads and a multiply among them - its "ruler" line below, 31 on
+    // the CH32V203C8T6 and 23 on the CH32V303CBT6, so 13 at most).
+    constexpr uint32_t turn_max = 7u + 2u * 3u + 13u;
+    const TimedWait w1 = timed_wait(short_us);
+    const TimedWait w = timed_wait(asked_us);
+    const uint32_t late1 = w1.took - short_due;
+    const uint32_t late = w.took - due;
+    print(serial, "  delay_us(clock, ", asked_us, ") ", w.served ? "served" : "REFUSED", ": ",
+          w.took, " cycles on the ruler, ", due, " due, ", w.d.irq, " interrupts in it", crlf);
+    print(serial, "  delay_us(clock, ", short_us, ") ", w1.served ? "served" : "REFUSED", ": ",
+          w1.took, " cycles, ", short_due, " due: the fixed path is ", late1, " cycles late, the ",
+          asked_us, " us wait ", late, crlf);
+    bench.verdict("999 us on the ruler is at least the due cycles (at least, never early)",
+                  w.served && w.took >= due);
+    bench.verdict("and late by the 1 us wait's fixed path to within one turn of the spin (26 "
+                  "cycles): no error proportional to the wait",
+                  w1.served && w1.took >= short_due && late <= late1 + turn_max &&
+                      late1 <= late + turn_max);
+
+    Stopwatch<Ruler> sw;
     console_drain();
     const BenchSample reads = quiet_batches([] { ruler_reads<10>(); });
     print(serial, "  ruler: 1000 reads, ten batches of 100 each from a fresh tick, ", reads.irq,

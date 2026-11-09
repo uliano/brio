@@ -306,10 +306,32 @@ uint32_t wire_permille(uint32_t baud, uint32_t frames) {
     return wire == 0u ? 0u : static_cast<uint32_t>(1000ULL * took / wire);
 }
 
-/// The verdict on a reading: never faster than the rate asked by more
-/// than the ruler's few cycles - every rate this suite asks divides PB1
-/// whole - and never slower by more than three per cent.
-bool wire_ok(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
+/**
+ * The verdict on a reading at `baud`, on a port that counts PCLK1 (USART2,
+ * the fourth port, the link's).
+ *
+ * THE FAST SIDE IS THE DIVISOR'S, derived: the STK counts HCLK and the
+ * port divides PCLK1, both out of one oscillator, so the oscillator's error
+ * cancels and a bit lasts BRR periods of PCLK1 whatever the crystal or the
+ * HSI does. The stopwatch opens before the first queue and closes after
+ * the flag that ends the run, so the reading is never under 1000 x BRR x
+ * baud / PCLK1, rounded down - 1000 at every rate this suite asks, each
+ * dividing PCLK1 whole (625, 72 and 16 at 115200, 1 and 4.5 Mbaud).
+ *
+ * THE SLOW SIDE IS A THRESHOLD, not a model of the path. What it is there
+ * to catch is a wrong bus divisor - a bus prescaler, or BRR computed from
+ * the other bus - and each of those is a factor of two: a thousand per
+ * mille. The path adds the frame start's latency (up to a bit, a tenth of
+ * a per mille of the shortest run timed here, 256 frames) and a poll turn,
+ * and a transmit engine leaves gaps between its blocks, which is not this
+ * verdict's subject. Thirty per mille sits between the path's own figure
+ * and the next wrong rate.
+ */
+bool wire_ok(uint32_t permille, uint32_t baud) {
+    constexpr uint32_t pclk1 = SysClock::pclk1_hz;
+    const uint32_t floor_pm = static_cast<uint32_t>(1000ULL * usart_divisor(pclk1, baud) * baud / pclk1);
+    return permille >= floor_pm && permille <= 1030u;
+}
 
 // ---------------------------------------------------------------------------
 // The handlers' counters, and which face channels 6 and 7 wear
@@ -442,10 +464,17 @@ void need_jumper() {
 /// `bytes` go out as 8N1 frames back to back, every edge at an ABSOLUTE
 /// offset from the run's start so a handler's delay never accumulates, and
 /// the line then idles for two bit times more: the last frame is received
-/// and stored by the time this returns. Each edge is placed up to one turn
-/// of the poll late - one read of the composed cycle count, some forty
-/// cycles, a thirtieth of the 1250-cycle bit - which a receiver sampling
-/// the bit's middle never sees.
+/// and stored by the time this returns. THE MARGIN, derived: an edge is
+/// written up to one turn of the stopwatch's poll after its offset - one
+/// composed cycle count read and its compare, about twenty instructions -
+/// plus any handler served in that turn (the tick's, a console character's,
+/// the ring's own vector: the bang masks nothing). The receiver samples a
+/// bit no earlier than 37 % of the cell after its start edge (the census of
+/// test_vx03_serial's letter 4, on both parts; chapter 18 does not place
+/// the samples), so an edge up to 462 of the 1250 cycles late is never
+/// sampled on its wrong side. A later one - a handler past some 400 cycles
+/// in the turn - misreads a bit, which the letters see as a wrong byte or a
+/// counted error: a failure, never a pass.
 constexpr uint32_t bang_baud = 115200;
 
 void bang(const uint8_t* bytes, uint16_t n) {
@@ -628,8 +657,8 @@ void tg_rate() {
     print(serial, "  256 frames through the transmit engine in ", pm,
           " thousandths of their wire time at 115200", crlf);
     bench.verdict("the transmit engine runs the line at the rate asked: 256 frames in their wire "
-                  "time at 115200 on the core's counter, -1 % to +3 %",
-                  wire_ok(pm));
+                  "time at 115200 on the core's counter, no faster than the divisor and at most 3 % slower",
+                  wire_ok(pm, 115200));
 }
 
 void tg_engines() {
@@ -821,10 +850,18 @@ void tp_dead_ring() {
           " of 128 after the enable), four frames sent: USART2's vector ", entries, " entries",
           stormed ? " - STORMED, silenced by the suite" : "", ", dma_faults ", faults,
           ", the wait for a frame ", given_up ? "given up (RXNEIE down)" : "STILL ARMED", crlf);
+    // THE COUNT, derived from the vector's two states (ch32vx03/usart.hpp):
+    // the ring armed waits for the end with RXNEIE down, so the first frame
+    // standing in DATAR raises nothing; the error or the idle line that
+    // follows raises ONE entry, which turns the vector to its wait for a
+    // frame with RXNEIE up; RXNE standing then re-enters it back to back,
+    // each entry finding the channel's count unmoved, and the 255th of
+    // those (rx_stall_entries) gives the channel up, RXNEIE down and
+    // nothing left armed - 1 + 255 entries exactly.
     bench.verdict("A RECEIVE CHANNEL THAT NEVER TAKES THE FRAME leaves the thread running: the "
-                  "vector's wait for a frame gives the channel up within its bound of 255 "
-                  "entries - RXNEIE down, one DMA fault counted - and no storm",
-                  opened && !stormed && entries <= 300u && faults == 1u && given_up);
+                  "vector's wait for a frame gives the channel up at its bound of 255 unmoved "
+                  "entries, 256 in all - RXNEIE down, one DMA fault counted - and no storm",
+                  opened && !stormed && entries == 1u + 255u && faults == 1u && given_up);
 
     // The held request let go by TIM3's reset line; the consumer's next
     // look starts the ring again and arms the wait for the end, and the
@@ -857,8 +894,8 @@ void tp_dead_ring() {
     print(serial, "  then 256 frames through the transmit engine in ", pm,
           " thousandths of their wire time at 115200", crlf);
     bench.verdict("and the port runs at the rate asked after it: 256 frames in their wire time "
-                  "at 115200, -1 % to +3 %",
-                  wire_ok(pm));
+                  "at 115200, no faster than the divisor and at most 3 % slower",
+                  wire_ok(pm, 115200));
 
     Loop::release();
     uart_mode = false;
@@ -1433,9 +1470,9 @@ void tq_priority() {
               "frames ", r1.port, " and ", r4.port, crlf);
         bench.verdict("BOTH ENDS RUN AT THE RATE ASKED, which the stream alone cannot tell: the "
                       "sender's block and USART2's own transmit engine in their wire time at 1 "
-                      "and 4.5 Mbaud on the core's counter, -1 % to +3 %",
-                      wire_ok(r1.sender) && wire_ok(r4.sender) && wire_ok(r1.port) &&
-                          wire_ok(r4.port));
+                      "and 4.5 Mbaud on the core's counter, no faster than the divisor and at most 3 % slower",
+                      wire_ok(r1.sender, 1'000'000) && wire_ok(r4.sender, 4'500'000) &&
+                          wire_ok(r1.port, 1'000'000) && wire_ok(r4.port, 4'500'000));
 
         // The copy alone: its own rate, the reference for its cost.
         Copier::stop();
@@ -1528,9 +1565,9 @@ void tr_overrun_tail() {
         print(serial, "  at 1 Mbaud: the sender's 4 KB block in ", rates.sender,
               " and USART2's transmit engine's 1024 frames in ", rates.port,
               " thousandths of their wire time", crlf);
-        bench.verdict("both ends run at the rate asked: in their wire time at 1 Mbaud, -1 % to "
-                      "+3 %",
-                      wire_ok(rates.sender) && wire_ok(rates.port));
+        bench.verdict("both ends run at the rate asked: in their wire time at 1 Mbaud, no faster than the "
+                      "divisor and at most 3 % slower",
+                      wire_ok(rates.sender, 1'000'000) && wire_ok(rates.port, 1'000'000));
         fat_mode = 1;
         const bool opened = Fat::init(clock, 1'000'000UL) && F::open(1'000'000UL);
         spin_us<Ruler>(500);
@@ -1602,10 +1639,18 @@ void tr_overrun_tail() {
               " bytes delivered, USART2's vector ", entries, " entries, ", hw,
               " overruns counted, ", skips, " gaps, ", faults, " channels given up; the vector ",
               waiting_for_the_end ? "waiting for the end" : "NOT waiting for the end", crlf);
-        bench.verdict("AN OVERRUN AT A MESSAGE'S TAIL, ORE up with nothing in DATAR: no storm - a "
-                      "handful of entries, no channel given up - the overrun counted once and "
-                      "the gap once, the bytes before it delivered in order",
-                      opened && copied && entries <= 8u && faults == 0u && hw == 1u &&
+        // THE COUNT, derived from the vector's two states (ch32vx03/usart.hpp):
+        // unmasked, the vector waiting for the end takes ONE entry for the
+        // overrun and the idle line together and turns to its wait for a
+        // frame, RXNEIE up; ORE alone re-enters it (18.10.4) with the
+        // channel's count unmoved, and the second such entry
+        // (rx_overrun_probe) reads STATR and DATAR, clearing ORE, and goes
+        // back to the wait for the end - 1 + 2 entries exactly.
+        bench.verdict("AN OVERRUN AT A MESSAGE'S TAIL, ORE up with nothing in DATAR: no storm - "
+                      "three entries, the overrun probed on the second unmoved one, no channel "
+                      "given up - the overrun counted once and the gap once, the bytes before it "
+                      "delivered in order",
+                      opened && copied && entries == 1u + 2u && faults == 0u && hw == 1u &&
                           skips == 1u && lead_in_order && waiting_for_the_end);
 
         // 2. The next message, whole: the vector left waiting for the end
@@ -1996,8 +2041,8 @@ void tn_far_uart4() {
         print(serial, "  256 frames in ", pm, " thousandths of their wire time at 115200; the far chip counted ",
               s.count, crlf);
         bench.verdict("and the transmit engine runs at the rate asked: 256 frames in their wire time at 115200, "
-                      "-1 % to +3 %, every one counted at the far end",
-                      wire_ok(pm) && s.count == 256u && s.ferr == 0u);
+                      "no faster than the divisor and at most 3 % slower, every one counted at the far end",
+                      wire_ok(pm, 115'200) && s.count == 256u && s.ferr == 0u);
         far_done<on>();
     }
 }
@@ -2083,12 +2128,13 @@ void tq_far_priority() {
                   " frames here); UART4's transmit engine 1024 frames in ", pm,
                   " thousandths of their wire time, the far chip counting ", k.count, crlf);
             rates_ok = rates_ok && up && have && (r.flags & link::report_rate_stated) != 0u &&
-                       stated == D::divisor_ppm(baud) && junk.got == 64u && wire_ok(pm) && k.count == 1024u &&
+                       stated == D::divisor_ppm(baud) && junk.got == 64u && wire_ok(pm, baud) && k.count == 1024u &&
                        k.ferr == 0u;
         }
         bench.verdict("BOTH ENDS RUN AT THE RATE ASKED, which the stream alone cannot tell: the far chip states its "
                       "rate exact at 1 and 4.5 Mbaud, and UART4's transmit engine runs in its wire time on this "
-                      "core's counter, -1 % to +3 %, every frame counted at the far end",
+                      "core's counter, no faster than the divisor and at most 3 % slower, every frame counted at "
+                      "the far end",
                       rates_ok);
 
         // The copy alone: its own rate, the reference for its cost.
@@ -2242,10 +2288,13 @@ void tr_far_overrun_tail() {
               entries, " entries, ", hw, " overruns counted, ", skips, " gaps, ", faults,
               " channels given up; the vector ", waiting_for_the_end ? "waiting for the end" : "NOT waiting for the end",
               crlf);
-        bench.verdict("AN OVERRUN AT A MESSAGE'S TAIL, ORE up with nothing in DATAR, on DMA2: no storm - a handful of "
-                      "entries, no channel given up - the overrun counted once and the gap once, the bytes before "
-                      "it delivered in order",
-                      opened && copied && entries <= 8u && faults == 0u && hw == 1u && skips == 1u && lead_in_order &&
+        // THE COUNT: 1 + 2 entries exactly, letter r's derivation on the
+        // same vector body.
+        bench.verdict("AN OVERRUN AT A MESSAGE'S TAIL, ORE up with nothing in DATAR, on DMA2: no storm - three "
+                      "entries, the overrun probed on the second unmoved one, no channel given up - the overrun "
+                      "counted once and the gap once, the bytes before it delivered in order",
+                      opened && copied && entries == 1u + 2u && faults == 0u && hw == 1u && skips == 1u &&
+                          lead_in_order &&
                           waiting_for_the_end);
         Port::release();
         far_mode = 0;

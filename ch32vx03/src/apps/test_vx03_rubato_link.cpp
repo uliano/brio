@@ -57,7 +57,7 @@
 //   of the ring, write_bulk() pumping it once (docs/ch32vx03/usart.md, the
 //   transport). No receiver time-out on this block. Both ends on their 8
 //   MHz crystals at 144 MHz, PCLK1 72 MHz: every rate is one divisor at
-//   both ends, the two crystals within nine ppm (usart.md).
+//   both ends, and what the two crystals differ by letter v measures.
 //   THE DMA RELEASE CONTRACT (docs/ch32vx03/dma.md, "A released
 //   requester"): a USART's DMA request, once raised, is held until the
 //   channel answers it or the block's reset line is pulsed - so every hand
@@ -151,8 +151,10 @@
 //      (usart_peer.cpp's run_receive: DATAR read at RXNE and written back
 //      at TXE), so it holds two characters of a writer's lead; at both
 //      rates the two ends divide one PCLK1 by one BRR (156 and 78, +1602
-//      ppm each), and the crystals' nine ppm make 0.0006 of a character a
-//      71-character line.
+//      ppm each), and two quartz crystals of 100 ppm each (an assumption:
+//      the boards name no part), 200 ppm apart at most, make 0.014 of a
+//      character a 72-character line, the line written whole after the one
+//      before has left the wire.
 //   u  the UART, sent: 300 numbered lines back to back through write_bulk()
 //      and the transmit engine into the peer's SINK at 460800 and 921600,
 //      judged by the peer's report - the bytes counted, their 16-bit sum,
@@ -167,8 +169,11 @@
 //      empty at its entry, the sink never nested in itself), the two
 //      buffers strictly alternating, and the lender never reading what the
 //      borrower wrote over. The echo's backlog over the whole leg, 200
-//      lines of at most 71 characters at the crystals' nine ppm, is 0.13 of
-//      a character, inside its two. A pressure pass judges that Pressure
+//      lines of at most 72 characters, is the crystals' difference times
+//      14400 characters - inside its two at 138 ppm, which two crystals of
+//      100 ppm need not keep: the letter times the pair first (calibrate)
+//      and skips the leg when this end runs faster than that, the stamp
+//      bound added. A pressure pass judges that Pressure
 //      landed inside the borrower at least once: the sink's dispatches add
 //      up to 200 x 6000 = 1.2 M cycles at least, 21 ticks of the longest
 //      period (56016 cycles) on average, so a pass with none has a chance
@@ -952,6 +957,38 @@ void tv_loan() {
     // 921600 and a window of 20 lines: the file header's arithmetic.
     constexpr uint32_t rate = 921'600u;
     constexpr uint8_t window = 20;
+    // THE LEG'S PREMISE, MEASURED (the file header's v): streamed, the leg
+    // is one gapless run of up to echo_lines x line_most characters, and the
+    // echo's backlog grows by what this end's crystal runs fast of the far
+    // one - two quartz crystals of 100 ppm each (an assumption: the boards
+    // name no part) could differ by 200 ppm, 2.9 characters over the leg,
+    // past the echo's two. So the pair is timed first (calibrate: the far
+    // receiver stamps a run of this end's) and the leg runs only with this
+    // end fast by at most two characters over the leg, the reading's stamp
+    // bound added; otherwise it is skipped, its premise absent.
+    constexpr uint32_t most_ppm = 2'000'000u / (static_cast<uint32_t>(echo_lines) * line_most);
+    if (!ul::ensure()) {
+        ul::release();
+        return;
+    }
+    const ul::D::Timed lead = ul::D::calibrate();
+    ul::release();
+    const uint32_t lead_bound = ul::D::span_bound_ppm(ul::D::calib_rate, ul::D::calib_frames);
+    print(serial, "  this end against the far chip: ", lead.ppm, " ppm (positive: this end fast; good to ", lead_bound,
+          " ppm), the leg's ceiling ", most_ppm, " ppm", crlf);
+    if (!lead.ok && ul::D::leg_refused) {
+        bench.skip("the far chip refuses calibrate - it runs on its HSI - so the leg's premise cannot be measured");
+        return;
+    }
+    if (!lead.ok) {
+        bench.verdict("the far chip times a run of this end's before the leg (calibrate)", false);
+        return;
+    }
+    if (lead.ppm + static_cast<int32_t>(lead_bound) > static_cast<int32_t>(most_ppm)) {
+        bench.skip("this end's crystal runs too fast of the far chip's for the streamed leg: the echo's two "
+                   "characters would not hold the backlog");
+        return;
+    }
     for (uint8_t p = 0; p < pass_count; ++p) {
         const PassSpec& s = passes[p];
         pass_begin(s);

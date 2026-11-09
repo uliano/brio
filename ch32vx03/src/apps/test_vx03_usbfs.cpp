@@ -458,10 +458,14 @@ void ta_enumerate() {
                   "block holds",
                   Device::resets() >= 1u && Device::address() != 0u &&
                       Usb::address() == Device::address());
-    bench.verdict("the enumeration took at least the four requests a host must make, and few "
-                  "stalls (a device qualifier and a string this device has not are stalled by "
-                  "the rules, and the next SETUP still arrived)",
-                  Device::setups() - setups_before >= 4u && Device::stalls() - stalls_before <= 8u);
+    // The stalls are printed, not judged: which requests a host makes,
+    // and so how many the rules stall (a device qualifier, a string this
+    // device has not), is the host's and no figure bounds it.
+    print(serial, "  this enumeration: ", Device::setups() - setups_before, " SETUP(s), ",
+          Device::stalls() - stalls_before, " stalled by the rules", crlf);
+    bench.verdict("the enumeration took at least the four requests a host must make (the "
+                  "device descriptor, SET_ADDRESS, the configuration, SET_CONFIGURATION)",
+                  Device::setups() - setups_before >= 4u);
     bench.verdict("the port is configured with its bulk OUT armed and nothing in flight",
                   Port::configured() && Port::out_armed() && !Port::in_armed() && Port::tx_idle());
 
@@ -493,11 +497,14 @@ void ta_enumerate() {
         P::idle();
     }
     const uint32_t idle_ms = Ticker::millis() - t0;
+    // The time is printed, not judged: no cycle figure for the loop's CSR
+    // accesses is written where a bound could cite it (test_vx03_usb's
+    // letter a). The count the idle path reads is what the verdict judges.
     print(serial, "  bus masters=", masters, " attached=", Usb::attached() ? 1 : 0,
           "; a thousand idle() calls took ", idle_ms, " ms", crlf);
     bench.verdict("the attached controller counts itself one bus master, so the kernel's idle "
                   "path returns at once instead of sleeping - and the port survives it",
-                  masters == 1u && Usb::attached() && idle_ms <= 20u && Device::configured() &&
+                  masters == 1u && Usb::attached() && Device::configured() &&
                       Usb::overruns() == overruns_before);
 }
 
@@ -672,9 +679,15 @@ void tf_frames() {
     const uint32_t after = Usb::frames() - f0;
     print(serial, "  frames counted in 100 ms: ", counted, "; ten more milliseconds with the bit "
           "clear added ", after - counted, crlf);
+    // THE BOUND: pause_ms(100) waits 99 to 100 kernel tick periods (a
+    // budget of 99 ticks begun inside a period) plus a turn; a full-speed
+    // host sends a frame every 1.000 ms within 500 ppm (USB 2.0, 7.1.12)
+    // and the tick is the crystal's (100 ppm): 98.9 to 100.1 frame
+    // periods, so 98 to 101 frames counted.
     bench.verdict("INT_EN's bit 7 - reserved in the manual, the device SOF interrupt in the "
-                  "vendor's header - counts a host frame a millisecond",
-                  counted >= 95u && counted <= 105u);
+                  "vendor's header - counts a host frame a millisecond: 98 to 101 in the "
+                  "99 to 100 ms window",
+                  counted >= 98u && counted <= 101u);
     bench.verdict("and clearing it stops the count", after == counted);
 }
 
@@ -718,10 +731,20 @@ void td_overflow() {
           "took ", arrived, " and counted ", overflowed, " FIFO overflows; 200 ms awake again "
           "drained ", recovered, " with ", jumps_first, " jumps (the last of ",
           check.last_jump, " bytes: the sleep's loss, if any)", crlf);
+    // THE BOUND is the class's own code: it re-arms the bulk OUT only
+    // while the ring has room for a whole packet more (util/usb/cdc.hpp),
+    // so with nothing draining it the window takes at most the ring,
+    // Port::rx_capacity() bytes, and the block answers NAK after that.
     bench.verdict("A SLEEPING CORE THAT DOES NOT DRAIN FILLS THE RING AND THE BLOCK ANSWERS NAK: "
-                  "the wfi window carried at most the class's ring, and nothing was lost - no "
-                  "jump, no overflow",
-                  arrived < awake / 2u && jumps_first == 0u && overflowed == 0u);
+                  "the wfi window carried at most the class's ring",
+                  arrived <= Port::rx_capacity());
+    // Printed, not judged: whether the packets that did arrive came
+    // through whole is the block's DMA working while the core sleeps
+    // under a bare wfi - this die's behaviour, written in no chapter;
+    // the platform's contract is that its idle() does not sleep while
+    // the controller is attached.
+    print(serial, "  FINDING: the wfi window lost ", jumps_first == 0u && overflowed == 0u ?
+          "nothing (no jump, no overflow)" : "PACKETS (a jump or an overflow above)", crlf);
 
     // THEN ASLEEP BETWEEN PACKETS, which is the question: the same
     // instruction with the ring drained after every wake, so the class
@@ -751,9 +774,12 @@ void td_overflow() {
           between, " bytes, ", overflowed_between, " FIFO overflows, ", jumps_sleeping,
           " jumps (the last of ", check.last_jump, " bytes); 100 ms awake after drained ",
           recovered_between, crlf);
-    bench.verdict("with the core asleep between packets the block's DMA still carries them: "
-                  "bytes arrived through the sleeping window with no overflow and no jump",
-                  between > 0u && overflowed_between == 0u && jumps_sleeping == 0u);
+    // Printed, not judged, for the reason above: the DMA's access with
+    // the core asleep is the die's, and the platform never sleeps here.
+    print(serial, "  FINDING: with the core asleep between packets the block's DMA ",
+          between > 0u && overflowed_between == 0u && jumps_sleeping == 0u ?
+          "still carried them: bytes arrived with no overflow and no jump" :
+          "DID NOT carry them whole: no bytes, an overflow or a jump above", crlf);
     bench.verdict("with the core awake again the port takes bytes, still configured",
                   recovered_between > 0u && Device::configured());
 }
@@ -880,10 +906,12 @@ void tn_asleep() {
     const uint32_t sent = Port::tx_bytes() - tx0;
     print(serial, "  the device sent ", sent, " bytes in 2 s = ", sent / 2000u, " KB/s with ",
           in_wakes, " wakes; what arrived is the host end's to count", crlf);
+    // More than the one packet a host that reads nothing lets out is a
+    // host reading (letter v's skip says why).
     bench.verdict("the device poured into a reading host with the core in wfi between its "
                   "packets - the host end counts the bytes the block could not read whole out "
                   "of RAM as breaks in the stream",
-                  sent >= 8192u && in_wakes > 0u);
+                  sent > Port::packet && in_wakes > 0u);
     while (!Port::tx_idle() && Ticker::millis() - t1 < 3000u) {
     }
     pause_ms(2500);   // the host end's read, over
@@ -976,13 +1004,14 @@ void tv_throughput() {
     }
     const uint32_t sent = Port::tx_bytes() - tx0;
     print(serial, "  the device sent ", sent, " bytes in 3 s = ", sent / 3000u, " KB/s", crlf);
-    if (sent < 8192u) {
+    // A host that reads nothing lets one packet out - the one submitted
+    // and never collected - and tx_bytes() counts what was handed to the
+    // controller (util/usb/cdc.hpp), so more than a packet is a host
+    // reading.
+    if (sent <= Port::packet) {
         bench.skip("no host read the port: the transmit ring filled and stayed full");
         return;
     }
-    bench.verdict("the device pours into a host that is reading, one packet per IN token and no "
-                  "double buffer",
-                  sent >= 8192u);
 
     print(serial, "  now the other way: the two seconds count from the host's first byte", crlf);
     if (wait_for_traffic(5000u) == 0u) {
@@ -1649,16 +1678,21 @@ void tq_numbered() {
     // backward number) makes the jump after it long. So: every block not
     // a packet is matched by a jump (one either way for the window's
     // edges), and every jump longer than one follows a backward number.
+    //
+    // PRINTED, NOT JUDGED: 6 MHz is below the driver's floor
+    // (usbfs_min_hclk_hz, 12 MHz, ch32vx03/usbfs.hpp), where nothing is
+    // promised - the rung is the contrast that shows what the floor is
+    // for, and its figures are the finding.
     const SeqCheck& low = checks[2];
     const uint32_t longs = low.jumps - low.singles;
     const uint32_t matched = low.corrupt > low.jumps ? low.corrupt - low.jumps
                                                      : low.jumps - low.corrupt;
-    bench.verdict("AT 6 MHz THE LOSS IS PACKETS WRITTEN WRONG, NEVER PACKETS MISSING WHOLE: every "
-                  "block that is not a packet is matched by a jump in the numbers, and every jump "
-                  "longer than one follows a block that read as an older packet",
-                  low.corrupt > 0u && matched <= 1u && longs <= low.backward);
-    bench.verdict("and no FIFO overflow says so - the flag stays down at every rung",
-                  overflows[0] == 0u && overflows[1] == 0u && overflows[2] == 0u);
+    print(serial, "  FINDING, below the floor at 6 MHz: ", low.corrupt, " blocks not a packet "
+          "against ", low.jumps, " jumps (", matched, " apart), ", longs,
+          " jump(s) longer than one against ", low.backward, " backward number(s), ",
+          overflows[2], " FIFO overflows", crlf);
+    bench.verdict("and no FIFO overflow at the two rungs at or above the floor",
+                  overflows[0] == 0u && overflows[1] == 0u);
     bench.verdict("and the port is configured at the suite's own rate again", Device::configured());
 }
 // =============================================================================

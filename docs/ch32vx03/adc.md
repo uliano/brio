@@ -678,15 +678,15 @@ MHz and ADCCLK at 12 MHz. NOTHING OUTSIDE THE CHIP: the levels are a pad
 driven or pulled by its own port, the internal reference and the
 temperature sensor - and on the CH32V303 its own DAC, whose first output
 is the converter's input 4 - and the core's own counter is the ruler. On
-the CH32V203C8T6 the fourteen letters of that part: **89 pass, 0 fail**
+the CH32V203C8T6 the fourteen letters of that part: **85 pass, 0 fail**
 in `z`, ten runs alike. On the CH32V303CBT6 the eighteen its package
-gives it (no TIM8, so no letter for code 110): **99 pass, 0 fail**, ten
+gives it (no TIM8, so no letter for code 110): **95 pass, 0 fail**, ten
 runs alike. On the CH32V303VCT6 all nineteen; it was not run with
 today's suite, and the findings that name it were measured on it. Where
 one number is given below it is the CH32V203C8T6's unless a CH32V303
 part is named.
 
-- **The calibration costs eight microseconds and leaves a word behind.**
+- **The calibration costs some nine microseconds and leaves a word behind.**
   ADON was acknowledged within the counter's own resolution, RSTCAL
   cleared itself in under a microsecond and CAL took 9 us - the
   datasheet's tCAL of 100 ADCCLK is 8.3 us at 12 MHz - and the data
@@ -749,10 +749,9 @@ part is named.
   the multiplexer parked 0, 2, 20 and 200 us before the start 3954 to
   3958, 3965 to 3972, 3966 to 3971 and 3966 to 3970, against the rail's
   4092 to 4093: the park helps and stops short of the rail. The three
-  dies answer three ways, so on the CH32V303 the suite prints what a
-  parked multiplexer buys as a finding; on the CH32V203 it judges the
-  tracking, the parked read at 1.5 cycles within 200 counts of the one
-  at 239.5.
+  dies answer three ways, so the suite prints what a parked multiplexer
+  buys as a finding on every part, the reads after a park of 0, 2, 20
+  and 200 us beside it, and judges none of it.
 - **A pad in PULLED INPUT mode is an analog source.** Analog mode takes
   the pull away with the input driver (10.2.7), so a program that wants
   a pad's own pull as its level leaves the pad a pulled input and
@@ -895,7 +894,10 @@ part is named.
   and 12.6 or 12.7 behind every one of them, on the CH32V203C8T6 as on
   the CH32V303CBT6 (12.5 or 12.6 on the CH32V303VCT6): the datasheets'
   14..252, not 12.2.2's 11. The
-  driver's `conversion_half_cycles()` predicts each to half a cycle.
+  driver's `conversion_half_cycles()` predicts each to within the
+  measurement's own late end, one ADCCLK cycle a conversion (the poll
+  that closes the span and the handlers it can meet, spread over the
+  sixty-four).
 - **THE SHORT SAMPLING TIMES ARE A LOT'S, AND THIS DIE HAS NONE**
   (CH32V303VCT6). ADC1_AUX with ADC_SMP_SEL1 written read back 0x0 - and
   ADC2's the same - so the short-time verbs answered false and the

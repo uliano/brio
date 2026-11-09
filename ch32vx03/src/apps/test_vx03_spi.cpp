@@ -68,8 +68,9 @@
 //      block timed on the core's counter (the difference of a 2048- and a
 //      256-frame block) against its SCK periods at the instance's own bus
 //      over the division, SPI1 at /4, /16, /64 and in 16-bit frames, SPI2
-//      at /2 and /16 - a loop shares one clock at both ends and cannot
-//      tell a wrong one
+//      at /2 and /16, within a derived bound on readings no tick and no
+//      console entry lengthened - a loop shares one clock at both ends and
+//      cannot tell a wrong one
 //   b  THE HOST WITH ITS MISO HELD BY ITS OWN PORT, no wire: frames of
 //      all ones and all zeros read back, both widths, both bit orders,
 //      the four modes read back out of CTLR1
@@ -88,7 +89,7 @@
 //      makes wrong -, the bidirectional line mode on one pad, the
 //      receive-only host and how it is stopped, the I2S register where
 //      the part has no I2S (printed)
-//   f  A POLLED WAIT THAT RUNS OUT (spi_stalled within its budget), what a
+//   f  A POLLED WAIT THAT RUNS OUT (spi_stalled once its budget is spent), what a
 //      closed gate leaves; THE END OF A FAILED REQUEST, the D/C and the
 //      select high after a stalled command phase on either engine and a
 //      faulted block; THE NEXT REQUEST WITH NOTHING CALLED, after a stall
@@ -599,12 +600,34 @@ uint8_t dma_xfer(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t
 // The rate on the wire
 // ---------------------------------------------------------------------------
 
+/// One block's reading: its span, and whether its WITNESS calls it quiet.
+struct BlockSpan {
+    uint32_t cycles;
+    bool quiet;
+};
+
+/// THE WITNESS's window before the receive channel's vector: a reload of
+/// the STK this close before the vector's stamp may have held the vector
+/// back behind the tick's handler. Ten times that handler's whole trip -
+/// the 52-to-66-cycle round trip of a minimal handler
+/// (docs/ch32vx03/platform.md, "The interrupt round trip") with
+/// Ticker::tick()'s few loads and stores in it: an exclusion window, so
+/// its width costs readings, never a verdict.
+constexpr uint32_t tick_guard_cycles = 1000;
+
 /// One block of `n` frames on the engines of an ENGINED host `H`,
 /// neither buffer named - the transmit engine pouring its fixed cell and
 /// the receive engine its sink - in core cycles from the start() call to
 /// the receive channel's vector (the engined hosts' while dma_host_live).
+/// QUIET when nothing lengthened either end of it (util/test_wait.hpp, the
+/// derived bound's rule): no tick from before the first stamp until
+/// start() has returned (the path that arms the channels), no reload of
+/// the STK within tick_guard_cycles before the vector's stamp nor between
+/// that stamp and the last one, and no console entry. A tick in the middle
+/// of the block is part of no end: the channels keep the wire fed with a
+/// frame's time of slack while the core serves it.
 template <typename H>
-uint32_t engined_block(uint16_t n, SpiClock rate, SpiDataSize bits) {
+BlockSpan engined_block(uint16_t n, SpiClock rate, SpiDataSize bits) {
     typename H::Request r{};
     r.cs = {};
     r.len = n;
@@ -613,44 +636,107 @@ uint32_t engined_block(uint16_t n, SpiClock rate, SpiDataSize bits) {
     r.bits = bits;
     r.engine = SpiEngine::dma;
     host_done = false;
+    end_stamp = 0;   // a vector that never ran reads as a reload just before it
+    const uint32_t console0 = console_entries;
+    const uint32_t k0 = Ticker::ticks();
     const uint32_t t0 = Ruler::now();
-    if (!H::start(r)) {
+    const bool sync = H::start(r);
+    const uint32_t k1 = Ticker::ticks();
+    if (!sync) {
         // The longest block asked, 2048 frames at /64 of PB2, is 7.3 ms.
         (void)done_within_ms(20);   // a block that never ended reads as a wall past every bound
     }
-    return Ruler::now() - t0;
+    const uint32_t t1 = Ruler::now();
+    const uint32_t p1 = stk()->CNTL;
+    const uint32_t pe = end_stamp;
+    return {t1 - t0, k0 == k1 && pe >= tick_guard_cycles && p1 >= pe && console_entries == console0};
 }
+
+/// THE RATE ON THE WIRE, as one reading: `diff` the difference of a 2048-
+/// and a 256-frame block, `want` the 1792 frames' SCK periods, `bound` the
+/// derived slack, all in core cycles; `judged` when each block size had a
+/// quiet reading.
+struct WireReading {
+    uint32_t diff;
+    uint32_t want;
+    uint32_t bound;
+    bool judged;
+};
+
+/// The poll turn of done_within_ms() in the release listing (wait_ticks
+/// over host_done and the tick count, on both series' builds; five
+/// instructions where the 32 KB tier's image inlines it into the reading):
+/// at most six instructions, one taken branch and two loads of SRAM - at
+/// most 6 + 3 + 13 = 22 cycles (docs/ch32vx03/platform.md: an instruction a cycle,
+/// a taken branch one to three more; two loads at most the 13 cycles a
+/// whole Ruler::now() spends over its 18 instructions, five loads and a
+/// multiply among them, as bench_vx03's "ruler" line prints it: 31 on the
+/// CH32V203C8T6, 23 on the CH32V303CBT6).
+constexpr uint32_t done_turn_cycles = 6u + 3u + 13u;
 
 /**
  * THE RATE ON THE WIRE, which a loop alone cannot tell - both ends of a
  * loop share the one clock: the time ONE FRAME takes inside an engined
  * block, from the difference of a 2048-frame and a 256-frame block (the
- * best of three of each) so that the transaction's fixed cost cancels, in
- * thousandths of its SCK periods at the rate ASKED - the bus clock the
- * instance divides, `bus_hz`, over the code's division - on the core's
- * counter, which counts HCLK. A host whose transmit buffer is refilled
- * while TXE stands keeps a complete data flow (20.2.2) - the clock does not
- * pause between frames - so nothing is added for a gap.
+ * best of three quiet readings of each, out of six at most) so that the
+ * transaction's fixed cost cancels, against its SCK periods at the rate
+ * ASKED - the bus clock the instance divides, `bus_hz`, over the code's
+ * division - on the core's counter, which counts HCLK. A host whose
+ * transmit buffer is refilled while TXE stands keeps a complete data flow
+ * (20.2.2) - the clock does not pause between frames - so nothing is
+ * added for a gap.
+ *
+ * THE BOUND, derived. The ruler and SCK share one source - HCLK, PCLKx
+ * its APB division, SCK that over the code's - so no clock error enters:
+ * a block that keeps the data flow takes exactly `want` cycles more at
+ * 2048 frames than at 256. What does not cancel is where each block's
+ * two ends fall inside the same code: the first SCK edge after the
+ * channels are armed, at most one SCK period late on the bus's divider
+ * (division x HCLK/PCLKx cycles), and the end seen by the wait at most one
+ * poll turn after the vector set host_done, the vector itself entered at
+ * most one more turn's instruction late - so each reading lies in
+ * [path, path + E], E = one SCK period + 2 x done_turn_cycles, and the
+ * difference within E of `want` either way. A frame stalled for a late
+ * channel shows on the + side; nothing can show on the - side.
  */
 template <typename H>
-uint32_t frame_permille(uint32_t bus_hz, SpiClock rate, SpiDataSize bits) {
-    auto best = [&](uint16_t n) {
-        uint32_t least = 0xFFFF'FFFFUL;
-        for (uint8_t k = 0; k < 3u; ++k) {
-            const uint32_t c = engined_block<H>(n, rate, bits);
-            least = c < least ? c : least;
-        }
-        return least;
+WireReading frame_wire(uint32_t bus_hz, SpiClock rate, SpiDataSize bits) {
+    struct Best {
+        uint32_t least;
+        uint8_t quiet;
     };
-    const uint32_t big = best(2048);
-    const uint32_t small = best(256);
+    auto best = [&](uint16_t n) {
+        Best b{0xFFFF'FFFFUL, 0};
+        for (uint8_t k = 0; k < 6u && b.quiet < 3u; ++k) {
+            const BlockSpan c = engined_block<H>(n, rate, bits);
+            if (c.quiet) {
+                ++b.quiet;
+                b.least = c.cycles < b.least ? c.cycles : b.least;
+            }
+        }
+        return b;
+    };
+    const Best big = best(2048);
+    const Best small = best(256);
     const uint32_t width = bits == SpiDataSize::bits16 ? 16u : 8u;
-    const uint64_t want = 1792ULL * width * spi_division(rate) * SysClock::hz / bus_hz;
-    return want == 0u ? 0u : static_cast<uint32_t>(1000ULL * (big - small) / want);
+    const uint32_t sck_cycles = spi_division(rate) * (SysClock::hz / bus_hz);
+    return {big.least - small.least, 1792u * width * sck_cycles,
+            sck_cycles + 2u * done_turn_cycles, big.quiet > 0u && small.quiet > 0u};
 }
 
-/// The verdict on a reading: -1 % to +3 % of the wire at the rate asked.
-bool wire_ok(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
+/// The verdict on a reading: within its derived bound of the wire.
+bool wire_ok(const WireReading& w) {
+    return w.judged && w.diff + w.bound >= w.want && w.diff <= w.want + w.bound;
+}
+
+/// The reading in thousandths of the wire, and in cycles against its bound.
+void print_wire(const char* name, const WireReading& w) {
+    const uint32_t permille = w.want == 0u ? 0u : static_cast<uint32_t>(1000ULL * w.diff / w.want);
+    const bool slow = w.diff >= w.want;
+    print(serial, "    ", name, ": ", permille, " thousandths, ", slow ? "+" : "-",
+          slow ? w.diff - w.want : w.want - w.diff, " cycles over ", w.want, " (bound ", w.bound,
+          ")", w.judged ? "" : " - NOT JUDGED: no quiet reading", crlf);
+}
 
 /// A block's time in thousandths of its wire at the rate asked - `frames`
 /// frames of `width` bits at PB1 over `division` - which a link between
@@ -660,6 +746,15 @@ uint32_t block_permille(uint32_t cycles, uint32_t frames, uint32_t width, uint32
                           SysClock::pclk1_hz;
     return wire == 0u ? 0u : static_cast<uint32_t>(1000ULL * cycles / wire);
 }
+
+/// The verdict on a whole block so read: never shorter than its wire. The
+/// span opens before the host is enabled and closes after the receive
+/// channel's completion is seen, so every frame's SCK periods lie inside it
+/// and the shared clock leaves no error: at least 1000 thousandths, exact.
+/// How far above is the block's own fixed path - the enable, the channels'
+/// first beats, the flag's poll - which no written figure bounds, so the
+/// excess is printed and not judged.
+bool block_not_early(uint32_t permille) { return permille >= 1000u; }
 
 // ===========================================================================
 // a - the rates, and the clock measured on its own pad
@@ -841,40 +936,49 @@ void ta_rates() {
     // ---- THE RATE ON THE WIRE, inside an engined block, per instance ----
     // No wire wanted: the transmit engine clocks the frames out whatever
     // MISO reads. SPI1 divides PB2, SPI2 PB1 - the bus a loop could not
-    // tell wrong.
+    // tell wrong. Every reading is taken with the console drained and
+    // printed after the last (frame_wire's bound judges the quiet path).
     Dma<1>::open();
     dma_host_live = true;
     (void)Dma1::init(clock);
     NssPad::release();   // the select pad stays an input (the header)
-    const uint32_t s1_d4 = frame_permille<Dma1>(SysClock::pclk2_hz, SpiClock::div4,
+    console_drain();
+    const WireReading s1_d4 = frame_wire<Dma1>(SysClock::pclk2_hz, SpiClock::div4,
+                                               SpiDataSize::bits8);
+    const WireReading s1_d16 = frame_wire<Dma1>(SysClock::pclk2_hz, SpiClock::div16,
                                                 SpiDataSize::bits8);
-    const uint32_t s1_d16 = frame_permille<Dma1>(SysClock::pclk2_hz, SpiClock::div16,
-                                                 SpiDataSize::bits8);
-    const uint32_t s1_d64 = frame_permille<Dma1>(SysClock::pclk2_hz, SpiClock::div64,
-                                                 SpiDataSize::bits8);
-    const uint32_t s1_w4 = frame_permille<Dma1>(SysClock::pclk2_hz, SpiClock::div4,
-                                                SpiDataSize::bits16);
+    const WireReading s1_d64 = frame_wire<Dma1>(SysClock::pclk2_hz, SpiClock::div64,
+                                                SpiDataSize::bits8);
+    const WireReading s1_w4 = frame_wire<Dma1>(SysClock::pclk2_hz, SpiClock::div4,
+                                               SpiDataSize::bits16);
     Dma1::release();
-    print(serial, "  a frame inside an engined block, in thousandths of its wire at the rate "
-                  "asked: SPI1 /4 ",
-          s1_d4, ", /16 ", s1_d16, ", /64 ", s1_d64, ", 16-bit /4 ", s1_w4, crlf);
+    WireReading s2_d2{};
+    WireReading s2_d16{};
+    if constexpr (has_two_spi) {
+        (void)Spi2Dma::init(clock);
+        s2_d2 = frame_wire<Spi2Dma>(SysClock::pclk1_hz, SpiClock::div2, SpiDataSize::bits8);
+        s2_d16 = frame_wire<Spi2Dma>(SysClock::pclk1_hz, SpiClock::div16, SpiDataSize::bits8);
+        Spi2Dma::release();
+    }
+    dma_host_live = false;
+    print(serial, "  a frame inside an engined block, 1792 frames' difference against their "
+                  "wire at the rate asked:", crlf);
+    print_wire("SPI1 /4", s1_d4);
+    print_wire("SPI1 /16", s1_d16);
+    print_wire("SPI1 /64", s1_d64);
+    print_wire("SPI1 16-bit /4", s1_w4);
     bool engines_on_time = wire_ok(s1_d4) && wire_ok(s1_d16) && wire_ok(s1_d64) &&
                            wire_ok(s1_w4);
     if constexpr (has_two_spi) {
-        (void)Spi2Dma::init(clock);
-        const uint32_t s2_d2 = frame_permille<Spi2Dma>(SysClock::pclk1_hz, SpiClock::div2,
-                                                       SpiDataSize::bits8);
-        const uint32_t s2_d16 = frame_permille<Spi2Dma>(SysClock::pclk1_hz, SpiClock::div16,
-                                                        SpiDataSize::bits8);
-        Spi2Dma::release();
-        print(serial, "  SPI2 /2 ", s2_d2, ", /16 ", s2_d16, crlf);
+        print_wire("SPI2 /2", s2_d2);
+        print_wire("SPI2 /16", s2_d16);
         engines_on_time = engines_on_time && wire_ok(s2_d2) && wire_ok(s2_d16);
     }
-    dma_host_live = false;
     bench.verdict("THE ENGINES RUN AT THE RATE ASKED: a frame inside a block takes its SCK "
                   "periods at the instance's own bus over the division - SPI1 at /4, /16 and /64 "
-                  "and in 16-bit frames, SPI2 at /2 and /16 where the part has it - each -1 % to "
-                  "+3 % on the core's counter",
+                  "and in 16-bit frames, SPI2 at /2 and /16 where the part has it - each within "
+                  "one SCK period and two poll turns of the wait (the derived bound) on the "
+                  "core's counter, judged on quiet readings",
                   engines_on_time);
     host_ready();
 }
@@ -1123,8 +1227,8 @@ void tc_loop() {
         print(serial, " and breaks at ", first_bad / 1000u, " kHz");
     }
     print(serial, crlf);
-    bench.verdict("the strap carries every BR code the block offers, or names the one it does "
-                  "not",
+    bench.verdict("the strap carries the slowest codes clean, every one to 1 MHz of SCK at least; the "
+                  "fastest clean code and the first that breaks are printed above, not judged",
                   best >= 1'000'000UL);
     bench.verdict("and no code is faster than its wire: 256 frames take at least eight SCK "
                   "periods each at the rate asked, PB2 over the division (letter a times the "
@@ -2046,9 +2150,10 @@ void th_high_speed_read() {
         const uint32_t pm2 = block_permille(fast.cycles, 256, 8, 2);
         print(serial, "  in thousandths of the wire at the rate asked: /4 ", pm4,
               ", /2 with HSRXEN ", pm2, crlf);
-        bench.verdict("and the blocks run at the rate asked: 256 frames at /4 and at /2 in their "
-                      "SCK periods at PB1 over the division, -1 % to +3 % on the core's counter",
-                      wire_ok(pm4) && wire_ok(pm2));
+        bench.verdict("and neither block is shorter than its wire: 256 frames at /4 and at /2 "
+                      "take at least their SCK periods at PB1 over the division on the core's "
+                      "counter (the excess, the block's fixed path, printed above)",
+                      block_not_early(pm4) && block_not_early(pm2));
         bench.verdict("at BR /4 the wires carry the block exactly both ways - the baseline the /2 "
                       "runs are read against",
                       base.done && base.host_wrong == 0u && base.client_wrong == 0u);
@@ -2142,7 +2247,7 @@ void ti_wide_frames() {
             const uint32_t pm_narrow = block_permille(narrow.cycles, bytes, 8, row.divisor);
             print(serial, "    in thousandths of the wire at the rate asked: ", pm_wide,
                   " in 16-bit frames, ", pm_narrow, " in 8-bit ones", crlf);
-            if (!wire_ok(pm_wide) || !wire_ok(pm_narrow)) {
+            if (!block_not_early(pm_wide) || !block_not_early(pm_narrow)) {
                 timed = false;
             }
         }
@@ -2152,8 +2257,9 @@ void ti_wide_frames() {
                       "high-speed read; the costs are printed as measured, the row without the "
                       "mode beside them",
                       exact);
-        bench.verdict("and every row runs at the rate asked: both widths' blocks in their SCK "
-                      "periods at PB1 over the division, -1 % to +3 % on the core's counter",
+        bench.verdict("and no row is shorter than its wire: both widths' blocks take at least "
+                      "their SCK periods at PB1 over the division on the core's counter (the "
+                      "excess, each block's fixed path, printed above)",
                       timed);
         L::all_released();
     }
@@ -3396,6 +3502,7 @@ void tk_extended() {
     // ---- the receive-only window: this end's WRITE witnessed ----
     {
         uint8_t ok = 0;
+        uint8_t judged = 0;
         constexpr uint8_t runs = 6;
         for (uint8_t k = 0; k < runs; ++k) {
             Exchange e{};
@@ -3410,15 +3517,23 @@ void tk_extended() {
             print(serial, "    receive-only, this end a ", shape_name(e.shape), " write of 64 ", w, "-bit frames at /",
                   spi_division(e.rate), ": the peer heard ", o.r.count, " mism ", o.r.mism, ", ", o.cycles,
                   " cycles against the wire's ", wire_cycles(e.rate, 64, w), crlf);
-            if (heard(e, o) && (o.r.flags & spilink::report_extended) != 0u) {
-                ++ok;
+            // The far client's hearing is judged from /4 (heard_judged(),
+            // the section's bounds); the two /2 runs are printed beside them.
+            const bool fine = heard(e, o) && (o.r.flags & spilink::report_extended) != 0u;
+            if (!heard_judged(e.rate)) {
+                print(serial, "      (/2: printed, not judged - ", fine ? "heard exact" : "NOT heard exact", ")", crlf);
             } else {
-                dump(o);
+                ++judged;
+                if (fine) {
+                    ++ok;
+                } else {
+                    dump(o);
+                }
             }
         }
         bench.verdict("THE WRITE SHAPE IS WITNESSED: a client that only listens (receive-only, MISO dark) hears this "
-                      "end's writes exact, polled and engined, both widths, to /2",
-                      ok == runs);
+                      "end's writes exact, polled and engined, both widths, at /16 and /4 (the /2 runs printed)",
+                      judged > 0u && ok == judged);
     }
     (void)link_command_mode();
     bench.verdict("the command channel is back after the extended exchange", command(Op::ping));
@@ -3763,16 +3878,18 @@ void tm_select() {
 volatile bool txe_mode = false;
 volatile uint16_t txe_next = 0;
 volatile uint32_t txe_entries = 0;
+volatile uint16_t txe_count = 0;   ///< the frames of the stream in flight
 constexpr uint16_t txe_frames = 64;
+constexpr uint16_t txe_short_frames = 8;
 
 /// THE POLLED WAIT'S LOOP, counted in the release listing (poll_write's
 /// wait for TXE: the STATR load, the bit test, the budget's decrement and
 /// its test, the branch back - five instructions, one an APB load): a spin
-/// costs at least its five cycles and, the load waiting on PB2, no more
-/// than four times that; the tick's 1 kHz handler adds well under one per
-/// cent. So a budget of S spins ends between 5 S and 20 S cycles.
+/// costs at least its five cycles (docs/ch32vx03/platform.md: an
+/// instruction a cycle at the least), so a budget of S spins spent whole
+/// takes at least 5 S cycles - the verdict. How much more the APB load
+/// costs on PB2 no written figure states: the cycles a spin are printed.
 constexpr uint32_t spin_min_cycles = 5;
-constexpr uint32_t spin_max_cycles = 20;
 
 /// A flag of the resource waited for, bounded: a millisecond on the ruler,
 /// past any frame this letter or letter v clocks (the slowest, a byte at /64
@@ -3884,7 +4001,7 @@ void stall_then(NextTally& t, SpiMode mode, SpiClock rate, bool read, bool comma
     const bool sck_at_idle = SckPad::read() == spi_mode_cpol(mode);
     t.wall_min = wall < t.wall_min ? wall : t.wall_min;
     t.wall_max = wall > t.wall_max ? wall : t.wall_max;
-    if (sync && st == spi_stalled && released && wall >= spin_min_cycles * spins && wall <= spin_max_cycles * spins) {
+    if (sync && st == spi_stalled && released && wall >= spin_min_cycles * spins) {
         ++t.failed_right;
     }
     if (word_back && flags_clear && sck_at_idle) {
@@ -3980,10 +4097,10 @@ void next_request_with_nothing_called() {
     stall_then<Dma1>(stalls, SpiMode::mode0, SpiClock::div16, false, true, true);
     stall_then<Dma1>(stalls, SpiMode::mode0, SpiClock::div16, false, true, false);
     print(serial, "  ", stalls.runs, " stalls with the enable down, a write of 16 frames, a read of 16 and a command phase: ",
-          stalls.wall_min, "..", stalls.wall_max, " cycles; ", stalls.failed_right, " spi_stalled within the budget with the "
+          stalls.wall_min, "..", stalls.wall_max, " cycles; ", stalls.failed_right, " spi_stalled after the whole budget with the "
           "select released, ", stalls.clean, " left the block's word back, its flags clear and SCK at the mode's idle; next "
           "polled ", stalls.polled_exact, " of 3 exact, next asynchronous ", stalls.async_exact, " of 3 exact", crlf);
-    bench.verdict("A STALL ON A BLOCK A RESET CURES ends spi_stalled within its budget, the select released, every path "
+    bench.verdict("A STALL ON A BLOCK A RESET CURES ends spi_stalled once its budget is spent, the select released, every path "
                   "(polled write, polled read, a command phase before a data block)",
                   stalls.failed_right == stalls.runs);
     bench.verdict("... the block back before start() returns: the applied word with SPE up in modes 0, 2 and 3, TXE "
@@ -4171,13 +4288,12 @@ void tf_stalled_txe() {
           wall, " cycles - ", wall / spins, " a spin over the budget's ", spins, "; the next one, the gate still closed, ",
           st_again, " after ", wall_again, " cycles; the gate open, the same request ",
           st2 == spi_ok ? "spi_ok" : "FAILED", " (", st2, ")", crlf);
-    bench.verdict("A POLLED WAIT THAT RUNS OUT ends the transaction spi_stalled within its one spin budget - "
-                  "between 5 and 20 cycles a spin, the loop's own five instructions",
-                  up && sync && st == spi_stalled && wall >= spin_min_cycles * spins &&
-                      wall <= spin_max_cycles * spins);
+    bench.verdict("A POLLED WAIT THAT RUNS OUT returns and ends the transaction spi_stalled once its spin budget "
+                  "is spent - at least five cycles a spin, the loop's own five instructions (the cycles a spin "
+                  "printed)",
+                  up && sync && st == spi_stalled && wall >= spin_min_cycles * spins);
     bench.verdict("A RESET OPENS NO GATE: the next request on the closed gate stalls too, on its own budget",
-                  sync_again && st_again == spi_stalled && wall_again >= spin_min_cycles * spins &&
-                      wall_again <= spin_max_cycles * spins);
+                  sync_again && st_again == spi_stalled && wall_again >= spin_min_cycles * spins);
     bench.verdict("... and the engine is left where start() is legal: with the gate open the same request "
                   "runs spi_ok",
                   sync2 && st2 == spi_ok);
@@ -4217,12 +4333,29 @@ void tf_stalled_txe() {
     // at /64 a frame is 512 core cycles and a handler a small fraction of
     // it, so the frames go out back to back.
     //
-    // THE SPAN IS JUDGED ON A QUIET RUN (the lengtheners rule): the console
+    // THE SPAN, DERIVED. A run of N frames is timed from the stamp before
+    // TXEIE is set to the wait seeing the vector's last entry, the one that
+    // silences TXEIE - taken when the LAST frame moves into the shift
+    // register, so the span holds N - 1 frames' time and one fixed path
+    // (the enable, the first entry, the first SCK edge, the end's
+    // detection). The ruler and SCK share HCLK, so a run of 64 frames lasts
+    // 56 frames' time more than a run of 8 - 56 x 512 cycles - when the
+    // vector keeps the stream back to back, give or take where each run's
+    // two ends fall in the same code: the first SCK edge at most one SCK
+    // period late on PB2's divider (64 cycles at /64), and the last entry
+    // seen at most one poll turn of the wait after it, itself entered at
+    // most one more turn's instruction late - E = 64 + 2 x 25 = 114
+    // cycles. THAT WAIT'S TURN, in the release listing on both series'
+    // builds: at most six instructions, two taken branches and two loads of
+    // SRAM, at most 6 + 2 x 3 + 13 = 25 cycles by done_turn_cycles'
+    // arithmetic. A frame the vector fed late shows on the + side.
+    //
+    // THE SPAN IS JUDGED ON QUIET RUNS (the lengtheners rule): the console
     // drained first, each run started on a fresh tick - a whole millisecond
     // against the stream's 228 us - and the tick and the console's vector
     // counted around it. A run either moved is printed with its figure, not
-    // judged, and the stream runs again, four runs at most; the entries and
-    // the CRC are judged on every run.
+    // judged, and the stream runs again, four runs at most of each length;
+    // the entries and the CRC are judged on every run.
     struct TxeRun {
         uint32_t took = 0;
         uint32_t entries = 0;
@@ -4231,12 +4364,13 @@ void tf_stalled_txe() {
         uint16_t got = 0;
         bool finished = false;
     };
-    const auto txe_run = [] {
+    const auto txe_run = [](uint16_t frames) {
         TxeRun t{};
         S1::reset();
         (void)S1::configure({.role = SpiRole::host, .clock = SpiClock::div64, .crc = true, .crc_polynomial = 0x07u});
         txe_next = 0;
         txe_entries = 0;
+        txe_count = frames;
         txe_mode = true;
         S1::enable();
         Pfic::clear_pending(S1::irq);
@@ -4247,13 +4381,14 @@ void tf_stalled_txe() {
         const TickWitness<P> witness;
         const uint32_t t1 = Ruler::now();
         S1::txe_interrupt(true);
-        // On the tick, a poll turn of two loads, so the span ends a few
-        // cycles behind the flag: 64 frames of 512 cycles are 228 us.
+        // On the tick, a poll turn of two loads: 64 frames of 512 cycles
+        // are 228 us.
         t.finished = wait_ticks<P>([] { return !txe_mode; }, 2u);
-        t.finished = wait_ticks<P>([] { return !S1::busy(); }, 1u) && t.finished;
         t.took = Ruler::now() - t1;
         t.ticks = witness.ticks();
         t.console = console_entries - console0;
+        // The last frame's own shift, after the span: the CRC wants it out.
+        t.finished = wait_ticks<P>([] { return !S1::busy(); }, 1u) && t.finished;
         Pfic::disable(S1::irq);
         txe_mode = false;
         t.entries = txe_entries;
@@ -4264,45 +4399,56 @@ void tf_stalled_txe() {
     S1::bus_clock(true);
     fill_pattern(tx_buf, txe_frames, 0x5C);
     const uint16_t want = crc_frames(0x07u, false, tx_buf, txe_frames);
+    const uint16_t want_short = crc_frames(0x07u, false, tx_buf, txe_short_frames);
     const bool drained = brio::console_drain<Ruler, Serial>();
-    TxeRun runs[4];
+    TxeRun runs[8];
     uint8_t made = 0;
     bool right = true;
-    bool quiet = false;
-    while (made < 4u && !quiet) {
-        const TxeRun t = txe_run();
-        runs[made++] = t;
-        right = right && t.finished && t.entries == txe_frames + 1u && t.got == want;
-        quiet = drained && t.ticks == 0u && t.console == 0u;
-    }
+    // Up to four runs of `frames` until one is quiet: the quiet one's index,
+    // or -1.
+    const auto quiet_run = [&](uint16_t frames, uint16_t crc) {
+        for (uint8_t k = 0; k < 4u; ++k) {
+            const TxeRun t = txe_run(frames);
+            runs[made] = t;
+            right = right && t.finished && t.entries == frames + 1u && t.got == crc;
+            if (drained && t.ticks == 0u && t.console == 0u) {
+                return static_cast<int8_t>(made++);
+            }
+            ++made;
+        }
+        return static_cast<int8_t>(-1);
+    };
+    const int8_t long_k = quiet_run(txe_frames, want);
+    const int8_t short_k = quiet_run(txe_short_frames, want_short);
     S1::reset();
     S1::bus_clock(false);
-    // 64 frames of 512 cycles back to back, plus the first entry's
-    // latency and the last frame's own shift after the vector let go: the
-    // span lies between the frames' time and that plus one frame and the
-    // handlers' slack (2000 cycles: the vector's sixty-five entries, and
-    // room for two tick entries a quiet run does not carry).
     const uint32_t frame_cycles = 8u * 64u * (SysClock::hz / SysClock::pclk2_hz);
-    const uint32_t wire = txe_frames * frame_cycles;
-    const TxeRun& last = runs[made - 1u];
-    print(serial, "  TXEIE on a host: ", last.entries, " entries for ", txe_frames, " frames, TCRCR ", hex(last.got),
-          " against ", hex(want), ", ", last.took, " cycles against ", wire, " of wire",
-          quiet ? " (a quiet run)" : " (lengthened)", crlf);
-    const uint8_t lengthened = quiet ? static_cast<uint8_t>(made - 1u) : made;
-    for (uint8_t k = 0; k < lengthened; ++k) {
-        print(serial, "    a lengthened run, not judged: ", runs[k].took, " cycles, ", runs[k].ticks, " tick(s) and ",
-              runs[k].console, " console entr", runs[k].console == 1u ? "y" : "ies", " inside it",
-              drained ? "" : ", the console not drained", crlf);
+    const uint32_t more = (txe_frames - txe_short_frames) * frame_cycles;
+    constexpr uint32_t txe_turn_cycles = 6u + 2u * 3u + 13u;
+    const uint32_t slack = 64u * (SysClock::hz / SysClock::pclk2_hz) + 2u * txe_turn_cycles;
+    const bool quiet = long_k >= 0 && short_k >= 0;
+    for (uint8_t k = 0; k < made; ++k) {
+        const bool judged = static_cast<int8_t>(k) == long_k || static_cast<int8_t>(k) == short_k;
+        print(serial, judged ? "    a quiet run: " : "    a lengthened run, not judged: ", runs[k].entries,
+              " entries, TCRCR ", hex(runs[k].got), ", ", runs[k].took, " cycles", crlf);
+        if (!judged) {
+            print(serial, "      ", runs[k].ticks, " tick(s) and ", runs[k].console, " console entr",
+                  runs[k].console == 1u ? "y" : "ies", " inside it", drained ? "" : ", the console not drained", crlf);
+        }
     }
+    print(serial, "  TXEIE on a host: ", txe_frames, " frames against ", txe_short_frames, " (TCRCR wanted ", hex(want),
+          " and ", hex(want_short), ")", crlf);
     bench.verdict("THE TRANSMIT INTERRUPT ON A HOST: one entry a frame and one more to silence it, every frame "
                   "out in order (the CRC unit's sum the buffer's), on every run",
                   right);
     if (quiet) {
-        bench.verdict("... and the stream back to back: on a quiet run, the span within one frame and 2000 cycles of "
-                      "the frames' own time",
-                      last.took >= wire && last.took <= wire + frame_cycles + 2000u);
+        const uint32_t diff = runs[long_k].took - runs[short_k].took;
+        print(serial, "  the 56 frames more took ", diff, " cycles against ", more, " (bound ", slack, ")", crlf);
+        bench.verdict("... and the stream back to back: on quiet runs, 56 frames more take their 56 frames' time, "
+                      "within one SCK period and two poll turns (the derived bound)",
+                      diff + slack >= more && diff <= more + slack);
     } else {
-        bench.skip("the stream's span: no run of four was quiet, a tick or the console's vector inside each");
+        bench.skip("the stream's span: no quiet run of each length in four, a tick or the console's vector inside each");
     }
     host_ready();
 }
@@ -5487,8 +5633,9 @@ void tn_recover() {
     // back for the receive channel to count, and no completion is posted:
     // the arbiter's timeout is what answers, and recover() what brings the
     // engine back.
+    constexpr uint8_t pulse_after_ms = 30;
     spilink::Params a{};
-    a.aux8 = 30;
+    a.aux8 = pulse_after_ms;
     a.aux16 = 2000;
     const bool acked = peer_act(Op::ss_pulse, a);
     (void)PairDma::init(clock);
@@ -5529,13 +5676,29 @@ void tn_recover() {
     PairNss::release();
     settle_ms(20);
     (void)link_command_mode();
-    // The bound: the arbiter's timeout counts from the post, so the answer
-    // comes at 120 ms of ticks plus one tick of its arming and the kernel
-    // loop's turn - never before 120, and well before 200.
+    // THE BOUNDS, derived. The answer: the arbiter arms its time event at
+    // the request's dispatch, the deadline P::now() + 120 ticks
+    // (kernel/time_event.hpp, "When a timer matures"), and the pump
+    // dispatches the timeout, recover() (575 cycles, docs/ch32vx03/spi.md)
+    // and the reply on the turn the deadline is reached; t0 and the reply's
+    // stamp are whole milliseconds. So 120 ms at the least, and at most one
+    // tick more between t0 and the arming and one between the deadline and
+    // the reply's stamp: 120 to 122. MODF: the far chip takes the select
+    // low aux8 = 30 ms after the ack window closes, on its 144 MHz from the
+    // crystal (a quartz crystal, 100 ppm with its temperature stability -
+    // the board names no part - 3 us here), its path from the window's
+    // close to the spin a few register writes; this end closes that window
+    // in command(), then peer_act()'s settle - spilink::settle_ms of ticks,
+    // 5 to 6 ms - and the setup above, a few register writes, before t0;
+    // each of t0 and the stamp a whole millisecond. So MODF lands 30 - 6 -
+    // 1 = 23 to 30 - 5 + 1 = 26 ms after t0, and a millisecond each way for
+    // the two paths of register writes: 22 to 27.
+    constexpr uint32_t modf_due_ms = pulse_after_ms - spilink::settle_ms;
     bench.verdict("A HOST DEMOTED MID-TRANSACTION BY A SECOND DEVICE ON ITS SELECT is answered spi_timeout by "
-                  "the timed arbiter, 120 to 200 ms after the post, MODF seen near the far chip's 30 ms",
-                  acked && modf_at >= 20u && modf_at <= 60u && first == spi_timeout && answered >= kt::timeout_ms &&
-                      answered < 200u);
+                  "the timed arbiter, 120 to 122 ms after the post, MODF seen 22 to 27 ms in - the far chip's 30 ms "
+                  "after the ack less this end's settle (the derived bounds)",
+                  acked && modf_at + 3u >= modf_due_ms && modf_at <= modf_due_ms + 2u && first == spi_timeout &&
+                      answered >= kt::timeout_ms && answered <= kt::timeout_ms + 2u);
     bench.verdict("... and recover() puts the engine back where start() is legal - the block a software-selected "
                   "host again, MODF down - and the same arbiter carries the next transaction spi_ok",
                   back && second == spi_ok);
@@ -6020,7 +6183,7 @@ BRIO_CH32_LEAF_VECTOR(spi1_handler) {
         txe_entries = txe_entries + 1u;
         if ((S1::isr() & SpiFlag::txe) != 0u) {
             const uint16_t k = txe_next;
-            if (k < txe_frames) {
+            if (k < txe_count) {
                 S1::data8(tx_buf[k]);
                 txe_next = static_cast<uint16_t>(k + 1u);
             } else {

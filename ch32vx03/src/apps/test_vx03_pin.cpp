@@ -895,10 +895,15 @@ void th_event() {
           " kernel tick; with a latched line event it returned after ", event_cycles,
           " core cycles and ", ticks_in_event, " ticks (flag ", flag_down ? "down" : "UP",
           ", the vector's pending bit ", pfic_quiet ? "down" : "UP", ")", crlf);
+    // THE BOUND is the claim's own: the event ends the wait before the
+    // tick would have, so the span is under one kernel tick period
+    // (SysClock::hz / P::ticks_per_second cycles) and no tick lands in
+    // it. How far under - the idle path's own cost - is printed above.
+    constexpr uint32_t tick_period_cycles = SysClock::hz / P::ticks_per_second;
     bench.verdict("a line in EVENT mode ends the platform's idle() inside the tick that would "
                   "otherwise have ended it, with no flag raised and no interrupt pending (9.4.2)",
-                  ticks_waited == 1u && ticks_in_event == 0u && event_cycles < 2000u &&
-                      flag_down && pfic_quiet);
+                  ticks_waited == 1u && ticks_in_event == 0u &&
+                      event_cycles < tick_period_cycles && flag_down && pfic_quiet);
     all_off();
 }
 
@@ -1137,8 +1142,9 @@ void tj_wire() {
         }
         const uint32_t c0 = stk_count();
         WireSrc::set();
-        // 100 us: a hundred times the bound the verdict below holds the
-        // latency to, so a slow edge is measured and not lost.
+        // 100 us: some ten thousand core cycles, a hundred times the
+        // latency any interrupt entry here costs, so a slow edge is
+        // measured and not lost.
         if (!brio::wait_until<Ruler>([&] { return edges_line1 != before; }, 100u)) {
             continue;
         }
@@ -1181,8 +1187,13 @@ void tj_wire() {
           " when PA1 raised its own line", crlf);
     bench.verdict("every edge PA6 made reached PA1's line over the wire, one interrupt each",
                   over_wire == 20u);
-    bench.verdict("and the handler ran within a microsecond of the store that made the edge",
-                  taken == 64u && worst < SysClock::hz / 1'000'000u);
+    // The latency is printed, not judged: no figure for the path from a
+    // port store through the input synchronizer, the edge detector and
+    // the interrupt entry is written in the manual, and an entry cost
+    // measured on one die is no bound for the family. PA1 raising its own
+    // line is printed beside it as the reference the wire is read against.
+    bench.verdict("and every one of the 64 rising edges reached the handler inside the 100 us "
+                  "wait", taken == 64u);
     all_off();
 }
 

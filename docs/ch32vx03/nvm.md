@@ -642,7 +642,8 @@ and a `false` under a dynamic one.
 CH32V303VCT6 with nothing wired. The suite runs on a `DynamicClock` of
 three rates - 96 MHz to work at, 48 MHz where SCKMOD may be set at all,
 144 MHz to prove the refusal - which is what a program that writes flash
-on this family really looks like. Thirty-two verdicts in `z`, which
+on this family really looks like. Twenty-nine verdicts in `z` on the
+CH32V203C8T6 and twenty-four on the CH32V303CBT6, which
 spends not one cycle of the array, and nine letters by name: `w`, `v`,
 `q`, `u` and `x` each spend one or two erases of the medium's zone, `y`
 locks the engine with a wrong key and reboots, `t` and `s` spend one

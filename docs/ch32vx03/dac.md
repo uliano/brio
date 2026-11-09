@@ -394,7 +394,7 @@ A triangle of amplitude 1023 over 512, stepped by a timer:
 
 `test_vx03_dac` on the CH32V303CBT6, with the PLL on the HSI at 96 MHz
 so that the converter judging the pads is in specification (ADCCLK
-12 MHz) and nothing wired: **35 pass, 0 fail**, ten runs alike. The
+12 MHz) and nothing wired: **34 pass, 0 fail**, ten runs alike. The
 CH32V303VCT6 was not run with today's suite; the findings that name it
 were measured on it. The judge is ratiometric - the DAC's output and
 the ADC's count are both against the same supply, measured through
@@ -462,7 +462,12 @@ parts'.
   20 ms: the channel's own
   handler counted two laps and no fault, and 3738 to 3742 conversions of
   PA4 in those 20 ms found all eight levels, nine in ten of them (3401
-  to 3405) on a level of the table - the rest caught mid-step. DAC2 on
+  to 3405) on a level of the table. Of the rest, the first millisecond's
+  - some 190, before the first trigger - read DOR's reset zero, and the
+  others, about seven a step, fall between levels: more than the 4 us
+  settling of table 4-45 leaves at this conversion rate (three a step at
+  most), which is not explained (the suite prints the fraction and judges
+  the levels found). DAC2 on
   ITS OWN request, DMA2's channel 4 (DMAEN2 alone), the same: two laps,
   no fault, all eight levels on PA5, 3407 to 3411 of 3740 to 3743
   conversions on a level, in ten runs on the CH32V303CBT6 (3404 to 3410

@@ -278,11 +278,11 @@ if ((flags & brio::ResetFlag::independent_watchdog) != 0u) { ... }
 `test_vx03_watchdog` at 144 MHz (PCLK1 72 MHz), nothing wired: **16
 pass, 0 fail** in `z` on the CH32V203C8T6 and on the CH32V303CBT6, ten
 runs alike on each, the same verdicts on both. The three by-name
-letters, which reboot the board thirteen times between them, gave **4
-pass** in letter `w`, **8 pass** in letter `v` and **13 pass** in
-letter `p` (`p` ten times on each part) on the CH32V203C8T6 and the
-CH32V303VCT6; they were not run with today's suite, and neither was the
-CH32V303VCT6's `z`. Where one number is given below it holds for every
+letters, which reboot the board thirteen times between them, gave **8
+pass** in letter `v` and **12 pass** in letter `p`, ten times each on
+the CH32V203C8T6 and the CH32V303CBT6, and **4 pass** in letter `w`
+with an earlier build of the suite; neither `w` nor the CH32V303VCT6's
+`z` was run with today's suite. Where one number is given below it holds for every
 part that ran the letter.
 
 **The window watchdog's counter is frozen until it is armed.** With
@@ -294,8 +294,8 @@ millisecond later.
 from 0x7F to 0x50 (47 ticks) measured **2627 to 2628 us at /1 (2673 nominal),
 5346 and 5347 us at /2 (5347), 10694 us at /4 (10695) and 21389 us at
 /8 (21390)** - the refresh lands at any phase of the prescaler, so the
-fall is 46 to 47 whole ticks and the letter's three per cent covers
-both - and the
+fall is 46 to 47 whole ticks, and the letter's bound is those and the
+poll's turn, PCLK1 and the core's counter being one PLL's - and the
 early-wakeup flag came up **28671 us after a refresh where 63 ticks at
 /8 are 28672**.
 
@@ -306,7 +306,9 @@ block's reset line puts both back to 0x007F.
 
 **Its three resets, each with the flag at the next boot.** Left
 unrefreshed at /8 it reset the board **29 ms** after the last refresh,
-where the arithmetic says 29; a refresh BEFORE the window opened reset
+where the arithmetic says 29 and the letter allows 28 to 30 (the
+prescaler's first tick short, the tick count's millisecond either way);
+a refresh BEFORE the window opened reset
 it in **0 ms** - immediately, not after the counter's own fall; and with
 the early-wake-up interrupt enabled the handler ran **once** and the
 reset arrived at the same **29 ms**, the interrupt costing nothing.
@@ -336,9 +338,11 @@ its ten refreshes before that.
 arms each of the seven codes for the smallest reload that reaches 400 ms
 at the typical LSI, lets the update cross into the LSI's domain, and
 leaves it: every leg ended in IWDGRSTF alone, and the LSI each span
-implies agrees with the /32 leg's within that leg's window, derived in
-the letter from the tick's millisecond, one prescaled tick and half a
-per cent of the RC's wander between legs (1.2 % at /4, 2.9 % at /256).
+implies lies in the part's rated range - the verdict. Their agreement
+with the /32 leg is printed beside each leg's quantization (the tick's
+millisecond and one prescaled tick over its span, 0.7 to 0.8 % at /4, 2.4 %
+at /256), not judged: the RC's wander over the seconds between legs has
+no figure in the datasheets.
 On the CH32V203C8T6 the seven read **38.5 to 38.7 kHz** at /4 to /128
 (403 to 405 ms) and **39.0 to 39.1 kHz** at /256 (399 to 400 ms); on
 the CH32V303VCT6 **36.79 to 36.83 kHz** at /4 to /64 (424 ms) and

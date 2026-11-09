@@ -249,6 +249,8 @@ struct Ruler {
     static constexpr uint32_t hz() { return SysClock::hz; }
 };
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
+/// One period of the kernel tick in cycles of the suite's rate.
+constexpr uint32_t tick_period_cycles = SysClock::hz / P::ticks_per_second;
 
 /// STK's own counter as a stopwatch, for the spans the ruler cannot
 /// take: right after a Stop (the core back on the HSI, the timebase not
@@ -345,6 +347,18 @@ uint32_t place_alarm(uint32_t counts) {
     const uint32_t at = settled_count() + counts;
     return Rtc::alarm(at) ? at : 0u;
 }
+
+/// THE EARLIEST an alarm placed two seconds out (place_alarm(2 * tr_hz))
+/// can be seen, in milliseconds from a count read right after the
+/// placement: that read lands inside the alarm's own write window (186 us
+/// at most, letter a) - one count past the settled count at worst, never
+/// below it, a stale copy lagging three RTCCLK periods - and the event
+/// comes on the armed count or the one after it (letter d). So 2047 whole
+/// counts at least, read synchronized: 2047 x 1000 / 1024 = 1999 ms. How
+/// late it is seen holds a wake or a whole boot, the crystal's start
+/// among it, and no figure for that is written where this suite can cite
+/// it: the windows below judge the earliest and print the rest.
+constexpr uint32_t two_s_alarm_earliest_ms = ((2u * tr_hz - 1u) * 1000u) / tr_hz;
 
 // ===========================================================================
 // a - what the boot found, the mode pair, the two flags
@@ -479,10 +493,16 @@ void ta_found() {
         const uint32_t alarm_us = aw.elapsed() / cycles_per_us;
         print(serial, "  Rtc::alarm() takes ", alarm_us, " us to land, against a count of ",
               1'000'000u / tr_hz, " us", crlf);
+        // THE BOUND: alarm() waits for RTOFF before its window and again
+        // after it, and a write crosses into RTCCLK in three of its periods
+        // (ch32vx03/rtc.hpp, sync_spins) - 6 x 30.52 = 183.1 us at most -
+        // plus the stores, the polls' last turns and one kernel tick
+        // handler, under 3 us at 96 MHz: 186 us, a fifth of one 976 us count.
         bench.verdict("the alarm's write window is a fraction of ONE count of the ruler it "
-                      "is placed on, which is what makes the site's floor of four counts a "
-                      "margin and not a guess",
-                      wrote && alarm_us * 4u < 1'000'000u / tr_hz);
+                      "is placed on - 186 us at most, two crossings of three RTCCLK periods - "
+                      "which is what makes the site's floor of four counts a margin and not "
+                      "a guess",
+                      wrote && alarm_us <= 186u);
         Rtc::clear(rtc_alrf);
     }
 }
@@ -682,10 +702,16 @@ void tc_sleep() {
                   "master, and it is the transition that is counted, in the one verb every "
                   "engine and every task goes through",
                   quiet_before && loaded && with_dma == 1u);
-    bench.verdict("and idle() RETURNS AT ONCE over it - eight calls cost a handful of "
-                  "cycles each instead of the millisecond a tick-ended sleep costs, the "
-                  "loop spins, and the transfer ran on across them",
-                  dma_idle.cycles < 4000u && dma_idle.ticks <= 1u && left1 < left0);
+    // THE BOUND is the claim's own: a sleeping idle() returns at the next
+    // tick, so eight of them span seven ticks at least; eight that return
+    // at once span under one tick period (SysClock::hz /
+    // P::ticks_per_second cycles), with at most one tick landing inside.
+    // Their own cost - the handful of cycles each - is printed above.
+    bench.verdict("and idle() RETURNS AT ONCE over it - eight calls together cost less than "
+                  "the one tick period a single tick-ended sleep can cost, the loop spins, "
+                  "and the transfer ran on across them",
+                  dma_idle.cycles < tick_period_cycles && dma_idle.ticks <= 1u &&
+                      left1 < left0);
     bench.verdict("the block completed with its data moved - which is what a sleep taken "
                   "over it would have broken and not merely slowed",
                   done_us != 0u && left2 == 0u && moved == 0xA5u);
@@ -710,7 +736,7 @@ void tc_sleep() {
                   "and while it does the idle path does not sleep - which is what turns "
                   "the old rule 'a program with USB never idles' into a mechanism the "
                   "program does not have to keep",
-                  usb_quiet && with_usb == 1u && usb_idle.cycles < 4000u &&
+                  usb_quiet && with_usb == 1u && usb_idle.cycles < tick_period_cycles &&
                       usb_idle.ticks <= 1u && after_detach == 0u);
 }
 
@@ -877,10 +903,13 @@ void td_stop() {
                   "the RTC's alarm on line 17 - the path that needs no clock - brought the "
                   "core back, and the span the RTC counted is the one that was asked for",
                   main_run.ok && main_run.span >= main_run.counts * tr_div);
-    bench.verdict("and it lands LATE and never early: past the block's own lag the wake "
-                  "costs at most one more count of the ruler and a few of its periods, "
-                  "which is the finest this silicon can say with its core stopped",
-                  main_run.overshoot >= awake_lag && wake_cost < 2u * tr_div);
+    // Late and never early is judged; HOW late - the wake's own cost,
+    // printed above - is not: the time a Stop's wake takes is not among
+    // the figures this suite cites, so there is no bound to hold it to.
+    bench.verdict("and it lands LATE and never early: the overshoot past the alarm is at "
+                  "least the block's own lag measured awake, and what the wake adds is "
+                  "printed above",
+                  main_run.overshoot >= awake_lag);
     bench.verdict("WHAT COMES BACK IS NOT WHAT WENT IN: the core resumes on the HSI with "
                   "the PLL off, and the site's disarm() is what re-runs the clock task and "
                   "puts the program's own rate back",
@@ -889,10 +918,21 @@ void td_stop() {
                   "HCLK, which a Stop stops - so the plain site's honest restriction is "
                   "that a program with armed deadlines must not take one",
                   main_run.ticks <= 1u);
+    // THE BOUND: RSF returns at the first RTCCLK edge after the clear
+    // (6.2.3), at most 1/32768 s = 30.52 us. On top, counted in the
+    // release listing at the HSI's 8 MHz: the StkWatch's two reads and
+    // arithmetic, the driver's call and one poll turn (some twenty-five
+    // instructions and three peripheral loads), and at most one kernel
+    // tick handler (nineteen instructions and its entry) - under 80
+    // cycles, 10 us. The span is counted in HSI cycles and converted at
+    // the nominal 8 MHz, so the HSI's data-sheet tolerance (1.8 % on the
+    // CH32V303, the wider of the two) scales it: 40.52 x 1.018 = 41.2,
+    // whole microseconds 41. Non-zero: the path alone is over 1 us.
     bench.verdict("and the counter's first read after the wake is synchronized before it "
                   "is believed: the resync costs at most one RTCCLK period, which is what "
-                  "6.2.3 asks for and what the site pays unconditionally",
-                  main_run.sync_us != 0u && main_run.sync_us <= 100u);
+                  "6.2.3 asks for and what the site pays unconditionally - 41 us with the "
+                  "poll and the HSI's tolerance",
+                  main_run.sync_us != 0u && main_run.sync_us <= 41u);
 
     // THE TWO DEEP RUNGS ARE ONE MODE WITH TWO PRICES, and the only
     // thing this desk can measure of the price is the wake. Sixteen
@@ -1053,14 +1093,19 @@ void te_kernel() {
                   "the target really took, and the loop's own idle path is what stopped "
                   "the machine",
                   Probe::votes >= 1u && Probe::asked >= 1u && Probe::blips == 1u);
+    // NEVER EARLY is the kernel's time contract and is judged; how late
+    // is printed above and not judged: it holds the Stop's wake and the
+    // clock task's re-run (the crystal's start, the PLL's lock), and no
+    // figure for either is written where this suite can cite it. The
+    // pump's own guard, three seconds, is what bounds it.
     bench.verdict("THE DEADLINE WAS MET ON THE CLOCK: the RTC's alarm was placed where the "
                   "kernel's nearest deadline was and its counter was read as the witness, "
-                  "so a Stop no longer costs the program the time it slept",
-                  wall_ms >= 500u && wall_ms < 700u);
+                  "so the event matured no earlier than 500 ms of wall time",
+                  wall_ms >= 500u);
     bench.verdict("and it was met in KERNEL time too, late and never early - the resync "
                   "advanced the tick by the frozen span, less what the counter itself "
                   "served",
-                  kernel_ms >= 500u && kernel_ms < 700u && advance != 0u);
+                  kernel_ms >= 500u && advance != 0u);
     bench.verdict("the first event after the wake ended the round: nothing polled, the "
                   "manager disarmed on its own and the clock is the program's again",
                   Probe::wakes >= 1u && Timed::armed() == SleepDepth::none &&
@@ -1231,16 +1276,19 @@ void th_edge() {
                   "the backstop, and the letter says which",
                   claimed && r.ok);
     if (edges != 0u) {
-        bench.verdict("A PAD'S EXTI LINE ENDS A STOP, and long before the backstop: the "
+        // Before the backstop: the alarm cannot end a Stop short of the
+        // span it was asked for (letter d's first verdict), so a span under
+        // it was ended by something else.
+        bench.verdict("A PAD'S EXTI LINE ENDS A STOP, and before the backstop: the "
                       "edge detection is asynchronous and needs no clock, which is what "
                       "makes a pin a wake source with the whole tree stopped",
-                      fine_ms(r.span) < 2900u);
+                      r.span < 3u * tr_hz * tr_div);
     } else {
         bench.skip("no edge arrived: nothing outside this board is driving PA0, so the pad's "
                    "half of this letter is not measured and the backstop is");
         bench.verdict("with no instrument on the pad the RTC's backstop is what ended the "
-                      "Stop, at the three seconds it was asked for",
-                      alarms != 0u && fine_ms(r.span) >= 2900u);
+                      "Stop, no sooner than the three seconds it was asked for",
+                      alarms != 0u && r.span >= 3u * tr_hz * tr_div);
     }
 
     // The WKUP pad: the same pad under EWUP. The line stays armed
@@ -1340,6 +1388,10 @@ void tw_enter(uint8_t leg) {
     Ticker::resume();
     token.returned = 1;
     token.turns = turns;
+    // After a wake the bus reads stale values until an RTCCLK edge
+    // (ch32vx03/rtc.hpp): synchronized first, or the count is the one
+    // from before the Standby.
+    (void)Rtc::synchronize();
     token.rtc_at_wake = Rtc::count();
 }
 
@@ -1362,7 +1414,7 @@ void tw_judge(uint8_t leg, bool returned, uint32_t flags, uint32_t csr) {
                       "survives a Standby wake where every other bit of the block's "
                       "registers does not",
                       (csr & pwr_sbf) != 0u);
-        if (leg == 3u && ms < 1900u) {
+        if (leg == 3u && ms < two_s_alarm_earliest_ms) {
             bench.verdict("A PAD'S LINE ARMED AS AN EVENT ENDS A STANDBY TOO - an exit "
                           "2.3.4 does not list: the machine came back on an edge, before "
                           "the documented backstop, and it came back the same way, through "
@@ -1372,16 +1424,17 @@ void tw_judge(uint8_t leg, bool returned, uint32_t flags, uint32_t csr) {
         } else if (leg == 3u) {
             bench.skip("no edge reached the pad while the machine was stopped: the question "
                        "this leg asks is not measured, the documented backstop is");
-            bench.verdict("the documented alarm ended the Standby at the two seconds it "
-                          "was placed and raised WUF, with nothing outside the board "
-                          "driving the pad",
-                          ms <= 2600u && (csr & pwr_wuf) != 0u);
+            bench.verdict("the documented alarm ended the Standby, no sooner than the two "
+                          "seconds it was placed (the branch), and raised WUF, with nothing "
+                          "outside the board driving the pad",
+                          (csr & pwr_wuf) != 0u);
         } else {
-            bench.verdict("the RTC's alarm is a documented Standby exit and it arrived at "
-                          "the two seconds it was placed - the backup domain counts through "
-                          "a mode in which nothing else does - AND IT RAISES WUF, which the "
-                          "same alarm served awake does not: the flag is the wake's",
-                          ms >= 1900u && ms <= 2600u && (csr & pwr_wuf) != 0u);
+            bench.verdict("the RTC's alarm is a documented Standby exit and it arrived no "
+                          "sooner than the two seconds it was placed - the backup domain "
+                          "counts through a mode in which nothing else does - AND IT RAISES "
+                          "WUF, which the same alarm served awake does not: the flag is the "
+                          "wake's",
+                          ms >= two_s_alarm_earliest_ms && (csr & pwr_wuf) != 0u);
         }
         bench.verdict("the SRAM the retention bit covers came through it: the token this "
                       "letter left in .noinit is the pattern it wrote",
@@ -1409,8 +1462,8 @@ void tw_judge(uint8_t leg, bool returned, uint32_t flags, uint32_t csr) {
         bench.verdict("and it came back on the HSI like a Stop, with the clock task put "
                       "back by the same verb",
                       Rcc::sysclk_status() == SysClock::sysclk_source);
-        bench.verdict("the alarm arrived at the two seconds it was placed",
-                      ms >= 1900u && ms <= 2600u);
+        bench.verdict("the alarm arrived no sooner than the two seconds it was placed",
+                      ms >= two_s_alarm_earliest_ms);
     }
 }
 
@@ -1522,16 +1575,18 @@ void tg_resume() {
                   "no way to read it",
                   (boot_flags & ResetFlag::independent_watchdog) != 0u);
     if (token.returned == 0u) {
-        bench.verdict("AND IT COUNTED THROUGH THE STOP: the reset arrived while the core "
-                      "was stopped, before the alarm that would have ended the sleep - the "
-                      "LSI runs in a Stop and this watchdog rides it, so a program that "
-                      "sleeps longer than its time-out is reset in its sleep",
-                      to_reset < 1900u);
+        // Reaching this branch is the observation: printed, not scored.
+        // to_reset is read at the next boot and holds the boot itself,
+        // which no written figure bounds.
+        print(serial, "  AND IT COUNTED THROUGH THE STOP: the reset arrived while the core was "
+              "stopped, before the alarm that would have ended the sleep - the LSI runs in a "
+              "Stop and this watchdog rides it, so a program that sleeps longer than its "
+              "time-out is reset in its sleep", crlf);
     } else {
         bench.verdict("BUT NOT THROUGH THE STOP: the sleep ran its full two seconds and "
                       "the reset came only once the core was awake again, so this "
                       "watchdog does not count while the core is stopped",
-                      to_wake >= 1900u);
+                      to_wake >= two_s_alarm_earliest_ms);
     }
     bench.end_letter();
     token.letter = '\0';
@@ -2088,9 +2143,9 @@ void tr_resume() {
                           t.kept[2] == t.words[2] && (boot_flags & ResetFlag::software) != 0u);
     } else {
         print(serial, "  ", ms, " ms after the alarm was placed", crlf);
-        bench.verdict("the alarm ended the Standby through a reset, at the two seconds it was "
-                      "placed, with SBF and WUF standing at the boot",
-                      ms >= 1900u && ms <= 2600u && (boot_csr & pwr_sbf) != 0u &&
+        bench.verdict("the alarm ended the Standby through a reset, no sooner than the two "
+                      "seconds it was placed, with SBF and WUF standing at the boot",
+                      ms >= two_s_alarm_earliest_ms && (boot_csr & pwr_sbf) != 0u &&
                           (boot_csr & pwr_wuf) != 0u);
     }
     if (!l.control) {
@@ -2172,9 +2227,14 @@ void tx_resume() {
     bench.verdict("the Standby ended - the board came back through its reset vector with SBF "
                   "standing",
                   standby);
-    bench.verdict("what ended it, measured: the independent watchdog's reset at about 200 ms, or "
-                  "the alarm at two seconds (the numbers above say which)",
-                  (iwdg_reset && ms < 1500u) || (woke && ms >= 1900u && ms <= 2600u));
+    // Which one is told by the flags; how soon after the placement the
+    // boot read the count is printed above and judged only where it is
+    // derived - the alarm's earliest. The watchdog's own time-out (250 x
+    // 32 of the LSI's 25 to 60 kHz, 133 to 320 ms) reaches this read
+    // through a boot no written figure bounds.
+    bench.verdict("what ended it, measured: the independent watchdog's reset, or the alarm "
+                  "no sooner than its two seconds (the numbers above say which)",
+                  iwdg_reset || (woke && ms >= two_s_alarm_earliest_ms));
     bench.verdict("and the reset that ended it left no watchdog running into this boot",
                   !iwdg_at_boot);
     (void)Bkp::data(r_bkp_magic, 0);

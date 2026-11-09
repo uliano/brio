@@ -1054,11 +1054,16 @@ other's `spi_peer` - in the one after it.
   inside an engined block - the difference of a 2048- and a 256-frame
   block on the engines, neither buffer named, the best of three each - is
   timed on the
-  core's counter, which counts HCLK, in thousandths of its SCK periods at
-  the instance's own bus over the division. SPI1 read 1000 at /4, /16 and
-  /64 and in 16-bit frames at /4, SPI2 1000 at /2 and /16 (999 in some
-  of twenty runs): the clock does not pause between frames while the
-  engine refills (20.2.2), and each bus divides as the clock tree says.
+  core's counter, which counts HCLK, against its SCK periods at the
+  instance's own bus over the division. The counter and SCK share HCLK, so
+  no clock error enters; the suite judges the difference within one SCK
+  period (where the first edge falls on the bus's divider) and two turns
+  of the wait's poll (where the end is seen), 22 cycles a turn by the
+  release listing, on readings no tick and no console entry lengthened.
+  SPI1 read 1000 thousandths at /4, /16 and /64 and in 16-bit frames at
+  /4, SPI2 1000 at /2 and /16 (999 in some of twenty runs): the clock
+  does not pause between frames while the engine refills (20.2.2), and
+  each bus divides as the clock tree says.
   The polled path is never faster than its wire at the rate asked - SPI1
   on its second column, 64 frames: 1220 cycles at /2 against the wire's
   1024, 2247 to 2273 at /4 against 2048, 131266 at /256 against 131072 - nor is letter c's polled ladder on the
@@ -1193,8 +1198,10 @@ other's `spi_peer` - in the one after it.
   spins (16 frames of 8 bits at /64 of PB2, twice over, and 256): 11 and 10
   cycles a spin of a loop of five
   instructions, and 12 and 9 in other layouts of the same loop (the STATR load, the bit test, the budget's decrement and
-  test, the branch - poll_write's in the release listing), so the bound
-  the suite judges, 5 to 20 cycles a spin, holds on both. The next request
+  test, the branch - poll_write's in the release listing). The suite
+  judges the floor, five cycles a spin - the budget spent whole - and
+  prints the rest: what the APB load adds on PB2 no written figure
+  states. The next request
   on the closed gate stalled too, on its own budget; with the gate open the
   same request ran `spi_ok`. Ten runs a part.
 - **A FAILED REQUEST ENDS WITH THE D/C AND THE SELECT HIGH** (letter f, both
@@ -1257,6 +1264,10 @@ other's `spi_peer` - in the one after it.
   in order by the CRC unit's own sum (TCRCR 0x1E, the bitwise loop's),
   back to back: 32895 to 32897 cycles on the CH32V203C8T6 and 32887 to
   32902 on the CH32V303VCT6 against the frames' 32768, thirteen runs a part.
+  The suite judges the stream against a run of 8 frames: the 56 frames
+  more take their 56 frames' time within one SCK period and two turns of
+  the wait's poll (114 cycles, derived beside the verdict), on runs no
+  tick and no console entry lengthened.
   `txe_interrupt()` and the resource's `isr()` reporting TXE under its
   enable are what it exercises; the host engine arms no interrupt of the
   block (the class comment), this being the shape of a transmit-only
@@ -1391,14 +1402,17 @@ declines by name.
   and costs nothing on the wire; the block was exact both ways at /4, /8
   and /16 and at /2 with HSRXEN, and one bit late at /2 without it, in
   both widths.
-- **THE LINKS RUN AT THE RATE ASKED**: SPI2 and SPI3 both divide PB1, so
+- **THE LINKS NEVER BEAT THEIR WIRE**: SPI2 and SPI3 both divide PB1, so
   the link between them cannot tell a wrong bus; letters h and i time the
   host's run on the core's counter in thousandths of the wire at PB1 over
   the division: letter h's blocks of 256 frames 1005 at /4 and 1011
   at /2 with HSRXEN; letter i's rows 1011 at /2 in both widths, 1005 at
   /4, 1002 at /8 and 1001 at /16 - the 80 to 90 cycles between the enable
   and the receive channel's completion inside every block, the wire's
-  own time at every row.
+  own time at every row. The suite judges that no block is shorter than
+  its wire (the span holds every SCK period, on a shared clock) and
+  prints the excess, the block's fixed path, which no written figure
+  bounds.
 - **The I2S face**, I2S2 against I2S3 on WS, CK and SD: every field of
   I2S_CFGR and I2SPR written and read back on both instances; Philips,
   MSB- and LSB-justified and PCM in both frames carrying 96 words word for
@@ -1493,8 +1507,9 @@ direction was not run with today's suite).
   at both ends, and a polynomial mismatch (0x07 here, 0x31 there) raising
   CRCERR at BOTH ends; and this end's WRITE shape - no in buffer, the
   transmit-only loop writing ahead - heard exact by a far client that only listens, polled
-  and engined, both widths, to /2: the transmit path holds at 36 MHz
-  where the answer path does not.
+  and engined, both widths, judged at /16 and /4 where the far client's
+  hearing is, and printed at /2, where every run was heard exact as well:
+  the transmit path holds at 36 MHz where the answer path does not.
 - **THE ROLES INVERT**: each chip's `SpiClient::exchange()` run under the
   far chip's host_burst answers one frame ahead, both ends agreeing frame
   for frame, in 8- and 16-bit frames, and hands its MISO back; each
@@ -1555,9 +1570,12 @@ direction was not run with today's suite).
   an engined write of 2000 frames at /256 (57 ms) under a TIMED SpiBus (a
   per-bus timeout of 120 ms), this host's NSS pad made the multi-host
   input under the engine, and the far chip's ss_pulse taking the select
-  low 30 ms after its ack: MODF 24 to 25 ms into the transaction - SPE
+  low 30 ms after its ack: MODF 24 to 25 ms into the transaction (the
+  suite's derived window 22 to 27: the far chip's 30 ms less this end's
+  settle of 5 to 6 ms, each stamp a whole millisecond) - SPE
   and MSTR gone, so no frame came back for the receive channel to count
-  and no completion was posted - the arbiter's answer `spi_timeout` exactly 120 ms after the
+  and no completion was posted - the arbiter's answer `spi_timeout` exactly 120 ms (judged 120
+  to 122: one tick each side of the time event) after the
   post, and after `recover()` the block a software-selected host again,
   enabled, MODF down (the reset pulse is the recovery's), the same
   arbiter carrying the next transaction `spi_ok` and the command channel

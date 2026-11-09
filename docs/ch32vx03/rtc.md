@@ -213,7 +213,7 @@ whole thing again while the two high reads disagree. That is the
 driver's own care and not a rule of the chapter.
 
 Measured at 32768 ticks a second, over four million reads that included
-a roll-over of the low half: the retry never fired and no read was ever
+two roll-overs of the low half: the retry never fired and no read was ever
 torn - the worst step in either direction is a few ticks and never the
 65536 a half-read counter would give. But the count does step backwards
 by up to three ticks now and then (some 700 reads in four million),
@@ -436,8 +436,8 @@ CH32V303CBT6 with each board's two crystals and no wire. THE CORE'S COUNTER IS T
 system clock is rooted in the 8 MHz crystal (96 MHz through the PLL):
 a ruler half a per cent off would swamp a measurement of a 32.768 kHz
 oscillator, and the clock chapter puts a crystal-rooted rate inside a
-twentieth of a per mille. In `z`: **30 pass, 0 fail** on the
-CH32V203C8T6 and **33 pass, 0 fail** on the CH32V303CBT6, whose second
+twentieth of a per mille. In `z`: **29 pass, 0 fail** on the
+CH32V203C8T6 and **32 pass, 0 fail** on the CH32V303CBT6, whose second
 block of data registers is one more letter, ten runs alike on each.
 Three letters run by name, two of which wipe the domain and one of
 which reboots the board; they were measured on the CH32V203C8T6 and the
@@ -467,7 +467,7 @@ CH32V203C8T6's unless a CH32V303 part is named.
   registers as written. RTC_DIV moves and stays inside the reload; the
   counter advanced five counts in sixty milliseconds at sixty-four
   ticks a second. Hammered at 32768 ticks a second - 3.76 million reads
-  in four seconds, across a roll-over of the low half - the driver's
+  in four seconds, across two roll-overs of the low half - the driver's
   re-read fired at most once in a run and nothing was ever torn, while
   the count stepped BACK 629 to 679 times, the worst by three ticks, and
   forward by at most four. On the CH32V303CBT6, 4.08 million reads, the

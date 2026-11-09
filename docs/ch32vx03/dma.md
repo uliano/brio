@@ -1079,9 +1079,8 @@ named.
   whole block across ten, on DMA1 and on DMA2's first channel alike,
   ten runs of ten. Across one sleep that die starves like the others;
   what moves the rest across the next nine - wakes far longer than the
-  CH32V203C8T6's, or a sleep not entered - is not measured (the
-  suite's print calls it a channel moving in Sleep, which the one-sleep
-  figure does not support).
+  CH32V203C8T6's, or a sleep not entered - is not measured, and the
+  suite's print says so beside the two figures.
 - **All the vectors are the channels' own**: eight on the CH32V203C8T6,
   the eighth on that device class's tail, and on both CH32V303 parts
   DMA1's seven and DMA2's eleven - eighteen blocks, eighteen bodies, each

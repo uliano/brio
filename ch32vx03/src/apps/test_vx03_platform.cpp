@@ -352,9 +352,15 @@ void tb_critical() {
     const uint32_t through_mask = Ticker::ticks() - t0;
     print(serial, "  5 ms with interrupts masked advanced the tick by ",
           through_mask, " ms, the tick in within ", settle, " cycles of the unmask", crlf);
+    // THE COUNT, derived: the 5 ms spans five compares, and the STK
+    // interrupt is ONE pending bit, so the unmask delivers one tick; one
+    // more if a compare fell in the few instructions between t0's read and
+    // the mask, and one more if the next compare falls in the few between
+    // that delivery and the read above - 1 to 3, never 5.
     bench.verdict("a masked window LOSES ticks (the STK interrupt is a "
-                  "pending bit: one tick is delivered, the rest coalesce)",
-                  through_mask >= 1u && through_mask <= 5u);
+                  "pending bit: one tick is delivered, the rest coalesce): 1, or up to "
+                  "3 with a compare in the instructions at either end",
+                  through_mask >= 1u && through_mask <= 3u);
 
     // idle(): unmask, then a WFE on this core. Any enabled interrupt
     // wakes it, so the console must be silent first or the USART's own
@@ -376,9 +382,13 @@ void tb_critical() {
     print(serial, "  with the console silent, ", calls,
           " idle() call(s) covered the ", idle_cycles / cycles_per_us(),
           " us to the next tick", crlf);
+    // At most two calls, derived: the event latch is one bit, so one call
+    // can return at once on a latch the console's last interrupt left
+    // (taken outside an idle(), qingke/platform.hpp), and the next sleeps
+    // until the tick - the only interrupt enabled with the console silent.
     bench.verdict("idle() sleeps and the tick is what brings it back, inside "
-                  "one tick period",
-                  calls >= 1u && calls < 20u);
+                  "one tick period, in at most two calls (one on a standing latch)",
+                  calls >= 1u && calls <= 2u);
     bench.verdict("and it comes back with interrupts enabled",
                   P::interrupts_enabled());
 }
@@ -408,10 +418,12 @@ void tc_ticker() {
     Ticker::now(stamp);
     print(serial, "  ticks=", ticks, " millis=", ms, " secs=", secs,
           " now=", stamp, crlf);
+    // The four reads above are consecutive calls, microseconds apart in
+    // all: at most one tick edge falls among them.
     bench.verdict("millis() is ticks() at 1000 Hz (no correction, no drift)",
-                  ms >= ticks && ms - ticks <= 2u);
+                  ms >= ticks && ms - ticks <= 1u);
     bench.verdict("secs() is the whole-second part of the same counter",
-                  secs == ticks / 1000u || secs == (ticks + 2u) / 1000u);
+                  secs == ticks / 1000u || secs == (ticks + 1u) / 1000u);
     bench.verdict("now() agrees with both counters",
                   stamp.seconds == secs || stamp.seconds == secs + 1u);
 
@@ -450,6 +462,18 @@ void tc_ticker() {
 // ---------------------------------------------------------------------------
 // d - delay_us
 // ---------------------------------------------------------------------------
+// THE LATE SIDE IS PRINTED, THE EARLY SIDE JUDGED. delay_us() counts the
+// cycles asked from its first counter read and stops at the first read
+// that reaches them (qingke/delay.hpp), so it is never early - that is
+// judged, exactly. How late it is, the release listing counts in
+// instructions: 14 between the caller's read and delay_us's first one
+// (the call, the STK checks, the multiply), 8 between its last read and
+// the caller's (the turn's tail, the return), and up to one turn of the
+// spin, 7 - two more in the turn or the tail that folds the reload, at
+// most once in a wait: 31 at most - and a tick landing in that last turn
+// or outside the counted span adds its service. No written figure gives
+// this core's cycles per instruction, so the overshoot is printed in
+// cycles beside that count.
 void td_delay() {
     // 500 us twenty times is 10 ms: at least ten ticks, never fewer.
     const uint32_t t0 = Ticker::ticks();
@@ -460,30 +484,29 @@ void td_delay() {
     const uint32_t took = Ticker::ticks() - t0;
     print(serial, "  20 x delay_us(500) took ", took, " ticks", crlf);
     bench.verdict("every 500 us wait was served", served);
-    bench.verdict("twenty of them are at least 10 ms and no more than 12",
-                  took >= 10u && took <= 12u);
+    bench.verdict("twenty of them are at least 10 ms (the tick count's late side printed)",
+                  took >= 10u);
 
     const uint32_t asked_short = 100u * cycles_per_us();
     const uint32_t c0 = cycles_now();
     const bool short_ok = delay_us(clock, 100);
     const uint32_t short_spent = cycles_between(c0, cycles_now());
     print(serial, "  delay_us(100) spent ", short_spent, " cycles (",
-          asked_short, " asked)", crlf);
-    bench.verdict("100 us is at least what it asked for and under 4 per cent "
-                  "over",
-                  short_ok && short_spent >= asked_short &&
-                      short_spent < asked_short + asked_short / 25u);
+          asked_short, " asked): ", short_spent - asked_short,
+          " late (31 instructions at most, the listing)", crlf);
+    bench.verdict("100 us is at least what it asked for, never early",
+                  short_ok && short_spent >= asked_short);
 
     const uint32_t asked_long = 900u * cycles_per_us();
     const uint32_t c1 = cycles_now();
     const bool long_ok = delay_us(clock, 900);
     const uint32_t long_spent = cycles_between(c1, cycles_now());
     print(serial, "  delay_us(900) spent ", long_spent, " cycles (",
-          asked_long, " asked)", crlf);
+          asked_long, " asked): ", long_spent - asked_long,
+          " late (31 instructions at most, the listing)", crlf);
     bench.verdict("900 us - the longest wait that still fits a tick period - "
-                  "is at least what it asked for and under 1 per cent over",
-                  long_ok && long_spent >= asked_long &&
-                      long_spent < asked_long + asked_long / 100u);
+                  "is at least what it asked for, never early",
+                  long_ok && long_spent >= asked_long);
 
     bench.verdict("a wait of one tick period (1000 us) is refused",
                   !delay_us(clock, 1000));
@@ -577,10 +600,11 @@ void te_latency() {
           best_trip, "..", worst_trip, " cycles", crlf);
     bench.verdict("every raise of the software interrupt was taken",
                   seen == rounds);
-    bench.verdict("the handler was entered within 100 cycles of the raise",
-                  best_entry <= 100u);
-    bench.verdict("and the whole trip is under 300 cycles",
-                  best_trip < 300u);
+    // The entry and the trip above are PRINTED, not judged: the entry is the
+    // PFIC's and the hardware prologue's, for which none of the documents
+    // of record (docs/ch32vx03/vendor/README.md) states a cycle count, and a
+    // figure measured on these dies is not a bound for the family
+    // (docs/ch32vx03/platform.md tabulates them).
 }
 
 // ---------------------------------------------------------------------------
@@ -1087,8 +1111,10 @@ void tk_fpu_storm() {
               " interrupts, one every ", period, " cycles (", spent_ms, " ms)", crlf);
         print(serial, "  the handler found its own twenty-local sum wrong ", storm.bad,
               " times", crlf);
+        // `still_on` is the whole loop; the count is printed above, and a
+        // storm that never fired is all a verdict on it can tell.
         bench.verdict("the storm ran for the whole loop and ended with it",
-                      still_on && hits > 1000u);
+                      still_on && hits != 0u);
         bench.verdict("every one of the twenty accumulators is exact after the loop",
                       rotted == 0u);
         bench.verdict("and every handler computed its own sum exactly", storm.bad == 0u);
@@ -1271,16 +1297,23 @@ void tm_bus_in_sleep() {
     SleepDma::stop();
     const uint32_t moved_awake = 65535u - awake_left;
 
-    // The mechanism: over a working master idle() returns at once.
+    // The mechanism: over a working master idle() returns at once. ONCE
+    // IS DERIVED: the tick is the only interrupt enabled, so an idle() that
+    // slept would come back no earlier than the next compare, period - c0
+    // cycles after c0 (c0 is the counter's phase); a fresh tick first puts
+    // that most of a period away.
     (void)SleepDma::prepare(sleep_block());
     console_drain();
+    const bool edge_seen = fresh_tick();
     uint32_t returned_in = 0;
+    uint32_t to_compare = 0;
     uint8_t masters = 0;
     {
         P::CriticalSection cs;
         (void)SleepDma::trigger();
         masters = P::bus_masters_active();
         const uint32_t c0 = cycles_now();
+        to_compare = stk()->CMPLR + 1u - c0;
         P::idle();
         returned_in = cycles_between(c0, cycles_now());
     }
@@ -1354,11 +1387,17 @@ void tm_bus_in_sleep() {
     print(serial, "  FINDING: in Sleep the DMA ", moves ? "KEEPS MOVING" : "STALLS",
           " - ", moved_asleep, " words asleep against ", moved_awake, " awake", crlf);
     bench.verdict("the block ran awake (the channel and its count work)",
-                  moved_awake > 1000u);
-    bench.verdict("over a working master the platform's idle() returns at once",
-                  masters == 1u && returned_in < per_ms / 10u);
+                  moved_awake != 0u);
+    bench.verdict("over a working master the platform's idle() returns at once: before the "
+                  "next compare, the only wake, could have woken it",
+                  edge_seen && masters == 1u && returned_in < to_compare);
+    // Slept, derived without a figure: the loop leaves only when the
+    // one-shot tick has been served, two calls at most (one on a standing
+    // latch, the event latch being one bit) - and two calls that returned at
+    // once take tens of cycles, against the compare `span` away. The span
+    // slept is printed above.
     bench.verdict("with the count set aside idle() slept until the one-shot wake",
-                  slept >= span / 2u && woke_ticks == 1u && calls <= 2u);
+                  woke_ticks == 1u && calls <= 2u);
 }
 
 // ---------------------------------------------------------------------------

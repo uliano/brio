@@ -1297,6 +1297,13 @@ void tg_mask() {
         // there is F; 215 (221) with a fifth. Without the hardware prologue
         // the software interrupt's scratch saves (6) and the two
         // transitions' 10 more: 195 (200), 234 (240).
+        // No second verdict on the spread of the quiet runs, as letter c has:
+        // c's spread is two cycles per taken transfer of a path whose traps
+        // are the same in every event, and this path crosses a trap's entry
+        // and its MRET, whose own timing wanders on the CH32V303's V4F (the
+        // platform suite's round trip, 53 to 66 cycles there against 53 every
+        // round on the CH32V203) by an amount no written source states. The
+        // least and the most are printed; the bound above judges the most.
         constexpr uint32_t section_bound =
             hpe_build ? (fpu_part ? 221u : 215u) : (fpu_part ? 240u : 234u);
         bench.verdict("the section's end to the receiver's first statement under its bound "

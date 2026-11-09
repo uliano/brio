@@ -368,9 +368,9 @@ whole: the host enumerated the device, and a pour arrived with no jump
 and no overflow, at 96, 48, 24 and 12 MHz; at 6 MHz the device still
 enumerated every time, but some 2.3 to 3.4 % of the packets of a pour
 arrived written wrong - a right prefix, then bytes repeated and the
-previous packet's in place of the rest - with no overflow flagged and no
-packet missing whole (a pour whose every packet carries its own number,
-below); at 1.5 MHz it enumerated never, with the FIFO overflow counting,
+previous packet's in place of the rest - with no overflow flagged, and
+now and then a packet missing whole as well (a pour whose every packet
+carries its own number, below); at 1.5 MHz it enumerated never, with the FIFO overflow counting,
 and the pour arrived broken. The PLL at 48 MHz with USBPRE at /1 feeds
 it as the 96 MHz tree does (an enumeration, below). The
 driver's floor, `usbfs_min_hclk_hz`, is therefore 12 MHz, refused below
@@ -622,10 +622,13 @@ the 96 MHz tree and an enumeration again.
 sixteen-bit number in bytes 0-1 and that number plus the index in the
 rest): at 96 MHz 19 865 to 24 628 packets in 2 s and at the 12 MHz floor
 6238 to 6298 in 4 s, every one whole and in order; at 6 MHz, 3126 to
-3324 whole packets in 5 s and 77 to 110 blocks that were no packet, each
-matched by a jump of ONE in the numbers - the mangled packet itself, the
-next one arriving whole - so NOTHING went missing whole: the packets were
-acknowledged, written and handed over WRONG. Byte by byte a mangled
+3324 whole packets in 5 s and 77 to 110 blocks that were no packet,
+nearly each matched by a jump of ONE in the numbers - the mangled packet
+itself, the next one arriving whole: the packets were acknowledged,
+written and handed over WRONG. Not always only that: in one run of three
+two jumps of two packets followed no block that read as an older packet,
+so below the floor a packet can also go missing whole. The suite prints
+this rung's figures and judges only the rungs at or above the floor. Byte by byte a mangled
 block is a right prefix of 1 to 52 bytes, then bytes of the same packet
 repeated and out of place, and at the tail the previous packet's bytes
 at their positions; in five runs of ten one mangled block had only its

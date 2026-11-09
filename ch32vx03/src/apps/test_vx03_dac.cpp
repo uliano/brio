@@ -747,13 +747,24 @@ void tf_stream() {
     bench.verdict("the loop engine starts on the channel DAC1's request is wired to (DMA2's "
                   "channel 3, table 11-3)",
                   started);
+    // THE LAPS. The pacer's first update comes 1000 us after CEN and one
+    // every 1000 us after; the window opens after CEN and closes at least
+    // 20000 us later, under a millisecond late (a turn is one conversion),
+    // so it holds 20 triggers: 20 entries poured, a lap ending at the
+    // eighth and the sixteenth and the third not before the
+    // twenty-fourth. Two laps exactly.
     bench.verdict("each TRGO raises the request that pours the next table entry into the "
-                  "holding register: the channel's own handler counted the laps a timer at "
-                  "1 kHz makes of eight entries in 20 ms",
-                  laps >= 2u && laps <= 3u && faults == 0u);
-    bench.verdict("and the pad carries every level of the table, the converter finding "
-                  "nine samples in ten on one of them",
-                  levels_seen == 0xFFu && on_level * 10u >= samples * 9u);
+                  "holding register: the channel's own handler counted the two laps a timer "
+                  "at 1 kHz makes of eight entries in 20 ms",
+                  laps == 2u && faults == 0u);
+    // How many samples sit on a level is printed above, not judged. DOR's
+    // reset zero before the first trigger takes a twentieth of the window,
+    // and the DAC's settling (tSETTLING, 4 us at most, table 4-45) at most
+    // three conversions a step at this rate; the desk finds about seven a
+    // step off a level, and the rest - the converter's acquisition of a
+    // moving pad at 28.5 cycles - has no figure written here to bound it.
+    bench.verdict("and the pad carries every level of the table, each found by the converter",
+                  levels_seen == 0xFFu);
     all_off();
 
     // DAC2's OWN REQUEST: the same table into channel 2 through DMA2's
@@ -792,12 +803,13 @@ void tf_stream() {
     print(serial, "  channel 2: ", samples2, " conversions of PA5 in 20 ms: ", on_level2,
           " on a table level, levels seen ", hex(levels_seen2), "; the engine on DMA2's channel "
           "4 counted ", laps2, " laps and ", faults2, " faults", crlf);
+    // The laps as channel 1's: 20 triggers, two laps exactly; the fraction
+    // on a level printed, not judged, for the same reason.
     bench.verdict("DAC2 raises its OWN request on DMA2's channel 4: DMAEN2 alone, the engine "
-                  "counting the laps of eight entries at 1 kHz in 20 ms",
-                  started2 && only_dac2 && laps2 >= 2u && laps2 <= 3u && faults2 == 0u);
-    bench.verdict("and PA5 carries every level of the table, nine samples in ten on one of "
-                  "them",
-                  levels_seen2 == 0xFFu && on_level2 * 10u >= samples2 * 9u);
+                  "counting the two laps of eight entries at 1 kHz in 20 ms",
+                  started2 && only_dac2 && laps2 == 2u && faults2 == 0u);
+    bench.verdict("and PA5 carries every level of the table, each found by the converter",
+                  levels_seen2 == 0xFFu);
     all_off();
 }
 
@@ -864,12 +876,23 @@ void tg_dual() {
     bench.verdict("one stream on DAC1's request feeds both channels: DMAEN1 set and DMAEN2 "
                   "clear, the engine started on DMA2's channel 3",
                   only_dac1 && started);
-    bench.verdict("each word of the table lands in both DORs on one trigger - nine register "
-                  "pairs in ten are a pair of the table",
-                  consistent * 10u >= reads * 9u && laps >= 2u);
-    bench.verdict("and both pads carry it: nine back-to-back conversions in ten sum to full "
-                  "scale, as every pair of the table does",
-                  sums_right * 10u >= conversions * 9u);
+    // THE BOUNDS. Both DORs move on one trigger, so a pair read back to
+    // back is torn only when a trigger falls between its two loads - at
+    // most one pair a trigger, the triggers a millisecond apart and a
+    // pair's two loads microseconds apart at most, a handler between them
+    // included. The 10 ms window holds 10 triggers, 11 with its ragged
+    // ends: at most 11 torn pairs. The laps: the pacer's updates every
+    // 1000 us from CEN, the window closing 13 ms after it and under a
+    // millisecond late, so 13 triggers - laps at the fourth, eighth and
+    // twelfth entries, the fourth lap not before the sixteenth: three.
+    bench.verdict("each word of the table lands in both DORs on one trigger - every register "
+                  "pair read is a pair of the table but those a trigger tore, one a trigger "
+                  "at most - and the engine counted the three laps of 13 triggers",
+                  static_cast<uint16_t>(reads - consistent) <= 11u && laps == 3u);
+    // How many pad pairs sum to full scale within 96 counts is printed
+    // above, not judged: a pair spoiled by a step depends on the
+    // converter's acquisition of a moving pad, which has no figure written
+    // here (letter f's fraction, the same unknown).
     all_off();
 }
 

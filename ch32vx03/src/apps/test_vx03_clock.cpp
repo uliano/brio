@@ -423,13 +423,20 @@ RungReading rung_by_rtc() {
 /// lag rtc.hpp measured), so each end can be that late - 2 x 92 us of
 /// 125 ms, 15 parts in ten thousand; the poll turn at each end (one
 /// count() and one cycles(), under 100 cycles at 8 MHz) adds under 2.
-/// Then the two clocks: a crystal rung is the HSE against the LSE, two
-/// crystals of +-100 ppm each at room temperature (2 more); an HSI rung
-/// is the HSI's own accuracy after calibration at 0..70 C (CH32V203
-/// table 4-13: -1.0 to +1.6 %, CH32V303 table 4-14: -1.8 to +1.8 %), the
-/// wider of the two (180).
+/// Then the two clocks. A crystal rung is the HSE against the LSE: two
+/// quartz crystals, each taken at 100 ppm with its temperature stability -
+/// an ASSUMPTION, the boards name no part (docs/boards/) - 2 more. An HSI
+/// rung is the HSI's own accuracy after calibration at 0..70 C against
+/// the LSE's 1: CH32V203 datasheet table 4-13, -1.0 to +1.6 %, on the
+/// CH32V203s; CH32V303 datasheet table 4-14, -1.8 to +1.8 %, on the
+/// CH32V303s - asymmetric, so an HSI rung's bound has a fast side and a
+/// slow side.
 constexpr uint32_t bound_xtal_pptt = 15u + 2u + 2u;
-constexpr uint32_t bound_hsi_pptt = 15u + 2u + 180u;
+constexpr bool v303_datasheet = device::device_class == DeviceClass::v30x_d8;
+constexpr uint32_t hsi_fast_pptt = v303_datasheet ? 180u : 160u;
+constexpr uint32_t hsi_slow_pptt = v303_datasheet ? 180u : 100u;
+constexpr uint32_t bound_hsi_fast_pptt = 15u + 2u + 1u + hsi_fast_pptt;
+constexpr uint32_t bound_hsi_slow_pptt = 15u + 2u + 1u + hsi_slow_pptt;
 
 /// The tick's bound over the window, in ticks: the same rate error over
 /// 125 ticks, rounded up, plus the one tick of quantization the window's
@@ -489,7 +496,10 @@ void tc_dynamic() {
         const uint32_t asked = SysClock::rate_hz(i);
         // The pack's first five rates are the HSI's trees, the last five
         // the crystal's (rate_names).
-        const uint32_t pptt = i < xtal_144_rate ? bound_hsi_pptt : bound_xtal_pptt;
+        const bool hsi_rung = i < xtal_144_rate;
+        const uint32_t fast_pptt = hsi_rung ? bound_hsi_fast_pptt : bound_xtal_pptt;
+        const uint32_t slow_pptt = hsi_rung ? bound_hsi_slow_pptt : bound_xtal_pptt;
+        const uint32_t pptt = fast_pptt > slow_pptt ? fast_pptt : slow_pptt;
         RungReading r;
         if (rtc_ok) {
             r = rung_by_rtc();
@@ -497,7 +507,7 @@ void tc_dynamic() {
         const DelayReading d = delay_by_counter(asked);
         const uint32_t off = r.hclk > asked ? r.hclk - asked : asked - r.hclk;
         const uint32_t toff = r.ticks > 125u ? r.ticks - 125u : 125u - r.ticks;
-        const bool near = off <= (asked / 10'000u) * pptt;
+        const bool near = off <= (asked / 10'000u) * (r.hclk > asked ? fast_pptt : slow_pptt);
         const bool tick_near = toff <= tick_slack(pptt);
         const uint32_t asked_cycles = 500u * (asked / 1'000'000u);
         if (rtc_ok) {
@@ -513,8 +523,9 @@ void tc_dynamic() {
         print(serial, "  ", dir, " ", i, " -> ", SysClock::hz(), " Hz (", rate_names[i], "), ",
               in_force ? "in force" : "NOT IN FORCE", crlf);
         if (rtc_ok) {
-            print(serial, "      against the RTC: HCLK ", r.hclk, " Hz (bound ", pptt,
-                  " in 10000), ", r.ticks, " ticks in 125 ms (bound +-", tick_slack(pptt), ")",
+            print(serial, "      against the RTC: HCLK ", r.hclk, " Hz (bound +", fast_pptt,
+                  " -", slow_pptt, " in 10000), ", r.ticks, " ticks in 125 ms (bound +-",
+                  tick_slack(pptt), ")",
                   r.ok ? "" : ", AN EDGE NEVER CAME", crlf);
         }
         print(serial, "      delay_us(500): ", d.cycles, " cycles for ", asked_cycles, " asked",
@@ -543,7 +554,8 @@ void tc_dynamic() {
         bench.verdict("the RTC's edges came at every rung (the window 128 counts of 1024 Hz)",
                       readings_ok);
         bench.verdict("HCLK counted against the RTC on the 32 kHz crystal is the rate asked at "
-                      "every rung: within 0.19 % on the crystal's rungs, 1.97 % on the HSI's",
+                      "every rung: within 0.19 % on the crystal's rungs, and on the HSI's within "
+                      "the part's datasheet accuracy and the instrument's 0.18 %",
                       hclk_ok);
         bench.verdict("the kernel tick kept its millisecond at every rung, counted against the "
                       "RTC: 125 ticks in 125 ms within the rung's bound",
@@ -779,18 +791,27 @@ void mco_frequency() {
     print(serial, "  through the PA8-PA6 strap, TIM3 counting 5 ms of the crystal's tree: "
                   "MCO = HSE reads ", hse_hz, " Hz, MCO = HSI reads ", hsi_hz, " Hz (",
           hsi_ppm, " ppm)", crlf);
-    // THE BOUND for the HSE: the count is a whole number of edges (one
-    // in 40000, 25 ppm) and each end's masked pair is two loads apart
-    // (a few cycles of 720000) - 200 Hz and some; 250 Hz is the window.
+    // THE BOUND for the HSE, a ratio of one oscillator to itself: the
+    // count is a whole number of edges, one in 40000 or 200 Hz; and the
+    // two ends' masked pairs - a counter load beside the ruler's composed
+    // read - sit alike but for one retry of that read when a reload falls
+    // inside it, half the 28 to 35 cycles test_vx03_rubato's letter d
+    // measures for two reads: 18 cycles of the 720000, 200 Hz more.
+    constexpr uint32_t hse_window_hz = 200u + 200u;
     bench.verdict("with MCO on the HSE the pad carries the crystal: 8 MHz to within one edge "
-                  "of the 5 ms gate (250 Hz), counted against a core clock made from it",
-                  moved && hse_hz + 250u >= 8'000'000u && hse_hz <= 8'000'000u + 250u);
-    // The HSI's own: within the datasheets' accuracy after calibration
-    // at 0..70 C (CH32V203 table 4-13: -1.0 to +1.6 %, CH32V303 table
-    // 4-14: -1.8 to +1.8 %) - the wider of the two.
+                  "of the 5 ms gate and one retry of the ruler's read (400 Hz), counted against "
+                  "a core clock made from it",
+                  moved && hse_hz + hse_window_hz >= 8'000'000u &&
+                      hse_hz <= 8'000'000u + hse_window_hz);
+    // The HSI's own: within the datasheet's accuracy after calibration at
+    // 0..70 C (hsi_fast_pptt and hsi_slow_pptt above: the CH32V203's -1.0
+    // to +1.6 %, the CH32V303's -1.8 to +1.8 %), plus the HSE crystal it is
+    // counted against (100 ppm, the assumption above) and the edge (25 ppm).
+    constexpr int32_t hsi_fast_ppm = static_cast<int32_t>(hsi_fast_pptt) * 100 + 125;
+    constexpr int32_t hsi_slow_ppm = static_cast<int32_t>(hsi_slow_pptt) * 100 + 125;
     bench.verdict("with MCO on the HSI the pad carries the internal oscillator, inside the "
-                  "datasheets' accuracy after calibration (-1.8 to +1.8 %)",
-                  hsi_ppm >= -18000 && hsi_ppm <= 18000);
+                  "part's datasheet accuracy after calibration, the crystal and the edge beside it",
+                  hsi_ppm >= -hsi_slow_ppm && hsi_ppm <= hsi_fast_ppm);
     print(serial, "  SYSCLK and PLL/2 are read back above and not counted: at the rates "
                   "that make them they are 48 to 144 MHz, past both the pad's fastest class "
                   "(50 MHz, the datasheets' I/O AC table) and what a timer clocked at HCLK "

@@ -229,9 +229,32 @@ void us_timer_init() {
     UsTimer::enable(true);
 }
 
-uint16_t us_timer_now() { return static_cast<uint16_t>(UsTimer::count()); }
+/// The timer is sixteen bits, so a span is good under 65536 us and the
+/// erases it times have no maximum written (the datasheets give typical
+/// figures only: 16 ms for a page or a sector, table 4-17 / 4-19). So
+/// every span starts the counter at zero with the update flag clear, and
+/// a span that reached 65536 us raises the flag: its figure is then a
+/// remainder, and us_timer_span() answers nothing rather than a number.
+void us_timer_mark() {
+    UsTimer::set_count(0);
+    UsTimer::clear_flags(UsTimer::update_flag);
+}
 
-uint16_t us_timer_since(uint16_t mark) { return static_cast<uint16_t>(us_timer_now() - mark); }
+/// The microseconds since us_timer_mark(), or nothing when the counter
+/// wrapped (the count is read before the flag, so a wrap between the two
+/// reads answers nothing too).
+std::optional<uint32_t> us_timer_span() {
+    const uint32_t us = UsTimer::count();
+    if (UsTimer::flag(UsTimer::update_flag)) {
+        return std::nullopt;
+    }
+    return us;
+}
+
+/// A span for a print: its microseconds, or 65536 for a wrap - a figure
+/// the counter itself never shows, so a print of 65536 reads as "past
+/// the timer's range".
+uint32_t us_or_wrap(std::optional<uint32_t> span) { return span.value_or(65'536u); }
 
 /// Where the letters that write work: the LAST page of the medium's
 /// zone, which is the last page of the zero-wait window. One page, so
@@ -666,12 +689,13 @@ void tf_sckmod() {
                   stepped && half && whole && half_reads && whole_reads && back &&
                       unlocked_here && (ctlr_half & flash_sckmod) == 0u &&
                       (ctlr_whole & flash_sckmod) != 0u);
-    bench.verdict("and the two numbers are the answer: at 48 MHz of HCLK neither a "
-                  "straight run of fifty thousand instructions nor ten thousand words read "
-                  "out of the array costs measurably more with the access clock HALVED - "
-                  "what the core waits for at this rate is not the flash, whichever of the "
-                  "two settings it is read at",
-                  sink != 0u && fetch_gain < 5u && read_gain < 5u);
+    // Printed, not judged: what a halved access clock costs the core at
+    // 48 MHz is not written anywhere (the chapter gives SCKMOD's two
+    // settings and the 60 MHz ceiling, never a fetch or a read time), so
+    // the two figures above are the answer and there is no bound to hold
+    // them to.
+    print(serial, "  FINDING: with the access clock halved a straight run costs ", fetch_gain,
+          " per cent more and a run of reads ", read_gain, " per cent more", crlf);
 }
 
 // ===========================================================================
@@ -724,9 +748,10 @@ void tw_page_cycle() {
     // engine works is a fact a program has to know.
     us_timer_init();
     const uint32_t ms_before = Ticker::millis();
-    const uint16_t erase_mark = us_timer_now();
+    us_timer_mark();
     const uint32_t erase_err = Flash::erase_page(clock, test_page);
-    const uint32_t erase_us = us_timer_since(erase_mark);
+    const std::optional<uint32_t> erase_span = us_timer_span();
+    const uint32_t erase_us = us_or_wrap(erase_span);
     const uint32_t ms_after = Ticker::millis();
     const bool erased = Flash::erased(test_page, MainFlashPartition::page);
     print(serial, "  erase_page: ", hex(erase_err), " in ", erase_us,
@@ -742,10 +767,10 @@ void tw_page_cycle() {
     // with WRBSY watched between them, then PGSTRT.
     fill_pattern(page_buffer, 0xB2103u);
     const uint32_t pms_before = Ticker::millis();
-    const uint16_t program_mark = us_timer_now();
+    us_timer_mark();
     const uint32_t program_err =
         Flash::program_page(clock, test_page, {page_buffer, MainFlashPartition::page});
-    const uint32_t program_us = us_timer_since(program_mark);
+    const uint32_t program_us = us_or_wrap(us_timer_span());
     const uint32_t pms_after = Ticker::millis();
     Flash::read(test_page, {read_back, MainFlashPartition::page});
     const bool exact = memcmp(page_buffer, read_back, MainFlashPartition::page) == 0;
@@ -756,22 +781,35 @@ void tw_page_cycle() {
     bench.verdict("a whole page programmed in one operation comes back BYTE FOR BYTE: the "
                   "fast method's buffer took all sixty-four words and PGSTRT wrote them",
                   program_err == 0u && exact);
-    bench.verdict("and both operations are inside the datasheet's typical times, with the "
-                  "erase the expensive one",
-                  erase_us > program_us && erase_us < 50000u && program_us < 20000u);
+    // The two times are printed above, not judged: the datasheets give
+    // a typical figure for each (16 ms and 2 ms, table 4-17 / 4-19) and
+    // no maximum, and a typical is no bound.
 
     // THE CORE DOES NOT STOP. The kernel's millisecond tick is a count
     // of HANDLER RUNS, and a handler runs only if the core can fetch it
     // out of the array the engine is working on: a tick that keeps up
     // with the ruler is proof that it could.
     const uint32_t erase_ms = ms_after - ms_before;
-    const uint32_t erase_expected = erase_us / 1000u;
-    bench.verdict("AND THE CORE GOES ON RUNNING OUT OF THE ARRAY WHILE THE ENGINE ERASES "
-                  "IT: the kernel's tick, which counts handler runs and would lose every "
-                  "millisecond the core could not fetch, advanced across the erase by what "
-                  "the ruler measured - so an erase here is a wait and not a stall, and a "
-                  "program that erases keeps its interrupts",
-                  erase_ms + 2u >= erase_expected && erase_ms <= erase_expected + 2u);
+    if (!erase_span) {
+        bench.skip("the erase ran past the 16-bit timer's 65.5 ms, so there is no figure "
+                   "to hold the tick against");
+    } else {
+        // THE BOUND: the tick's two reads bracket the timer's (a few
+        // microseconds more), and an interval of L ms holds floor(L) or
+        // ceil(L) tick events; the timer and the STK share the crystal
+        // and the timer's figure is whole microseconds. With m the timer's
+        // figure in ms, the tick moved by floor(m) - 1 (m within a
+        // microsecond above a whole) to floor(m) + 2 (the bracket pushing
+        // a fraction over two boundaries) - while one lost tick per
+        // stalled millisecond would take it below.
+        const uint32_t erase_expected = *erase_span / 1000u;
+        bench.verdict("AND THE CORE GOES ON RUNNING OUT OF THE ARRAY WHILE THE ENGINE ERASES "
+                      "IT: the kernel's tick, which counts handler runs and would lose every "
+                      "millisecond the core could not fetch, advanced across the erase by what "
+                      "the ruler measured, one tick short to two over - so an erase here is a "
+                      "wait and not a stall, and a program that erases keeps its interrupts",
+                      erase_ms + 1u >= erase_expected && erase_ms <= erase_expected + 2u);
+    }
 
     // A PROGRAM INTO A PAGE THAT WAS NOT ERASED. The chapter does not
     // say what happens; this is where the silicon does.
@@ -830,19 +868,20 @@ void tv_half_word() {
     // The standard method: two bytes, the store IS the operation - and
     // it is the SLOW one, which is the first surprise of this letter.
     us_timer_init();
-    const uint16_t mark = us_timer_now();
+    us_timer_mark();
     const uint32_t err = Flash::program_half_word(clock, second_page, 0xF0F0u);
-    const uint32_t us = us_timer_since(mark);
+    const uint32_t us = us_or_wrap(us_timer_span());
     uint16_t back = 0;
     Flash::read(second_page, {reinterpret_cast<uint8_t*>(&back), 2u});
     print(serial, "  program_half_word 0xF0F0: ", hex(err), " in ", us,
           " us - against ", 1500u, " or so for a whole page the fast way", crlf);
     print_first_words(second_page, 4);
+    // The cost is printed above, not judged: no datasheet figure is
+    // written for a half-word program, so "more than a page the fast way"
+    // is a measurement (docs/ch32vx03/nvm.md), not a bound.
     bench.verdict("the standard method writes ONE half-word behind PG with no start bit - "
-                  "the store is the operation - and the cell reads back what was written; "
-                  "it costs MORE than the fast method spends on a whole page, which is "
-                  "what makes the page the grain a medium wants",
-                  err == 0u && back == 0xF0F0u && us > 1000u);
+                  "the store is the operation - and the cell reads back what was written",
+                  err == 0u && back == 0xF0F0u);
 
     // THE QUESTION A SMALL-VALUE STORE OVER THIS MEDIUM WOULD NEED
     // ANSWERED, and the reason this letter exists: does a cell take a
@@ -1392,9 +1431,10 @@ void tt_tail_standard() {
 
         us_timer_init();
         const uint32_t ms_before = Ticker::millis();
-        const uint16_t mark = us_timer_now();
+        us_timer_mark();
         const uint32_t erase_err = Flash::erase_sector(clock, sector);
-        const uint32_t erase_us = us_timer_since(mark);
+        const std::optional<uint32_t> erase_span = us_timer_span();
+        const uint32_t erase_us = us_or_wrap(erase_span);
         const uint32_t ms_after = Ticker::millis();
         const bool erased = tail_erased(clock, sector, Flash::sector_size);
         print(serial, "  erase_sector at ", hex(sector), " (the tail's last): ", hex(erase_err),
@@ -1404,10 +1444,18 @@ void tt_tail_standard() {
                       "lock alone, and every word of it reads the erased pattern",
                       fast_shut && erase_err == 0u && erased);
         const uint32_t erase_ms = ms_after - ms_before;
-        const uint32_t erase_expected = erase_us / 1000u;
-        bench.verdict("the core went on running out of the window while the engine erased the "
-                      "tail: the tick advanced by what the ruler measured",
-                      erase_ms + 2u >= erase_expected && erase_ms <= erase_expected + 2u);
+        if (!erase_span) {
+            bench.skip("the erase ran past the 16-bit timer's 65.5 ms, so there is no figure "
+                       "to hold the tick against");
+        } else {
+            // THE BOUND, letter w's: one tick short of the timer's whole
+            // milliseconds to two over.
+            const uint32_t erase_expected = *erase_span / 1000u;
+            bench.verdict("the core went on running out of the window while the engine erased "
+                          "the tail: the tick advanced by what the ruler measured, one tick "
+                          "short to two over",
+                          erase_ms + 1u >= erase_expected && erase_ms <= erase_expected + 2u);
+        }
 
         // Thirty-two half-words at the sector's start, the first of them
         // timed on the ruler and the run on the tick.
@@ -1415,9 +1463,9 @@ void tt_tail_standard() {
         uint16_t words[32];
         memcpy(words, page_buffer, sizeof words);
         uint32_t errors = 0;
-        const uint16_t first_mark = us_timer_now();
+        us_timer_mark();
         errors |= Flash::program_half_word(clock, sector, words[0]);
-        const uint32_t first_us = us_timer_since(first_mark);
+        const uint32_t first_us = us_or_wrap(us_timer_span());
         const uint32_t run_before = Ticker::millis();
         for (uint32_t i = 1; i < 32u; ++i) {
             errors |= Flash::program_half_word(clock, sector + 2u * i, words[i]);
@@ -1494,9 +1542,9 @@ void ts_tail_fast() {
         const uint32_t marked =
             Flash::program_page(clock, page, {page_buffer, MainFlashPartition::page});
         const bool dirty = !tail_erased(clock, page, MainFlashPartition::page);
-        uint16_t mark = us_timer_now();
+        us_timer_mark();
         const uint32_t block_err = Flash::erase_block32(clock, block);
-        const uint32_t block_us = us_timer_since(mark);
+        const uint32_t block_us = us_or_wrap(us_timer_span());
         const bool block_clean = tail_erased(clock, block, Flash::block_size);
         print(serial, "  erase_block32 at ", hex(block), " (the tail's last 32 KB), over a page ",
               dirty ? "that was not erased" : "that WAS erased", ": ", hex(block_err), " in ",
@@ -1507,15 +1555,15 @@ void ts_tail_fast() {
 
         // THE PAGE PROGRAM AND THE PAGE ERASE, with the driver's verbs.
         fill_pattern(page_buffer, tail_pattern_seed);
-        mark = us_timer_now();
+        us_timer_mark();
         const uint32_t program_err =
             Flash::program_page(clock, page, {page_buffer, MainFlashPartition::page});
-        const uint32_t program_us = us_timer_since(mark);
+        const uint32_t program_us = us_or_wrap(us_timer_span());
         (void)Flash::read_tail(clock, page, {read_back, MainFlashPartition::page});
         const bool landed = memcmp(read_back, page_buffer, MainFlashPartition::page) == 0;
-        mark = us_timer_now();
+        us_timer_mark();
         const uint32_t erase_err = Flash::erase_page(clock, page);
-        const uint32_t erase_us = us_timer_since(mark);
+        const uint32_t erase_us = us_or_wrap(us_timer_span());
         const bool erased_now = tail_erased(clock, page, MainFlashPartition::page);
         print(serial, "  program_page at ", hex(page), ": ", hex(program_err), " in ", program_us,
               " us, the page ", landed ? "holds the data" : "does NOT hold the data",
