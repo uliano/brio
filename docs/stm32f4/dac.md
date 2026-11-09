@@ -289,11 +289,14 @@ pads they share with the ADC - one pad free on the board and one carrying
 a LOAD, which is the board's: on the Nucleo-64 PA4 is free and PA5 carries
 the LED; on the STM32F429I-DISC1 PA5 is free and PA4 is the display's
 VSYNC, pulled HIGH by the board; on the 32F469IDISCOVERY both pads reach
-a header and nothing else, so the buffer's verdict is declined there by
-name and every other letter runs.
+a header and nothing else, so the load's row is skipped there by name
+and every other letter runs. Where a verdict judges a value read back
+through a pad, its bound is the STM32F446 data sheet's (DS10693 table 85
+for the DAC, tables 76 and 79 for the ADC), written beside it in the
+suite; what the sheet gives no figure for is printed and not judged.
 
 **The holding register reaches the output by itself, and it is there
-before the first read of DOR** - 43 HCLK cycles for a write and a
+before the first read of DOR** - 29 HCLK cycles for a write and a
 read-and-compare together, with an APB1 cycle worth 4 of them at 180/45.
 With TEN set the same write does not move DOR at all until SWTRIG, and
 SWTRIG clears itself.
@@ -303,23 +306,35 @@ reads back 0x800; 0xABC0 written left-aligned reads back 0xABC; a
 right-aligned datum is itself. One 32-bit store into the dual register
 carries both channels, and one `trigger_both()` moves both outputs.
 
-**The transfer curve, read back through the pad it drives**: monotonic
-over the whole range, and within 38 to 47 LSB of the identity between
-codes 256 and 3840 - a little over one per cent of full scale for the
-DAC's error, the ADC's and their shared reference together. Code 0 reads
-34..40 and code 4095 reads 4072..4073 with the buffer on: the buffer
-cannot reach either rail, and those two numbers are its own output swing.
+**The transfer curve, read back through the pad it drives**: within 40 to
+45 LSB of the identity between codes 256 and 3840, the worst near the top
+where the buffer nears its swing. The letter judges the codes the sheet
+specifies the buffered output over, 0x1C7 to 0xE38 (0.2 V from either
+rail, in codes at VREF+ = 1.7 V, a range every higher VDDA contains): the
+curve rises at every 128-code step there and stays within the sheet's 46
+LSB - the DAC's offset (10 mV), gain error (0.5 % of full scale) and INL
+(4 LSB), the ADC's total unadjusted error (5) and four times its noise.
+Code 3584, the highest the letter reads inside that range, reads 3617 to
+3619. Code 0 reads 35..40 and code 4095 reads 4070..4073 with the buffer
+on: the buffer's own swing, which the sheet does not bound past 0.2 V, so
+the letter prints it.
 
 **Buffered against unbuffered, measured twice - on a free pad and on the
 LED's.** On PA4, with nothing but the ADC's sampling network on it,
-buffered reads 37 / 2062 / 4074 at codes 0 / 2048 / 4095 and unbuffered
-reads 13 / 2054 / 4095: the unbuffered output reaches both rails and
-stays linear in between. On PA5, which carries LD2 and its resistor,
-buffered reads 36 / 2053 / 3926 and unbuffered reads 2 / 1994 / 2278 - so
-at full scale THE LOAD PULLS THE UNBUFFERED OUTPUT DOWN BY 1648 COUNTS,
-1.3 V, while the buffered one holds within 170. At mid-scale, where the
-LED barely conducts, the two agree to 59 counts. That is what the buffer is
-for, in one pair of numbers. The STM32F429I-DISC1 says the same from the
+buffered reads 36..38 / 2059..2060 / 4072 at codes 0 / 2048 / 4095 and
+unbuffered reads 0..7 / 2044..2056 / 4080..4093: the unbuffered output
+reaches both rails and stays linear in between. On PA5, which carries LD2
+and its resistor, buffered reads 35..36 / 2054..2056 / 3927..3928 and
+unbuffered reads 1..8 / 2000..2002 / 2288..2291 - so at full scale THE
+LOAD PULLS THE UNBUFFERED OUTPUT DOWN BY ABOUT 1800 COUNTS, 1.45 V, while
+the buffered one holds within 145. At mid-scale, where the LED barely
+conducts, the two agree to about 50 counts. That is what the buffer is
+for, in one pair of numbers. The letter prints all of it and judges one
+thing: the unbuffered mid-code within the round trip's 46 LSB, the
+output's 15 kOhm at most (table 85) settling far inside a 480-cycle
+sample. Which output comes nearer the rails, and how far a load pulls
+either, are the part's and the load's - a LED behind its resistor is a
+heavier load than the 5 kOhm the sheet specifies the buffer for. The STM32F429I-DISC1 says the same from the
 other side: on its free pad PA5 unbuffered reads 2 / 2049 / 4093 and
 buffered 36 / 2051 / 4069, and on PA4 - pulled high by the display's
 circuit - unbuffered reads 2906 / 3500 / 4095 while buffered holds
@@ -332,7 +347,8 @@ transfer curve on that board's free pad is within 1.5 per cent too, at a
 conversion started with no delay reads 432..475, at +1 us about 2200, at
 +2 us about 3440, at +5 us 4031, and 4040..4041 from +10 us against a
 settled 4038..4041. So the pad is within one per cent between 2 and 5 us
-after the write.
+after the write. The letter judges it settled by +10 us, the first probe
+past the sheet's 6 us settling time, and prints the rest.
 
 **The LFSR is deterministic where the chapter says it is.** With the
 holding register at zero and MAMP unmasking all twelve bits, the FIRST
@@ -350,6 +366,8 @@ edges driven onto EXTI line 9's pad, a DMA stream on DAC1's own cell
 (DMA1 stream 5, channel 7) refilling the holding register behind each
 trigger: the pad, read by the ADC after each edge, plays 180, 692, 1198,
 1701, 2212, 2720, 3228, 3739 for a table of 200 to 3700 by 500. The
+letter plays 500 to 3580 by 440, every code inside the buffer's specified
+range, and judges each reading against the round trip's 46 LSB. The
 stream reported its own completion after its last beat, and no underrun
 happened while it was serving - nor on the ONE trigger past that last
 beat, because 14.3.7 wants a SECOND unserved request before it says so.
@@ -369,8 +387,8 @@ of the five raises the trigger is not isolated. With the trigger path
 set up before the channel listens, the letter followed the ADC's DMA
 letter twelve times and ran in ten whole passes with no beat before the
 first edge. The erratum itself has not been seen on this bench; the
-count stays, and the table is compared from wherever the stream really
-is.
+count is printed, not judged, and the table is compared from wherever the
+stream really is.
 
 **A SPENT STREAM IS AN UNDERRUN.** Three more edges after the stream's
 last beat: DMAUDR is up, and the pad still sits at 3738 - the channel
@@ -381,8 +399,10 @@ the DAC's half of the errata's stop sequence.
 **THE UNDERRUN INTERRUPT, on TIM6's line** (letter `s`): channel 1
 DMA-enabled on TIM6's TRGO at 10 kHz with NO stream serving it - every
 trigger after the first is an underrun and **enters the shared vector
-once** (the letter's 2.5 ms hold 24 or 25 triggers, the first 100 us
-after the enable), each flag cleared by `isr()`. DMAENx STAYS SET through an underrun (each trigger re-raises
+once** (the letter's 2.45 ms, ending half a period from a trigger,
+hold 24 or 25 triggers, the first 100 us after the enable; the vector
+stays enabled a few microseconds past the timer's stop so the last
+underrun is served), each flag cleared by `isr()`. DMAENx STAYS SET through an underrun (each trigger re-raises
 the flag the body cleared): it is `stop_dma()` that drops it, as the
 spent-stream finding above shows from the other side.
 
@@ -432,3 +452,8 @@ Implemented, not bench-verified:
   does - and it has no workaround to verify anyway.
 - Letter `s`'s underrun leg on the STM32F429 and the STM32F469: their
   boards are not on the desk.
+- The table of 500 to 3580 by 440 that letter `r` plays: its readings
+  against the round trip's 46 LSB are the next run of the suite's.
+- The value bounds of letters c, d, e and r on the STM32F429 and the
+  STM32F469: they are the STM32F446 data sheet's, and a run of the suite
+  on each board, against its own sheet's tables, would measure them.

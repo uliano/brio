@@ -424,6 +424,22 @@ uint16_t sample_permille(uint8_t shift, uint32_t samples) {
     return sample_permille_port<'A'>(shift, samples);
 }
 
+/// WHAT THE SAMPLERS RESOLVE on a waveform of pwm_top + 1 = 1000 cycles
+/// (prescaler 0 at 64 MHz), derived. Their loops are seven to fifteen
+/// instructions in the release listing (the census of a pair is the
+/// longest, and the copies inlined into letter l keep their counter on
+/// the stack): L cycles a sample, under 40 even if every fetch waited on
+/// the flash, so the phases the samples land on are gcd(L, 1000) cycles
+/// apart - at most 25 for any L under 40 - and a duty read on that lattice
+/// is off by at most half a step, 12.5 per mille. The kernel tick's
+/// handler (SysTick_Handler, fourteen instructions: with the exception's
+/// entry and return under 200 cycles) takes at most 200 of a tick's 64000
+/// cycles, always at the same phase of the waveform since a tick is
+/// exactly 64 of its periods: at most 3 per mille of bias. The rounding
+/// and the edge a sample can catch half-way add 1. A reading is within
+/// 17 per mille of the true duty.
+constexpr uint32_t sampler_permille = 17;
+
 /// The same census on PORT B, where letter l's instances put their
 /// channels. Same rule: nothing here branches on data.
 uint16_t sample_permille_b(uint8_t shift, uint32_t samples) {
@@ -1622,6 +1638,23 @@ WaveformRate measure_waveform(uint32_t window_cycles) {
     return {counts, cycles, counts == 0u ? 0u : (cycles * 10u) / counts};
 }
 
+/// How far measure_waveform()'s period (in tenths of a tick) may sit from
+/// a true period of `ticks`, derived. TIM2 runs at prescaler 0 on PCLK,
+/// the ruler's own clock, so a tick is a cycle and no oscillator error
+/// enters. The edge count over the window is off by under one, which is
+/// ticks / cycles of the period; the cycle window holds the counting
+/// window plus the two reads between the stamps and the counts - a few
+/// tens of cycles, and at most one kernel tick handler (under 200
+/// cycles) in each gap: under 400 cycles, (400 / cycles) of it. So the
+/// figure is within 10 x ticks x (ticks + 400) / cycles tenths, plus one
+/// for the division's truncation.
+uint32_t waveform_tol_x10(uint32_t ticks, uint32_t cycles) {
+    if (cycles == 0u) {
+        return 0u;
+    }
+    return static_cast<uint32_t>((10ULL * ticks * (ticks + 400u) + cycles - 1u) / cycles) + 1u;
+}
+
 void ti_center_aligned() {
     T2::init();
     T3::init();
@@ -1653,18 +1686,23 @@ void ti_center_aligned() {
     const uint32_t edge_due = (pwm_top + 1u) * 10u;
     const uint32_t centre_due = 2u * pwm_top * 10u;
     const uint32_t centre_other = 2u * (pwm_top + 1u) * 10u;
-    bench.verdict("an EDGE-aligned period is ARR + 1 counter ticks, to a "
-                  "tenth of a tick",
-                  edge.period_x10 + 10u > edge_due && edge.period_x10 < edge_due + 10u);
-    // The two candidate formulas are TWO TICKS apart, so the window has
-    // to be tighter than one: half a tick to 2 x ARR, and at least one
-    // whole tick away from 2 x (ARR + 1).
+    const uint32_t edge_tol = waveform_tol_x10(pwm_top + 1u, edge.cycles);
+    const uint32_t centre_tol = waveform_tol_x10(2u * pwm_top, centre.cycles);
+    print(serial, "  the measurement's own resolution: +-", edge_tol, " tenths of a tick "
+          "edge-aligned, +-", centre_tol, " centre-aligned", crlf);
+    bench.verdict("an EDGE-aligned period is ARR + 1 counter ticks, to the "
+                  "measurement's own resolution (printed)",
+                  edge.counts != 0u && edge.period_x10 + edge_tol >= edge_due &&
+                      edge.period_x10 <= edge_due + edge_tol);
+    // The two candidate formulas are TWO TICKS apart (20 tenths), and the
+    // resolution is a few tenths: the band around 2 x ARR does not reach
+    // 2 x (ARR + 1).
     bench.verdict("A CENTRE-ALIGNED PERIOD IS 2 x ARR - the counter runs "
                   "0..ARR-1 up and ARR..1 down (21.3.3), so it is NOT "
                   "2 x (ARR + 1), and this measurement tells the two apart",
-                  centre.period_x10 + 5u >= centre_due &&
-                      centre.period_x10 <= centre_due + 5u &&
-                      centre.period_x10 + 10u < centre_other);
+                  centre.counts != 0u && centre.period_x10 + centre_tol >= centre_due &&
+                      centre.period_x10 <= centre_due + centre_tol &&
+                      centre.period_x10 + centre_tol < centre_other);
 
     // The three CMS codes differ only in WHEN the compare flag is raised:
     // counting down, counting up, or both (21.4.1). One rate against two.
@@ -1912,20 +1950,22 @@ void tk_errata() {
           " times, and the SECOND match (CNT = CCR = 0, one counter "
           "cycle later) raised its flag ", second_fired, " times and toggled "
           "the pad ", second_toggled, " times", crlf);
-    bench.verdict("the erratum's first match happens every round and the "
-                  "counter really does reach the next cycle",
+    bench.verdict("the control of the staging: the erratum's first match happens "
+                  "every round and the counter really does reach the next cycle",
                   first_fired == 8u && wrapped == 8u);
-    // WHAT THE BENCH FOUND, recorded as it is: the second compare of two
-    // consecutive counter cycles is served in full - the flag rises and
-    // the output toggles - so the described behaviour did NOT reproduce in
-    // this staging on this die. The erratum stands unrefuted rather than
-    // disproved: its own description is of a REPEATING pattern driven at
-    // the counter's rate (a single-cycle-wide pulse per period built by
-    // DMA), where this letter drives it once per period from software.
-    bench.verdict("THE STAGED BEHAVIOUR DID NOT REPRODUCE ON THIS DIE - the "
-                  "second compare raised its flag and toggled its output "
-                  "every round - the item being the G0B1's 2.7.2 (ES0548)",
-                  second_fired == 8u && second_toggled == 8u);
+    // WHAT THE SECOND MATCH DOES IS PRINTED, NOT JUDGED. An erratum says
+    // what a die may do and not what every die does, so whether it
+    // reproduces is a fact about one die, not a verdict for the family;
+    // and its own description is of a REPEATING pattern driven at the
+    // counter's rate (a single-cycle-wide pulse per period built by DMA),
+    // where this letter drives it once per period from software. The
+    // control above is what makes the figures mean something.
+    print(serial, "  the second match ", second_fired == 8u && second_toggled == 8u
+                                             ? "was served in full every round: the "
+                                               "staged behaviour did not reproduce here"
+                                             : "was MISSED in some round: the erratum's "
+                                               "behaviour reproduced here",
+          crlf);
 
     print(serial, "  the G0B1's 2.7.1 (one-pulse trigger lost in master-slave "
                   "reset + trigger with MSM)", errata_twin_1, ", NOT "
@@ -2487,11 +2527,14 @@ void tl_tim4_pwm() {
         print(serial, "  TIM4 at 64 kHz, four channels at once: PB6 ", t4_got[0],
               " PB7 ", t4_got[1], " PB8 ", t4_got[2], " PB9 ", t4_got[3],
               " per mille, asked 200/400/600/800", crlf);
+        // Each channel's duty is CCR / (ARR + 1), the ask itself, read to
+        // the sampler's 17 per mille.
         bool t4_duties = t4_channels;
         for (uint8_t i = 0; i < 4u; ++i) {
             const int32_t err = static_cast<int32_t>(t4_got[i]) -
                                 static_cast<int32_t>(t4_asks[i]);
-            if (err > 25 || err < -25) {
+            if (err > static_cast<int32_t>(sampler_permille) ||
+                err < -static_cast<int32_t>(sampler_permille)) {
                 t4_duties = false;
             }
         }
@@ -2562,13 +2605,16 @@ void tl_tim15_pwm() {
                       "never both high in forty thousand samples of one instant, "
                       "and channel 2 carries its own duty beside them",
                       t15_up && t15_ch2 && t15c.both_high == 0u &&
-                          t15_ch2_got + 25u >= 700u && t15_ch2_got <= 725u);
+                          t15_ch2_got + sampler_permille >= 700u &&
+                          t15_ch2_got <= 700u + sampler_permille);
         bench.verdict("...and the dead time 25.5.16's generator inserts is taken "
                       "off BOTH halves, exactly: each output lands at its own duty "
                       "less the dead time, so the two sum to a thousand less TWICE "
                       "it and not to a thousand",
-                      t15_a + 20u >= t15_want_a && t15_a <= t15_want_a + 20u &&
-                          t15_b + 20u >= t15_want_b && t15_b <= t15_want_b + 20u);
+                      t15_a + sampler_permille >= t15_want_a &&
+                          t15_a <= t15_want_a + sampler_permille &&
+                          t15_b + sampler_permille >= t15_want_b &&
+                          t15_b <= t15_want_b + sampler_permille);
         T15::release();
         PadB13::input(PinPull::none);
         PadB14::input(PinPull::none);
@@ -2699,7 +2745,8 @@ void tl_six_instances() {
                   "carries a different timer under a different alternate "
                   "function - the AF number is what chooses, and this is the "
                   "check the device header cannot make",
-                  t14_up && t14_got + 25u >= 350u && t14_got <= 375u);
+                  t14_up && t14_got + sampler_permille >= 350u &&
+                      t14_got <= 350u + sampler_permille);
     T14::release();
     PadPairN::input(PinPull::none);
 
@@ -2731,8 +2778,10 @@ void tl_six_instances() {
                   "on the last of the instances that had never driven "
                   "anything here",
                   t17_up && t17c.both_high == 0u &&
-                      t17_a + 20u >= t17_want_a && t17_a <= t17_want_a + 20u &&
-                      t17_b + 20u >= t17_want_b && t17_b <= t17_want_b + 20u);
+                      t17_a + sampler_permille >= t17_want_a &&
+                      t17_a <= t17_want_a + sampler_permille &&
+                      t17_b + sampler_permille >= t17_want_b &&
+                      t17_b <= t17_want_b + sampler_permille);
     T17::release();
     PadB7::input(PinPull::none);
     PadB9::input(PinPull::none);

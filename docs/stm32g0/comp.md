@@ -242,7 +242,10 @@ eighteen milliseconds and stops: about **1.22 V, a third of the way up
 the supply**, reproducible to a count between one release and the next
 (1511 then 1512). Nothing in any chapter names it and it is a BOARD
 fact, not a silicon one - it is where that pad's own leakage paths
-balance, and another pad or another board will settle somewhere else.
+balance, and another pad or another board will settle somewhere else -
+so the letter prints the trace and the two settles and judges none of
+them; what the legs below need, a level between the rails, the
+DAC-threshold verdict judges.
 The CONTROL says the reading is not passive: ten milliseconds with the
 converter looking elsewhere move the node by five hundred counts, so the
 conversions are part of what holds it.

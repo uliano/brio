@@ -93,7 +93,7 @@
 //   d  THE THREE SPEEDS MEASURED, the Fm+ drive, and the whole ladder
 //      through the dynamic clock with the refusals it produces - each
 //      controller rate judged against the RATE ASKED: SCL never above it
-//      by more than 2 % and within a quarter below it (a self-link's
+//      and within a quarter below it (a self-link's
 //      target follows the controller's clock and cannot tell a wrong
 //      TIMINGR) - but for the 2 MHz core's rung, where the stopwatch
 //      times the two vectors and the rate rests on the 16 MHz rung's
@@ -1177,6 +1177,13 @@ void ta_block() {
     // ---- the enable protection, MEASURED field by field ----
     // The SPI's question, asked of this chapter's four PE-gated fields:
     // does the SILICON drop a forbidden write, or does only the driver?
+    // A PRINT, NOT A VERDICT: 32.9.1 says NOSTRETCH, ANFOFF and DNF "can
+    // be programmed only when the I2C peripheral is disabled (PE = 0)" and
+    // 32.9.5 that TIMINGR "must be configured when the I2C peripheral is
+    // disabled" - duties of the programmer's, with nothing said of what a
+    // write with PE set does - so what this die does with one is recorded,
+    // and the verdict is the driver's refusal, which brio's contract
+    // states.
     H::enable();
     const uint32_t timing_live = H::timing_reg();
     H::regs().TIMINGR = 0x00706090u;
@@ -1193,13 +1200,13 @@ void ta_block() {
     print(serial, "  with PE set, a raw write lands on: TIMINGR ",
           timing_stuck ? "yes" : "no", " NOSTRETCH ", nostretch_stuck ? "yes" : "no",
           " ANFOFF ", anfoff_stuck ? "yes" : "no", " DNF ", dnf_stuck ? "yes" : "no",
+          " - ", !timing_stuck && !nostretch_stuck && !anfoff_stuck && !dnf_stuck
+                     ? "the silicon drops all four (undefined by the manual, not judged)"
+                     : "the silicon takes one at least (undefined by the manual, not judged)",
           crlf);
-    bench.verdict("the enable protection is REAL on this chapter's four PE-gated fields",
-                  !timing_stuck && !nostretch_stuck && !anfoff_stuck && !dnf_stuck);
-    bench.verdict("... and the driver refuses them too", !H::timing(t) &&
-                                                             !H::filters(I2cFilters{}) &&
-                                                             !H::no_stretch(true) &&
-                                                             !H::configure(cfg));
+    bench.verdict("the driver refuses this chapter's four PE-gated fields with PE set",
+                  !H::timing(t) && !H::filters(I2cFilters{}) && !H::no_stretch(true) &&
+                      !H::configure(cfg));
     (void)H::disable();
 
     // ---- the timing arithmetic at this clock ----
@@ -1447,11 +1454,14 @@ void tc_vocabulary() {
     // Parked behind a held SDA by the resource's own verb, it stands for as long
     // as the line is held: 32.9.2 sends it "once the bus is free". 32.9.8 says
     // writing ADDRCF "also clears the START bit", and start() opens with that
-    // write - yet on the STM32G0B1RE it leaves a START parked this way standing,
-    // ADDR being clear, where the same sequence on the STM32F446RE's FMPI2C takes
-    // it. So the CR2 store at start()'s end can refuse, and the host answers
-    // i2c_bus_error with nothing moved. The verdict follows whichever this die
-    // does. The PE cycle takes it either way (32.4.6).
+    // write - yet the bench's STM32G0B1RE leaves a START parked this way
+    // standing, ADDR being clear, where the same sequence on the bench's
+    // STM32F446RE's FMPI2C takes it. Which a die does is printed, not judged
+    // (one die of each, nothing written says which is right); the verdict is
+    // the driver's answer under either: where the write leaves the START, the
+    // CR2 store at start()'s end refuses and the host answers i2c_bus_error
+    // with nothing moved; where it takes it, start() goes ahead with its own
+    // request. The PE cycle takes it either way (32.4.6).
     peer_live = false;
     PeerSdaPin::clear();
     PeerSdaPin::output(false, {.open_drain = true});
@@ -1485,8 +1495,8 @@ void tc_vocabulary() {
           "ICR write ", start_left, "; start() over one answered ", sr_sync, ", status ", sr_status,
           ", CR2 ", hex(sr_cr2), "; the PE cycle took it ", start_gone, crlf);
     bench.verdict("A START STILL STANDING: parked behind a held SDA it stood, and start() over one "
-                  "answers i2c_bus_error with CR2 unmoved where the ICR write leaves it (this die), "
-                  "false with its own request where the write takes it",
+                  "answers i2c_bus_error with CR2 unmoved if the ICR write left it, false with its "
+                  "own request if the write took it (which this die does: the print above)",
                   start_stood && sr_nbytes &&
                       (start_left ? sr_sync && sr_status == i2c_bus_error : !sr_sync));
     bench.verdict("... and the PE cycle takes it", start_gone);
@@ -1534,10 +1544,35 @@ uint32_t scl_permille(uint32_t ns, uint32_t asked_hz) {
                                             (static_cast<uint64_t>(ns) * asked_hz));
 }
 
-/// The verdict on it: never above the rate asked by more than 2 %, and
-/// within a quarter below it - the pull-ups' rise and the detection of
-/// each edge (32.4.9's tSYNC) only lengthen the period.
-bool scl_ok(uint32_t permille) { return permille <= 1020u && permille >= 750u; }
+/// The verdict on it: NEVER ABOVE THE RATE ASKED, derived. The chooser
+/// (i2c_timing_for()) rounds both halves of the period UP into prescaler
+/// units and charges the least detection delay any wire can have (two
+/// kernel periods and tAF(min) an edge, 32.4.9's tSYNC floor), so the
+/// period it produces is at least the one asked; a slow edge, a third
+/// synchronization period, a stretch, the START, the STOP and the
+/// request's own cost only add. The stopwatch shares the oscillator: the
+/// host's kernel is PCLK and the ruler SysTick on HCLK, one PLL over the
+/// HSI16, so DS13560 table 44's tolerance cancels in the ratio. What is
+/// left is arithmetic: the tenure's nanoseconds and the division by its
+/// clocks each truncate, under 1 ns of a period of 1000 ns or more - one
+/// thousandth at Fm+, nothing at the slower two. So 1001 thousandths.
+/// How far BELOW the rate a wire lands is the pull-ups' rise and a
+/// stretching target's, which no document of this board states; the floor
+/// is the framework's window for an I2C clock, a quarter below the rate
+/// asked (docs/design/overview.md, "A loop proves the bytes, never the
+/// rate"): a reading under it is a finding to explain, not a window to
+/// widen. The reading is printed beside each verdict.
+constexpr uint32_t scl_ceiling_permille = 1001;
+constexpr uint32_t scl_floor_permille = 750;
+bool scl_ok(uint32_t permille) {
+    return permille >= scl_floor_permille && permille <= scl_ceiling_permille;
+}
+
+/// The same arithmetic in nanoseconds: a measured period reads at most this
+/// much under the true one (the two truncating divisions of
+/// measure_scl_ns()), and a period the register cannot shorten is judged
+/// with it and nothing more.
+constexpr uint32_t stopwatch_slack_ns = 1;
 
 void td_speeds() {
     if constexpr (!self_link_possible) {
@@ -1591,18 +1626,21 @@ void td_speeds() {
     Host::fast_plus_drive(true);
     bench.verdict("the Fm+ drive is on (SYSCFG's instance bit)", Host::fast_plus_drive());
 
-    // THE BRACKET IS PHYSICAL AND TWO-SIDED, which is the only honest
-    // shape for a stopwatch on a wire with no pad to spare:
+    // THE FLOOR IS A VERDICT, THE BUDGET A PRINT:
     //   * the FLOOR is the chooser's own prediction, tSCLL + tSCLH plus
     //     the least detection delay any wire can have (the filters and
     //     two kernel periods an edge): nothing makes the clock shorter -
     //     a stretch, a slow edge and a third synchronization period all
-    //     ADD - so THE SPEED ASKED IS A CEILING;
-    //   * the CEILING on the period is tSCLL + tSCLH plus the tSYNC the
-    //     manual's example tables 172..174 charge for the mode (1000 /
-    //     750 / 500 ns) as their example. A 2.2 kOhm bus is far quicker
-    //     than that, so the measured period lands INSIDE the bracket and
-    //     nearer the floor.
+    //     ADD - so THE SPEED ASKED IS A CEILING. The stopwatch and the
+    //     kernel share the oscillator (scl_ok()), so the period reads
+    //     under the floor only by the two truncating divisions, under
+    //     1 ns: stopwatch_slack_ns;
+    //   * the BUDGET is tSCLL + tSCLH plus the tSYNC the manual's example
+    //     tables 172..174 charge for the mode (1000 / 750 / 500 ns) as
+    //     their example. An example is no maximum, and this wire's rise
+    //     is no document's, so where the period lands against it is
+    //     printed (on the bench's 2.2 kOhm wire well inside, nearer the
+    //     floor).
     for (uint8_t i = 0; i < 3u; ++i) {
         const auto s = static_cast<I2cSpeed>(i);
         if (!Host::speed_ok(s)) {
@@ -1629,15 +1667,16 @@ void td_speeds() {
             const uint32_t pm = scl_permille(ns, i2c_speed_hz(s));
             print(serial, "    SCL in ", pm, " thousandths of the ", i2c_speed_hz(s) / 1000u,
                   " kHz asked", crlf);
-            bench.verdict("THE RATE ASKED, ON THE WIRE: SCL never above it by more than "
-                          "2 % and within a quarter below it",
-                          scl_ok(pm));
+            bench.verdict("THE RATE ASKED, ON THE WIRE: SCL never above it and within a "
+                          "quarter below it", scl_ok(pm));
             bench.verdict("the measured period is at least the chooser's floor - the rate "
                           "is never above the speed asked",
-                          ns + 30u >= floor_ns && ns + 30u >= 1'000'000'000UL / i2c_speed_hz(s));
-            bench.verdict("... and no slower than the manual's own tSYNC budget would "
-                          "make it",
-                          ns <= worst_ns + 60u);
+                          ns + stopwatch_slack_ns >= floor_ns &&
+                              ns + stopwatch_slack_ns >= 1'000'000'000UL / i2c_speed_hz(s));
+            print(serial, "    against the manual's tables' budget: ",
+                  ns <= worst_ns ? "inside it by " : "OVER it by ",
+                  ns <= worst_ns ? worst_ns - ns : ns - worst_ns,
+                  " ns (an example, not a maximum: not judged)", crlf);
             bench.verdict("... with the tenure byte-exact",
                           peer_rx_n == 32u && same(peer_rx, tx_buf, 32));
         } else {
@@ -1678,7 +1717,7 @@ void td_speeds() {
         bench.verdict("with the target stretching the tenure is byte-exact",
                       st == i2c_ok && peer_rx_n == 32u && same(peer_rx, tx_buf, 32));
         bench.verdict("... and a stretch can only LENGTHEN the clock",
-                      ns + 30u >= floor_ns);
+                      ns + stopwatch_slack_ns >= floor_ns);
     }
 
     // ---- AND THE BUDGET IS A KNOB, WHICH IS THE POINT OF STATING IT ----
@@ -1698,20 +1737,39 @@ void td_speeds() {
         I2cBusTiming measured = i2c_bus_timing(I2cSpeed::standard_100k);
         measured.sync_ns = static_cast<uint16_t>(wire_ns);
         (void)Host::init(clock, I2cClock::pclk, I2cFilters{}, measured);
+        const I2cTiming t1 = Host::timing_of(I2cSpeed::standard_100k);
+        // What the re-chosen register makes on this wire: its halves plus
+        // the delay just measured.
+        const uint32_t predicted = i2c_scll_ns(Host::kernel_hz(), t1) +
+                                   i2c_sclh_ns(Host::kernel_hz(), t1) + wire_ns;
         uint8_t st2 = 0;
         const uint32_t after = measure_scl_ns(32, I2cSpeed::standard_100k, st2);
         const uint32_t before_hz = before != 0u ? 1'000'000'000UL / before : 0u;
         const uint32_t after_hz = after != 0u ? 1'000'000'000UL / after : 0u;
+        // The same wire a moment later differs from its measurement by up
+        // to the synchronizer's third kernel period on each edge (32.4.9's
+        // "2 to 3", two a period); the prediction differs from the rate
+        // asked by up to the half cycle the chooser rounds the stated delay
+        // to, and is otherwise never under it (the halves rounded up into
+        // prescaler units). With the four truncated divisions (both
+        // readings and both halves), 2.5 kernel periods and 4 ns hold both
+        // the band around the prediction and the floor at 10000 ns.
+        const uint32_t jitter_ns =
+            static_cast<uint32_t>(5'000'000'000ULL / (2ULL * Host::kernel_hz())) + 4u;
         print(serial, "  this wire's own tSYNC is ", wire_ns, " ns; at 100 kHz the "
               "unmeasured default gives ", before_hz, " Hz and the measured budget ",
-              after_hz, " Hz", crlf);
+              after_hz, " Hz (", after, " ns against the re-chosen register's ", predicted,
+              " ns, plus or minus ", jitter_ns, ")", crlf);
         bench.verdict("the unmeasured default keeps the bus at or under its mode on a real "
                       "wire",
-                      before_hz <= 100'000UL);
-        bench.verdict("... and a MEASURED budget brings it to the rate asked, within one "
-                      "per cent and never further from it",
-                      st2 == i2c_ok && after_hz >= before_hz && after_hz >= 99'000UL &&
-                          after_hz <= 101'000UL);
+                      before + stopwatch_slack_ns >= 1'000'000'000UL / 100'000UL);
+        bench.verdict("... and a MEASURED budget brings it to the rate asked: the re-chosen "
+                      "register's period on this wire, to the synchronizer's jitter, never "
+                      "above the rate and never slower than before",
+                      st2 == i2c_ok && after + jitter_ns >= predicted &&
+                          after <= predicted + jitter_ns &&
+                          after + jitter_ns >= 1'000'000'000UL / 100'000UL &&
+                          after <= before + stopwatch_slack_ns);
         (void)Host::init(clock, I2cClock::pclk);
     }
 
@@ -1726,14 +1784,12 @@ void td_speeds() {
     print(serial, "  Fm+ at 1 MHz: drive on ", ns_on, " ns/clock (status ", st_on,
           "), drive off ", ns_off, " ns/clock (status ", st_off, ")", crlf);
     // 8.1.1 makes the drive a PAD property and the SCL period is the
-    // TIMING register's: a rise time that is a fraction of the period on
-    // a 2.2k bus does not move the average by a measurable amount. Said,
-    // not faked.
+    // TIMING register's: the drive moves the falling EDGE, which enters
+    // the period only through tSYNC1's detection of it - by how much on
+    // this wire no document states, so the difference is printed above
+    // and not judged.
     bench.verdict("the bus carries bytes at 1 MHz with the Fm+ drive on",
                   st_on == i2c_ok);
-    bench.verdict("the drive does not move the CLOCK PERIOD (it moves the EDGE, "
-                  "which no instrument on this board can see)",
-                  (ns_on > ns_off ? ns_on - ns_off : ns_off - ns_on) < 120u);
 
     // ---- the ladder ----
     // The client goes back to HSI16 for it: its kernel then does not move
@@ -1781,8 +1837,8 @@ void td_speeds() {
             if (rung == r_mid) {
                 mid_timingr = i2c_timingr(Host::timing_of(I2cSpeed::standard_100k));
             }
-            bench.verdict("... at the rate asked: SCL never above 100 kHz by more than 2 % "
-                          "and within a quarter below it, TIMINGR re-chosen for this kernel",
+            bench.verdict("... at the rate asked: SCL never above 100 kHz and within a quarter "
+                          "below it, TIMINGR re-chosen for this kernel",
                           st_t == i2c_ok && scl_ok(pm));
         } else {
             // AND THE RESCUE: the same core rate with the instance's own
@@ -1882,6 +1938,11 @@ void te_stretch() {
     uint16_t last_hold = 0;
     bool monotone = true;
     bool linear = true;
+    bool exact = true;
+    // A hold no byte in the shifter can hide (a byte and the STOP at
+    // 400 kHz, 25 us), and the slope's band (derived beside the verdict).
+    constexpr uint16_t stretch_unhidden_us = 50;
+    constexpr uint32_t stretch_slope_band_us = 8;
     for (uint16_t hold : {20u, 50u, 100u}) {
         peer_stretch_us = static_cast<uint16_t>(hold);
         mark("stretch leg");
@@ -1898,43 +1959,60 @@ void te_stretch() {
             console_drain();
         }
         mark("leg done");
-        // Eight bytes plus the address event: nine stretches of `hold`.
-        const uint32_t predicted = base_us + 9u * hold;
+        // The address event, eight bytes and the tenth TXIS (below): ten
+        // stretches of `hold` on top of the baseline, the turnaround they
+        // overlap not subtracted.
+        const uint32_t predicted = base_us + 10u * hold;
         print(serial, "  stretch ", hold, " us/byte: tenure ", us,
               " us, predicted ", predicted, " us, status ", st, crlf);
         if (us <= last_us) {
             monotone = false;
         }
-        // THE SLOPE, not the intercept: each commanded hold lands on top
+        // THE SLOPE, NOT THE INTERCEPT. Each commanded hold lands on top
         // of the client's own turnaround, which already stretches SCL in
-        // the unstretched baseline, so a tenure runs a constant few us a
-        // byte short of base + 9 x hold (the client's ISR entry and its
-        // read, about 13 us a byte at 400 kHz, measured the same before
-        // and after any of the host's changes). Between two legs that
-        // constant cancels: the tenure must grow by nine times the
-        // hold's step, to within an eighth.
+        // the unstretched baseline, so a tenure runs short of base plus
+        // its holds; between two legs that turnaround cancels. TEN holds
+        // a tenure, not nine: the address event, the eight TXIS that load
+        // the bytes, and the TXIS the eighth byte's handoff to the shifter
+        // raises (32.4.8: TXIS whenever TXDR is empty), whose byte is never
+        // clocked - and the tenure's end is the HOST's completion, served
+        // by a vector of the same priority as the client's (the reset one:
+        // nothing here sets a priority), so it waits behind that tenth
+        // hold (no preemption at one priority). A hold
+        // the byte in the shifter can hide is one shorter than a byte and
+        // the STOP, 25 us at 400 kHz: so the step is judged from 50 to
+        // 100 us, where nothing hides, and printed from 20 to 50. The
+        // band: the two readings truncated to whole microseconds (one),
+        // delay_us()'s overshoot of up to one poll turn a hold (nine
+        // instructions in the release listing, under 25 cycles, ten holds),
+        // and the SysTick handlers a tenure of a millisecond meets (two
+        // at most, about 70 cycles each with the exception's entry and
+        // return): 1 + (250 + 140) / 64, under 8 us.
         if (last_hold != 0u) {
-            const uint32_t step = 9u * static_cast<uint32_t>(hold - last_hold);
+            const uint32_t step = 10u * static_cast<uint32_t>(hold - last_hold);
             const uint32_t grew = us > last_us ? us - last_us : 0u;
             const uint32_t err = grew > step ? grew - step : step - grew;
             print(serial, "    from ", last_hold, " to ", hold, " us/byte the tenure grew ", grew,
-                  " us against ", step, crlf);
-            if (err > step / 8u) {
+                  " us against ten holds' ", step, crlf);
+            if (last_hold >= stretch_unhidden_us && err >= stretch_slope_band_us) {
                 linear = false;
             }
         }
         last_us = us;
         last_hold = hold;
         if (st != i2c_ok || !same(rx_buf, answers, 8)) {
-            linear = false;
+            exact = false;
         }
     }
     peer_stretch_us = 0;
     bench.verdict("a commanded stretch lengthens the tenure monotonically", monotone);
-    bench.verdict("... by nine holds a step, to within an eighth (the slope: the client's own turnaround cancels)",
+    bench.verdict("... by ten holds a step from 50 to 100 us a hold, to 8 us (the slope: the "
+                  "client's own turnaround cancels; the tenth is the TXIS the last byte's "
+                  "handoff raises, which the host's completion waits behind)",
                   linear);
-    bench.verdict("... and the data is untouched by it (stretching is flow control)",
-                  st == i2c_ok && same(rx_buf, answers, 8));
+    bench.verdict("... and the data is untouched by it at every hold (stretching is flow "
+                  "control)",
+                  exact && st == i2c_ok && same(rx_buf, answers, 8));
 
     // ---- NOSTRETCH, and 32.4.8's own sentence ----
     // "In transmission, the data must be written in TXDR before the
@@ -2240,8 +2318,9 @@ void th_long() {
     bench.verdict("... and every byte arrives byte-exact",
                   peer_rx_n == big && same(peer_rx, tx_buf, big));
     bench.verdict("... in ONE tenure (one address match)", peer_addr_hits == 1u);
-    bench.verdict("... at the rate asked: SCL never above 400 kHz by more than 2 % and "
-                  "within a quarter below it, across the reload", ok && scl_ok(big_pm));
+    bench.verdict("... at the rate asked: SCL never above 400 kHz and within a quarter "
+                  "below it, across the reload",
+                  ok && scl_ok(big_pm));
 
     // ---- AUTOEND against a software STOP ----
     // With AUTOEND clear the tenure ends at TC with SCL held, and the
@@ -2299,8 +2378,9 @@ void th_long() {
     bench.verdict("the host's TX engine moves 64 bytes",
                   tx_done && DmaHost::status() == i2c_ok && peer_rx_n == 64u &&
                       same(peer_rx, tx_buf, 64));
-    bench.verdict("... at the rate asked: SCL under the engine never above 400 kHz by more "
-                  "than 2 % and within a quarter below it", scl_ok(dma_pm));
+    bench.verdict("... at the rate asked: SCL under the engine never above 400 kHz and "
+                  "within a quarter below it",
+                  scl_ok(dma_pm));
 
     for (uint16_t i = 0; i < 64u; ++i) {
         rx_buf[i] = 0;
@@ -2718,7 +2798,8 @@ struct RefusedPositions {
 
 /// THE BOUND ON ONE TENURE, in ticks of 1 ms: nine clocks for each address and
 /// each byte plus the START and the STOP at the speed's period, which letter d
-/// reads within a quarter of the rate asked on these kernels; under byte control
+/// prints at 807 to 973 thousandths of the rate asked on the bench's wire (a
+/// period at most a quarter longer); under byte control
 /// the client adds at most its two entries a byte, which at 64 MHz and the
 /// flash's two wait states are under 10 us against a byte of 22.5 us at 400 kHz.
 /// Twice the wire holds all that, doubled again as this bound only tells a
@@ -3607,6 +3688,17 @@ namespace kl {
 constexpr uint32_t bus_timeout_ticks = ticks_from_ms<P>(20);
 using I2cArb = I2cBus<Host, P, 4, BusPassThrough, bus_timeout_ticks>;
 
+/// THE LATEST A WEDGED TENURE CAN BE ANSWERED, in ticks counted from the
+/// post: the arbiter arms its time event when the tenure goes asynchronous,
+/// in the first pump after the post - one tick boundary at most between the
+/// two - and kernel/time_event.hpp matures a delay of N ticks on the first
+/// turn at which now() reaches the deadline, never later than N tick
+/// boundaries after the arming. The pump serves it on that turn: recover()'s
+/// PE cycle and the reply's dispatch, microseconds, at most one more
+/// boundary before the letter reads the tick count. Sooner is legal (an
+/// engine that reads back a level it did not drive answers at once).
+constexpr uint32_t wedge_answer_ticks = bus_timeout_ticks + 2u;
+
 uint8_t out_a[4];
 uint8_t out_b[4];
 
@@ -3804,8 +3896,9 @@ void tl_kernel() {
     // report and neither is silence.
     bench.verdict("... with i2c_timeout or a wire code, never i2c_ok",
                   kl::Probe::replies[0] != i2c_ok);
-    bench.verdict("... at the arbiter's own limit and not the wedge's length",
-                  took <= 40u);
+    bench.verdict("... at the arbiter's own limit or sooner (two ticks over it at most), and "
+                  "not the wedge's length",
+                  took <= kl::wedge_answer_ticks);
 
     (void)peer_arm(answers, 8);
     kl::drain(50);
@@ -4232,40 +4325,63 @@ void tp_peer_vocabulary() {
         return;
     }
     uint8_t w8[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-    uint32_t t0 = Ticker::millis();
+    uint32_t t0 = Ruler::now();
     bool base_ok = true;
     for (uint8_t k = 0; k < 8; ++k) {
         if (host_tenure(twilink::dut_addr, w8, 8, nullptr, 0, link_speed) != i2c_ok) {
             base_ok = false;
         }
     }
-    const uint32_t base_ms = Ticker::millis() - t0;
+    const uint32_t base_us = cycles_us(Ruler::now() - t0);
     settle_ms(750);
 
+    // THE MODEL, from the F446 peer's run_serve: a hold at the address match
+    // and one before each byte it takes, and its block is one byte deep -
+    // each later byte shifts in during the hold before the previous one's
+    // take - so the tenure of a write of 8 holds the address's hold and
+    // seven takes' (the eighth falls after the STOP), eight in all, plus
+    // the two byte times no hold overlaps (the address and the first byte,
+    // 9 SCL periods each at 100 kHz). The holds are the peer's spin on its
+    // cycle counter, at least hold_us on the crystal behind its PLL (the
+    // ST-LINK's MCO, UM1724 7.9.1; even 1000 ppm moves 16 ms by 16 us).
+    // THIS end's stopwatch runs on the HSI16: DS13560 table 44's 15.88 MHz
+    // at 30 C and its drift row's -1 % over 0..85 C, -1.75 % in all, read
+    // 16180 us as 15896 at the lowest (the microseconds truncated), and the
+    // bound's own division is rounded one lower.
+    constexpr uint32_t stretch_hold_us = 2000;
+    constexpr uint32_t stretch_holds = 8;
+    constexpr uint32_t stretch_wire_us = 2u * 9u * 10u;   // two bytes at 100 kHz
+    constexpr uint32_t stretch_floor_us = static_cast<uint32_t>(
+        (static_cast<uint64_t>(stretch_holds * stretch_hold_us + stretch_wire_us) * 9825u) /
+            10000u -
+        1u);
+    static_assert(link_speed == I2cSpeed::standard_100k,
+                  "the stretch floor counts 10 us SCL periods");
     twilink::Params st{};
     st.count = 64;
     st.ms = 150;
     st.addr = twilink::dut_addr;
-    st.hold_us = 2000;
+    st.hold_us = stretch_hold_us;
     if (!peer_act(Op::serve, st)) {
         bench.verdict("the peer accepted the stretched serve", false);
         return;
     }
-    t0 = Ticker::millis();
+    t0 = Ruler::now();
     const uint8_t s2 = host_tenure(twilink::dut_addr, w8, 8, nullptr, 0, link_speed);
-    const uint32_t stretched_ms = Ticker::millis() - t0;
+    const uint32_t stretched_us = cycles_us(Ruler::now() - t0);
     settle_ms(300);
     twilink::Report sr{};
     const bool srep = peer_report(sr);
-    print(serial, "  8 x 8 bytes unstretched: ", base_ms,
-          " ms; ONE 8-byte tenure at 2 ms per byte: ", stretched_ms,
-          " ms; peer count=", sr.count, crlf);
+    print(serial, "  8 x 8 bytes unstretched: ", base_us,
+          " us; ONE 8-byte tenure at 2 ms per byte: ", stretched_us,
+          " us, against at least ", stretch_floor_us, " (eight holds and two bytes, "
+          "the HSI16 at its slowest); peer count=", sr.count, crlf);
     bench.verdict("the unstretched baseline tenures all complete i2c_ok", base_ok);
     bench.verdict("a client stretching every data byte by 2 ms stretches the WALL "
-                  "TIME the model predicts (16 ms or more for 8 bytes) and the "
-                  "tenure still completes i2c_ok - stretching is flow control and "
-                  "the controller simply waits",
-                  s2 == i2c_ok && stretched_ms >= 16u && srep && sr.count >= 8u);
+                  "TIME the model predicts (eight holds and two byte times, the "
+                  "stopwatch's HSI16 at its slowest) and the tenure still completes "
+                  "i2c_ok - stretching is flow control and the controller simply waits",
+                  s2 == i2c_ok && stretched_us >= stretch_floor_us && srep && sr.count >= 8u);
 }
 
 // ===========================================================================
@@ -4342,9 +4458,12 @@ void tq_peer_speeds() {
     bench.verdict("Standard mode and Fast mode both carry a write and a read "
                   "byte-exact between TWO SEPARATE CHIPS",
                   sm_fm_ok);
-    bench.verdict("... at the rates asked: the write's SCL never above 100 or 400 kHz by "
-                  "more than 2 % and within a quarter below it (a short tenure: the "
-                  "request's own cost is inside the reading)",
+    // Never above: scl_ok()'s arithmetic. How far below is the F446 target's
+    // stretch (its polled serve, one byte late) and the wire's rise on top of
+    // the request's own cost - nothing a document bounds, so the floor is the
+    // design's quarter (scl_ok()); the thousandths are printed above.
+    bench.verdict("... at the rates asked: the write's SCL never above 100 or 400 kHz "
+                  "and within a quarter below them",
                   sm_fm_ok && scl_ok(pm[0]) && scl_ok(pm[1]));
     // FAST-MODE-PLUS IS THE RUNG THAT IS ABOUT THE WIRE AND THE FAR
     // END, not this controller: what a megahertz bus does here is a
@@ -4485,9 +4604,9 @@ void tr_peer_kernel() {
     bench.verdict("a tenure into a wire a FOREIGN CHIP holds down is answered IN ITS "
                   "PLACE - never silence and never i2c_ok",
                   kl::Probe::n == 1u && kl::Probe::replies[0] != i2c_ok);
-    bench.verdict("... at the arbiter's own limit or sooner, never at the wedge's "
-                  "length",
-                  took <= 40u);
+    bench.verdict("... at the arbiter's own limit or sooner (two ticks over it at most), "
+                  "never at the wedge's length",
+                  took <= kl::wedge_answer_ticks);
 
     // And the same bus AO carries the next tenure once the peer lets go. The
     // serve goes as ONE command attempt and no init(): link_ready() and

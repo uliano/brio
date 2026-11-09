@@ -317,10 +317,15 @@ writing at the computed word offset and reading at the byte address
 
 **THE BIT RATE ON THE PAD, counted with no CPU.** 125 k / 250 k / 500 k
 / 1 Mbit/s from the 64 MHz PCLK measured as 125000 / 250000 / 500000 /
-1000050 bit/s, every one inside the HSI16's own 1 %. Through CKDIV /2
+1000050 bit/s. The bit clock and the timer the window is spun on are one
+PLL over one HSI16, so the oscillator's tolerance cancels and the bound
+is the register's own: half of one of the 64 time quanta every rate has
+here (0.78 %), the midpoint between the right NBTP and one a quantum
+off, against an instrument good to about 100 ppm. Through CKDIV /2
 and /4 the same NBTP gives exactly 250000 and 125000. And the RESET
 NBTP, which 36.4.7's note prices at 3 Mbit/s from 48 MHz, measures
-**4000400 bit/s** here - the arithmetic the note does not do.
+**4000400 bit/s** here - the arithmetic the note does not do (judged to
+half of one of its 16 quanta).
 
 **WHAT `TEST.TX = 01` PUTS ON THE PAD IS A STROBE AND NOT A LEVEL.**
 36.4.4 says only "sample point can be monitored at pin FDCANx_TX". The
@@ -446,10 +451,13 @@ reads 18, so **the internal loop delay is 2 mtq**.
 
 **Timestamps.** The internal counter runs on the BIT CLOCK and not on
 traffic: 10000 counts in 20 ms on an idle bus at 500 kbit/s (TCP = 1),
-and 625 in the same window at TCP = 16. Two back-to-back DLC-8 frames
+and 625 in the same window at TCP = 16, each judged against the ruler's
+own count of bit times (one oscillator under both) to one count either
+way. Two back-to-back DLC-8 frames
 are 124 bit times apart at RXTS, which is the frame plus the interframe
-space. IR.TSW lands at 2097151 us against 65536 x 16 bit times = 2097
-ms. And **TSCV is TIM3's counter** when TSS = 10 (the one external
+space. IR.TSW lands at 2097151 us against 65536 x 16 bit times = 2097152
+us, judged from one 32 us count early (the prescaler's phase at the
+reset) to one bit time late (the poll's detection). And **TSCV is TIM3's counter** when TSS = 10 (the one external
 source this part wires up): the register tracked tim3_cnt to within a
 microsecond of the timer's own reading, and an element's RXTS is that
 counter captured at start of frame (29 us after the request at a 1 MHz
@@ -457,7 +465,8 @@ TIM3).
 
 **The timeout counter** counts down in the same units the timestamp
 counter counts up: continuous, TOP = 1000 at TCP = 1, IR.TOO after 1999
-us against 2000. Under a FIFO, an empty FIFO holds it preset at 1000
+us against 2000, judged 1997..2002 us - a TOP one off moves it by one
+bit, inside the prescaler's phase, which one measurement cannot tell. Under a FIFO, an empty FIFO holds it preset at 1000
 (no TOO in 5 ms) and the first element stored starts it.
 
 **THE ERROR MACHINE WITH NO NODE.** Normal mode with the RX pad on its
@@ -478,8 +487,10 @@ raised and INIT set by hardware.
 disagreement inside the chapter: BO cleared **2842 us = 1421 bit times**
 after INIT was cleared, where figure 398 says "128 x 11 recessive bits"
 (1408) and 36.4.13's note says the device "waits for 129 occurrences of
-bus-idle" (1419). The measurement lands on the note. Both error counters
-came back at zero.
+bus-idle" (1419). The measurement lands on the note: the hypotheses are
+eleven bits apart, so the letter judges the count nearer 1419 than 1408
+or 1430 (1414..1424), and the standard's 1408 as the floor. Both error
+counters came back at zero.
 
 **A STUCK-DOMINANT LINE IS NOT AN ERROR, IT IS A WAIT.** With the RX pad
 pulled down the module never sees the eleven recessive bits that end
@@ -536,7 +547,10 @@ functionality and no wake-up capability of its own.
   PED zero in both. **NOT REPRODUCED**, and recorded as that and not as
   a disproof: the coincidence the item needs is an end of integration
   landing on a falling FDCAN_RX edge, and a loop-back whose RX pin is
-  disconnected may never offer one. The bit is a verb with the
+  disconnected may never offer one. So the EFBI arm is a printed
+  reading, and the verdict is its control alone: the arm with edge
+  filtering clear delivers every frame byte-exact, without which the
+  EFBI arm's count would mean nothing. The bit is a verb with the
   obligation stated on it; nothing a driver can do.
 - **2.13.2 (Tx FIFO messages inverted)** is **UNREACHABLE BY
   CONSTRUCTION on this silicon, and TXBC is the evidence**: written

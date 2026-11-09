@@ -734,7 +734,12 @@ in band over the bus under test: letter `n`, 13 verdicts, green in every run of
   and TRISE for 12 MHz where 24 runs, and the partner's tenures go at
   **1935 thousandths** of 100 kHz (and 1839 at 16 MHz) - byte-exact, which
   letter `m` cannot see. Derived, **989, 982 and 958
-  thousandths** at 180, 48 and 16 MHz, in every run of `t`.
+  thousandths** at 180, 48 and 16 MHz, in every run of `t`. The letter reads FREQ and
+  CCR back against each rung's APB1 and judges the write never faster than the rate they
+  make (1000 thousandths at all three: a period counts 2 x CCR periods of PCLK1 at least,
+  24.3.3) nor below a quarter under the rate asked (the framework's window for an I2C
+  clock, [overview.md](../design/overview.md)); how much slower inside it - the
+  request's own cost and the partner's polled target - is printed.
 - **Clock stretching is flow control, against the partner** (set `t`,
   letter `n`): its target holding SCL 2 ms before each byte stretches an
   8-byte write to **16 ms** (eight holds inside the controller's window;
@@ -778,7 +783,9 @@ in band over the bus under test: letter `n`, 13 verdicts, green in every run of
   | 30 ms, three behind | `i2c_timeout` each, in order, 15011 us for all three in one dispatch |
   | 2 ms, let go inside the bound | `i2c_ok` 3007 us behind that completion, its byte in the register |
 
-  In every row the first tenure is `i2c_ok` 285 to 287 us from the post, and with no
+  Judged: each answer no earlier than the time asked (start() serves it at least, letter
+  `q`); what it takes past that is code with no written bound, printed. In every row the
+  first tenure is `i2c_ok` 285 to 287 us from the post, and with no
   `init()` and no `recover()` a read finds the register as the answered requests left it
   and a write and its read-back are exact. FMPI2C1 as the client does not reach this path:
   its hold at its address, 8 ms, delays the first tenure's own completion to 8007 us, no

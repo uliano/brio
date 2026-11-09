@@ -421,22 +421,29 @@ extern "C" void ADC_IRQHandler() {
 
 `test_stm32f4_analog`, on an STM32F446 at 180 MHz with PCLK2 at 90 MHz -
 so ADCCLK at PCLK2/4 = 22.5 MHz throughout - reading a DAC output through
-the pad the two converters share; every verdict green on the STM32F469 at
-the same rates, where neither DAC pad carries a load and letter d skips
-the buffer's verdict, saying why.
+the pad the two converters share. Where a verdict judges a converter's
+value, its bound is the STM32F446 data sheet's (DS10693 tables 74 to 85:
+the ADC's total unadjusted error and its noise, the DAC's offset, gain
+error and INL, the buffer's specified range), written beside it in the
+suite; what the sheet gives no figure for is printed and not judged.
 
 **The clock.** `init()` picks PCLK2/4: half the bus is 45 MHz, past the
 36 MHz ceiling, and the next division is the first that fits. fADC
 22.5 MHz.
 
-**The conversion time is the chapter's, to under one per cent, and it was
-measured DIFFERENTIALLY** - the same polling loop at two sampling times,
-so every cycle of overhead cancels. 477 ADCCLK cycles of extra sampling
-(480 against 3) cost 3813, 3822, 3817 and 3809 HCLK cycles at 12, 10, 8
-and 6 bits against 3816 predicted. Six SAR cycles (12 bits against 6 at
-the same sampling time) cost 44 to 45 HCLK against 48 predicted. One whole
-conversion at 3 cycles and 12 bits takes 265 HCLK cycles measured, of
-which 120 are the chapter's fifteen ADCCLK cycles and 145 are the polling
+**The conversion time is the chapter's, to one ADCCLK cycle and one poll
+turn, and it was measured DIFFERENTIALLY** - the same polling loop at two
+sampling times, so every cycle of overhead cancels. What does not cancel
+is each conversion's wait for the next ADCCLK edge after SWSTART (up to
+one ADCCLK cycle, 8 HCLK here) and the poll's lateness after EOC (up to
+one turn of the loop, which the letter measures with the converter off);
+that sum and a cycle of truncation is the bound the letter prints and
+judges. 477 ADCCLK cycles of extra sampling (480 against 3) cost 3812 to
+3813, 3827 to 3828, 3813 to 3814 and 3806 HCLK cycles at 12, 10, 8 and 6
+bits against 3816 predicted. Six SAR cycles (12 bits against 6 at the
+same sampling time) cost 44 HCLK against 48 predicted. One whole
+conversion at 3 cycles and 12 bits takes 240 HCLK cycles measured, of
+which 120 are the chapter's fifteen ADCCLK cycles and 120 are the polling
 loop around it - which is why the difference and not the absolute is what
 the verdict rests on.
 
@@ -444,16 +451,21 @@ the verdict rests on.
 calibration of 1494, giving VDDA 3320..3329 mV on the STM32F446 (1499
 against 1507 on the STM32F411, 3318 mV; and 1689 against 1498 on the
 STM32F429I-DISC1, whose rail is 2927 mV - the count is where the rail is,
-which is why `vdda_mv()` measures it). The sensor reads
-953..964, which is 776..780 mV, and gives 37 to 39 C from the two
-calibration points against 31 to 33 C from the datasheet's typical slope
-and V25 - a spread of six degrees between two formulas for one die, well
-inside the up-to-45 degree part-to-part offset the chapter warns about,
-and a reason to prefer the calibrated one.
+which is why `vdda_mv()` measures it). The letter judges the reading
+inside the sheet's VDDA range, 1.7 to 3.6 V, within the method's own 1.8 %
+(the reference's drift and two conversions' error); how near 3.3 V a
+board's regulator holds is printed. The sensor reads 942..943, which is
+764..765 mV, and gives 32.5 to 33.1 C from the two calibration points
+against 26.6 to 27.0 C from the datasheet's typical slope and V25 - a
+spread of six degrees between two formulas for one die, well inside the
+up-to-45 degree part-to-part offset the chapter warns about (the letter's
+bound adds the calibrated formula's own 5), and a reason to prefer the
+calibrated one.
 
 **The battery, and which switch wins the channel it shares with the
-sensor.** VBAT/4 reads 1024..1025, giving VBAT 3328..3332 mV against
-VDDA's 3324. With TSVREFE and VBATE both set the shared channel reads the
+sensor.** VBAT/4 reads 1024..1025, giving VBAT 3324..3332 mV against
+VDDA's 3322..3327 - inside the letter's bound, the bridge's 1 % and the
+ADC's error, 67 mV at this rail. With TSVREFE and VBATE both set the shared channel reads the
 BATTERY's number and not the sensor's on the STM32F446 and the STM32F429,
 exactly as 13.11 says - and the two sources are only 58 to 69 LSB apart
 on a 3.3 V board, which makes this a close-run reading rather than an
@@ -461,27 +473,37 @@ obvious one. THE STM32F411 DOES NOT AGREE: with both switches set its
 shared channel reads 978 between the battery's 1015 and the sensor's 957,
 neither source alone, as if both were on the pad at once (measured
 repeatedly). A program that wants either sets one switch and clears the
-other; the suite judges only that the reading is not the sensor's alone.
+other; the suite prints which source the reading is and judges nothing
+of it, since the manual's text and one part disagree.
 
 **The converter is quiet.** 256 conversions of VREFINT at 12 bits spread
 3 to 4 LSB with the ART's prefetch on and 2 LSB with it off, at the same
 mean (1482 both ways). So the errata item's workaround costs the accuracy
 nothing here and buys about one LSB of spread - which is the size of the
-effect on this board, at this rate, on this source.
+effect on this board, at this rate, on this source. Neither the erratum
+nor the sheet gives that noise a figure, so the letter prints it and
+judges nothing.
 
 **The DAC read back through the pad they share** (letters c, d and e are
 as much the DAC chapter's; they are repeated in
-[dac.md](dac.md)'s findings): the round trip is monotonic over the whole
-range and stays within 38 LSB of the identity between codes 256 and 3840,
-which is a little over one per cent of full scale for the DAC's error,
-the ADC's and their shared reference together (38 to 47 LSB run to run).
+[dac.md](dac.md)'s findings): between codes 256 and 3840 the round trip
+stays within 40 to 45 LSB of the identity, the worst near the top where
+the buffer nears its swing. The letter judges the codes the sheet
+specifies the buffered output over, 0x1C7 to 0xE38 (0.2 V from either
+rail at VREF+ = 1.7 V), against the sheet's own 46 LSB - the DAC's
+offset, gain error and INL, the ADC's total error and its noise - and
+requires the curve to rise at every 128-code step there; code 3584, the
+highest it reads inside that range, reads 3617 to 3619.
 
 **The settling of a step, measured by sampling at increasing delays.**
 After a 0 -> 4000 code step, a 15-cycle conversion started with no delay
 reads 432..475, at +1 us about 2200, at +2 us about 3440, at +5 us 4031,
 and 4040..4041 from +10 us - against a settled 4038..4041. So the pad is within one per cent
 of its final value between 2 and 5 us after the write, and a program that
-converts immediately after a step measures the ramp.
+converts immediately after a step measures the ramp. The letter judges
+the step settled by +10 us, the first probe past the sheet's 6 us
+settling time; how far short the first reading falls is printed, the
+sheet giving the settling time no minimum.
 
 **The analog watchdog.** A window of +/- 600 LSB around a DAC-held
 midpoint raises AWD on a step below it and on a step above it and stays
@@ -511,14 +533,18 @@ selected, with no stream armed and nothing serving the requests. So
 ADC_CDR is the DMA's register and not a second data register, which
 13.13.17 does not say. AND THE SLAVE'S OWN EOC DOES NOT STAND after such
 a round (its SR reads STRT alone), so a reconfiguration has to clear its
-STRT by hand.
+STRT by hand. Both are this part's measurements, printed by the letter;
+what it judges is the manual's own statement, that under DMA mode 2 the
+two halves of ADC_CDR are the two converters' data registers of the same
+round.
 
 **Two converters on ONE pad**, which 13.9.2's note tells an application
 not to do ("no overlapping sampling times ... when converting the same
 channel"): they read within 1 LSB of each other and within 6 of the
 single-converter answer. On a source as stiff as a buffered
 DAC output the caution costs nothing measurable; it is about a source
-with impedance, which this is not.
+with impedance, which this is not. Printed, not judged: the note gives
+no figure for the cost.
 
 **Overrun, both ways.** With EOC at every conversion, continuous, and
 nothing read for 200 us, OVR is up; clearing it and triggering again is
@@ -535,7 +561,10 @@ more SWSTART converts the new sequence.
 With a HARDWARE trigger (a pad edge on line 11) the conversion the
 rewrite landed in is lost in the same way and THE NEXT EDGE converts the
 new sequence with no software in between, which is exactly the sparing
-the item's own text claims.
+the item's own text claims. Whether the erratum reproduces is printed;
+what the letter judges is the driver's refusal and the two controls the
+item rests on (one more SWSTART, and the next hardware edge, each
+converting the new sequence).
 
 **The external trigger path, with no timer and no wire.** A pad driven
 high feeds its own EXTI line and starts a conversion on line 11, and an
@@ -545,7 +574,10 @@ the edge detector's output. AND THE EXTI's SOFTWARE TRIGGER DOES NOT
 REACH IT: SWIER raises the line's own pending bit and no conversion
 follows, under either mask, because that write is injected past the
 detector. SWSTART is independent of all of it: a converter armed for a
-hardware trigger still converts when the software asks.
+hardware trigger still converts when the software asks. Which mask gates
+the trigger and whether SWIER reaches the converter are in neither
+chapter, so the letter prints them; it judges the conversions each edge
+starts, VREFINT read at no less than the sheet's floor of 1333.
 
 **A four-rank sequence into memory, and the counter-experiment.** One
 SWSTART, four conversions of four different channels (the two DAC pads,
@@ -652,3 +684,7 @@ Implemented, not bench-verified:
 - Letter `s` on the STM32F411, the STM32F429 and the STM32F469: their
   boards are not on the desk (on the F411, which has no TIM8, the two
   TIM8 rows of each table are skipped by name).
+- The value bounds of letters c to g, j, m, o and r on the STM32F429,
+  the STM32F411 and the STM32F469: they are the STM32F446 data sheet's,
+  and a run of the suite on each board, against its own sheet's tables,
+  would measure them.

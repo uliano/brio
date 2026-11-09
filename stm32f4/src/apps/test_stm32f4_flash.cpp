@@ -839,19 +839,23 @@ void tg_stall() {
               " KB: ", took, " us, ", Flash::last_wait_turns(),
               " poll turns, the kernel tick advanced ", ticks, " ms", crlf);
         bench.verdict("the erase completes with no error", err == 0u);
-        if (s->bank == 1u) {
-            // The image is in bank 1 on every board of this bench, so
-            // this erase stalls the fetches that would have served the
-            // SysTick handler.
-            bench.verdict("THE CORE IS FROZEN THROUGH IT: the kernel tick, whose interrupt "
-                          "cannot be taken, loses all but a millisecond or two of the wall",
-                          ticks <= 2u);
-        } else {
+        // In bank 1 - where the image is on every board of this bench -
+        // the erase stalls every fetch the array must serve (3.5).
+        // Whether SysTick's vector and handler are among them with the
+        // ART on, or come out of its caches, is not the manual's to say,
+        // so the tick above is printed; the freeze is judged below with
+        // the accelerator off, where every fetch is the array's.
+        if (s->bank != 1u) {
             // Read-while-write (RM0090 3.6.5): the code is in the other
-            // bank and the core never notices.
+            // bank and the core never notices. Derived: a window of
+            // `took` microseconds holds at least took / 1000 whole tick
+            // periods, every one of them served (nothing here masks for
+            // a millisecond), and TIM2 reads the window to 1 us late at
+            // most, which costs one; both clocks come from the same PLL,
+            // so no crystal error enters.
             bench.verdict("the erase is in the OTHER bank, so the core runs through it and "
                           "the tick keeps its time",
-                          ticks + 5u >= took / 1000u);
+                          ticks + 1u >= took / 1000u);
         }
     }
 
@@ -870,27 +874,45 @@ void tg_stall() {
     FlashAccel::dcache(false);
     (void)FlashAccel::icache_reset();
     (void)FlashAccel::dcache_reset();
+    const uint32_t ticks2 = Ticker::ticks();
     const uint32_t t2 = us_now();
     (void)Flash::erase_sector(zone->number);
     const uint32_t without_art = us_since(t2);
+    const uint32_t ticks_bare = Ticker::ticks() - ticks2;
     const uint32_t turns_bare = Flash::last_wait_turns();
     FlashAccel::enable_all();
 
+    // The two durations are printed and not compared: the datasheet
+    // gives tERASE a typical and a maximum and no spread between two
+    // erases of one sector (the page records the spread measured).
     print(serial, "  the same ", zone->size / 1024u, " KB sector: ART on ", with_art, " us / ",
-          turns_art, " turns, ART off ", without_art, " us / ", turns_bare, " turns", crlf);
+          turns_art, " turns, ART off ", without_art, " us / ", turns_bare,
+          " turns, the kernel tick advanced ", ticks_bare, " ms", crlf);
     if (zone->bank == 1u) {
         bench.verdict("with the accelerator off the core completes NO poll turn: "
                       "every instruction fetch is stalled on the array",
                       turns_bare == 0u);
+        // Derived: with the prefetch and both caches off every fetch,
+        // the vector's included, is the array's, and 3.5 stalls it to
+        // the erase's end. SysTick keeps counting (it is the core's, on
+        // HCLK) but its every period inside the stall sets ONE pending
+        // bit, served once when the fetches resume; one more period can
+        // end in the few instructions between the first tick read and
+        // the erase's start, and one in those between its end and the
+        // second read. Three at most, against the hundreds of a
+        // sector's erase.
+        bench.verdict("THE CORE IS FROZEN THROUGH IT with the accelerator off: the "
+                      "kernel tick, whose interrupt cannot be taken, advances by "
+                      "three at most",
+                      ticks_bare <= 3u);
     } else {
         bench.verdict("the zone is in the other bank, so the core polls throughout "
                       "whatever the accelerator does",
                       turns_bare > 0u);
+        // The same derivation as the sizes above: every tick served.
+        bench.verdict("and the tick keeps its time with the accelerator off too",
+                      ticks_bare + 1u >= without_art / 1000u);
     }
-    bench.verdict("the erase takes the same time either way, the accelerator being "
-                  "the CPU's side of the interface and not the array's",
-                  with_art + with_art / 10u >= without_art &&
-                      without_art + without_art / 10u >= with_art);
     bench.verdict("the ART is back on afterwards",
                   FlashAccel::prefetch() && FlashAccel::icache() && FlashAccel::dcache());
     (void)Flash::lock();

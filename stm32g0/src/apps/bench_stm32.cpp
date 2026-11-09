@@ -615,6 +615,20 @@ void run_costs(const OpNames& ops) {
 constexpr uint32_t probe_us = 999u;
 constexpr uint32_t probe_floor = SysClock::hz / 1'000'000u * probe_us;
 static_assert(SysClock::hz % 1'000'000u == 0u, "the floor is exact in whole cycles per microsecond");
+/// What the ruler may read past the due cycles, from the release listing.
+/// delay_us() counts SysTick's own VAL, the ruler composes the same
+/// counter, so the HSI's error cancels and an interrupt inside the wait
+/// is counted by both. Between the two ruler samples and outside the
+/// counted wait lie: the first read's tail after its VAL load and the
+/// call (23 instructions), delay_us()'s entry to its first VAL load (19),
+/// its exit (5) and the second read's head to its VAL load (8) - 55
+/// instructions, at most 2 cycles each but the call (3) and the push and
+/// the pop (5 each): 119, and 16 for LATENCY's two wait states on 8
+/// non-sequential fetches; one turn of the poll that overshoots the due
+/// count (13 instructions, at most 28 cycles); and one tick handler
+/// landing outside the counted wait or on its last turn (under 80
+/// cycles, entry and exit included): 243, written 250.
+constexpr uint32_t probe_slack = 250u;
 
 void tr_ruler() {
     const bool quiet = drain();
@@ -626,13 +640,14 @@ void tr_ruler() {
     const bool served = delay_us(clock, probe_us);
     const uint32_t took = sw.elapsed();
     print(serial, "  delay_us(clock, ", probe_us, ") served=", served, ": ", took,
-          " cycles on the ruler (floor ", probe_floor, ", +5% ", probe_floor + probe_floor / 20u,
+          " cycles on the ruler (floor ", probe_floor, ", top ", probe_floor + probe_slack,
           "); delay_us(clock, 1000) refused=", whole_tick_refused, crlf);
     if (quiet) {
         bench.verdict("the ruler reads delay_us(999) at least the due cycles",
                       served && took >= probe_floor);
-        bench.verdict("and under the due cycles + 5 per cent",
-                      took <= probe_floor + probe_floor / 20u);
+        bench.verdict("and at most 250 cycles more: the code around the counted wait, "
+                      "one turn of its poll and one tick",
+                      took <= probe_floor + probe_slack);
     } else {
         bench.skip("the console did not drain: the timed wait would carry its interrupt");
     }

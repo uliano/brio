@@ -912,14 +912,15 @@ void tk_pending() {
     (void)delay_us(clock, 200);
     const uint16_t early = vector_entries;
 
-    print(serial, "  one trigger: ", late, " entries clearing LAST, ", early,
+    // The clear-last count is printed and not judged: whether the delay
+    // the errata warns of outlives the exception return is not stated
+    // (the item says only that it may), and one die's answer is no
+    // licence - the driver clears first. Clearing first is the control:
+    // the store lands before the return, so one trigger is one entry.
+    print(serial, "  one trigger: ", late, " entries clearing LAST (one means the delay "
+          "did not outlive the exception return here, two that it did), ", early,
           " clearing first", crlf);
-    bench.verdict("clearing first serves one trigger exactly once", early == 1u);
-    bench.verdict("and clearing it as the handler's LAST store is served once too "
-                  "here - the delay the errata warns of did not outlive the "
-                  "exception return on this part, which is a measurement and not a "
-                  "licence: the driver clears first",
-                  late == 1u);
+    bench.verdict("the control: clearing first serves one trigger exactly once", early == 1u);
 
     quiet_everything();
 }

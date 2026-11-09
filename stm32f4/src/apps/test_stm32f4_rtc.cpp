@@ -690,6 +690,11 @@ void tf_alarms() {
     Rtc::clear_alarm(RtcAlarmId::a);
 
     // Alarm B with the SUB-SECOND field: half a second into every second.
+    // The calendar's own second is weighed first in core cycles, so the
+    // offset below is read in the RTC's time and neither crystal's
+    // tolerance enters it.
+    uint32_t sec_cycles = 0;
+    const bool sec_ok = measure_seconds(1, sec_cycles) && sec_cycles != 0u;
     const uint16_t half = static_cast<uint16_t>((Rtc::prescalers().sync + 1u) / 2u);
     RtcAlarm b{};
     b.subsecond_mask = 15;
@@ -704,15 +709,32 @@ void tf_alarms() {
     const uint32_t waited = Ticker::ticks();
     while (alarm_count == 0u && Ticker::ticks() - waited < 1500u) {
     }
-    if (got_edge && alarm_count != 0u) {
+    // WHEN IT IS DUE, derived: RTC_SSR reloads to PREDIV_S at the
+    // second's edge and counts down at ck_apre, so it reads `half` after
+    // PREDIV_S - half ticks: 127 of the 256 in a second at the reset
+    // prescalers, 496.1 ms, not 500. The offset is read in calendar
+    // seconds (sec_cycles above), so no crystal enters. Around the due
+    // time: the flag cannot precede the match, and the edge's stamp is
+    // late by at most a polling turn of RTC_SSR (under a microsecond,
+    // with the conversion's floor 2 us in all); the flag's way to the
+    // handler is held under a millisecond by the latency verdict above
+    // (alarm A's, the same path).
+    const RtcPrescalers pre = Rtc::prescalers();
+    const uint32_t due_us = static_cast<uint32_t>(
+        static_cast<uint64_t>(pre.sync - half) * 1'000'000ULL / (pre.sync + 1u));
+    if (sec_ok && got_edge && alarm_count != 0u) {
         const uint32_t offset = static_cast<uint32_t>(alarm_at - edge);
-        const uint32_t ms = offset / (SysClock::hz / 1000u);
-        print(serial, "  alarm B landed ", ms, " ms into the second (500 due)", crlf);
-        bench.verdict("and it lands half a second in, to a few milliseconds",
-                      ms >= 495u && ms <= 505u);
+        const uint32_t offset_us =
+            static_cast<uint32_t>(static_cast<uint64_t>(offset) * 1'000'000ULL / sec_cycles);
+        print(serial, "  alarm B landed ", offset_us, " us into the second (", due_us,
+              " due, the second weighed at ", sec_cycles, " core cycles)", crlf);
+        bench.verdict("and it lands where the sub-second count puts the match, to the "
+                      "handler's latency",
+                      offset_us + 2u >= due_us && offset_us <= due_us + 1000u);
         bench.verdict("the handler served alarm B", (alarm_served & RtcFlag::alarm_b) != 0u);
     } else {
-        bench.verdict("and it lands half a second in, to a few milliseconds", false);
+        bench.verdict("and it lands where the sub-second count puts the match, to the "
+                      "handler's latency", false);
         bench.verdict("the handler served alarm B", false);
     }
     Rtc::clear_alarm(RtcAlarmId::b);
@@ -1236,6 +1258,31 @@ uint32_t count_pad_edges(uint32_t ms, uint32_t& cycles) {
     return edges;
 }
 
+/// Count rising edges on RTC_AF1 between two RTC_SSR reloads - one
+/// calendar second. False when no second closed inside 2.5 s.
+bool count_pad_edges_in_second(uint32_t& edges) {
+    edges = 0;
+    const uint32_t started = Ticker::ticks();
+    uint16_t prev = Rtc::subsecond();
+    bool last = RtcPad::read();
+    bool open = false;
+    while (Ticker::ticks() - started < 2500u) {
+        const uint16_t ss = Rtc::subsecond();
+        const bool now = RtcPad::read();
+        if (ss > prev) {   // a reload: the counter counts DOWN
+            if (open) {
+                return true;
+            }
+            open = true;
+        } else if (open && now && !last) {
+            ++edges;
+        }
+        prev = ss;
+        last = now;
+    }
+    return false;
+}
+
 void tm_output() {
     bench.verdict("the domain runs the reset prescalers (set if found otherwise)",
                   default_prescalers());
@@ -1257,10 +1304,24 @@ void tm_output() {
     const uint32_t fast = count_pad_edges(1000, window);
     const uint32_t fast_hz = static_cast<uint32_t>(
         (static_cast<uint64_t>(fast) * SysClock::hz) / (window == 0u ? 1u : window));
+    // The rate against the core is printed: it carries the two crystals,
+    // and the ST-LINK's has no stated tolerance. What is judged is the
+    // count in one CALENDAR second, derived: the output is RTCCLK / 64 at
+    // PREDIV_A 0x7F (RM0390 22.3.14) and the second is RTCCLK / 32768,
+    // so a second holds exactly 512 of its periods; each end of the
+    // second is seen within a polling turn of RTC_SSR (under a
+    // microsecond against a 1953 us period), which can add or lose the
+    // one edge that falls inside it: 511..513. Rising edges, as that
+    // section advises (the falling ones jitter).
     print(serial, "  RTC_CALIB counted ", fast, " rising edges in ", window, " cycles = ", fast_hz,
-          " Hz (512 due)", crlf);
-    bench.verdict("and it is 512 Hz on the pad, to one per cent",
-                  fast_hz > 507u && fast_hz < 517u);
+          " Hz against the core (512 due)", crlf);
+    uint32_t in_second = 0;
+    const bool second_seen = count_pad_edges_in_second(in_second);
+    print(serial, "  and ", in_second, " rising edges in one calendar second (511..513 due)",
+          crlf);
+    bench.verdict("and it is 512 Hz on the pad: 512 rising edges in a calendar second, to "
+                  "the one edge a polling turn can catch at either end",
+                  second_seen && in_second >= 511u && in_second <= 513u);
 
     bench.verdict("the 1 Hz output takes PREDIV_S ending in 0xFF",
                   Rtc::calibration_output(true, RtcCalibOutput::hz1));

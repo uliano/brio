@@ -98,12 +98,12 @@ bus-clock, capability and EXTI facts come from
 `stm32g0/device_tables.hpp` (the reserve: the table of what each part
 has, read off the device header). The LPUARTs are
 [lpuart.md](lpuart.md) - the same task over a different resource. Bench
-suite: `test_stm32_serial` (17 letters in `z`, 119 verdicts and two
+suite: `test_stm32_serial` (17 letters in `z`, 121 verdicts and two
 skips, wireless - a letter is one command key of the suite's console and
 the group of verdicts it runs, `z` the key that runs them all; the two
 skips are smartcard block mode and the synchronous data path, which one
 board cannot settle; four more outside `z` through `brio stress`;
-thirteen under the second all-key `t`, 171 verdicts, against the desk's
+thirteen under the second all-key `t`, 172 verdicts, against the desk's
 STM32F446RE running `usart_peer` - "Against a far board" below - and
 letter `W` beside them, outside both all-keys). The instrument for a far
 board's suite is this stratum's `usart_peer` ("The peer" below). Family
@@ -782,7 +782,13 @@ of `h`, `k` and `l`) are fed by the bit-banged line, which TIM2 paces at
 the rate asked, so their decoding is the check. TIM2 and every kernel
 clock but the LSE derive from HSI16 on these boards (no HSE fitted): the
 oscillator's error cancels and what is read is the divisor; against the
-32768 Hz crystal the reading carries HSI16's trim too.
+32768 Hz crystal the reading carries HSI16's whole error too, and those
+runs are judged 982 to 1023 thousandths instead: DS13560 table 44's
+HSI16 (15.88 to 16.08 MHz at 30 C, a further 1 % either way over 0 to
+85 C: -1.75 % to +1.5 %), the divisor's rounding (at most +0.19 %,
+LPUART1 at 9600) and the first frame's start on the next baud clock
+edge (one bit of the shortest such run, 6.25 thousandths), the crystal's
+own 20 ppm nothing at that grain.
 
 | letter | what runs | rate asked | STM32G0B1RE | STM32G071RB |
 |---|---|---|---|---|
@@ -808,8 +814,9 @@ oscillator's error cancels and what is read is the divisor; against the
 Every reading is inside its window. The two that are not 1000 are the
 divisor's own rounding, stated at the verdict: 921600 from 64 MHz is
 BRR 69 for 69.4, a rate 6.4 thousandths fast (993); PRESC /256 at 9600 is
-BRR 26 for 26.04 (998). The LSE legs read 1001 to 1004, HSI16's trim
-against the crystal. The transports' 1001 is the start of the run - the
+BRR 26 for 26.04 (998). The LSE legs read 1001 to 1004: the ruler's
+HSI16 against the crystal, inside the 982 to 1023 its data sheet
+allows. The transports' 1001 is the start of the run - the
 first frame waits for the engine's launch and a full shift register
 starts "on the next baud clock edge" (33.5.17) - over 1024 frames; the
 pad's 997 and 999 are the poll that sees each start bit, a few tens of
@@ -914,7 +921,12 @@ never told**, learned from ONE character the software put on the pad:
 mode 0 (any character starting with 1), mode 1 (a 10xx pattern), mode 2
 (0x7F), mode 3 (0x55) learned BRR 21294/21315/21328/21328 against a
 truth of 21333 - **one part in a thousand at worst, and zero for three
-of the four**. Mode 3 given a 0x00 raises **ABRE** rather than a wrong
+of the four**, each judged within 3.33 % of the truth: the tolerance of
+the receiver that will use the learnt BRR (table 189: 8N1, OVER16, three
+samples, BRR[3:0] not zero), since the pad's own fall against its rise
+- what mode 0 times, through the 40 k pulls - has no data-sheet bound;
+the clocks cancel (the pacer is TIM2 on the same HSI16) and the count is
+exact to a cycle an edge. Mode 3 given a 0x00 raises **ABRE** rather than a wrong
 BRR believed. 33.5.9's own precondition is a refusal here: a detector
 armed on a zero BRR has nothing to measure against, so `auto_baud()`
 returns false.
@@ -934,10 +946,14 @@ the last break) with an ICR bit of its own.
 what brings it back. **Address-mark wake compares four bits or seven**
 on the MSB mark and REPORTS the address character that woke it (0x85 for
 a 4-bit address 0x5, 0xC5 for a 7-bit 0x45). **The receiver time-out is
-twenty-two bit times to within the measurement**: RTOF rose 9173 us
-after the character at 2400 baud, where 22 bits are 9167 - and the count
-starts at the END of the stop bit, so the read's own delay is inside
-that. **The character match fires on the character it was given and no
+twenty-two bit times**: RTOF rose 9173 us after the character at 2400
+baud, where 22 bits are 9167 - and the count starts at the END of the
+stop bit, so the read's own delay is inside that. The window is 21.9 to
+22.2 bits, derived: RTOF between RTO and RTO + 2 sample times (33.8.10),
+the receiver's end of the stop bit trailing the pacer's by its start-bit
+detection (a sixteenth) and the pad's fall through the pull-down, the
+poll and the read a few microseconds each - the span opened with the
+console quiet. **The character match fires on the character it was given and no
 other**, and **CMIE does not gate the flag**: with the interrupt enable
 clear the same LF still raises CMF.
 
@@ -952,17 +968,23 @@ this driver does not pretend it can.
 mode is its own half duplex with no HDSEL bit**: 0x3B out on the card
 wire comes back as 0x13B, because the ISO 7816 frame is 8 bits PLUS
 parity and RDR KEEPS the parity bit. **The guard time is counted in BAUD
-PERIODS after the stop bit and holds TC down for exactly that long**: TC
+PERIODS after the stop bit and holds TC down for that long**: TC
 at 10005 us with GT = 0 and 36628 us with GT = 32, a delay of 31.9 baud
-periods where the register asked for 32 - and **TCBGT rises before TC**,
+periods where the register asked for 32 (BRR 208 on the 250 kHz kernel
+makes the period 0.16 % short of 1200 baud's, so 32 read 31.95), judged
+30.9 to 32.9: each leg's character waits for the next baud clock edge
+(33.5.17), one period either way between the two legs - and **TCBGT rises before TC**,
 which is the flag that says the frame left with no NACK behind it
 without waiting for the guard time. **CK is the kernel rate over TWICE
 the prescaler**, counted by a DMA channel with no CPU: PSC 4/8/16/31
 give 31250 / 15630 / 7810 / 4030 Hz against 31250 / 15625 / 7812 / 4032.
-**The automatic retry is real and countable on the pad**: a NACK pulled
-onto the wire from the PORT pull during the 1.5 stop bit with SCARCNT =
-2 was followed by three further start bits and then the ISR read
-0x26000F0.
+**The automatic retry is countable on the pad, and it gives up after
+SCARCNT tries**: a NACK pulled onto the wire from the PORT pull during
+the 1.5 stop bit, SCARCNT = 2, the character 0x00 so that each frame has
+one falling edge and its start bits are the frames - one NACK, the
+control, costs exactly one retry and no error; a NACK on every frame
+costs two retries and no third, and then FE (33.8.4's SCARCNT, 33.8.10's
+FE in smartcard transmission).
 
 ### IrDA
 
@@ -971,12 +993,18 @@ baud, where 3/16 of 833 us is 156. The idle level is LOW with a HIGH
 pulse per zero - the opposite of the decoder's own input, which the
 chapter says in one sentence and no figure repeats. **In low-power mode
 the pulse stops being 3/16 of a BIT and becomes three periods of the PSC
-clock**: 48 us with PSC = 64 on a 4 MHz kernel, where three periods of
-62500 Hz are 48 us - a width that no longer moves with the baud rate.
+clock**: 47 to 48 us with PSC = 64 on a 4 MHz kernel, where three
+periods of 62500 Hz are 48 us - a width that no longer moves with the
+baud rate. It is judged within one of those periods (31 to 64 us): the
+chapter does not say where the low-power divider stands when the bit
+begins.
 **The SIR decoder turned a hand-made RZI frame back into its byte**, 3
 of 3. **The glitch filter is one PSC period**: a low pulse of half of it
-started nothing, which is what PSC is FOR on the receive side and why
-the ENDEC refuses PSC = 0.
+started nothing in the twelve bit times a frame it started would need to
+end, which is what PSC is FOR on the receive side and why the ENDEC
+refuses PSC = 0 - and on the same receiver a pulse of twenty PSC
+periods (3/16 of the bit, past the two above which 33.5.18 accepts a
+pulse) starts a frame, the control.
 
 ### The pads' extras
 
@@ -991,10 +1019,16 @@ inverts the receive line, and the same waveform read without it is not
 the byte. **MSBFIRST is an exact bit reversal**: 0xB2 on the wire reads
 back 0x4D. **DEAT is counted in SAMPLE times and not bit times**: DE
 rose 416 us before the start bit for DEAT = 16 at 2400 baud, where a bit
-is 416 us - sixteen sample times are one whole bit at OVER8 = 0. RTS is
-asserted exactly while the receiver cannot take another character;
-**CTS held high stops the transmitter BETWEEN frames** and releasing it
-lets the character go, with the line pull-walked and no wire.
+is 416 us - sixteen sample times are one whole bit at OVER8 = 0, read
+as 15 or 16 sixteenths and judged so: DEAT to DEAT + 1 sample times by
+where the oversampling clock's first tick falls, less a poll's turn. RTS
+is asserted exactly while the receiver cannot take another character;
+**CTS held high from before the first write holds the transmitter
+before a frame** - the character held in TDR, TXE down and nothing on
+the wire; the shifter is not loaded while CTS stops it, so TDR is the
+one place a character waits - and releasing it lets the held one go and
+the next follow as soon as TDR frees, in order, each read as it arrives
+(RDR holds one), with the line pull-walked and no wire.
 
 ### Synchronous master
 
@@ -1176,8 +1210,8 @@ against its own LSE over the very window of each run, the stratum's
 `LseTracker` ([clock.md](clock.md), "The core against the LSE, tracked")
 on DMA1 channel 4 with a ring of 4096, a second of the crystal, for the
 length of the set: every rate verdict is the divisor's on the wire with
-the oscillator's walk taken out. Score: **171 of 171**, the refusals
-counted as skips with their reason; letter `x`, outside `z` and `t`, is
+the oscillator's walk taken out. The set carries **172 verdicts**, the
+refusals counted as skips with their reason; letter `x`, outside `z` and `t`, is
 letter `7`'s control through the bridge (below).
 
 - **The rendezvous and the refusal path** (`1`): ping, IDENT (kind
@@ -1203,9 +1237,10 @@ letter `7`'s control through the bridge (below).
   `report_rate_stated` beside it, the far divisor on its crystal,
   usart_link.hpp), so the far transmitter is judged as tightly as this
   one - the far divisor's EXACT rungs (9600, 1, 1.5 and 2 Mbaud: 90 MHz
-  over a whole number of sixteenths) at 100 ppm with the rest; a peer
-  that cannot tell leaves the flag clear and is judged at the loose per
-  cent.
+  over a whole number of sixteenths) with the rest; a peer that cannot
+  tell leaves the flag clear, and its blast's rate is printed, not
+  judged. Letter `1` keeps the crystals' offset (the three runs' mean)
+  for letter `2`, which takes one run of its own when `1` has not run.
 - **The baud matrix** (`2`), on the two dividers' COMMON ladder: this
   USART makes 64 MHz / n (OVER8 adds no resolution, above), the far one
   90 MHz / k, and the two meet where k / n = 7 / 5 - above 2 Mbaud at
@@ -1213,8 +1248,10 @@ letter `7`'s control through the bridge (below).
   1, 1.5, 2 Mbaud and those four: 16 frames echoed by the far chip, every
   one equal; this transmitter timed by the far receiver over a thousand
   frames or 25 ms (864 frames at 9600, nine tenths of the trackers'
-  second) within 100 ppm of the divisor's error plus the HSI's over the
-  run - measured within 60 ppm at every rung: 9600 +3044 against +3033,
+  second) at the divisor's error plus the HSI's over the run plus the
+  crystals' offset, within the run's derived error (47 to 62 ppm by the
+  rung, "The rates across the wire" below) - the first two measured within
+  60 ppm at every rung: 9600 +3044 against +3033,
   921600 +9472 against +9434 (BRR 69 for 69.4), 6.4 Mbaud +3151 against
   +3140. THE FAR RECEIVER'S FIRST OR LAST STAMP MOVES BY ABOUT 0.4 BIT
   from run to run - with the 64 frames of 25 ms at 9600 it read +600 ppm
@@ -1223,7 +1260,9 @@ letter `7`'s control through the bridge (below).
   located. The far blast whole on the polled receiver (16000 of 16000 at
   6.4 Mbaud, a hundred cycles a frame, on a lean loop: the ISR load, the
   stamp, the RDR load and the count), its rate within 40 ppm of the far
-  divisor's stated one less this HSI's (6.4 Mbaud: +1174 against
+  divisor's stated one less this HSI's (judged less the crystals' offset
+  too, within the run's derived error, 59 to 112 ppm by the rung, the
+  window opened with the console quiet) (6.4 Mbaud: +1174 against
   +4464 - 3264); and 1024 frames whole through the interrupt receiver and
   through the receive engine (DMA1 channel 3) at every rung, OVER8's task
   above 4 Mbaud.
@@ -1232,7 +1271,9 @@ letter `7`'s control through the bridge (below).
   far USART refuses them: M counts its parity bit and has no seven-bit
   word), 9E1 skipped here (no word length on this USART either); the
   half stop bits timed as LENGTHS by the far receiver, 19 and 21 half
-  bits within 100 ppm of an 8N1 run with the HSI taken out.
+  bits: each run's figure with the HSI taken out that of an 8N1 run,
+  the crystals' offset cancelling, within the two runs' derived errors
+  (133 and 127 ppm).
 - **The receiver's errors from a foreign sender** (`4`): six frames of
   odd parity into an even receiver, PE on each, the data readable; THE
   FE ONSET with the far divisor 0..8 % off 9600, back to back (a fast
@@ -1266,7 +1307,8 @@ letter `7`'s control through the bridge (below).
   3.33 % inside both ways; ONE STRETCHED CELL of 0x55 at 115200 - the
   start or a data cell 30 % longer or shorter decoded, 45 % not, the stop
   cell's length free with an idle behind it. **ES0548 2.11.1 REPRODUCES
-  AT EVERY RATE**, the far engine drawing a glitch to zero INSIDE the
+  AT EVERY RATE** (printed, not judged: whether a die reproduces an
+  erratum is its figure; the first-half control is the verdict), the far engine drawing a glitch to zero INSIDE the
   stop bit of eight 0x96 frames (the protocol's `stage` op): an eighth of
   a bit from 75 % of the stop bit corrupts 7 or 8 frames of 8 at 2400,
   9600 and 115200, a quarter at 1 Mbaud (an eighth is under the far
@@ -1348,7 +1390,8 @@ letter `7`'s control through the bridge (below).
   sender IDLE follows every frame from ten bits and none at 9.75; from a
   sender 1 % fast from 10.25 of its bits, 3 % fast from 11 - so ONE IDLE
   FRAME AND THEN A CHARACTER FROM A FASTER SENDER IS NOT TOLD HERE
-  EITHER, which is ES0298 2.13.1's own case: the receiver counts its
+  EITHER (printed, not judged: no sheet of this die describes it),
+  which is ES0298 2.13.1's own case: the receiver counts its
   idle frame from the stop bit as IT sampled it, and a faster sender's
   frame ends ahead of that by its error over the frame (ten bits of 3 %
   are 0.3 bit). The far F446 reads the same table, entry for entry
@@ -1523,6 +1566,36 @@ crystals' tolerances allow (UM2324 6.7.1 names a 20 ppm part for the
 LSE; the ST-LINK's 8 MHz has none stated) against the 0.3 % an
 uncorrected HSI16 would put there.
 
+### The rates across the wire
+
+Letters `2` and `3` judge a rate the other chip timed, or this chip timed
+from the other, and every such figure has two parts besides the divisor
+and the HSI16's walk (which the tracker takes out): the two crystals'
+offset, and the run's own error. The offset is MEASURED, because no data
+sheet bounds it tightly enough (UM1724 states no tolerance for the
+ST-LINK's 8 MHz): letter `1`'s three runs, their mean, kept for letter
+`2` - which takes one run of its own when `1` has not run in the boot -
+with one run's error beside it (7 ppm over 0.4 s; 35 on the 8 KB
+part's 40 ms). In letter `3` the offset is the same in both runs and
+cancels. Each stamp of a run's span is late by up to a TIME, whatever
+the span's length, so the span is off by up to that time:
+
+| the term | its time | from |
+|---|---|---|
+| the stamps' shift from run to run | about 0.4 bit | measured on both peers, the cause not located (the baud matrix above) |
+| the poll that stamps: the far F446's, this end's `collect()` | 0.12 us there, 0.63 us here | 22 cycles at 180 MHz; some 40 at 64 MHz, the idle turn in the release listing |
+| one SysTick handler on a stamp | 0.25 us there, 1 us here | some 45 cycles on the M4; some 64 on the M0+ (entry, return, a handler of 13 instructions at two flash wait states) |
+| this end's tracker over the window | 0.47 us | "The rendezvous's bound" |
+
+So a span of N half bits at a rate R errs by ceil(2 x (4e8 + t x R) /
+(1000 x N)) ppm, t the sum of the last three terms in nanoseconds
+(`run_err_ppm`), and each verdict adds one ppm for every whole-ppm
+figure it combines: letter `2`'s transmitter leg 47 to 62 ppm by the
+rung, its far blast on this receiver 59 to 112 (this end's slower poll
+and handler; the console drained before the window, which the bound does
+not count) - wider on the 8 KB part, whose 62 ms ring shortens every
+span - and letter `3`'s half and one-and-a-half stop bits 133 and 127.
+
 ### Where the hot paths run from
 
 The task's placement (util/placement.hpp, [platform.md](platform.md)'s
@@ -1558,9 +1631,14 @@ the completion and the marks alone. `LpUart` takes the same parameter
 ## On the STM32G071RB
 
 `test_stm32_serial` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
-0x2000) and scores **112/112** against the G0B1RE's 118, its console the
-FIFO-mode USART2 it defaults to; letters `y`, `w` and `v` pass there with
-`brio stress` as on the bigger part.
+0x2000), its console the FIFO-mode USART2 it defaults to; letters `y`,
+`w` and `v` pass there with `brio stress` as on the bigger part. Counted
+from the code, its single-board image's `z` carries the G0B1RE's 121
+verdicts less LPUART2's two (one skip instead) and, where the boot
+probe finds the edge-counter path dead as on that die (below), less
+four more: **115 verdicts and seven skips** (119 and three where the
+path works). The score of today's two images, the two-board set's
+count among it, is a run on the board.
 
 **TABLE 183 IS A DIFFERENT ROW THERE, and the silicon says so.** The part
 has FOUR USARTs and one LPUART: USART1 and USART2 FULL, **USART3 and
@@ -1587,7 +1665,10 @@ EXTI-related DMAMUX trigger inputs are routed to `it_exti_per(y)` instead
 of to `exti[15:0]`, and this suite's edge counter - a DMAMUX request
 generator triggered by an EXTI line, the instrument letters `j`, `m` and
 `o` use to count a clock with no CPU - is exactly what that breaks. The
-boot probe measures it on PB3 and the numbers are the mechanism: four pad
+boot probe measures it on PB3 (once the pad has followed its own pull
+both ways: PB3 is the desk's SPI clock wire to the far board, and a pad
+something drives is left alone, the probe's letters then skipping by
+name) and the numbers are the mechanism: four pad
 edges move **0** words with the EXTI event mask alone and **1 of 4** with
 the interrupt mask armed too, while the EXTI's own rising pending bit
 sees every edge and four SOFTWARE events on the same line, generator and
@@ -1613,9 +1694,14 @@ no letter, there being no synchronous slave on this desk.
 
 ## On the STM32G031K8
 
-`test_stm32_serial` scored **79 of 88** as one image on the
-Nucleo-G031K8 (DEV_ID
-0x466, REV_ID 0x1003). This part has **USART1 and USART2 and nothing
+`test_stm32_serial` runs on the Nucleo-G031K8 (DEV_ID 0x466, REV_ID
+0x1003) as five images. Counted from the code, the first (letters `a`
+to `j`) carries **67 verdicts and three skips** - the G0B1RE's 71 less
+letter `a`'s BASIC-prescaler leg and letter `d`'s three console legs,
+each a skip - and the second (`k` to `q`) **40 and three**, the G0B1RE's
+50 less LPUART1's own-pad half (eight verdicts, one skip) and LPUART2
+(two, one skip). The scores, and the counts of the host and two-board
+images, are a run on the board. This part has **USART1 and USART2 and nothing
 else**, and the split moves one step further down table 183: **USART2 IS
 BASIC HERE** - no FIFO, no PRESC that divides, NO KERNEL-CLOCK
 MULTIPLEXER (`usart_has_clock_select(2)` is false: the header declares no
@@ -1733,6 +1819,14 @@ Declined with a reason (every field of chapter 33 is implemented):
   brio's business yet.
 
 Implemented, not bench-verified:
+- The verdicts and windows `test_stm32_serial` gained after its last
+  bench run: letter `j`'s two staged-NACK legs (one NACK, one retry; a
+  NACK on every frame, SCARCNT retries and FE), letter `k`'s
+  glitch-filter control, letter `l`'s two characters released by CTS,
+  letter `o`'s count of the USART envelope's rises (5700 to 5740, a
+  figure no run has printed yet) and letter `3`'s stop-bit lengths
+  against the derived error (their HSI-corrected figures, which no run
+  has printed yet); one run of `z` and of `t` on the desk measures them.
 - **`tx_room()` and `tx_drained()` on this silicon**, on the USARTs and
   the LPUARTs: the same ring and the same dry branch are judged on the
   host over the simulated PL011 (test/test_pl011) and measured on the

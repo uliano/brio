@@ -59,13 +59,12 @@
 //      2 MHz the part wakes in low-power run with HSIDIV kept (4.3.6) and
 //      restore() finds nothing to do
 //   h  delay_us AT EVERY RUNG on the MCO wall: the per-rate table
-//      selected by the rate index, at least and never early at 64, 16
-//      and 2 MHz
+//      selected by the rate index, never early at 64, 16 and 2 MHz, and
+//      never longer than its own listed cycles allow
 //   i  THE SYSTICK TICKER AS A CLOCK USER: SysTick handed from the
 //      interrupt-less counter to BasicTicker for one letter, the tick
-//      rate held at 1000 Hz against the crystal across the ladder
-//      (rebase() restarts the period: under a tick late per switch,
-//      never fast), then handed back
+//      rate held at 1000 Hz against the crystal across the ladder,
+//      within the HSI16's data-sheet band, then handed back
 //   j  A PLL RATE IN RANGE 2: 16 MHz as PLLRCLK with the VCO at table
 //      47's 128 MHz ceiling, reached from 64 MHz on the PLL (a
 //      reconfiguration through HSISYS), from 2 MHz in low-power run and
@@ -466,6 +465,51 @@ void console_drain() {
 
 bool within(uint32_t v, uint32_t lo, uint32_t hi) { return v >= lo && v <= hi; }
 
+// ---- THE BANDS A RATE IS JUDGED IN ------------------------------------------
+//
+// Every rate this suite judges is HSI16's: SYSCLK is the PLL over HSI16
+// or HSISYS, SysTick counts SYSCLK, and the MCO wall is HSI16/64. Against
+// the crystal (the RTC wall on the LSE, the LPTIM timebase) it carries
+// DS13560 table 44's band: fHSI16 15.88..16.08 MHz at 3.0 V and 30 C,
+// drift -1..+1 % over 0..85 C and -0.1..+0.05 % over VDD 1.62..3.6 V -
+// 15.88 x 0.99 x 0.999 = 15.705 MHz to 16.08 x 1.01 x 1.0005 = 16.249 MHz,
+// -1.85 % .. +1.56 % of 16 MHz (rounded outward, in parts per ten
+// thousand below). The crystal's 20 ppm (NX3215SA, UM2324) is two orders
+// under it and left out.
+//
+// Against an RTC wall on the LSI the HSI16 cancels - the LSI's rate was
+// measured at boot against PCLK, an HSI16 rate - and what is left is the
+// LSI itself: it may have moved anywhere inside DS13560 table 46's band
+// (29.5..34 kHz) since that measurement, and the median read it to one
+// count in 124 (a 31 us period on the meter's 250 ns): a factor of
+// 29.5/34 x (1 - 1/124) = 0.8606 to 34/29.5 x (1 + 1/124) = 1.1619. That
+// band cannot tell 64 from 60 MHz, and it still tells a rate that is 4
+// or 32 times out, which is what a divisor or a table that did not follow
+// the switch would show.
+constexpr uint32_t e4 = 10'000u;
+constexpr uint32_t hsi_slow_e4 = 185;   ///< HSI16 at most 1.85 % slow (table 44)
+constexpr uint32_t hsi_fast_e4 = 156;   ///< HSI16 at most 1.56 % fast (table 44)
+
+/// A band as factors of a nominal value, in parts per ten thousand.
+struct Band {
+    uint32_t lo_e4;
+    uint32_t hi_e4;
+};
+/// How a SPAN of HSI16 cycles (a delay_us) reads on the RTC wall: 1/(1 +
+/// 0.0156) = 0.98464 to 1/(1 - 0.0185) = 1.01885 of its nominal length on
+/// the crystal, the LSI wall's factor otherwise.
+Band hsi_span_on_wall() {
+    return wall_on_lse ? Band{(e4 * e4) / (e4 + hsi_fast_e4),
+                              (e4 * e4 + (e4 - hsi_slow_e4) - 1u) / (e4 - hsi_slow_e4)}
+                       : Band{8606u, 11619u};
+}
+/// How a COUNT of HSI16-derived periods (SysTick ticks) in a window of the
+/// RTC wall reads: 0.9815 to 1.0156 of nominal on the crystal, the LSI
+/// wall's factor otherwise.
+Band hsi_count_on_wall() {
+    return wall_on_lse ? Band{e4 - hsi_slow_e4, e4 + hsi_fast_e4} : Band{8606u, 11619u};
+}
+
 /// The silicon's own account of the clock: what every rung is judged by.
 struct ClockState {
     SysclkSource sws;
@@ -565,7 +609,7 @@ uint32_t loop_run(uint32_t count) {
 /// type claims iff this takes ~N ms (SysTick counts real cycles, the
 /// reload and the table are the type's) - plus the calls' own cycles,
 /// which are a fixed count and so cost 32 times more at 2 MHz than at
-/// 64: `delay_rounds_ok()` prices them at 80 cycles a call.
+/// 64: `delay_rounds_ok()` prices them from the release listing.
 uint32_t delay_rounds_ms(uint32_t rounds) {
     console_drain();
     // ON THE WALL, NOT ON THE KERNEL TICK. The tick is an LptimTicker,
@@ -581,9 +625,40 @@ uint32_t delay_rounds_ms(uint32_t rounds) {
     }
     return rtc_us(t0, wall()) / 1000u;
 }
+/// THE BAND, DERIVED. Each call spins 999 us worth of SYSCLK cycles (the
+/// table's cycles per microsecond are exact at every rung), which read
+/// on the wall as hsi_span_on_wall() of 999 us. Besides the spin, a call
+/// costs at most 83 cycles at zero wait states, counted in the release
+/// listing: 9 in delay_rounds_ms()'s loop (ldr, subs, bl, cmp, bne), 36
+/// from delay_us's entry to its first VAL read, at most 23 from its last
+/// VAL read to the return (19, or 23 when that turn folded a SysTick
+/// reload), and the spin ending less than one poll turn after its count
+/// is met (a turn is 12 cycles, 16 with the fold: 15). A flash wait state
+/// adds at most one cycle per flash access on that path - 52 instruction
+/// halfwords, each counted as its own fetch (a bound: a fetch brings
+/// two), and 6 literal and table loads: 58 - so (83 + 58 x LATENCY)
+/// cycles at the rung's rate. The wall reads 1/32768 s at either end and
+/// the division to whole milliseconds truncates, so the reading is low by
+/// under 1 ms and high by under 0.1:
+///   lo = floor(rounds x 999 us x span.lo) - 1 ms
+///   hi = rounds x (999 us + (83 + 58 x LATENCY) / MHz) x span.hi + 1 ms
+/// 500 rounds on the crystal: 490..511 ms at 64 MHz (LATENCY 2), 490..514
+/// at 16 (LATENCY 1), 490..531 at 2 MHz.
 bool delay_rounds_ok(uint32_t rounds, uint32_t ms) {
-    const uint32_t overhead_ms = (rounds * 80u) / (SysClock::hz() / 1000u);
-    return within(ms, rounds - 2u, rounds + overhead_ms + 2u);
+    const Band band = hsi_span_on_wall();
+    const uint32_t mhz = SysClock::hz() / 1'000'000u;
+    const uint32_t call_ns =
+        999'000u + ((83u + 58u * FlashWaitStates::get()) * 1000u) / mhz + 1u;
+    const uint32_t lo = static_cast<uint32_t>(
+                            (static_cast<uint64_t>(rounds) * 999'000u * band.lo_e4) /
+                            (static_cast<uint64_t>(e4) * 1'000'000u)) - 1u;
+    const uint32_t hi = static_cast<uint32_t>(
+                            (static_cast<uint64_t>(rounds) * call_ns * band.hi_e4) /
+                            (static_cast<uint64_t>(e4) * 1'000'000u)) + 1u;
+    print(serial, "  the band: ", lo, "..", hi, " ms (",
+          wall_on_lse ? "table 44's HSI16 on the crystal wall" : "table 46's LSI wall",
+          ")", crlf);
+    return within(ms, lo, hi);
 }
 
 // ---------------------------------------------------------------------------
@@ -742,24 +817,37 @@ void ta_boot() {
                       SysClock::rate_source(0) == SysclkSource::pllrclk &&
                       SysClock::rate_source(2) == SysclkSource::hsisys);
 
-    // THE WALL, weighed: two seconds of the timebase on TIM2's count. The
-    // span is 2048 ticks plus at most one (wait_ticks ends after more than
-    // its budget), half a per mille against the 1 % band below.
+    // THE WALL, weighed: two seconds of the timebase (LPTIM1 on the LSE
+    // crystal, 1024 Hz) on TIM2's count. wait_ticks ends on the tick that
+    // makes the count exceed its 2048, so the window is more than 2048 and
+    // at most 2049 periods; TIM2's difference quantizes by one count. The
+    // band is the wall's clock against the crystal: table 44's HSI16 where
+    // the wall is MCO (the bands above), the crystal against itself where
+    // it is the LSE -
+    //   lo = nominal x lo - 1,  hi = nominal x hi x 2049/2048 + 1.
     console_drain();
     const uint32_t c0 = t2();
     (void)brio::wait_ticks<P>([] { feed(); return false; }, brio::ticks_from_ms<P>(2000));
     const uint32_t counted = t2() - c0;
     constexpr uint32_t etr_wall_nominal = etr_wall_hz * 2u;
+    static_assert(brio::ticks_from_ms<P>(2000) == 2048u);
     if (etr_wall_ok) {
+        const Band b = wall_on_mco ? Band{e4 - hsi_slow_e4, e4 + hsi_fast_e4} : Band{e4, e4};
+        const uint32_t lo = static_cast<uint32_t>(
+                                (static_cast<uint64_t>(etr_wall_nominal) * b.lo_e4) / e4) - 1u;
+        const uint32_t hi = static_cast<uint32_t>(
+                                (static_cast<uint64_t>(etr_wall_nominal) * b.hi_e4 * 2049u) /
+                                (static_cast<uint64_t>(e4) * 2048u)) + 1u;
         print(serial, "  2 s of the kernel timebase: TIM2 on ", etr_wall_name,
               " counted ", counted, " (", etr_wall_nominal, " nominal, ",
-              (counted / (etr_wall_nominal / 1000u)), " per mille)", crlf);
+              (counted / (etr_wall_nominal / 1000u)), " per mille; the band ", lo, "..", hi,
+              ")", crlf);
         bench.verdict("THE WALL RUNS: a clock that does not move with SYSCLK "
                       "reaches TIM2's ETR with no pad (external clock mode 2, "
                       "ETRSEL naming MCO where the part has that code and the "
-                      "LSE where it has not), within 1 % of its stated rate",
-                      within(counted, (etr_wall_nominal / 100u) * 99u,
-                             (etr_wall_nominal / 100u) * 101u));
+                      "LSE where it has not), at its stated rate within its "
+                      "oscillator's data-sheet band against the crystal",
+                      within(counted, lo, hi));
     } else {
         // NOTHING REACHES THE ETR HERE, and both halves of that are
         // printed because either alone would be a guess: the part offers
@@ -782,8 +870,8 @@ void ta_boot() {
     // The CPU really at 64 MHz: delay_us on SysTick's cycles against the crystal.
     const uint32_t ms = delay_rounds_ms(500);
     print(serial, "  500 x delay_us(999) at 64 MHz: ", ms, " ms on the RTC wall", crlf);
-    bench.verdict("500 near-millisecond waits take 500 ms - SysTick's reload, delay_us's "
-                  "table and the CPU's rate agree, on the RTC wall's scale",
+    bench.verdict("500 near-millisecond waits take 500 ms within the band - SysTick's "
+                  "reload, delay_us's table and the CPU's rate agree, on the RTC wall's scale",
                   delay_rounds_ok(500, ms));
 
     // The PLL's refusal while running: one of the four steps the design
@@ -825,7 +913,7 @@ void tb_fall_mid() {
     const uint32_t ms = delay_rounds_ms(500);
     print(serial, "  500 x delay_us(999) at 16 MHz: ", ms, " ms on the RTC wall", crlf);
     bench.verdict("the CPU is at 16 MHz: the SysTick counter rebased, delay_us's table "
-                  "indexed by the rate, 500 waits in 500 ms",
+                  "indexed by the rate, 500 waits in 500 ms within the band",
                   delay_rounds_ok(500, ms));
     bench.verdict("the switch took under a millisecond", sw.us < 1000u);
 }
@@ -857,7 +945,7 @@ void tc_fall_slow() {
     const uint32_t ms = delay_rounds_ms(500);
     print(serial, "  500 x delay_us(999) at 2 MHz: ", ms, " ms on the RTC wall", crlf);
     bench.verdict("the CPU is at 2 MHz: 500 waits in 500 ms on the RTC wall, plus the "
-                  "calls' own cycles - which are 32 times dearer here",
+                  "calls' own cycles - which are 32 times dearer here - within the band",
                   delay_rounds_ok(500, ms));
 }
 
@@ -882,7 +970,7 @@ void td_rise_and_ladder() {
     bench.verdict("the USART's divisor came back with the rate", good == 64u);
     const uint32_t ms = delay_rounds_ms(500);
     print(serial, "  500 x delay_us(999) at 64 MHz: ", ms, " ms on the RTC wall", crlf);
-    bench.verdict("the CPU is back at 64 MHz on the RTC wall's scale",
+    bench.verdict("the CPU is back at 64 MHz on the RTC wall's scale, within the band",
                   delay_rounds_ok(500, ms));
 
     // THE LADDER, twenty-four times round, the loop exchanging at every rung.
@@ -1178,11 +1266,43 @@ void th_delay() {
                    "own quantum.");
         return;
     }
+    // THE BOUNDS, DERIVED. The wall (TIM2 counting MCO = HSI16/64) and the
+    // spin (SysTick counting SYSCLK, the PLL over HSI16 or HSISYS) run on
+    // the same oscillator, so table 44's error cancels and a span reads in
+    // the HSI16's own microseconds. Two TIM2 readings bracket a true span T
+    // as T - 4 < took < T + 4 (one 4 us count either way; the ETR's
+    // resynchronization moves an edge by under one TIMPCLK cycle, 0.5 us at
+    // the slowest rung, which the rounding below and the path's 72 cycles
+    // absorb).
+    //  - Never early: T >= span, so took > span - 4; a reading of span - 4
+    //    or less is a short delay.
+    //  - Never much more: from one TIM2 read to the next the release
+    //    listing counts at most 91 cycles besides the spin - 10 to the
+    //    call, 36 from delay_us's entry to its first VAL read, at most 23
+    //    from its last VAL read to the return (19, or 23 when that turn
+    //    folded a SysTick reload), 7 to the second TIM2 read, and the spin
+    //    ending less than one poll turn after its count is met (a turn is
+    //    12 cycles, 16 with the fold: 15) - and a flash wait state adds at
+    //    most a cycle per flash access on that path (57 instruction
+    //    halfwords, each counted as its own fetch, and 7 literal and table
+    //    loads: 64). So T <= span + (91 + 64 x LATENCY) / MHz, and took <
+    //    span + 4 + that, rounded up: span + 8 at 64 MHz (LATENCY 2),
+    //    span + 14 at 16 (LATENCY 1), span + 50 at 2 MHz. The 2 MHz rung's
+    //    fixed 36..44 us over every span is those cycles (72 to 76 of path,
+    //    up to 15 of overshoot); at 64 MHz the same cycles are 1.4 us,
+    //    under one count. The TIM2 reads' own bridge cycles are not given
+    //    in RM0444; the bound holds them only as far as its rounding up to
+    //    a whole microsecond does.
+    //  - A span an interrupt handler landed in (the timebase's LPTIM1 or
+    //    the RTC's) is not delay_us alone: it is reported with its figure
+    //    and left out of the upper bound.
     static const uint32_t spans[] = {20, 100, 500, 900};
     static const uint8_t rungs[3] = {r_fast, r_mid, r_slow};
     static const char* const names[3] = {"64 MHz", "16 MHz", "2 MHz"};
     bool never_early = true;
     bool bounded = true;
+    bool refused_all = true;
+    uint32_t lengthened = 0;
     constexpr uint8_t n_spans = sizeof(spans) / sizeof(spans[0]);
     for (uint8_t r = 0; r < 3; ++r) {
         feed();
@@ -1192,30 +1312,42 @@ void th_delay() {
         // more than the bound below, and it is the handler, not delay_us.
         uint32_t took[n_spans] = {};
         bool ok[n_spans] = {};
+        bool quiet[n_spans] = {};
         for (uint8_t i = 0; i < n_spans; ++i) {
+            const uint32_t irq0 = lptim_irqs + rtc_wakes;
             const uint32_t t0 = t2();
             ok[i] = delay_us(clock, spans[i]);
             took[i] = t2_us(t2() - t0);
+            quiet[i] = lptim_irqs + rtc_wakes == irq0;
         }
-        print(serial, "  at ", names[r], ":");
+        const uint32_t mhz = SysClock::hz() / 1'000'000u;
+        const uint32_t slack =
+            4u + ((91u + 64u * FlashWaitStates::get()) + mhz - 1u) / mhz;
+        print(serial, "  at ", names[r], " (bound span + ", slack, " us):");
         for (uint8_t i = 0; i < n_spans; ++i) {
             print(serial, " ", spans[i], "->", took[i]);
-            // The wall's quantum is 4 us; the loop's own overhead grows
-            // 32-fold at 2 MHz (a poll is ~20 cycles).
-            if (!ok[i] || took[i] + 4u < spans[i]) never_early = false;
-            if (took[i] > spans[i] + (rungs[r] == r_slow ? 60u : 16u)) bounded = false;
+            if (!ok[i] || took[i] + 4u <= spans[i]) never_early = false;
+            if (!quiet[i]) {
+                print(serial, " (an interrupt inside: not judged)");
+                ++lengthened;
+            } else if (took[i] >= spans[i] + slack) {
+                bounded = false;
+            }
         }
         print(serial, " us", crlf);
-        const bool refused = !delay_us(clock, 1000u);
-        if (!refused) bounded = false;
+        if (delay_us(clock, 1000u)) refused_all = false;
     }
     (void)go(r_fast);
+    if (lengthened != 0u) {
+        print(serial, "  ", lengthened, " of 12 spans carried an interrupt handler", crlf);
+    }
     bench.verdict("delay_us SERVES AT LEAST ITS ARGUMENT AT EVERY RUNG - the per-rate "
                   "table selected by rate_index(), no division at wait time",
                   never_early);
-    bench.verdict("and never much more (the wall's 4 us, the poll's own cost at 2 MHz), "
-                  "with the millisecond cap refused at every rate",
-                  bounded);
+    bench.verdict("and never more than its argument plus its own listed cycles and the "
+                  "wall's count (the bound printed per rung), with the millisecond cap "
+                  "refused at every rate",
+                  bounded && refused_all);
 }
 
 // =============================================================================
@@ -1234,15 +1366,24 @@ void ti_systick_ticker() {
 
     static const uint8_t rungs[4] = {r_mid, r_slow, r_pll16, r_fast};
     static const char* const names[4] = {"16 MHz R2", "2 MHz LPR", "16 MHz PLL R2", "64 MHz"};
+    // THE BAND, DERIVED. The ticker counts SYSCLK periods of 1 ms at the
+    // nominal rate, so in a window of the wall it counts the window times
+    // hsi_count_on_wall() (table 44's HSI16 on the crystal: 0.9815 to
+    // 1.0156). The window ends on the first wall reading at or past
+    // 500000 us: longer by under one 30.5 us wall count and a poll turn,
+    // under a tenth of a tick. A count of whole ticks in it is off by one
+    // either way. So 500 x lo - 1 <= counted <= 500 x hi + 1, rounded
+    // outward: 489..509 on the crystal, 429..582 on an LSI wall - where a
+    // reload that had not followed the rate still shows, at four or
+    // thirty-two times out. Every tick is one handler run.
+    const Band band = hsi_count_on_wall();
+    const uint32_t lo = (500u * band.lo_e4) / e4 - 1u;
+    const uint32_t hi = (500u * band.hi_e4 + e4 - 1u) / e4 + 1u;
     bool rate_held = true;
-    bool never_fast = true;
     for (uint8_t i = 0; i < 4; ++i) {
         feed();
         console_drain();
         const Switch sw = go(rungs[i]);
-        // 500 ms of the crystal: the ticker must count 500 (+-1 %), and
-        // never MORE than the wall says - a wrong reload would run it
-        // 4x or 32x fast.
         const uint32_t w0 = wall();
         const uint32_t s0 = Ticker::ticks();
         const uint32_t i0 = systick_irqs;
@@ -1251,29 +1392,17 @@ void ti_systick_ticker() {
         const uint32_t counted = Ticker::ticks() - s0;
         const uint32_t irqs = systick_irqs - i0;
         print(serial, "  ", names[i], " (switch ", sw.ok, ", ", sw.us, " us): ", counted,
-              " SysTick ticks in 500 ms of the RTC wall, ", irqs,
-              " handler runs", crlf);
-        // THE BAND IS THE WALL'S. A crystal wall resolves a per cent;
-        // an RC one does not - and on this die the 2 MHz rung reads
-        // about 1.5 % fast against an LSI wall where the other three
-        // read half a per cent, which is either the oscillator moving
-        // with the voltage regime or the core doing so, and this
-        // instrument cannot say which. What the letter is FOR survives
-        // either way: a reload that had not followed the rate would be
-        // four or thirty-two times out, not one and a half per cent.
-        const uint32_t slack = wall_on_lse ? 6u : 16u;
-        if (!within(counted, 500u - slack, 500u + slack) || irqs != counted) {
+              " SysTick ticks in 500 ms of the RTC wall (the band ", lo, "..", hi, "), ",
+              irqs, " handler runs", crlf);
+        if (!within(counted, lo, hi) || irqs != counted) {
             rate_held = false;
         }
-        if (counted > 500u + slack) never_fast = false;
     }
     bench.verdict("THE SYSTICK TICKER HOLDS 1000 Hz ACROSS THE LADDER: rebase() reloads it "
                   "at every switch, 500 ticks per 500 ms of the RTC wall at 16, "
-                  "2, 16 (PLL) and 64 MHz - inside the wall's own resolution, "
-                  "which is a per cent on a crystal and three on an RC root",
+                  "2, 16 (PLL) and 64 MHz within the oscillator's data-sheet band "
+                  "(printed), one handler run a tick",
                   rate_held);
-    bench.verdict("and never runs FAST - the restarted period costs under a tick, late",
-                  never_fast);
     // Hand it back: the interrupt-less counter, and the handler silent.
     Ticker::pause();
     const bool back = SysTickCounter::start(clock);
@@ -1307,7 +1436,8 @@ void tj_pll_range2() {
     const uint32_t ms = delay_rounds_ms(500);
     print(serial, "  the single-wire loop: ", good, " of 64 exact; 500 x delay_us(999): ", ms,
           " ms on the RTC wall", crlf);
-    bench.verdict("the rebased USART exact and the CPU at 16 MHz on the RTC wall's scale",
+    bench.verdict("the rebased USART exact and the CPU at 16 MHz on the RTC wall's scale, "
+                  "within the band",
                   good == 64u && delay_rounds_ok(500, ms));
 
     // From and to the other end of the ladder, eight times each way.

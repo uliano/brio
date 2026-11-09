@@ -1145,6 +1145,14 @@ void tj_can_errors() {
     bench.verdict("the error warning and error passive flags are passed on the "
                   "way",
                   Bus::error_warning() && Bus::error_passive());
+    // The ceiling, derived: bus-off is TEC above 255 (RM0390 30.7.6), and
+    // each failed attempt adds at least 8 - the CAN standard's charge for
+    // a transmitter's error, which the chapter defers to; the standard's
+    // one exception (an error-passive transmitter's acknowledge error)
+    // does not apply to the bit error printed above. After 31 attempts
+    // TEC is at least 248, so the 32nd takes it to 256 at the latest:
+    // 256 / 8. Each error flag the node fails to get out costs 8 more,
+    // so fewer attempts are needed, never more.
     bench.verdict("BUS-OFF is reached, in no more than the 32 attempts eight at a "
                   "time would need (an error frame nobody sees costs the counter "
                   "too)",

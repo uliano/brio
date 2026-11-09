@@ -430,12 +430,12 @@ Quad::output_mode(0, brio::TimOutputMode::force_active);   // the pad goes high
 
 ## Bench findings
 
-`test_stm32f4_tim`, 14 letters in `z` plus `h` by name, **68 pass, 0 fail**
+`test_stm32f4_tim`, 14 letters in `z` plus `h` by name, **66 pass, 0 fail**
 in `z` and 5 more in `h`, WIRELESS - on an STM32F411CE (DEV_ID 0x431,
 REV_ID 0x1000) at 100 MHz from its 25 MHz crystal, with an LSE fitted. The
 pads driven are PA6 (TIM3_CH1), PA8 and PB13 (TIM1_CH1 and CH1N) and
 PB6/PB7 (TIM4_CH1 and CH2); the console (PA9/PA10) and the SWD pads are
-avoided, and nothing is attached to any of them. The same 68 on the
+avoided, and nothing is attached to any of them. The same 66 on the
 32F469IDISCOVERY at 180 MHz, with the quadrature pair on PD12/PD13 (PB6
 and PB7 being the QSPI flash's select and the USB power switch's
 over-current flag there).
@@ -447,7 +447,11 @@ to the register map's values.
 
 **TIMxCLK measured against the core clock.** With PCLK1 at 50 MHz (the APB1
 prescaler at 2) an APB1 timer counts **99 999 753 Hz** and an APB2 timer
-**99 976 539 Hz** - both HCLK, and both what `tim_clock_hz()` derives; the
+**99 976 539 Hz** - both HCLK, and both what `tim_clock_hz()` derives, judged
+inside the bracket the readings allow (each end reads the counter between
+two cycle stamps under the mask, and the count is good to one prescaler
+step: a few tenths of a ppm for TIM2 undivided, about 280 ppm for TIM9
+counted at /5000; the two clocks share the PLL, so no crystal enters); the
 APB1 number is the doubling rule caught in the act, since twice a halved
 PCLK1 is HCLK again. Setting TIMPRE changes nothing on this part, and the
 rule says why: a prescaler of 1 or 2 is HCLK either way.
@@ -519,7 +523,10 @@ weighs **32 769.167 Hz, +35 ppm** against the core clock (2048 captures of
 eight crystal periods, about half a second), and `TimIntervalMeter` on the
 same source gives 32 769.152 Hz - the two agree to half a part per million,
 and both agree with the RTC chapter's own +36 ppm ([rtc.md](rtc.md)),
-measured by a completely different instrument. The LSI weighs
+measured by a completely different instrument. The crystal's figures are
+printed and not judged: the ruler is the HSE's crystal, whose tolerance no
+document on the desk states (the letters judge that the captures arrive).
+The LSI weighs
 **32 119 to 32 136 Hz** run to run, about 2 per cent below nominal and
 inside RM0383's 17..47 kHz window; the RTC chapter's 32 124 Hz sits in the
 same band.
@@ -558,7 +565,7 @@ standing for a poller, which is what makes every measurement above possible
 with no handler at all.
 
 **On the STM32F446** (Nucleo-F446RE, 180 MHz, APB1 at /4 with TIMPRE):
-`z` scores **78 of 78** - the F411's letters and `p` and `q`. Its APB1
+`z` scores **76 of 76** - the F411's letters and `p` and `q`. Its APB1
 timers count 179 999 614 Hz with TIMPRE set (the header's 180 000 000).
 **THE SIX INSTANCES THE F411 HAS NOT** (letter `p`): TIM6, TIM7, TIM12,
 TIM13 and TIM14 as `TimPeriodicTick`s at 10 kHz, all at once, each at its

@@ -139,7 +139,11 @@ interrupt.
 
 **The product is exactly the product.** A 38 kHz carrier at 50 % under a
 1 kHz 50 % envelope gave **1901 rising edges on PB9 in 100 ms**, where
-half of 38000 for a tenth of a second is 1900.
+half of 38000 for a tenth of a second is 1900 - judged 1899 to 2002: an
+envelope high of 499 us holds 18.96 carrier periods, so 19 or 20 rises
+a period by the carrier's phase at the envelope's rise, which drifts
+0.005 of a carrier period a period, and one rise either way at the
+window's ends.
 
 **IR_POL inverts the resting level**, measured with both timers stopped:
 the pad rests LOW normally and HIGH inverted - which is what an LED
@@ -151,7 +155,9 @@ which is HIGH - passes **0 carrier edges a millisecond**, i.e. it shuts
 the gate completely; twenty 0x00 characters at 1200 baud, which
 hold the line low for nine of every ten bit times, pass **34 edges a
 millisecond** against a free-running carrier's 38, which is nine tenths
-of it. That is the right way round for infrared (no light at rest, light
+of it - judged as a count: nine low bits are 285.03 carrier periods, so
+285 to 287 rises a frame and 5700 to 5740 for the twenty, and an idle
+line none. That is the right way round for infrared (no light at rest, light
 for a zero) and the chapter draws one AND gate and says nothing about
 the polarity of its second input.
 

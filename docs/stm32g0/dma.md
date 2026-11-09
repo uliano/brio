@@ -61,7 +61,7 @@ peripherals that publish them (`Usart<n>::dma_tx_request()`,
 channel to one owner. The first holds the instrument letters `a` to `n`
 and `r`; the second letter `o` and the serial streaming letters `p`, `q`,
 `u` and `w`; the third letter `x`, letter `o`'s ring on an LPUART. Across
-the three, 17 letters in their `z` and 84 verdicts, no wire (a letter is
+the three, 17 letters in their `z` and 83 verdicts, no wire (a letter is
 one command key of the suite's console and the group of verdicts it runs,
 `z` the key that runs them all; letters `p`, `q`, `u` and `w` stay outside
 `z` and need `brio stress`). The engines' cost is
@@ -554,11 +554,17 @@ re-arbitration between every single transfer, and "the DMA arbiter
 automatically alternates and grants the other highest-priority requested
 channel, WHICH MAY BE OF LOWER PRIORITY than the memory-to-memory
 channel". Measured over 512-word blocks: at the first finish the loser
-was within 3 of the winner in ALL THREE arrangements - very-high against
-low, low against very-high, and equal. What is left is the hardware
-tie-break, and it is exact: channel 1 was ahead every time, INCLUDING
-when it was the low-priority channel. The lower index wins and no
-register configures it.
+was within 2 to 5 of the winner in ALL THREE arrangements - very-high
+against low, low against very-high, and equal - judged against 13, the
+most the arrangement allows: channel 1 is enabled one call before
+channel 2, nine instructions and at most 22 cycles in which it runs alone
+at two bus cycles a word or more (10.4.3), and the alternation then keeps
+the order. A priority obeyed would have put the very-high channel a whole
+block ahead. Channel 1 was ahead every time, INCLUDING when it was the
+low-priority channel - but it is both the lower index (10.4.4's hardware
+tie-break for equal levels) and the channel enabled first, so this
+stimulus does not show which of the two put it there, and the letter
+prints the count rather than judging it.
 
 **PL BETWEEN TWO TIMER-PACED CHANNELS DID NOT SHOW.** Two channels
 over-requested at 32 million update events a second EACH - five times the
@@ -631,13 +637,15 @@ moved nothing into a channel reading a RAM cell into RAM and two items
 into one writing TDR (the second into the shift register, then the wire's
 pace), so the detector's channel writes where the owner's channel would.
 
-**Throughput.** 512 words (2048 bytes) memory to memory in 2638 cycles =
-5.15 cycles a word, about 49.7 MB/s at 64 MHz - the two AHB accesses
-10.4.3 describes for every single transfer plus the re-arbitration 10.4.4
-places between the transfers of a memory-to-memory block. The chapter
-gives no cycle figure, so how the five divide is not claimed;
-`bench_stm32`'s letter `d` measures the same 5.00 a word by the
-difference of two sizes.
+**Throughput.** 512 words (2048 bytes) memory to memory in 2658 to 2693
+cycles = 5.19 to 5.26 cycles a word, about 49 MB/s at 64 MHz - the two
+AHB accesses 10.4.3 describes for every single transfer plus the
+re-arbitration 10.4.4 places between the transfers of a memory-to-memory
+block. The chapter gives no cycle figure, so the cost is printed and how
+it divides is not claimed; the verdict judges the floor 10.4.3 does give,
+two bus cycles a word. `bench_stm32`'s letter `d` measures 5.00 a word by
+the difference of two sizes, the call and the poll around the block
+taken out.
 
 **Table 51's alignment rules hold as printed.** A byte source into a
 halfword destination is ZERO-EXTENDED, one item per address step of two
@@ -661,7 +669,8 @@ still finds a completion nobody asked to be interrupted for.
 **The request generator turns an edge into requests, on a trigger with no
 pad.** Table 56's input 22 is TIM14_OC, and TIM14 needs no pin to produce
 one: ten triggers at 1 kHz with GNBREQ + 1 = 4 moved exactly 40 words,
-never a stray one. With the channel left DISABLED so no request is ever
+never a stray one (judged 40 or 44: the window is 10 ms and some
+microseconds on TIM14's own clock, ten or eleven edges). With the channel left DISABLED so no request is ever
 served, the second trigger set OFx as 11.4.5 warns, and RGCFR cleared it.
 
 **A SOFTWARE EXTI TRIGGER DID NOT REACH THE REQUEST GENERATOR - recorded,
@@ -691,17 +700,24 @@ block the engine gets is a long one. TIMED AGAINST THE WIRE at the rate
 ASKED - the kilobyte from its first store to TC against 1024 frames of
 ten bits at 115200, which no reader sharing the rate could tell - both
 feeds read **1000 and 1000 thousandths** of the wire's time on the
-STM32G0B1RE and the STM32G071RB, judged -1 % to +3 %.
+STM32G0B1RE and the STM32G071RB, judged 1000 to 1001: the ruler and the
+USART share one clock, so what is read is the divisor - BRR 556 reads
+1000.8, its neighbours 555 and 557 read 999 and 1002 - and a line with
+no gap adds microseconds to it.
 
 **The timer round trip.** An eight-entry duty table played into TIM2's
-CCR1 on its own update request, at a 16 kHz PWM, reads 521..522 per mille
-off LD4's own pad against the table's mean of 525 - with the CPU touching
-not one compare value; the lap count moves at exactly the predicted
-2000 laps a second, and stopping the player leaves the pad holding one of
-the table's own entries. In the other direction a ping-pong engine
-drained TIM16's capture of the LSI - a real ~32 kHz stream reached
-through TISEL with no pad at all - four whole blocks of 32, every
-consecutive pair 30 us apart, nothing torn and no overrun.
+CCR1 on its own update request, at a 16 kHz PWM, reads 523..524 per mille
+off LD4's own pad against the table's mean of 524 (4200 over eight
+periods of 1001 counts) - with the CPU touching not one compare value,
+judged within 17, what a CPU sampler's window of 15 laps less a fraction,
+its per-sample grain and the two interrupts it loses samples to allow;
+the lap count moves at exactly the predicted 2000 laps a second, and
+stopping the player leaves the pad holding one of the table's own
+entries. In the other direction a ping-pong engine drained TIM16's
+capture of the LSI - a real ~32 kHz stream reached through TISEL with no
+pad at all - four whole blocks of 32, every consecutive pair 30 or 31 us
+apart (judged 28 to 35: DS13560's LSI range over the HSI16-derived
+microsecond), nothing torn and no overrun.
 
 **`BlockRelay` inside a real kernel.** Ten caller-owned blocks of 32
 words travelled from the ping-pong engine to a subscriber as
@@ -713,16 +729,15 @@ with nobody draining, the engine STALLED and counted an overrun rather
 than write into the block the caller held, and one `release()` brought
 the stream back.
 
-**The step verdict of that letter is FLAKY at about one run in eight**
-(one failure in eight consecutive `z` runs of the same image, the other
-seven clean). What fails is the fine-grained one - "no sample is off the
-32000-tick step" - and nothing else in the letter: the blocks arrive,
-the seams hold, the accounting agrees. The estimator is
-the tightest thing in the suite, an equality between consecutive
-free-running TIM2 readings taken by the DMA on TIM3's update, so a
-single late request shows as a whole failed verdict. It is recorded
-rather than tuned: whoever next maintains this suite has the choice of a
-tolerance or of finding what is late.
+**What the step verdicts judge is that nothing was torn or missed.** The
+datum is TIM2's counter read by the DMA on TIM3's update, and that read
+waits for whatever else holds the bus at the moment - another channel's
+transfer, a CPU access - by cycles the chapter gives no figure for, so a
+step's exactness is a measurement: the letter prints the largest
+deviation from the pace period. The verdicts draw their line where a
+torn or missing sample sits, half a period away: a missed request reads
+two periods, a sample from the wrong lap a whole block or more. (Judged
+as an exact equality, the letter failed about one run in eight.)
 
 **THE RECEIVE ENGINE AS A RING** (letter `o`). USART1 in single-wire
 half duplex hears every byte it sends (33.5.15), so its two engines -
@@ -748,8 +763,10 @@ board"):
 - **The loop's rate is the rate asked**, which the loop itself cannot
   tell, one divisor serving both ends: 1024 frames through the transmit
   engine, timed from the first `write_bulk()` to TC against their time
-  at 1 Mbaud, read **1001 thousandths** on both parts (judged -1 % to
-  +3 %): the 16-byte transmit ring keeps the wire busy.
+  at 1 Mbaud, read **1001 thousandths** on both parts (judged 1000 to
+  1014: the divisor 64 is exact and its neighbours read 984 and 1015, so
+  the band holds the latencies and up to 14 frames of gaps): the 16-byte
+  transmit ring keeps the wire busy.
 - **A burst with the consumer away loses nothing.** With the tail at 40
   of the 64, 60 bytes landed with nobody reading, harvesting or
   re-arming, and all 60 read back exact - the ring wrapped the storage by
@@ -906,7 +923,10 @@ In a five-millisecond window:
 | SE, NBREQ 1, rising | 5 |
 
 Five sync edges times four requests is twenty words where the same
-channel unsynchronized saturates. `SPOL` is a real selector - either
+channel unsynchronized saturates. The window is 5 ms and a few
+microseconds on the requests' and the sync's own clock, so it holds five
+or six edges and its last batch can be cut by the read: judged 16 to 24
+on one polarity, 36 to 48 on both, 4 to 6 at NBREQ 1. `SPOL` is a real selector - either
 single edge serves the same count and BOTH serves twice as many, which
 is the only reading of 11.6.1's three codes a square wave can tell
 apart - and **NBREQ is the count and not the count minus one**, which is
@@ -927,7 +947,8 @@ it afterwards takes the console's transmitter down with it and leaves
 the board silent mid-letter.
 
 **The request generator's other two polarities**: over ten TIM14
-periods, rising moves 10 words, falling 10, both 20.
+periods, rising moves 10 words, falling 10, both 20 (judged 10 or 11, and
+20 to 22: a window of 10 ms and some microseconds).
 
 - **DMA2 is five channels and not one** (letter `m`): every one of them
   moves a block at every width, byte for byte. With DMA1's seven -
@@ -1038,14 +1059,14 @@ mark: with the CPU in the loop the AHB is shared, and four samples of ten
 32-word blocks in the BlockRelay letter arrive **2 ticks long** - the
 payload being TIM2's counter READ BY THE DMA, whose access a CPU one in
 flight delays by a cycle or two. A torn block is off by a whole pace
-period or more, so the check allows the bus's own jitter where the
-console shares it and nothing at all where it does not.
+period or more, so the check judges half a period and prints the
+largest deviation.
 
 **8 KB OF SRAM IS THE OTHER LIMIT.** The three big memory-to-memory
 buffers drop from 512 to 256 words on this part (every claim restated for
 the length that fits and the length printed beside it), which brings the
-image to 48168 bytes of flash and 6288 of RAM - the stack living in the
-1904 left.
+first image to 46892 bytes of flash and 6360 of RAM - the stack living in
+the 1832 left.
 
 `BlockRelay` and the two block-stream engines run unchanged on this die,
 as does `util/` entire.

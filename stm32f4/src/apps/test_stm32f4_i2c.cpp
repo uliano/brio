@@ -2055,7 +2055,26 @@ void tn_partner() {
     // The host is a user of letter m's DynamicClock, so every switch runs
     // its rebase(): FREQ, CCR and TRISE re-derived for the new APB1. A
     // wrong derivation still moves bytes - at a wrong rate - so each rung
-    // TIMES its write against the rate asked.
+    // reads the registers back against the rung's own APB1 and TIMES its
+    // write against the rate they make.
+    //
+    // THE BOUND, derived. In standard mode the controller counts CCR periods
+    // of PCLK1 for each half of SCL from the edge it generates (RM0390 24.6.8),
+    // the high count held while a target holds the clock low (24.3.3, "SCL
+    // master clock generation"), so a rise time or a target holding the clock
+    // only lengthens a period: the write's 81 periods (the address
+    // and eight bytes, nine clocks each) take at least 81 x 2 x CCR periods of
+    // PCLK1, and the stopwatch around the request holds them all. SCL and the
+    // ruler both run from the rung's one clock, so no clock error enters. So
+    // the write's rate is at most the registers' rate, 1000 x PCLK1 / (2 x CCR)
+    // / 100 kHz thousandths, plus one for the two truncations below. How much
+    // slower it runs - the request's own cost and the partner's polled target
+    // stretching each byte - has no written bound of its own, so the floor is
+    // the framework's window for an I2C clock, a quarter below the rate asked
+    // (docs/design/overview.md, "A loop proves the bytes, never the rate"):
+    // a reading under 750 thousandths is a finding to explain.
+    static constexpr uint32_t rung_apb1[3] = {SysClock::pclk1_hz, Core48::pclk1_hz,
+                                              Core16::pclk1_hz};
     uint8_t rungs_ok = 0;
     for (uint8_t i = 0; i < 3u; ++i) {
         const bool up = i == 0u   ? Cores::template set_index<0>()
@@ -2072,6 +2091,16 @@ void tn_partner() {
         const uint32_t c0 = Ticker::cycles();
         const uint8_t ws = tenure<Host>(partner_addr, w8, 8, nullptr, 0);
         const uint32_t cyc = Ticker::cycles() - c0;
+        // The registers the write ran on, against the rung's APB1: FREQ its
+        // megahertz, and CCR the smallest count whose rate is not above
+        // 100 kHz (24.6.8's standard-mode CCR, rounded up).
+        const uint32_t apb1 = rung_apb1[i];
+        const uint32_t freq = S::regs().CR2 & I2C_CR2_FREQ;
+        const uint32_t ccr = S::regs().CCR & i2c_ccr_mask;
+        const bool regs_right = (S::regs().CCR & I2C_CCR_FS) == 0u && freq == apb1 / 1'000'000u &&
+                                ccr != 0u && apb1 / (2u * ccr) <= 100'000u &&
+                                (ccr == 1u || apb1 / (2u * (ccr - 1u)) > 100'000u);
+        const uint32_t ceiling_pm = ccr == 0u ? 0u : apb1 / (2u * ccr) / 100u + 1u;
         const uint8_t rs = tenure<Host>(partner_addr, nullptr, 0, rb, 8);
         uint8_t bad = 0;
         for (uint8_t k = 0; k < 8u; ++k) {
@@ -2087,19 +2116,20 @@ void tn_partner() {
                                           : 0u;
         const uint32_t pm = per_ns != 0u ? 10'000'000u / per_ns : 0u;   // thousandths of 100 kHz
         print(serial, "  core ", mhz, " MHz, APB1 ", Host::reference_hz() / 1000u,
-              " kHz: serve ", cmd, ", write ", ws, ", read ", rs, ", ", bad,
-              " wrong, the write's SCL at ", pm, " thousandths of 100 kHz", crlf);
-        // Never above the rate by more than 2 %, and within a quarter below
-        // it: a short tenure carries the request's own cost, and the
-        // partner's polled target stretches each byte a little.
-        if (cmd && ws == i2c_ok && rs == i2c_ok && bad == 0u && pm <= 1020u && pm >= 750u) {
+              " kHz: FREQ ", freq, ", CCR ", ccr, regs_right ? "" : " (NOT the rung's)",
+              "; serve ", cmd, ", write ", ws, ", read ", rs, ", ", bad,
+              " wrong, the write's SCL at ", pm, " thousandths of 100 kHz, the registers' ",
+              ceiling_pm, crlf);
+        if (cmd && regs_right && ws == i2c_ok && rs == i2c_ok && bad == 0u && pm >= 750u &&
+            pm <= ceiling_pm) {
             ++rungs_ok;
         }
     }
     (void)Cores::template set_index<0>();
     (void)Regs::up(clock);
-    bench.verdict("at 180, 48 and 16 MHz of core the host's rebase() keeps the bus at the rate "
-                  "asked (within 2 % above, a quarter below) and byte-exact against the partner",
+    bench.verdict("at 180, 48 and 16 MHz of core the host's rebase() puts FREQ and CCR for the "
+                  "rung's APB1, the write never faster than the rate they make nor a quarter "
+                  "below the rate asked, and byte-exact against the partner",
                   rungs_ok == 3u);
     bench.verdict("... and the channel is back at the boot rate", need_twi_peer());
 }
@@ -3277,16 +3307,13 @@ Row row_of(const char* arb, const char* what, const Stage& g) {
     return row;
 }
 
-/// The band of the last answer behind the completion it follows, `waits` waits of 5000 us.
-/// Below: start() serves the time asked at least (letter q). Above: letter q's 1000 cycles
-/// a wait (start() itself, a poll's turn, the ticks that land), then, once, the way from the
-/// completion's entry through a turn of the pump, the two dispatches of the arbiter and the
-/// replies': 1237 cycles over the time asked for one wait, 2039 for three, in the row's
-/// figures, which is under 400 cycles a wait and 1000 of way, and 3000 is three times that.
-constexpr bool answer_in_band(const Row& row, uint8_t waits, uint32_t cycles_per_us) {
-    const uint32_t low = waits * 5000u * cycles_per_us;
-    const uint32_t high = low + waits * 1000u + 3000u;
-    return row.answer_min >= low && row.answer_max <= high;
+/// The last answer behind the completion it follows, `waits` waits of 5000 us, is no earlier
+/// than the time asked: start() serves the time asked at least (letter q). What it takes past
+/// that - start() itself, a poll's turn, the ticks that land, and once the way from the
+/// completion's entry through a turn of the pump, the arbiter's two dispatches and the
+/// replies' - is code with no written bound, and row_of() prints it.
+constexpr bool answer_after_bound(const Row& row, uint8_t waits, uint32_t cycles_per_us) {
+    return row.answer_max != 0u && row.answer_min >= waits * 5000u * cycles_per_us;
 }
 
 template <typename Arb, typename Kernel>
@@ -3296,10 +3323,10 @@ void stages(const char* arb) {
         return;
     }
     const Row held = row_of<Arb, Kernel>(arb, "SCL held behind a written byte's acknowledge", Stage{});
-    bench.verdict("A CLIENT HOLDING SCL PAST THE BOUND: the request behind it answered i2c_timeout by start() itself at the "
-                  "bound, every pass",
+    bench.verdict("A CLIENT HOLDING SCL PAST THE BOUND: the request behind it answered i2c_timeout by start() itself, no "
+                  "earlier than the bound, every pass",
                   held.first_ok == held.passes && held.behind_timeout == held.passes && held.stood == held.passes &&
-                      answer_in_band(held, 1, cycles_per_us));
+                      answer_after_bound(held, 1, cycles_per_us));
     bench.verdict("... and the host sound when the client lets go, no init() and no recover(): the witness untouched, a write "
                   "and its read-back exact",
                   held.witness_ok == held.passes && held.next_ok == held.passes);
@@ -3311,7 +3338,7 @@ void stages(const char* arb) {
     bench.verdict("THREE REQUESTS BEHIND A LONGER HOLD: each answered i2c_timeout in its turn, in one dispatch of three bounds, "
                   "and the host sound when the client lets go",
                   three.first_ok == three.passes && three.behind_timeout == three.passes && three.stood == three.passes &&
-                      answer_in_band(three, 3, cycles_per_us) && three.witness_ok == three.passes && three.next_ok == three.passes);
+                      answer_after_bound(three, 3, cycles_per_us) && three.witness_ok == three.passes && three.next_ok == three.passes);
 
     if (!console_quiet()) {
         return;

@@ -1144,7 +1144,7 @@ On the Nucleo-F446RE's SPI1 at 180 MHz with MISO floating, the host's costs:
 
 **`test_stm32f4_spi` on the Nucleo-F446RE**, SPI2 at PCLK1 = 45 MHz
 against the STM32G0B1RE it is paired with on the desk (the stm32g0
-`spi_peer`, firmware 0x0302, on its SPI1), runs **121 verdicts** in `z`, all
+`spi_peer`, firmware 0x0302, on its SPI1), runs **120 verdicts** in `z`, all
 green in three runs. What they judge and what they print at the top rate: every
 read of 16-bit frames and of the CRC is judged to PCLK1/4 = 11.25 MHz and printed
 at PCLK1/2 = 22.5 MHz, where this cable's read-back is not exact ("Findings left
@@ -1160,11 +1160,15 @@ ladder, are judged at PCLK1/2 too:
   are the F429's, the even polynomial ES0298 2.14.4's.
 - **The rates, with the select high**: the eight codes 22500 down to 175
   kHz, timed with the suite's own one-frame loop on the resource, not `SpiHost`'s:
-  a constant turn after RXNE of 363 to 364 ns (65 core cycles: the DR read, the next
-  write, the restart, four APB1 accesses at HCLK/4), visible where it outlasts the
+  a constant turn after RXNE of 466 to 468 ns (83 to 84 core cycles: the poll's last
+  turn, the DR read, the next write, the restart), visible where it outlasts the
   half bit RXNE leaves (the last sampling edge, 26.3.9), at /2 to /16, and hidden by
-  it at /32 and slower, where the frame time is eight bits. `SpiHost`'s own loop is
-  the `spi.frame` table above.
+  it at /32 and slower, where the frame time is eight bits: 74 ns off them at /256,
+  inside the half bit over 32 frames the letter allows (90 ns with the arithmetic's
+  truncations). The turns' spread is
+  judged against one turn of the poll, measured in the same letter, PCLK1's edge and
+  the arithmetic's truncations; a code a kernel tick landed in is printed and left
+  out. `SpiHost`'s own loop is the `spi.frame` table above.
 - **THE MODE FAULT'S CLEARING SEQUENCE, FROM A FRESH FAULT** (letter `d`, ten runs):
   under a mask, the SR read followed by the CR1 write of the value kept clears MODF, the
   first SR read after the write already finds it down, and a write raising MSTR, SSI and
@@ -1219,7 +1223,10 @@ ladder, are judged at PCLK1/2 too:
   of one and eight frames, a polled write, the engines' read, write, command alone and
   command then data), four modes, eight rates, six times each, through a select and a
   null one - every one with the SCK pad at its idle level when it ended; the vector's
-  wait as in the table of "When a request ends"; a wait staged to run out ends
+  wait as in the table of "When a request ends", mode 0's longest vector at every rung
+  at most 8 cycles past mode 1's least plus half a bit, judged against mode 1's own
+  spread there plus 16 (one turn of the pad's poll, IDR's sampling and the pad's edge,
+  DS10693 table 58); a wait staged to run out ends
   `spi_stalled`, the select up, and the next request `spi_ok`.
 - **THE COUNT PAST SIXTEEN BITS** (letter `j`): `cmd_len` is a byte and `len` sixteen
   bits, and their sum is taken in thirty-two. One command frame and 65535 data frames
@@ -1270,9 +1277,13 @@ ladder, are judged at PCLK1/2 too:
   heard exact by the G0 and this end's read printed, not exact on this cable. Timed from
   two windows of 16 and 48 frames at the same rung (the transaction's fixed cost
   cancels, a pair a tick landed in run again), a frame inside the window takes 999 to
-  1001 permille of its sixteen SCK periods on the streams at PCLK1/8, /4 and /2, and on
-  the polled loop 1077 at /8 and 1218 at /4, the wire and the loop's turn ("The host's own
-  loops"); 1437 at /2, printed. The 22.5 MHz rung needed the G0's answer line at very-high
+  1000 permille of its sixteen SCK periods on the streams at PCLK1/8, /4 and /2, judged
+  against 1000 plus or minus 3, 4 and 7: the 24 core cycles by which the two windows'
+  fixed costs can differ (PCLK1's edge at the start, the completing vector's two APB1
+  accesses, the poll that sees its end) over 32 frames. The polled loop's frame is
+  printed, not judged, being the wire less the hidden half bit plus a turn of code
+  whose APB1 accesses the manual gives no time for: 1085 at /8, 1234 at /4 and 1468 at
+  /2 ("The host's own loops"). The 22.5 MHz rung needed the G0's answer line at very-high
   (its header): at high, more 16-bit windows read wrong while every 8-bit one held.
   Why PCLK1/4 is where the read is judged, by the answer line's budget: a bit of the
   G0's answer must cross the wire inside one SCK low phase, this end's tw(SCKL) at least
@@ -1435,12 +1446,13 @@ stream and 683 on the receive, `status()` is
   update handler holding the core 350 cycles of its own (374 to 429 with
   its entry, its exit and the rest of its body, the suite's arithmetic)
   every 5 us, beside the polled receive loop at PCLK1/8 - 256 cycles a
-  frame, 64 frames. With no handler a window takes 19141 cycles; with it,
-  about 32 runs landing in each, every window is exact both ways, `spi_ok`,
-  the far client's count right and OVR never standing, in 28650 to 29374
-  cycles: 9510 to 10234 longer, where the suite's arithmetic allows 2478 (the
-  runs that must land, times the 118 cycles a run longer than the frame
-  must idle the bus) to 18398 (every run whole). The letter's handler is the only interrupt the loop meets there
+  frame, 64 frames, the console drained before the twenty windows. With no
+  handler a window takes 19415 to 19463 cycles; with it, about 32 runs landing
+  in each, every window is exact both ways, `spi_ok`, the far client's count
+  right and OVR never standing, in 28669 to 29373 cycles: 9206 to 9958 longer,
+  where the suite's arithmetic allows 2478 (the runs that must land, times the
+  118 cycles a run longer than the frame must idle the bus) to some 18700
+  (every run whole). The letter's handler is the only interrupt the loop meets there
   but the tick: the host arms none of the block's.
 - **A DISPATCH ABOVE THE ARBITER IS A GAP ON THE BUS TOO**
   (`test_stm32f4_rubato_link` under the preemptive kernel, against the

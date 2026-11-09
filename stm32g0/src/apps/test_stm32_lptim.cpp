@@ -538,13 +538,78 @@ uint16_t counter_now() {
     const std::optional<uint16_t> v = L1::count();
     return v.value_or(L1::count_raw());
 }
+///
+/// THE COUNTER MUST BE MOVING BEFORE THE FIRST READ. A counter started a
+/// moment ago has not moved yet - 26.4.7 puts three kernel clocks between
+/// CNTSTRT and the first count, and letter a measures four on the 32 kHz
+/// root (122 us) - so a first read taken at once is a count of zero
+/// followed by a late start, and the span comes out four counts short
+/// (0.9 per mille on 100 ms of LSE, every run). The wait is one kernel
+/// clock on a running counter, and a counter that never moves within 10 ms
+/// answers nothing.
 std::optional<uint32_t> counts_over(uint32_t ms) {
+    const uint16_t z = L1::count_raw();
+    if (!brio::wait_until<Ruler>([z] { return L1::count_raw() != z; }, 10'000)) {
+        return std::nullopt;
+    }
     const uint16_t a = counter_now();
     const Span w;
     while (w.within(ms)) {
     }
     const uint16_t b = counter_now();
     return static_cast<uint32_t>((static_cast<uint32_t>(b) - a) & 0xFFFFu);
+}
+
+// ---- THE BANDS A COUNTED RATE IS JUDGED IN ---------------------------------
+//
+// Every PCLK-derived rate here is HSI16's (SYSCLK is the PLL over HSI16),
+// and HSI16 is a rate DS13560 table 44 bounds: 15.88..16.08 MHz at 3.0 V
+// and 30 C, drift -1..+1 % over 0..85 C and -0.1..+0.05 % over VDD -
+// 15.705..16.249 MHz, -1.85 % .. +1.56 % (rounded outward, parts per ten
+// thousand below). The LSI is table 46's 29.5..34 kHz.
+constexpr uint32_t e4 = 10'000u;
+constexpr uint32_t hsi_slow_e4 = 185;   ///< HSI16 at most 1.85 % slow (table 44)
+constexpr uint32_t hsi_fast_e4 = 156;   ///< HSI16 at most 1.56 % fast (table 44)
+/// A rate of `nominal` on an HSI16-derived clock: its lowest and highest.
+constexpr uint32_t hsi_low(uint32_t nominal) {
+    return static_cast<uint32_t>((static_cast<uint64_t>(nominal) * (e4 - hsi_slow_e4)) / e4);
+}
+constexpr uint32_t hsi_high(uint32_t nominal) {
+    return static_cast<uint32_t>(
+        (static_cast<uint64_t>(nominal) * (e4 + hsi_fast_e4) + e4 - 1u) / e4);
+}
+
+struct Band {
+    uint32_t lo;
+    uint32_t hi;
+};
+/// What a count over `ms` of the wall reads, scaled to a second, for a
+/// clock whose true rate lies in rate_lo..rate_hi - derived. The window
+/// opens on one wall reading and closes on the first reading at or past
+/// `ms` - `need` ticks, 3277 of 1/32768 s for 100 ms on the crystal - so
+/// it is more than need - 1 ticks long and, with the closing poll turn
+/// and the two counter reads outside it each under a tick, less than
+/// need + 4. The count quantizes by one either way. A clock on the wall's
+/// own root (`same_root`) carries nothing more; any other clock on the
+/// crystal wall carries nothing more either; on an LSI wall the real
+/// length of a tick also carries the LSI's move since its boot
+/// measurement inside table 46's band and the median's one count in 2000:
+/// a factor of 29.5/34 x (1 - 1/2000) = 0.8672 to 34/29.5 x (1 + 1/2000)
+/// = 1.1532. On the crystal, 100 ms of the LSE reads 32750..32830 Hz.
+Band counted_band(uint32_t rate_lo, uint32_t rate_hi, uint32_t ms = 100,
+                  bool same_root = false) {
+    const uint32_t hz = wall_hz();
+    const uint32_t need = (hz * ms + 999u) / 1000u;
+    const uint32_t scale = 1000u / ms;
+    const bool exact = wall_on_lse || same_root;
+    const uint64_t lo_e4 = exact ? e4 : 8672u;
+    const uint64_t hi_e4 = exact ? e4 : 11532u;
+    const uint64_t den = static_cast<uint64_t>(hz) * e4;
+    const uint32_t lo_n =
+        static_cast<uint32_t>((static_cast<uint64_t>(rate_lo) * (need - 1u) * lo_e4) / den);
+    const uint32_t hi_n =
+        static_cast<uint32_t>((static_cast<uint64_t>(rate_hi) * (need + 4u) * hi_e4) / den);
+    return Band{lo_n > 0u ? (lo_n - 1u) * scale : 0u, (hi_n + 2u) * scale};
 }
 
 /// Whether TIM7 - the other owner of LPTIM2's vector - is up. The shared
@@ -845,28 +910,31 @@ void ta_block() {
     // THE FOUR KERNEL CLOCKS, each weighed on this board's own ruler -
     // the crystal wall where there is one, the CPU's cycle counter where
     // there is not.
+    // Each row's band is the true rate its document allows, read through
+    // counted_band()'s window arithmetic.
     struct Src {
         const char* name;
         LptimClock code;
         LptimPrescaler presc;
         uint32_t nominal;   // the counter's expected rate
-        uint32_t lo;
-        uint32_t hi;
+        uint32_t rate_lo;   // the lowest true rate its document allows
+        uint32_t rate_hi;   // and the highest
     };
     const Src sources[] = {
         // LSE against a wall that IS the LSE: this measures the
-        // arithmetic and the prescaler, not the crystal.
-        {"LSE", LptimClock::lse, LptimPrescaler::div1, 32'768, 32'600, 32'940},
-        // LSI: DS13560 and DS12992 both bound it at 29.5..34 kHz, and
-        // the boards of this stratum have measured 31496..32586 Hz.
+        // arithmetic and the prescaler, not the crystal - the band is the
+        // window's alone.
+        {"LSE", LptimClock::lse, LptimPrescaler::div1, 32'768, 32'768, 32'768},
+        // LSI: DS13560 table 46 bounds it at 29.5..34 kHz.
         {"LSI", LptimClock::lsi, LptimPrescaler::div1, lsi_nominal, 29'500,
          34'000},
-        // HSI16 divided by 128: 125 kHz, with HSI16's own 1 % trim.
+        // HSI16 divided by 128: 125 kHz, inside table 44's band.
         {"HSI16/128", LptimClock::hsi16, LptimPrescaler::div128, 125'000,
-         123'000, 127'000},
-        // PCLK is SYSCLK here, 64 MHz, divided by 128 = 500 kHz.
+         hsi_low(125'000), hsi_high(125'000)},
+        // PCLK is SYSCLK here, 64 MHz on the PLL over HSI16, divided by
+        // 128 = 500 kHz: the same oscillator, so the same band.
         {"PCLK/128", LptimClock::pclk, LptimPrescaler::div128, 500'000,
-         495'000, 505'000},
+         hsi_low(500'000), hsi_high(500'000)},
     };
     Rcc::lsi_enable(true);
     (void)Rcc::lsi_wait_ready();
@@ -889,10 +957,12 @@ void ta_block() {
         }
         const std::optional<uint32_t> n = counts_over(100);
         const uint32_t hz = n.has_value() ? *n * 10u : 0u;
+        const Band b = counted_band(s.rate_lo, s.rate_hi, 100u, s.code == slow_clock);
         print(serial, "  kernel clock ", s.name, ": ", hz,
               " counts a second (nominal ", s.nominal, ", off by ",
-              permille_off(hz, s.nominal), " per mille)", crlf);
-        rates_ok = rates_ok && within(hz, s.lo, s.hi);
+              permille_off(hz, s.nominal), " per mille; the band ", b.lo, "..", b.hi, ")",
+              crlf);
+        rates_ok = rates_ok && within(hz, b.lo, b.hi);
     }
     bench.verdict("every kernel clock of RCC_CCIPR.LPTIM1SEL this board can "
                   "supply a root for drives the counter, and each lands inside "
@@ -1058,12 +1128,16 @@ void ta_block() {
               has_value[idx] ? "answered" : "GAVE NOTHING", crlf);
         ++idx;
     }
-    bench.verdict("26.7.8's double read is not a formality on an asynchronous "
-                  "kernel clock: on the 32 kHz root a few readings in two "
-                  "thousand really do disagree, and count() is what refuses to "
-                  "hand one back",
-                  disagreements[0] > 0u && disagreements[0] < 200u &&
-                      has_value[0]);
+    // HOW MANY of the 2000 pairs disagree on the 32 kHz root is printed,
+    // not judged: it is the number of asynchronous edges (and incoherent
+    // reads) that land between the two reads of a pair, which depends on a
+    // loop period and an incoherence rate no document states. What count()
+    // must do with a moving asynchronous counter - hand back a value the
+    // two reads agree on - is the verdict.
+    bench.verdict("26.7.8's double read on an asynchronous kernel clock: on the "
+                  "32 kHz root some raw pairs disagree (the count printed) and "
+                  "count() still hands back a value two reads agree on",
+                  has_value[0]);
     bench.verdict("BUT THE RULE HAS A SECOND REASON THE CHAPTER DOES NOT NAME: "
                   "with the counter clocked at ONE COUNT PER CPU CYCLE the two "
                   "reads NEVER agree - not because the value is incoherent but "
@@ -1170,15 +1244,17 @@ void tb_counting() {
     (void)free_run(slow_clock, LptimPrescaler::div1);
     brio::spin_us<Ruler>(2000);
     console_drain();
-    const uint16_t before = L1::count_raw();
+    const uint16_t before = counter_now();
     const bool reset_ok = L1::reset_count();
     uint16_t peak = before;
     // The reset lands three kernel clocks after the write (26.4.14), about
     // 100 us on the 32 kHz root: 5 ms of budget, and the verdict needs it
-    // to have landed.
+    // to have landed. Every read is the double read (26.7.8): a single
+    // read of the asynchronous counter can be incoherent, and one such
+    // read would end the wait or raise the peak by itself.
     const bool reset_landed = brio::wait_until<Ruler>(
         [&] {
-            const uint16_t c = L1::count_raw();
+            const uint16_t c = counter_now();
             if (c < before) {
                 return true;
             }
@@ -1190,13 +1266,18 @@ void tb_counting() {
         5'000);
     const uint32_t extra = static_cast<uint32_t>(peak - before);
     const bool second_refused = !(L1::count_reset_pending() && L1::reset_count());
+    // THE BAND, DERIVED: the reset lands three kernel clocks after the
+    // write (26.4.14), so the counter takes at least one more edge and at
+    // most three; the call between the first read and the write is a few
+    // microseconds against a 30 us kernel clock, room for one edge more:
+    // 1..4.
     print(serial, "  COUNTRST at ", before, ": the counter reached ", peak,
           " before the reset landed - ", extra,
-          " extra pulses (26.4.14 says three kernel clocks)", crlf);
+          " extra pulses (26.4.14 says three kernel clocks; the band 1..4)", crlf);
     bench.verdict("COUNTRST really is synchronous: the counter takes a few "
                   "more pulses before the reset lands, which is 26.4.14's own "
                   "sentence with a number on it",
-                  reset_ok && reset_landed && extra <= 8u);
+                  reset_ok && reset_landed && extra >= 1u && extra <= 4u);
     bench.verdict("and a second COUNTRST while the first still stands is "
                   "refused (26.7.5's Caution, which no hardware enforces)",
                   second_refused);
@@ -1281,6 +1362,24 @@ void tb_counting() {
 /// live in alternate mode (7.3.1), so a driven waveform is readable.
 /// THE LOOP MUST NOT BRANCH on what it reads: a branch makes its
 /// duration depend on the level and biases the answer.
+///
+/// WHAT THE SAMPLER RESOLVES, derived. The loop is six instructions in
+/// the release listing (an IOPORT load, four single-cycle operations, a
+/// taken branch; seven in pad_out2_permille(), which shifts the pin down):
+/// L cycles a sample, 7 to 9 from the cache and under 21 even if every
+/// fetch waited on the flash. A 64 kHz waveform here is 1000 cycles, so the phases the
+/// samples land on are gcd(L, 1000) cycles apart - at most 20 for any L
+/// under 21 - and a duty read on that lattice is off by at most half a
+/// step, 10 per mille. The kernel tick's handler (under 200 cycles, the
+/// figure letter c's period states) takes the CPU for at most 200 of the
+/// tick's 64000 cycles, and since a tick is exactly 64 periods of the
+/// waveform it always lands on the same phase: the samples it removes
+/// bias the reading by at most 3 per mille. The rounding and the edge an
+/// input sample can catch half-way add 1. So a reading is within 14 per
+/// mille of the true duty - enough to tell 250 from 750 or 0 from a
+/// quarter, and not one tick in a thousand from the next.
+constexpr uint32_t sampler_permille = 14;
+
 uint32_t pad_permille(uint32_t samples) {
     uint32_t high = 0;
     for (uint32_t i = 0; i < samples; ++i) {
@@ -1369,12 +1468,14 @@ void tc_waveform() {
                       seen && within(per_period, 64000u - 64u, 64000u + 64u));
     }
 
-    // THE HIGH TIME, from the pad, on a 64 kHz waveform the sampler can
-    // really average. 26.4.10 describes the shape in words and prints no
-    // formula, so the formula is MEASURED: the two candidates that read
-    // out of its sentences are ARR - CMP ticks and ARR - CMP + 1, and
-    // they are one tick apart in a thousand - which is exactly what a
-    // 60000-sample census of a 64 kHz waveform tells apart.
+    // THE HIGH TIME, from the pad, on a 64 kHz waveform. 26.4.10
+    // describes the shape in words and prints no formula; the two
+    // candidates that read out of its sentences are ARR - CMP ticks and
+    // ARR - CMP + 1, one tick apart in a thousand. The pad sampler reads a
+    // duty to 14 per mille (pad_permille()), which cannot tell the two
+    // apart, so the readings are PRINTED beside both formulas and judged
+    // only as a duty that follows CMP, inside the sampler's band of the
+    // ARR - CMP + 1 figure.
     struct Duty {
         uint16_t cmp;
         uint32_t want;   // per mille, (ARR - CMP + 1) / (ARR + 1)
@@ -1391,13 +1492,14 @@ void tc_waveform() {
         brio::spin_us<Ruler>(2000);
         const uint32_t got = pad_permille(60000);
         print(serial, "  ARR 999, CMP ", d.cmp, ": pad high ", got,
-              " per mille, (ARR - CMP + 1)/(ARR + 1) = ", d.want, crlf);
-        duty_ok = duty_ok && got + 20u >= d.want && got <= d.want + 20u;
+              " per mille, (ARR - CMP + 1)/(ARR + 1) = ", d.want, ", (ARR - CMP)/(ARR + 1) = ",
+              d.want - 1u, crlf);
+        duty_ok = duty_ok && got + sampler_permille >= d.want &&
+                  got <= d.want + sampler_permille;
     }
-    bench.verdict("and the HIGH TIME IS ARR - CMP + 1 TICKS out of the "
-                  "period's ARR + 1 - one tick MORE than 26.4.10's two "
-                  "sentences read on their own, so CMP = 0 is a FULL duty and "
-                  "not one tick short of it",
+    bench.verdict("and the HIGH TIME FOLLOWS CMP as ARR - CMP + 1 ticks of ARR + 1, to "
+                  "the pad sampler's 14 per mille - which does not resolve the one tick "
+                  "between that and ARR - CMP (both printed)",
                   duty_ok);
 
     // The two values 26.4.10 forbids ("ARR must be strictly greater than
@@ -1412,11 +1514,12 @@ void tc_waveform() {
           " per mille, CMP > ARR gives ", past_arr, crlf);
     bench.verdict("26.4.10's \"ARR must be strictly greater than CMP\" is a "
                   "rule with no hardware behind it, and what the silicon "
-                  "really does with the two illegal settings is a FLAT LOW "
-                  "output - not one tick of duty, not a fault, and NOT what "
-                  "the arithmetic above would extrapolate to (CMP = ARR would "
-                  "be one tick high)",
-                  at_arr < 30u && past_arr < 30u);
+                  "really does with the two illegal settings is a LOW "
+                  "output - zero duty to the sampler's 14 per mille, not a "
+                  "fault (whether one tick of it is high, as the arithmetic "
+                  "above would extrapolate for CMP = ARR, is below what the "
+                  "sampler resolves; the readings are printed)",
+                  at_arr <= sampler_permille && past_arr <= sampler_permille);
 
     // WAVPOL. The compare is deliberately NOT the half-way one: a 50 %
     // waveform inverted is still 50 %, so a symmetric duty would let a
@@ -1429,8 +1532,10 @@ void tc_waveform() {
     const uint32_t inverted = pad_permille(60000);
     print(serial, "  CMP = 749: WAVPOL 0 gives ", straight,
           " per mille and WAVPOL 1 gives ", inverted, crlf);
+    // 251 and 749 per mille by ARR - CMP + 1, each to the sampler's 14.
     bench.verdict("WAVPOL inverts the waveform and nothing else",
-                  within(straight, 230u, 270u) && within(inverted, 730u, 770u));
+                  within(straight, 251u - sampler_permille, 251u + sampler_permille) &&
+                      within(inverted, 749u - sampler_permille, 749u + sampler_permille));
 
     // ONE-PULSE (WAVE = 0 with SNGSTRT) and SET-ONCE (WAVE = 1).
     for (uint8_t leg = 0; leg < 2u; ++leg) {
@@ -1492,10 +1597,12 @@ void tc_waveform() {
                                             (999u + 1u);
         print(serial, "  LptimPwm duty ", v, "/999: pad ", got,
               " per mille (the mapping says ", want, ")", crlf);
-        ladder_ok = ladder_ok && (got + 20u >= want) && (got <= want + 20u);
+        ladder_ok = ladder_ok && (got + sampler_permille >= want) &&
+                    (got <= want + sampler_permille);
     }
     bench.verdict("LptimPwm is a PwmChannel: the duty ladder lands where the "
-                  "task's stated mapping puts it, both endpoints included",
+                  "task's stated mapping puts it, both endpoints included, to the "
+                  "pad sampler's 14 per mille",
                   ladder_ok);
     bench.verdict("and the task's own readback agrees with what was asked",
                   Lamp::duty() == 999u);
@@ -1534,8 +1641,10 @@ void tc_waveform() {
     (void)EdgeCh::enable(true);
     Gen0::enable(true);
     console_drain();
-    const Span gen_window;
+    // The first count before the window opens and the last after it
+    // closes, as counted_band() assumes.
     const uint16_t g0 = EdgeCh::count();
+    const Span gen_window;
     while (gen_window.within(200u)) {
     }
     const uint16_t g1 = EdgeCh::count();
@@ -1543,16 +1652,18 @@ void tc_waveform() {
     EdgeCh::stop();
     const uint32_t edges = static_cast<uint32_t>(g0 - g1);
     const uint32_t edge_hz = edges * 5u;
-    // THE BAND IS THE CRYSTAL'S OWN WHERE THERE IS A CRYSTAL, and one of
-    // the same width around the measured root's half rate where there is
-    // not.
+    // THE BAND: the waveform runs on the wall's own root, so the count is
+    // the window's arithmetic alone (counted_band(), same root): 16375..
+    // 16405 Hz on the crystal.
     const uint32_t want_hz = slow_hz / 2u;
-    const uint32_t edge_lo = wall_on_lse ? 16'200u : want_hz - want_hz / 100u;
-    const uint32_t edge_hi = wall_on_lse ? 16'560u : want_hz + want_hz / 100u;
+    const Band edge_band = counted_band(want_hz, want_hz, 200u, true);
+    const uint32_t edge_lo = edge_band.lo;
+    const uint32_t edge_hi = edge_band.hi;
     print(serial, "  ARR = 1 on the ", slow_hz, " Hz ", slow_name(),
           ": the DMAMUX generator counted ", edges,
           " rising edges in 200 ms = ", edge_hz,
-          " Hz, against the kernel clock's half, ", want_hz, crlf);
+          " Hz, against the kernel clock's half, ", want_hz, " (the band ", edge_lo,
+          "..", edge_hi, ")", crlf);
     bench.verdict("26.4.10's \"up to the LPTIM clock frequency divided by 2\" "
                   "is exact, measured by a DMA channel with no peripheral, no "
                   "pad and no CPU in the loop",
@@ -1638,10 +1749,12 @@ void td_pad_legs() {
               " edges: ", applied, " applied, ", got, " counted - ",
               applied - got, " lost at the start", crlf);
         bench.verdict(falling ? "the input IS the clock on the FALLING edge, "
-                                "and the edges lost at the start are counted"
+                                "and exactly the five edges 26.4.12 names are lost "
+                                "at the start"
                               : "the input IS the clock on the RISING edge, "
-                                "and the edges lost at the start are counted",
-                      got + 8u >= applied && got < applied);
+                                "and exactly the five edges 26.4.12 names are lost "
+                                "at the start",
+                      got == applied - 5u);
     }
 
     bench.verdict("both polarities work and BOTH EDGES AT ONCE is refused - "
@@ -2278,13 +2391,15 @@ void tg_through_stop() {
             Nvic::clear_pending(Rtc::irq());
             console_drain();
             Ticker::pause();
-            const uint16_t c0 = L1::count_raw();
+            // The double read (26.7.8) at both ends: on a 32 kHz root a
+            // single read of a moving counter can be incoherent.
+            const uint16_t c0 = counter_now();
             const uint32_t w0 = wall();
             (void)Pwr::arm(PwrMode::stop1);
             __DSB();
             __WFI();
             (void)PlainSite::resume_clock();
-            const uint16_t c1 = L1::count_raw();
+            const uint16_t c1 = counter_now();
             const uint32_t span = wall_ms(wall_delta(w0, wall()));
             Ticker::resume();
             (void)Pwr::arm(PwrMode::sleep);
@@ -2294,18 +2409,43 @@ void tg_through_stop() {
             const uint32_t expected =
                 span * leg.nominal / 1000u;
             const uint32_t got_hz = span == 0u ? 0u : counts * 1000u / span;
+            // THE BANDS, DERIVED. The counter is read just before the first
+            // wall reading and just before the last, each under a wall tick
+            // from it, and the span is the wall's ticks truncated to whole
+            // milliseconds: the counts cover more than span - 0.1 ms and
+            // less than span + 1.1 ms, and quantize by one. A clock that
+            // ran through the Stop at a rate in lo..hi counts
+            //   span x lo - 5 <= counts <= (span + 1.1) x hi + 2   (lo, hi in kHz)
+            // with lo = hi = 32.768 for the LSE on the LSE's own wall, and
+            // table 46's 29.5..34 kHz for the LSI (its rate measured at boot
+            // is printed, and not a bound: the LSI may move since). A clock
+            // that stopped counts only the awake moments either side of
+            // the Stop, which no table gives: it is judged as stopped when
+            // it counts under a tenth of the least a running one would.
+            const uint32_t run_lo_hz = leg.code == LptimClock::lse   ? 32'768u
+                                       : leg.code == LptimClock::lsi ? 29'500u
+                                       : leg.code == LptimClock::pclk
+                                           ? hsi_low(500'000u)
+                                           : hsi_low(125'000u);
+            const uint32_t run_hi_hz = leg.code == LptimClock::lse ? 32'768u : 34'000u;
+            const uint32_t least = span > 0u ? (span * run_lo_hz) / 1000u - 5u : 0u;
+            const uint32_t most = static_cast<uint32_t>(
+                ((static_cast<uint64_t>(span) * 10u + 11u) * run_hi_hz + 9999u) / 10000u + 1u);
             print(serial, "  ", leg.name, ": ", counts, " counts across a ",
                   span, " ms Stop 1 - ", got_hz, " counts a second against ",
-                  leg.nominal, " running (expected ", expected, ")", crlf);
-            if (leg.expect_running && leg.nominal == 0u) {
-                // The LSI not weighed this boot: table 46's band stands in.
-                stop_ok = stop_ok && within(got_hz, 29'500u, 34'000u);
-            } else if (leg.expect_running) {
-                stop_ok = stop_ok && permille_off(counts, expected) < 60u;
+                  leg.nominal, " running (expected ", expected, "; ",
+                  leg.expect_running ? "the band " : "stopped under ",
+                  leg.expect_running ? least : least / 10u);
+            if (leg.expect_running) {
+                print(serial, "..", most);
+            }
+            print(serial, ")", crlf);
+            if (leg.expect_running) {
+                stop_ok = stop_ok && span > 0u && within(counts, least, most);
             } else if (leg.code == LptimClock::pclk) {
-                stop_ok = stop_ok && counts < 16u;
+                stop_ok = stop_ok && counts < least / 10u;
             } else {
-                hsi_ran = counts > expected / 10u;
+                hsi_ran = counts >= least / 10u;
             }
         }
         bench.verdict("26.5's table 145 is exact: on the 32 kHz roots this "
@@ -2582,13 +2722,24 @@ void th_site() {
     pump_until_blip(3000u);
     const uint32_t to_blip = wall_ms(wall_delta(w0, Probe::blip_wall));
     const uint32_t kernel_ms = Ticker::millis() - k0;
+    // THE BAND, DERIVED. Never early is the kernel's promise. Late: the
+    // alarm counts ceil(ms x 1024 / 1000) + 1 of the site's 1024 Hz
+    // counter from a reading taken somewhere inside a count, so it fires
+    // under one count (0.98 ms) after the deadline, on the stated rate
+    // (site_span_ms() scales it to the wall's). The wake is under 11.2 us
+    // (DS13560 table 37, Stop 1 to Run from flash) and the PLL's relock
+    // under 40 us (table 47's tLOCK); the dispatch after the resync may
+    // wait one kernel tick in idle_if_empty() (1 ms); the wall's two
+    // readings are each a 30.5 us tick, and wall_ms() truncates. Each term
+    // rounded up to a whole millisecond: site_span_ms(ms) + 3.
     print(serial, "  a 500 ms event through a Stop matured after ", to_blip,
-          " ms of wall (", kernel_ms, " ms of kernel tick); the resync put "
-          "back ", Site::last_advance(), " ticks", crlf);
+          " ms of wall (", kernel_ms, " ms of kernel tick; the band 500..",
+          site_span_ms(500u) + 3u, "); the resync put back ", Site::last_advance(), " ticks",
+          crlf);
     bench.verdict("THE EVENT MATURED THROUGH A STOP, on the wall, with the "
                   "LPTIM as both the alarm and the witness",
                   Probe::blips == 1u &&
-                      within(to_blip, 500u, site_span_ms(500u) + 60u));
+                      within(to_blip, 500u, site_span_ms(500u) + 3u));
     bench.verdict("and NEVER EARLY - the lower bound is the kernel's own "
                   "promise", to_blip >= 500u);
     bench.verdict("the sleep was real: the resync handed back a frozen span of "
@@ -2623,13 +2774,14 @@ void th_site() {
         if (ms > worst_hi) {
             worst_hi = ms;
         }
-        if (within(ms, nominal, site_span_ms(nominal) + 20u)) {
+        // The band of the 500 ms round, derived there.
+        if (within(ms, nominal, site_span_ms(nominal) + 3u)) {
             ++on_time;
         }
     }
     print(serial, "  ", repeats, " rounds of ", nominal,
-          " ms through a Stop: wall spans ", worst_lo, "..", worst_hi, " ms",
-          crlf);
+          " ms through a Stop: wall spans ", worst_lo, "..", worst_hi, " ms (the band ",
+          nominal, "..", site_span_ms(nominal) + 3u, ")", crlf);
     bench.verdict("every one of six shorter rounds matured inside the band",
                   on_time == repeats);
     bench.verdict("and not one of them was early", worst_lo >= nominal);
@@ -2661,7 +2813,9 @@ void th_site() {
     // about 4 ms and a maturity exactly on the deadline can print as
     // 296. The lower bound is therefore the nominal LESS ONE QUANTUM,
     // and it is the instrument that is being allowed for, not the site -
-    // the fine-split rounds above are where "never early" is judged.
+    // the fine-split rounds above are where "never early" is judged. The
+    // upper bound is the fine rounds' (site_span_ms() + 3) plus the same
+    // quantum, which the two readings can add.
     const uint32_t quantum_ms = (1000u + low_wall_hz - 1u) / low_wall_hz;
     print(serial, "  with the RTC at the chapter's own split (PREDIV_A ",
           left.async, " / PREDIV_S ", left.sync,
@@ -2674,7 +2828,7 @@ void th_site() {
                   "and with an application alarm standing untouched",
                   split_moved && alarm_mine && Probe::blips == 1u &&
                       low_span + quantum_ms >= 300u &&
-                      low_span <= site_span_ms(300u) + 40u && alarm_survived &&
+                      low_span <= site_span_ms(300u) + 3u + quantum_ms && alarm_survived &&
                       left.async == 127u && left.sync == 255u);
 
     (void)wall_up();
@@ -2805,7 +2959,12 @@ uint16_t counter2_now() {
     return v.value_or(L2::count_raw());
 }
 
+/// The counter moving first, as counts_over() says why.
 std::optional<uint32_t> counts2_over(uint32_t ms) {
+    const uint16_t z = L2::count_raw();
+    if (!brio::wait_until<Ruler>([z] { return L2::count_raw() != z; }, 10'000)) {
+        return std::nullopt;
+    }
     const uint16_t a = counter2_now();
     const Span w;
     while (w.within(ms)) {
@@ -3085,22 +3244,23 @@ void tj_lptim2() {
     // THE FOUR KERNEL CLOCKS, through RCC_CCIPR's OTHER field. LPTIM2SEL
     // is a different field of the same register, and nothing but a bench
     // says the reserve's position for it is right.
+    // The bands as letter a derives them (counted_band()).
     struct Src {
         const char* name;
         LptimClock code;
         LptimPrescaler presc;
         uint32_t nominal;
-        uint32_t lo;
-        uint32_t hi;
+        uint32_t rate_lo;
+        uint32_t rate_hi;
     };
     const Src sources[] = {
-        {"LSE", LptimClock::lse, LptimPrescaler::div1, 32'768, 32'600, 32'940},
+        {"LSE", LptimClock::lse, LptimPrescaler::div1, 32'768, 32'768, 32'768},
         {"LSI", LptimClock::lsi, LptimPrescaler::div1, lsi_nominal, 29'500,
          34'000},
         {"HSI16/128", LptimClock::hsi16, LptimPrescaler::div128, 125'000,
-         123'000, 127'000},
+         hsi_low(125'000), hsi_high(125'000)},
         {"PCLK/128", LptimClock::pclk, LptimPrescaler::div128, 500'000,
-         495'000, 505'000},
+         hsi_low(500'000), hsi_high(500'000)},
     };
     Rcc::lsi_enable(true);
     (void)Rcc::lsi_wait_ready();
@@ -3119,10 +3279,12 @@ void tj_lptim2() {
         }
         const std::optional<uint32_t> n = counts2_over(100);
         const uint32_t hz = n.has_value() ? *n * 10u : 0u;
+        const Band b = counted_band(s.rate_lo, s.rate_hi, 100u, s.code == slow_clock);
         print(serial, "  LPTIM2 kernel clock ", s.name, ": ", hz,
               " counts a second (nominal ", s.nominal, ", off by ",
-              permille_off(hz, s.nominal), " per mille)", crlf);
-        rates_ok = rates_ok && within(hz, s.lo, s.hi);
+              permille_off(hz, s.nominal), " per mille; the band ", b.lo, "..", b.hi, ")",
+              crlf);
+        rates_ok = rates_ok && within(hz, b.lo, b.hi);
     }
     bench.verdict("every code of RCC_CCIPR.LPTIM2SEL this board can supply a "
                   "root for drives the second counter, each inside its own "
@@ -3154,12 +3316,13 @@ void tj_lptim2() {
               static_cast<char>(out2_sel.port),
               static_cast<uint32_t>(out2_sel.pin), " high ", got,
               " per mille, (ARR - CMP + 1)/(ARR + 1) = ", d.want, crlf);
-        duty_ok = duty_ok && got + 20u >= d.want && got <= d.want + 20u;
+        duty_ok = duty_ok && got + sampler_permille >= d.want &&
+                  got <= d.want + sampler_permille;
     }
-    bench.verdict("LPTIM2's output obeys the same arithmetic letter c "
-                  "measured on LPTIM1 - a period of ARR + 1 ticks with a high "
-                  "time of ARR - CMP + 1 - on the second instance's own pad, "
-                  "whatever port and alternate function the package puts it on",
+    bench.verdict("LPTIM2's output follows CMP as letter c measured on LPTIM1 - a "
+                  "high time of ARR - CMP + 1 ticks of ARR + 1 to the pad sampler's "
+                  "14 per mille - on the second instance's own pad, whatever port "
+                  "and alternate function the package puts it on",
                   duty_ok);
 
     (void)pwm2_64k(749);
@@ -3172,7 +3335,8 @@ void tj_lptim2() {
           static_cast<uint32_t>(out2_sel.pin), ": WAVPOL 0 gives ", straight,
           " per mille and WAVPOL 1 gives ", inverted, crlf);
     bench.verdict("and WAVPOL inverts LPTIM2's waveform and nothing else",
-                  within(straight, 230u, 270u) && within(inverted, 730u, 770u));
+                  within(straight, 251u - sampler_permille, 251u + sampler_permille) &&
+                      within(inverted, 749u - sampler_permille, 749u + sampler_permille));
 
     // THE DMAMUX TRIGGER INPUT, which is the reserve's OTHER number: 21
     // for LPTIM2_OUT where LPTIM1_OUT is 20. A request generator on that
@@ -3206,23 +3370,24 @@ void tj_lptim2() {
     (void)EdgeCh::enable(true);
     Gen0::enable(true);
     console_drain();
-    const Span gen2_window;
     const uint16_t g0 = EdgeCh::count();
+    const Span gen2_window;
     while (gen2_window.within(200u)) {
     }
     const uint16_t g1 = EdgeCh::count();
     Gen0::enable(false);
     EdgeCh::stop();
     const uint32_t edge_hz = static_cast<uint32_t>(g0 - g1) * 5u;
+    // The band as letter c's (counted_band(), same root).
     const uint32_t want2_hz = slow_hz / 2u;
-    const uint32_t edge2_lo =
-        wall_on_lse ? 16'200u : want2_hz - want2_hz / 100u;
-    const uint32_t edge2_hi =
-        wall_on_lse ? 16'560u : want2_hz + want2_hz / 100u;
+    const Band edge2_band = counted_band(want2_hz, want2_hz, 200u, true);
+    const uint32_t edge2_lo = edge2_band.lo;
+    const uint32_t edge2_hi = edge2_band.hi;
     print(serial, "  LPTIM2_OUT at ARR = 1 on the ", slow_name(),
           ": the DMAMUX generator on trigger input ",
           L2::dmamux_generator_input, " counted ", edge_hz,
-          " rising edges a second, against ", want2_hz, crlf);
+          " rising edges a second, against ", want2_hz, " (the band ", edge2_lo, "..",
+          edge2_hi, ")", crlf);
     bench.verdict("table 56's trigger input 21 IS LPTIM2_OUT: a DMA channel "
                   "with no peripheral counts the second timer's output at "
                   "half its kernel clock, with no pad and no CPU in the loop",
@@ -3268,9 +3433,9 @@ void tj_lptim2() {
           20u - clocked, " lost at the start", crlf);
     bench.verdict("LPTIM2's own input counts both of 26.4.12's ways: sampled "
                   "by the internal clock it loses nothing, and AS the clock "
-                  "it loses the same five edges at the start that LPTIM1 does",
-                  sampled_up && clocked_up && sampled == 20u &&
-                      clocked + 8u >= 20u && clocked < 20u);
+                  "it loses the same five edges at the start that LPTIM1 does "
+                  "(26.4.12's number)",
+                  sampled_up && clocked_up && sampled == 20u && clocked == 15u);
     In1Pad2::release();
 
     // THE ROUTE THAT EXISTS ON THIS INSTANCE ALONE: IN1SEL = 3, the OR of

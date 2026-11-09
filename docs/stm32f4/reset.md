@@ -330,7 +330,7 @@ extern "C" void UsageFault_Handler() {
 ## Bench findings
 
 `test_stm32f4_reset` at 180 MHz (PCLK1 45 MHz), nothing wired. Four
-letters in `z` (**44 verdicts**); letter `i` outside it (**34
+letters in `z` (**44 verdicts**); letter `i` outside it (**35
 verdicts**), which reboots the board seven times and resumes from a
 `.noinit` token; and letter `j` (**17 verdicts**), four more reboots
 through the same token. `z` and `i` are green on the STM32F429I-DISC1,
@@ -365,7 +365,13 @@ unless it names one.
   about 4.7% above the 32 kHz the tables assume. The setting is
   deliberately not the reset one, so the time-out itself proves the
   configuration landed: an unconfigured watchdog would have taken
-  512 ms.
+  512 ms. The datasheet's LSI band (17..47 kHz) is too wide to tell the
+  two settings apart by itself, so the leg weighs the LSI on TIM5's
+  channel 4 (RM0390 6.2.11) all through the time-out, in runs of 512
+  periods that tile it, and judges the time-out against the window
+  those weighings derive: RL x 8 to (RL + 1) x 8 + 5 LSI cycles over
+  the fastest and the slowest of them, one millisecond either way for
+  the tick. TIM5 and the tick share the PLL, so the crystal cancels.
 - **The witness reads both ways.** With the watchdog live and LSION
   never written, `Iwdg::running()` is true; at every boot of every
   letter it is false, and the board's backup domain reads RCC_BDCR =

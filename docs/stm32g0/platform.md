@@ -446,7 +446,9 @@ listing) - ST's
 - **`idle_until` by hand**: 2 / 3 / 10 / 100 / 500 ticks asked sleep
   1956 / 2938 / 9786 / 97862 / 489276 us on TIM2's scale (1953 / 2930 /
   9766 / 97656 / 488281 nominal, the PLL 0.23 % fast against the
-  crystal), one CMPM each, `ticks()` at return equal to the deadline
+  crystal) - judged inside DS13560 table 44's band for HSI16 on TIM2's
+  scale, N x 976.6 us x 0.9815 - 31 to x 1.0156 + 31 (a count of phase
+  at each end) - one CMPM each, `ticks()` at return equal to the deadline
   every time; a deadline one tick away sleeps 980 us and lands on it;
   a due deadline returns in 7 us with no interrupt; with nothing armed
   the sleep lasts until a foreign wake (the RTC's wake-up timer,
@@ -475,8 +477,12 @@ listing) - ST's
   on the PLL; six rounds of 150 ticks all at 146 ms of wall (146.5
   nominal) and not one early.
 - **`delay_us` on the interrupt-less SysTick**: 5 / 30 / 100 / 500 /
-  900 us measure 6 / 31 / 101 / 501 / 901 on TIM2; 200 x 50 us never
-  below 51; 1000 us refused, 999 served.
+  900 us measure 6 / 31 / 101 / 501 / 901 on TIM2, judged within the
+  span and the span + 2 us that the release listing allows (79 cycles
+  between the two TIM2 reads besides the spin, 104 more for the flash's
+  wait states at most: TIM2 and SysTick count the same SYSCLK, so no
+  oscillator error enters); 200 x 50 us never below 51; 1000 us
+  refused, 999 served.
 - **An LSI-clocked ticker** on LPTIM2 at the stated 32586 Hz (shift 5:
   1018 ticks a second by the statement): 2 s of the crystal count 2041
   of its ticks (2036 by the statement) and 2004 of its milliseconds,
@@ -485,7 +491,10 @@ listing) - ST's
   97.6 ms on TIM2; and the default statement (34000) would make every
   millisecond asked land 43 per mille late on this die, never early -
   the directional rule's price, paid by a program that does not
-  measure. The letter judges the witness against the LSI it measures on
+  measure. What is judged is that the die's LSI, read through the meter
+  (DS13560 table 44's band for the HSI16 it is read against, and one
+  count of the median), lies inside table 46's band, whose ceiling the
+  default states: some 28810..34925 Hz as read. The letter judges the witness against the LSI it measures on
   TIM16's capture at its start, never against the statement, which is a
   compile-time number and need not be the die's.
 - **What a two-second lap asks of a suite over this timebase**: a leg

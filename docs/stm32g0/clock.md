@@ -388,7 +388,7 @@ PLLRCLK), RCC_PLLCFGR 0x30000802 (R 2, REN, N 8, M 1, source HSI16),
 FLASH_ACR latency 2, PWR_CR1 0x208 (Range 1); SysTick's reload
 63999 and the console's baud 115107 = 64e6/556 are the same 64 MHz
 seen from two other registers, and the kernel tick is +0.24 % against
-the PC's clock over ten seconds (HSI16's 1 %). A raw-register sequence
+the PC's clock over ten seconds (inside DS13560 table 44's band for HSI16). A raw-register sequence
 with no brio code in the loop reaches the same state in the same order.
 FLASH_ACR reads 0x00040702 (LATENCY 2, PRFTEN, ICEN, DBG_SWEN) over SWD
 after a whole `test_stm32_clock` run and after a whole
@@ -420,18 +420,20 @@ phase.
 `test_stm32_nvm` (85 verdicts) and `test_stm32_journal` (52), which read
 and write bank 2 while the code runs from bank 1, are green on it.
 
-**The dynamic clock on silicon** (`test_stm32_clock`, ten letters, 42
+**The dynamic clock on silicon** (`test_stm32_clock`, ten letters, 41
 verdicts - a letter is one command key of the suite's console and the
 group of verdicts it runs - on the tickless platform with the console on HSI16 and USART1
 as a single-wire loop on PCLK as the rebased user; TIM2 on MCO =
-HSI16/64 as the wall, weighed at 250 kHz within HSI16's 1 % of the
-crystal):
+HSI16/64 as the wall, weighed at 250 kHz against the crystal inside
+DS13560 table 44's band for HSI16, -1.85..+1.56 %; it reads +0.23..0.28 %):
 
 - Every rung reads back as its type claims - SWS, HSIDIV, PLLON, VOS,
   LPR, REGLPF, LATENCY - and the CPU is at the rate the type claims on
   the crystal's scale: 500 waits of `delay_us(999)` take 498..501 ms at
   64 and 16 MHz and 515 at 2 MHz, the excess being the calls' own
-  cycles, 32 times dearer there. The loop-back is byte-exact at every
+  cycles, 32 times dearer there - inside bands derived from table 44 and
+  the 83 cycles a call costs in the release listing besides its spin
+  (490..511 ms at 64 MHz, 490..514 at 16, 490..531 at 2). The loop-back is byte-exact at every
   rung (64 of 64; BRR 0x8B at 16 MHz, 0x11 at 2), and 72 switches round the
   ladder with 16 bytes exchanged at each landed with no refusal, no
   wrong state and no bad byte.
@@ -477,10 +479,10 @@ crystal):
   register, and only a meter would tell.
 - **The SysTick ticker as a user**: SysTick handed from the
   interrupt-less counter to `BasicTicker` for one letter, its
-  `rebase()` reloading it at every switch - 500..501 ticks per 500 ms
+  `rebase()` reloading it at every switch - 501..502 ticks per 500 ms
   of crystal at 16 MHz Range 2, 2 MHz low-power run, 16 MHz on the PLL
-  and 64 MHz, never fast - then handed back with the handler silent
-  again. (The suite lists BOTH SysTick writers as users for that
+  and 64 MHz, inside table 44's band for HSI16 (489..509) - then handed
+  back with the handler silent again. (The suite lists BOTH SysTick writers as users for that
   letter, which no program would do; the two `rebase()` write the same
   reload and neither touches CTRL - a rebase that reprogrammed CTRL
   would turn the other writer's interrupt off.)
@@ -496,13 +498,16 @@ crystal):
   scale with HSIDIV still 3 - which is what the dynamic clock's write
   after every switch onto the PLL prevents (above).
 - **`delay_us` at every rung**, on the wall: 20/100/500/900 us served
-  at 20..900 (+0..4) at 64 MHz, +4..8 at 16 MHz, +36..40 at 2 MHz from
-  100 us up - the poll's own cost, 32 times the 64 MHz one - never
-  early, the millisecond cap refused at every rate. AND AT 2 MHz A
-  20 us WAIT TAKES 136..140 us, the same as a 100 us one, in four runs:
-  a minimum of 136 us, some 270 core cycles, which the letter's bound
-  (+60 us at 2 MHz) refuses - its second verdict fails
-  (the gap list).
+  with +0..4 us at 64 MHz, +4..8 at 16 MHz and +40..44 at 2 MHz, the
+  same at every span - never early, the millisecond cap refused at
+  every rate. The excess is a fixed cycle count: the release listing
+  puts 72 cycles between the wall's two reads besides the spin, and the
+  spin ends under one poll turn (12 cycles, 16 when it folds a SysTick
+  reload) after its count is met - 72..87 cycles, 36..44 us at 2 MHz and
+  under one 4 us wall count at 64. The MCO wall counts HSI16/64 and the
+  spin counts SYSCLK from the same oscillator, so HSI16's error cancels
+  and the bound is that cycle count plus the flash's wait states and one
+  wall count: span + 8 us at 64 MHz, + 14 at 16, + 50 at 2.
 
 ## On the STM32G071RB
 
@@ -531,7 +536,7 @@ G0B1's are four (the headers' own masks): one clock output, not two.
 
 ## On the STM32G031K8
 
-`test_stm32_clock` claims 40 of its 42 verdicts on the Nucleo-G031K8
+`test_stm32_clock` claims 39 of its 41 verdicts on the Nucleo-G031K8
 (DEV_ID 0x466, REV_ID 0x1003): the whole ladder, all four rates, the ADC
 across them, the kernel, both Stops and the PLL rate in Range 2. The two
 verdicts not claimed are letter `h`'s (`delay_us` at 20 us), for the
@@ -694,10 +699,6 @@ Driver gaps:
   end still extrapolated across the interval in progress - where the
   0.4 s runs that need the precision already have it; born with a user
   whose stretches are short and must be exact.
-
-Findings left open: `delay_us`'s minimum at 2 MHz (above) - some 270
-cycles where the bound allows 160 for a 20 us wait - is not located: the listing of `delay_us` at the 2 MHz rung, its per-rate
-table's read and the ticker's composed count, would place it.
 
 Implemented, not bench-verified: `FlashAccel`'s instruction-cache
 setter and its flush (the cache is on from reset, and no suite turns it

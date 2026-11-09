@@ -712,6 +712,23 @@ void tb_bit_rate() {
                                   {250'000u, "250 kbit/s"},
                                   {500'000u, "500 kbit/s"},
                                   {1'000'000u, "1 Mbit/s"}};
+    // THE BOUND IS HALF A TIME QUANTUM, and the oscillator is not in it.
+    // The bit clock (PCLK) and the stopwatch the window is spun on (TIM2
+    // on TIMPCLK) are the same PLL over the same HSI16, so the ratio of a
+    // bit rate to the ruler is exact whatever DS13560 table 44 lets the
+    // HSI16 do (-1.75..+1.5 %): its error cancels. What the count can be
+    // off by is the instrument's: one edge of quantization in 10000 or
+    // 20000 (100 ppm at most) and the edges counted in the arm's tail and
+    // the read's head around spin_us()'s span, about a microsecond of
+    // CPU (on the desk one edge at 1 Mbit/s and four at the reset
+    // value's 4 Mbit/s, 100 ppm) - together under 0.03 %. What a wrong
+    // NBTP costs is at least one time quantum of the bit:
+    // fdcan_bit_timing_for() makes 64 quanta of every rate here (64 MHz /
+    // rate is 64 x (NBRP + 1)), so a field one off moves the rate by 1/65
+    // or 1/63, 1.5 %. Half a quantum is the midpoint
+    // between the right register and one a quantum off - the line that
+    // refuses the second with the instrument's error under a twentieth
+    // of the 0.78 % margin on either side.
     bool all_ok = true;
     for (uint8_t i = 0; i < 4; ++i) {
         // EXTERNAL loop-back: the one mode in which the module runs its
@@ -726,16 +743,20 @@ void tb_bit_rate() {
             (static_cast<uint64_t>(n) * 1'000'000ULL) / window_us);
         const uint32_t expect = rates[i].hz;
         const uint32_t err = measured > expect ? measured - expect : expect - measured;
-        const bool ok = err * 100u <= expect;   // 1 %, the HSI16's own trim
+        const uint32_t tq = c.nominal.tq_per_bit();
+        const bool ok = tq != 0u && err * 2u * tq < expect;   // half a quantum
         all_ok = all_ok && ok;
         print(serial, "  ", rates[i].name, ": NBTP ", hex(Can1::regs().NBTP),
               ", ", n, " sample points in ", window_us, " us = ", measured,
-              " bit/s (", ok ? "within" : "OUTSIDE", " 1 %)", crlf);
+              " bit/s, ", err, " off (", ok ? "within" : "OUTSIDE",
+              " half of one of its ", tq, " quanta, ", expect / (2u * tq), ")",
+              crlf);
         Can1::release();
     }
     bench.verdict("TEST.TX = 01 PUTS THE SAMPLE POINT ON THE PAD, one edge per "
                   "bit time: four nominal bit rates from a 64 MHz PCLK, every "
-                  "one of them within the HSI16's own 1 % of its arithmetic",
+                  "one of them within half a time quantum of its arithmetic "
+                  "(the bit clock and the stopwatch share the oscillator)",
                   all_ok);
 
     // The reset NBTP, which 36.4.7's note prices at 48 MHz.
@@ -750,12 +771,22 @@ void tb_bit_rate() {
         (void)Can1::tx_pin(FdcanTxPin::sample_point);
         const uint32_t n = edges_over(10000u);
         const uint32_t measured = n * 100u;
+        // The same bound as above: half of one of the reset value's 16
+        // quanta (1 + NTSEG1 + 1 + NTSEG2 + 1 = 1 + 11 + 4), 125000 bit/s,
+        // against the instrument's few edges in 40000; the 48 MHz pricing
+        // (3 Mbit/s) is eight quanta away.
+        constexpr uint32_t reset_rate = 4'000'000u;
+        constexpr uint32_t reset_half_tq = reset_rate / (2u * 16u);
+        const uint32_t err = measured > reset_rate ? measured - reset_rate
+                                                   : reset_rate - measured;
         print(serial, "  the RESET NBTP (0x06000A03, 16 tq): ", measured,
-              " bit/s - 36.4.7 prices it at 3 Mbit/s from 48 MHz, and this "
-              "board's kernel clock is 64", crlf);
-        bench.verdict("...so the same register is 4 Mbit/s here, exactly as "
-                      "the arithmetic says and the note does not",
-                      measured > 3'960'000u && measured < 4'040'000u);
+              " bit/s, ", err, " off 4 Mbit/s against half a quantum's ",
+              reset_half_tq, " - 36.4.7 prices it at 3 Mbit/s from 48 MHz, and "
+              "this board's kernel clock is 64", crlf);
+        bench.verdict("...so the same register is 4 Mbit/s here, as the "
+                      "arithmetic says and the note does not - within half "
+                      "of one of its 16 quanta",
+                      err < reset_half_tq);
         Can1::release();
     }
 
@@ -778,7 +809,11 @@ void tb_bit_rate() {
                 (static_cast<uint64_t>(n) * 1'000'000ULL) / 80000ULL);
             const uint32_t expect = 500'000u / fdcan_divider_value(d);
             const uint32_t err = measured > expect ? measured - expect : expect - measured;
-            const bool ok = err * 50u <= expect;
+            // Half a quantum of the divided bit, as above: the timing keeps
+            // its 64 quanta and CKDIV lengthens each, so a wrong divider is
+            // a third or a half off and a quantum 1.5 %.
+            const uint32_t tq = c.nominal.tq_per_bit();
+            const bool ok = tq != 0u && err * 2u * tq < expect;
             div_ok = div_ok && ok;
             print(serial, "  CKDIV /", fdcan_divider_value(d),
                   " under the same NBTP: ", measured, " bit/s against ", expect,
@@ -1967,24 +2002,48 @@ void th_time() {
     c.timestamp_prescaler = 1;
     (void)bring_up<Can1>(c);
 
+    // THE COUNTS OF THIS LETTER ARE JUDGED AGAINST THE RULER, NOT THE
+    // HSI16. The bit clock (PCLK) and TIM2 (TIMPCLK) are one PLL over one
+    // oscillator, so a bit time is exactly cycles_per_bit ruler counts
+    // whatever the oscillator does. Two reads of a counter that steps once
+    // a `step` cycles, taken I cycles apart, differ by I / step rounded
+    // down or up - the counter's phase at the first read is not known. The
+    // span S is stamped around the two reads (t0 before the first, the end
+    // after the second), so S exceeds I by the stamps' and the reads' own
+    // cycles and by an interrupt served between a stamp and its read -
+    // SysTick's handler, about 70 cycles, the console drained first so no
+    // transmit interrupt can be one: under one step (128 cycles at the
+    // finest). So the counts are S / step to one count each way. An
+    // interrupt between the two reads lengthens I and S alike.
+    constexpr uint32_t cycles_per_bit = SysClock::hz / 500'000u;   // 128
+    auto counts_agree = [](uint32_t counts, uint32_t span, uint32_t step) {
+        const uint32_t expect = span / step;
+        return counts <= expect + 1u && counts + 1u >= expect;
+    };
+
     // --- the internal counter IS a bit-time counter.
     {
+        const bool quiet = brio::console_drain<Ruler, Serial>();
         Can1::reset_timestamp();
         const uint32_t t0 = now_ticks();
         const uint16_t a = Can1::timestamp_value();
         brio::spin_us<Ruler>(20000);
         const uint16_t b = Can1::timestamp_value();
-        const uint32_t elapsed = us_of(since(t0));
+        const uint32_t span = since(t0);
+        const uint32_t elapsed = us_of(span);
         const uint32_t ticks = static_cast<uint16_t>(b - a);
-        const uint32_t rate = (ticks * 1000u) / (elapsed / 1000u);
+        const uint32_t rate = static_cast<uint32_t>(
+            (static_cast<uint64_t>(ticks) * SysClock::hz) / span);
         print(serial, "  TSS = internal, TCP = 1: the counter advanced ", ticks,
-              " in ", elapsed, " us = ", rate, " counts/s against a nominal bit "
-              "rate of 500000", crlf);
+              " in ", elapsed, " us (", span / cycles_per_bit, " bit times of "
+              "the ruler) = ", rate, " counts/s against a nominal bit rate of "
+              "500000", crlf);
         bench.verdict("THE TIMESTAMP COUNTER RUNS ON THE BIT CLOCK AND NOT ON "
                       "TRAFFIC: with an idle bus it still counts once per CAN "
                       "bit time, which makes it a bit-rate meter for an "
-                      "instance with no pad at all",
-                      rate > 495000u && rate < 505000u);
+                      "instance with no pad at all - to one count of the "
+                      "ruler's bit times each way",
+                      quiet && counts_agree(ticks, span, cycles_per_bit));
     }
 
     // --- TCP 16.
@@ -1993,16 +2052,23 @@ void th_time() {
         (void)Can1::configuration(true);
         (void)Can1::timestamp(FdcanTimestamp::internal, 16);
         (void)Can1::start();
+        const bool quiet = brio::console_drain<Ruler, Serial>();
         Can1::reset_timestamp();
+        const uint32_t t0 = now_ticks();
         const uint16_t a = Can1::timestamp_value();
         brio::spin_us<Ruler>(20000);
         const uint16_t b = Can1::timestamp_value();
+        const uint32_t span = since(t0);
         const uint32_t ticks = static_cast<uint16_t>(b - a);
         print(serial, "  TCP = 16: ", ticks, " counts in the same 20 ms, "
-              "against 10000 / 16 = 625", crlf);
+              "against ", span / (16u * cycles_per_bit), " of 16 bit times in "
+              "the ruler's span", crlf);
+        // One count is 16 bit times here, so the bound is TCP's own
+        // arithmetic: a register one off (15) would advance 666.
         bench.verdict("TCP counts in MULTIPLES OF CAN BIT TIMES, 1 to 16, and "
-                      "the register holds one less than the multiple (36.4.8)",
-                      ticks > 615u && ticks < 635u &&
+                      "the register holds one less than the multiple (36.4.8) "
+                      "- 16 bit times a count, to one count each way",
+                      quiet && counts_agree(ticks, span, 16u * cycles_per_bit) &&
                           Can1::timestamp_prescaler() == 16u);
     }
 
@@ -2056,11 +2122,26 @@ void th_time() {
             },
             2'500'000u);
         const uint32_t took = us_of(since(t0));
+        // The wrap is the 65536th count of 32 us (16 bit times at
+        // 500 kbit/s, exact against the ruler as above), and the first
+        // count came up to one count early (the prescaler's phase at the
+        // reset write is not known): 2097120..2097152 us after the reset,
+        // t0 a few cycles after it and the microseconds truncated, one
+        // more below. Above, the detection: the wait's poll turn (the
+        // flag, the backstop's feed and the ruler, under 30 cycles in the
+        // release listing) and SysTick's handler served inside it (about
+        // 70 cycles with the exception's entry and return), together under
+        // one bit time, 2 us. TCP = 15 would wrap at 1966080.
+        constexpr uint32_t count_us = 16u * 2u;
+        constexpr uint32_t wrap_us = 65536u * count_us;
         print(serial, "  TSW after ", took, " us, against 65536 x 16 bit times "
-              "= 2097 ms at 500 kbit/s", crlf);
+              "= ", wrap_us, " us at 500 kbit/s (one 32 us count early to one "
+              "bit late)", crlf);
         bench.verdict("IR.TSW is the wrap-around of a 16-bit counter and lands "
-                      "where the arithmetic puts it",
-                      wrapped && took > 2000000u && took < 2300000u);
+                      "where the arithmetic puts it, one count early to one bit "
+                      "time late",
+                      wrapped && took + count_us + 1u >= wrap_us &&
+                          took <= wrap_us + 2u);
     }
 
     // --- the EXTERNAL timestamp: TIM3's counter, a wireless cross-check
@@ -2115,6 +2196,10 @@ void th_time() {
         (void)Can1::timestamp(FdcanTimestamp::internal, 1);
         (void)Can1::timeout(FdcanTimeoutMode::continuous, 1000, true);
         (void)Can1::start();
+        // The lines above are still going out, and this window is 2 ms:
+        // the console drained first, and a console that would not drain
+        // fails the verdict rather than time its interrupts.
+        const bool quiet = brio::console_drain<Ruler, Serial>();
         Can1::clear_flags(FdcanFlag::all);
         Can1::reset_timeout();
         const uint32_t t0 = now_ticks();
@@ -2122,12 +2207,23 @@ void th_time() {
         const bool fired = brio::wait_until<Ruler>(
             [] { return (Can1::flags() & FdcanFlag::timeout) != 0u; }, 20000u);
         const uint32_t took = us_of(since(t0));
+        // 1000 counts of one bit time (2 us, exact against the ruler), the
+        // first up to one bit early (the prescaler's phase at the preset):
+        // 1998..2000 us, t0 after the preset and the microseconds
+        // truncated, one more below. Above, the poll turn (seven
+        // instructions, under 30 cycles in the release listing) and
+        // SysTick's handler served inside it (about 70), under one bit
+        // time together. A TOP one off moves TOO by one bit, inside the
+        // phase: one measurement cannot tell it, and the verdict does not
+        // claim to.
+        constexpr uint32_t top_us = 1000u * 2u;
         print(serial, "  continuous timeout, TOP = 1000 at TCP = 1: TOO after ",
-              took, " us against 1000 bit times = 2000 us", crlf);
+              took, " us against 1000 bit times = ", top_us, " us (console ",
+              quiet ? "drained" : "NOT drained", ")", crlf);
         bench.verdict("the timeout counter counts DOWN in the same units the "
                       "timestamp counter counts up, and IR.TOO lands at TOP x "
-                      "TCP bit times",
-                      fired && took > 1800u && took < 2400u);
+                      "TCP bit times, 1997..2002 us",
+                      quiet && fired && took + 3u >= top_us && took <= top_us + 2u);
     }
 
     // --- the timeout counter under a FIFO.
@@ -2292,6 +2388,10 @@ void ti_errors() {
     {
         (void)Can1::tx_cancel(0x7);
         Can1::clear_flags(FdcanFlag::all);
+        // The lines above are still going out: drained first, so no
+        // transmit interrupt sits in the poll that ends the window, and a
+        // console that would not drain fails the placement verdict.
+        const bool quiet = brio::console_drain<Ruler, Serial>();
         const uint32_t r0 = now_ticks();
         (void)Can1::init_mode(false);
         // A hundred times the 2.8 ms of 1408 recessive bits.
@@ -2301,27 +2401,43 @@ void ti_errors() {
                 return !Can1::status().bus_off;
             },
             200000u);
-        const uint32_t took = us_of(since(r0));
+        const uint32_t span = since(r0);
+        const uint32_t took = us_of(span);
         const auto st = Can1::status();
         const auto ec = Can1::error_counters();
-        const uint32_t bits = took / 2u;   // 2 us a bit at 500 kbit/s
+        // Whole bit times of the ruler (128 cycles at 500 kbit/s, exact as
+        // in letter h: the bit clock and TIM2 share the PLL). r0 is taken
+        // before INIT is cleared and the end after BO reads clear, so the
+        // count can only exceed the sequence's: by the INIT write's
+        // crossing, the poll turn (a status read and the backstop's feed)
+        // and an interrupt served in it - SysTick's handler, the console
+        // drained - a few bit times at most.
+        const uint32_t bits = span / (SysClock::hz / 500'000u);
         print(serial, "  recovery: BO cleared after ", took, " us = ", bits,
               " bit times, against 128 x 11 = 1408 (36.4.13 says 129 x 11 = "
               "1419); ACT ", static_cast<uint8_t>(st.activity), ", TEC ",
-              ec.transmit, " REC ", ec.receive, crlf);
+              ec.transmit, " REC ", ec.receive, " (console ",
+              quiet ? "drained" : "NOT drained", ")", crlf);
+        // The floor is the CAN standard's own minimum, 36.3.5's "at least
+        // ... 128 occurrences of 11 consecutive recessive bits": the count
+        // cannot read under the sequence it contains.
         bench.verdict("THE BUS-OFF RECOVERY SEQUENCE RUNS ON A PULL-UP: with "
                       "INIT cleared the module counts its 11-recessive-bit "
-                      "sequences off a pad nothing is driving, comes back "
-                      "error-active and resets both error counters",
-                      recovered && bits > 1300u && bits < 1600u &&
-                          ec.transmit == 0u && ec.receive == 0u);
-        bench.verdict("...and it is 36.4.13'S NOTE THAT IS RIGHT AND FIGURE "
-                      "398 THAT IS NOT: the figure says '128 x 11 recessive "
-                      "bits' (1408) and the note says the device 'waits for "
-                      "129 occurrences of bus-idle' (1419), and the "
-                      "measurement lands on the note - inside a bit time and a "
-                      "half of 1419, and a dozen bits clear of 1408",
-                      bits >= 1414u && bits <= 1432u);
+                      "sequences off a pad nothing is driving - at least the "
+                      "standard's 128 x 11 bit times - comes back error-active "
+                      "and resets both error counters",
+                      recovered && bits >= 1408u && ec.transmit == 0u &&
+                          ec.receive == 0u);
+        // Which count it is: the hypotheses are 11 bits apart (128, 129 or
+        // 130 occurrences: 1408, 1419, 1430), and the excess above is a few
+        // bit times, so the midpoints classify - 1414..1424 is the note's
+        // 129 and nothing else.
+        bench.verdict("...and it is 36.4.13'S NOTE THAT DESCRIBES IT: the "
+                      "device 'waits for 129 occurrences of bus-idle' (1419 "
+                      "bit times), one more than figure 398's '128 x 11 "
+                      "recessive bits' (1408) - the count nearer 1419 than "
+                      "1408 or 1430, 1414..1424",
+                      quiet && bits >= 1414u && bits <= 1424u);
     }
 
     // --- a stuck-DOMINANT line.
@@ -2857,16 +2973,27 @@ void tl_errata() {
               ", PEA ", r.pea, ", PED ", r.ped, crlf);
         Can1::release();
     }
-    bench.verdict("ES0548 2.13.1 STAGED, 1500 FD frames with bit rate "
-                  "switching in each arm: with edge filtering SET and with it "
-                  "clear, every frame arrived and every one of them was "
-                  "byte-exact - the erratum is NOT REPRODUCED here, which is "
-                  "recorded as such and not as a disproof (the coincidence it "
-                  "needs is an END OF INTEGRATION on a falling RX edge, and a "
-                  "loop-back whose RX pin is disconnected may never offer one)",
-                  runs[0].received == runs[0].sent &&
-                      runs[1].received == runs[1].sent && runs[0].bad == 0u &&
-                      runs[1].bad == 0u);
+    // THE ERRATUM'S ARM IS A PRINT, ITS CONTROL A VERDICT. Whether the
+    // coincidence 2.13.1 needs (an END OF INTEGRATION on a falling RX
+    // edge) ever happens in a loop-back whose RX pin is disconnected is
+    // nothing the chapter or the erratum states, so what the EFBI arm
+    // delivers is recorded and not judged; a reproduction would be a
+    // finding to read, one die's either way. The clear arm is the
+    // control: an internal loop-back without edge filtering delivers every
+    // frame byte-exact by 36.3.4, and without it the EFBI arm's count
+    // would mean nothing.
+    const bool efbi_whole = runs[1].received == runs[1].sent && runs[1].bad == 0u;
+    print(serial, "  ES0548 2.13.1 with EFBI set: ", runs[1].sent - runs[1].received,
+          " frames lost and ", runs[1].bad, " corrupt of ", runs[1].sent, " - ",
+          efbi_whole ? "NOT REPRODUCED here, which is recorded as such and not as "
+                       "a disproof"
+                     : "THE ERRATUM'S SIGNATURE, a finding to read",
+          crlf);
+    bench.verdict("ES0548 2.13.1 STAGED, the control: 1500 FD frames with bit "
+                  "rate switching through the internal loop with edge "
+                  "filtering clear, every frame arrived and every one of them "
+                  "byte-exact (the EFBI arm's figures are the print above)",
+                  runs[0].received == runs[0].sent && runs[0].bad == 0u);
 
     // --- ES0548 2.13.2: Tx FIFO messages inverted "if FDCAN uses both a
     // dedicated Tx buffer and a Tx FIFO". Is a dedicated Tx buffer even

@@ -418,29 +418,38 @@ void ta_domain() {
           ((boot_bdcr & 1u) != 0u), crlf);
 
     // THE FIRST LOCK. PWR_CR1.DBP is clear after every system reset, and
-    // with it clear the whole domain ignores writes. Proven by writing
-    // something harmless into RCC_BDCR and reading it back unchanged -
-    // LSEBYP is the safest bit there is here (the oscillator is off, so
-    // 5.4.23's own precondition for writing it is met).
+    // with it clear the whole domain ignores writes - the RTC registers
+    // and the backup registers (RM0444 4.1.2's RTC domain access, and
+    // 31.3.3 for TAMP's). Proven on a backup register, a word the board
+    // depends on for nothing and one this letter's BDRST below wipes
+    // anyway: written under the lock it keeps its word; written with DBP
+    // set it takes the new one (the control - the bank is clocked and the
+    // write reaches it); and the first word is put back. The RTC's APB
+    // clock is opened first, since a bank without it answers nothing and
+    // would keep its word for the wrong reason.
     Pwr::bus_clock(true);
+    RtcDomain::apb_clock(true);
+    constexpr uint8_t probe_reg = Tamp::backup_count - 1u;
+    const uint32_t kept = Tamp::backup(probe_reg);
+    const uint32_t probe = ~kept;
     Pwr::rtc_domain_unlock(false);
-    const uint32_t before = RtcDomain::bdcr();
-    // The verb writes only while the oscillator is off; with the LSE
-    // running it refuses before any store, and the lock is not seen.
-    const bool attempted = RtcDomain::lse_bypass(true);
-    const uint32_t locked = RtcDomain::bdcr();
+    (void)Tamp::backup(probe_reg, probe);   // the lock must drop this store
+    const uint32_t locked = Tamp::backup(probe_reg);
     Pwr::rtc_domain_unlock(true);
     const bool unlocked = Pwr::rtc_domain_unlocked();
-    if (attempted) {
-        bench.verdict("with DBP clear the RTC domain ignores a write to "
-                      "RCC_BDCR (4.1.2)",
-                      before == locked && (locked & 0x4u) == 0u);
-    } else {
-        bench.skip("the LSE runs, so LSEBYP takes no write either way: the DBP lock is "
-                   "not seen through it on this boot");
-    }
-    bench.verdict("setting DBP opens it", unlocked);
-    (void)RtcDomain::lse_bypass(false);
+    (void)Tamp::backup(probe_reg, probe);   // and DBP must let it land
+    const uint32_t landed = Tamp::backup(probe_reg);
+    (void)Tamp::backup(probe_reg, kept);
+    const bool restored = Tamp::backup(probe_reg) == kept;
+    print(serial, "  BKP", static_cast<uint32_t>(probe_reg), "R held ", hex(kept),
+          "; written ", hex(probe), " with DBP clear it reads ", hex(locked),
+          ", with DBP set ", hex(landed), "; put back: ", restored ? "yes" : "NO", crlf);
+    bench.verdict("with DBP clear the RTC domain ignores a write: a backup register "
+                  "keeps its word (RM0444 4.1.2, 31.3.3)",
+                  locked == kept);
+    bench.verdict("setting DBP opens it: the same write then lands, and the word is "
+                  "put back",
+                  unlocked && landed == probe && restored);
 
     // The RTC's own APB interface has a SECOND enable, distinct from
     // RTCEN: RTCAPBEN gates the register bank while RTCEN gates the
@@ -1136,14 +1145,34 @@ void tg_wakeup() {
     }
     const uint32_t span = Ticker::millis() - t0;
     Rtc::clear_wakeup();
+    // THE BANDS, DERIVED. Both periods are read on the kernel tick -
+    // SysTick on the PLL over HSI16 - in whole milliseconds, each reading
+    // off by under one. On the LSE ck_spre is the crystal's second, so
+    // two counts read 2000 ms x DS13560 table 44's 0.9815..1.0156. On the
+    // LSI the working prescalers divide a NOMINAL 32000, so a count is
+    // 32000 / fLSI seconds with fLSI anywhere in table 46's 29.5..34 kHz:
+    // 2000 ms x 32000/34000 x 0.9815 .. 2000 ms x 32000/29500 x 1.0156.
+    // The first period: 30.6.6 puts the first assertion between WUT and
+    // WUT + 1 counts after WUTE - one to two counts here, the stamp taken
+    // just after WUTE - so it is never longer than the period: at least
+    // one count's low end and at most the second period, each side off by
+    // the two readings.
+    const bool on_lse = source_in_force == RtcClockSource::lse;
+    const uint32_t lo_e4 = on_lse ? 9'815u : 9'237u;
+    const uint32_t hi_e4 = on_lse ? 10'156u : 11'017u;
+    const uint32_t span_lo = (2000u * lo_e4) / 10'000u - 2u;
+    const uint32_t span_hi = (2000u * hi_e4 + 9'999u) / 10'000u + 2u;
+    const uint32_t first_lo = (1000u * lo_e4) / 10'000u - 2u;
     print(serial, "  ck_spre x 2: the FIRST period measured ", first_span,
-          " ms, the second ", span, " ms (nominal 2000; 30.6.6 says the "
-          "first may be a whole count short)", crlf);
+          " ms, the second ", span, " ms (nominal 2000, the band ", span_lo, "..", span_hi,
+          "; 30.6.6 puts the first between one and two counts: ", first_lo, "..",
+          span + 2u, ")", crlf);
     bench.verdict("a ck_spre wake-up of two counts is two seconds from the "
                   "second period on",
-                  first && second && within(span, 1800u, 2300u));
-    bench.verdict("and the FIRST one is shorter, exactly as 30.6.6 warns",
-                  first_span <= span + 50u);
+                  first && second && within(span, span_lo, span_hi));
+    bench.verdict("and the FIRST one is no longer, and may be a whole count shorter, "
+                  "exactly as 30.6.6 warns",
+                  first && within(first_span, first_lo, span + 2u));
 
     print(serial, "  the RTC's vector ran ", rtc_interrupts - irq0,
           " times during this letter - which is what keeps the wake-up "
@@ -1697,11 +1726,20 @@ void tk_refin() {
         bench.verdict("the calendar's second is timed on TIM2", false);
         return;
     }
+    // THE BAND, DERIVED. TIM2 counts the PLL over HSI16, so the crystal's
+    // second reads 64000000 ticks x DS13560 table 44's 0.9815..1.0156. A
+    // stamp is taken on the first loop turn that sees SS reload, which
+    // stays visible for a whole ck_apre period (1/256 s, 250000 ticks) and
+    // the loop turns far faster, so each stamp is late by under that: the
+    // mean of the four spans is off by under 2 x 250000 / 4.
+    constexpr uint32_t lse_second_lo = 64'000'000UL / 10'000u * 9'815u - 125'000UL;
+    constexpr uint32_t lse_second_hi = 64'000'000UL / 10'000u * 10'156u + 125'000UL;
     print(serial, "  LSE alone:      ", lse_only.mean, " TIM2 ticks a second (",
-          lse_only.lo, "..", lse_only.hi, ")", crlf);
-    bench.verdict("the calendar's own second, timed on the core, is within "
-                  "1 % of a second (the two oscillators' disagreement)",
-                  within(lse_only.mean, 63'360'000UL, 64'640'000UL));
+          lse_only.lo, "..", lse_only.hi, "; the band ", lse_second_lo, "..", lse_second_hi,
+          ")", crlf);
+    bench.verdict("the calendar's own second, timed on the core, is a second within "
+                  "the HSI16's data-sheet band (the two oscillators' disagreement)",
+                  within(lse_only.mean, lse_second_lo, lse_second_hi));
 
     // LEG 2 - 50 Hz, the chapter's first mains rate. One half period is
     // 10 ms of TIM2, so fifty periods are 64000000 ticks BY

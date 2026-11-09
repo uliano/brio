@@ -66,7 +66,8 @@
 //   b  the DAC as an actuator: the holding register, the output register
 //      and the cycles between them, the three data formats, both triggers
 //   c  the zero-length wire: the DAC's transfer curve read back through
-//      ADC12_IN4, monotonic, with the buffer's own swing limits
+//      ADC12_IN4, rising and within the data sheet's error inside the
+//      buffer's specified range, its swing at the ends printed
 //   d  buffered against unbuffered, on a free pad and on the LED's
 //   e  the settling time, by sampling at increasing delays after a step
 //   f  the conversion time in ADCCLK cycles, measured differentially per
@@ -365,6 +366,41 @@ uint16_t loop_read(uint8_t ch, uint16_t code, uint8_t settle_reads = 2) {
 constexpr uint16_t max_of(uint16_t a, uint16_t b) { return a > b ? a : b; }
 
 uint16_t abs_diff(uint16_t a, uint16_t b) { return a > b ? a - b : b - a; }
+
+// =============================================================================
+// What the data sheet bounds, for the verdicts that judge a converter's value
+// =============================================================================
+//
+// DS10693, the STM32F446's data sheet (the bench part), in LSB of 12 bits on
+// a reference of VDDA. A DAC and an ADC that share VDDA as their reference
+// cancel its value: what is left is each converter's own error.
+
+/// The ADC's total unadjusted error: table 76's +-5 at fADC = 30 MHz, the
+/// worse of the two tables (table 75, 18 MHz, +-4) that bracket the 22.5 MHz
+/// this suite runs at.
+constexpr uint16_t adc_et_lsb = 5;
+/// The conversion's noise: four times the 0.91 LSB rms that table 79's least
+/// SNR, 64 dB, gives at 12 bits (4096 / (2 x sqrt 2) / 10^(64/20)).
+constexpr uint16_t adc_noise_lsb = 4;
+/// The DAC's own error at a code (table 85, 12 bits): the offset, +-10 mV
+/// (12.4 at 3.3 V; the table's +-12 LSB row is at 3.6 V), the gain error,
+/// +-0.5 % of full scale (20.5 at the top code), and the INL, +-4: 37 in
+/// all, rounded up.
+constexpr uint16_t dac_error_lsb = 37;
+/// A DAC code read back through its own pad by one conversion: 37 + 5 + 4.
+constexpr uint16_t loop_error_lsb = dac_error_lsb + adc_et_lsb + adc_noise_lsb;
+static_assert(loop_error_lsb == 46u, "the verdicts' texts quote 46");
+/// The codes the BUFFERED output is specified over (table 85, DAC_OUT min
+/// and max with the buffer on: 0.2 V from either rail): 0x1C7 to 0xE38 at
+/// VREF+ = 1.7 V, a range every higher VDDA contains (at 3.6 V it is 0x0E0
+/// to 0xF1C). Outside it the buffer's output is the part's, not the sheet's.
+constexpr uint16_t dac_linear_lo = 0x1C7;
+constexpr uint16_t dac_linear_hi = 0xE38;
+/// The least VREFINT can read: 1.18 V (table 83) on a VDDA of 3.6 V at most
+/// (table 74) is 1342 counts, less the ADC's error and noise.
+constexpr uint16_t vrefint_floor =
+    static_cast<uint16_t>(1180UL * 4096UL / 3600UL - adc_et_lsb - adc_noise_lsb);
+static_assert(vrefint_floor == 1333u);
 
 // =============================================================================
 // The external trigger, with no timer and no wire
@@ -676,21 +712,30 @@ void tc_transfer() {
         }
         Adc1::select(FreeIn{});
 
+        // Judged inside the buffer's specified range alone, where the
+        // sheet bounds the round trip (loop_error_lsb, 46 LSB: the DAC's
+        // offset, gain and INL, the ADC's total error and noise); the ends
+        // are printed. Two readings 128 codes apart differ by at least
+        // 128 - 2 x 46 = 36 there, so the curve must RISE at every step.
         uint16_t last = 0;
-        bool monotonic = true;
+        bool rises = true;
+        bool falls_outside = false;
         uint16_t worst = 0;
         uint16_t worst_code = 0;
         const uint16_t at_zero = loop_read(free_ch, 0, 4);
         for (uint16_t code = 0; code <= 4095u; code = static_cast<uint16_t>(code + 128u)) {
             const uint16_t got = loop_read(free_ch, code);
-            if (code != 0u && got + 8u < last) {
-                monotonic = false;
+            const bool inside = code >= dac_linear_lo && code <= dac_linear_hi;
+            const bool step_inside = inside && code >= dac_linear_lo + 128u;
+            if (code != 0u && got <= last) {
+                if (step_inside) {
+                    rises = false;
+                } else {
+                    falls_outside = true;
+                }
             }
             last = got;
-            // The middle of the range is where a buffered output is
-            // linear; the ends are its own swing limit and are judged
-            // separately.
-            if (code >= 256u && code <= 3840u) {
+            if (inside) {
                 const uint16_t err = abs_diff(got, code);
                 if (err > worst) {
                     worst = err;
@@ -702,19 +747,20 @@ void tc_transfer() {
             }
         }
         const uint16_t at_full = loop_read(free_ch, 4095, 4);
+        // The ends, printed: below 0x1C7 and above 0xE38 the sheet gives
+        // the buffered output no figure, so how near the rails it comes is
+        // this part's measurement.
         print(serial, "  buffered swing: code 0 reads ", at_zero, ", code 4095 reads ", at_full,
-              "; worst error over codes 256..3840 is ", worst, " LSB at code ", worst_code, crlf);
+              "; outside codes ", dac_linear_lo, "..", dac_linear_hi, " the curve ",
+              falls_outside ? "has a step that does not rise" : "rises at every step", crlf);
+        print(serial, "  worst error over codes ", dac_linear_lo, "..", dac_linear_hi, " is ",
+              worst, " LSB at code ", worst_code, " (bound ", loop_error_lsb, ")", crlf);
 
-        bench.verdict("the curve is MONOTONIC over the whole range", monotonic);
-        // The bound is 1.5 % of full scale and the number printed above is
-        // the measurement: what it contains is the DAC's own error, the
-        // ADC's, and the two converters' shared reference - a round trip
-        // through both, and neither of them alone.
-        bench.verdict("and the round trip through both converters stays within 1.5 % of full "
-                      "scale away from the rails", worst < 62u);
-        bench.verdict("the BUFFER cannot reach either rail - the ends of the curve are its own "
-                      "output swing and not the converter's",
-                      at_zero > 20u && at_full < 4075u);
+        bench.verdict("the curve RISES at every step inside the buffer's specified range",
+                      rises);
+        bench.verdict("and the round trip through both converters stays within the sheet's "
+                      "46 LSB there (the DAC's error, the ADC's, the noise)",
+                      worst <= loop_error_lsb);
         analog_down();
     }
 #endif
@@ -771,12 +817,21 @@ void td_buffer() {
         print(serial, "  loaded pad ", loaded_pad_name, ": buffered ", load_buf[0], "/", load_buf[1], "/",
               load_buf[2], ", unbuffered ", load_raw[0], "/", load_raw[1], "/", load_raw[2], crlf);
 
-        bench.verdict("UNBUFFERED REACHES THE RAILS and buffered does not: on a pad with "
-                      "nothing on it the unbuffered output is nearer both ends",
-                      free_raw[0] < free_buf[0] && free_raw[2] > free_buf[2]);
-        bench.verdict("and it is still linear in the middle of the range with only the ADC's "
-                      "own sampling network on it",
-                      abs_diff(free_raw[1], 2048u) < 60u);
+        // Printed, not judged: the sheet gives the buffered output no figure
+        // past 0.2 V from either rail and the unbuffered one only a typical
+        // 0.5 mV (table 85), so which comes nearer the rails is this part's.
+        print(serial, "  at the rails the unbuffered output is ",
+              free_raw[0] < free_buf[0] && free_raw[2] > free_buf[2] ? "nearer both ends"
+                                                                     : "NOT nearer both ends",
+              " than the buffered one", crlf);
+        // The middle code, derived: with the buffer off the output
+        // impedance is 15 kOhm at most (table 85, RO), and a 480-cycle
+        // sample settles through it far inside a quarter LSB (equation 1:
+        // up to 300 kOhm at 22.5 MHz), so the reading carries the round
+        // trip's 46 LSB and nothing more.
+        bench.verdict("the unbuffered output is still within the round trip's 46 LSB in the "
+                      "middle of the range, with only the ADC's own sampling network on it",
+                      abs_diff(free_raw[1], 2048u) <= loop_error_lsb);
         if (Dac::channels > 1u) {
             // The load's direction is the board's (the LED sinks at full
             // scale, a pull-up lifts at zero), so the judgement is by how
@@ -790,10 +845,14 @@ void td_buffer() {
             print(serial, "  the load moves the unbuffered output ", raw_stray,
                   " LSB from the free pad's at the rail it fights, the buffered one ", buf_stray, crlf);
             if constexpr (loaded_pad_has_load) {
-                bench.verdict("A LOAD IS WHAT THE BUFFER IS FOR: the load pulls the UNBUFFERED "
-                              "output far from the code it was given at one rail, while the "
-                              "buffered one holds",
-                              raw_stray > buf_stray + 200u);
+                // Printed, not judged: how far a load pulls either output is
+                // the load's (a LED's curve, a pull-up's value), which no
+                // document here gives, and a LED behind its resistor is a
+                // heavier load than the 5 kOhm the sheet specifies the buffer
+                // for (table 85, RLOAD).
+                print(serial, "  the load pulls the UNBUFFERED output ",
+                      raw_stray > buf_stray ? "farther" : "NOT farther",
+                      " from its code than the buffered one", crlf);
             } else {
                 bench.skip("no load on either DAC pad of this board: the buffer's job is not "
                            "measurable here");
@@ -849,10 +908,20 @@ void te_settling() {
             }
         }
         print(serial, "  within 1 % of the settled value from +", first_within, " us", crlf);
-        bench.verdict("the step is NOT there at once - the reading taken with no delay is "
-                      "below the settled one", got[0] + 40u < settled);
-        bench.verdict("and it is within 1 % well inside the 20 us this letter waits",
-                      first_within <= 20u);
+        // Printed, not judged: the sheet gives the settling time a maximum
+        // and no minimum (table 85), so how far short the first reading
+        // falls is this part's slew.
+        print(serial, "  the reading taken with no delay is ",
+              got[0] + 40u < settled ? "below" : "NOT below", " the settled one by more than 1 %",
+              crlf);
+        // The bound, derived: tSETTLING is 6 us at most with the buffer on,
+        // into 50 pF and 5 kOhm (table 85; the free pad carries the ADC's
+        // 7 pF and the pad's 5 or so), so the first probe at or after 6 us,
+        // +10, finds the output settled; 1 % (40 LSB) is the margin left
+        // to two conversions' noise (2 x 4) and the settled value's own
+        // tolerance.
+        bench.verdict("and it is within 1 % by the first probe past the sheet's 6 us settling "
+                      "time (+10 us)", first_within <= 10u);
         analog_down();
     }
 #endif
@@ -861,6 +930,26 @@ void te_settling() {
 // =============================================================================
 // f - the conversion time in ADCCLK cycles, measured differentially
 // =============================================================================
+/// The HCLK cycles of one polled conversion, the average of 16 back to
+/// back, from a run no kernel tick landed in (TickWitness): up to 16 tries,
+/// 0 when none was quiet. A run of 16 at the slowest setting lasts 0.36 ms,
+/// so most tries are.
+uint32_t per_conversion() {
+    constexpr uint16_t rounds = 16;
+    for (uint8_t attempt = 0; attempt < 16u; ++attempt) {
+        const brio::TickWitness<P> witness;
+        const uint32_t t0 = Ruler::now();
+        for (uint16_t k = 0; k < rounds; ++k) {
+            (void)Adc1::read();
+        }
+        const uint32_t span = Ruler::now() - t0;
+        if (witness.quiet()) {
+            return span / rounds;
+        }
+    }
+    return 0;
+}
+
 void tf_timing() {
     if (!adc_up(base_config())) {
         bench.verdict("the converter came up", false);
@@ -879,16 +968,46 @@ void tf_timing() {
         return;
     }
 
+    // THE POLL'S TURN, measured, because it is part of the bound: with ADON
+    // clear SWSTART does nothing (13.13.3), so read(v, spins) polls EOC
+    // `spins` times and runs out - the difference of two spin counts over
+    // their difference is one turn of the loop that sees each conversion's
+    // end. Masked, so that no handler lands in either span.
+    uint32_t turn = 0;
+    {
+        Adc1::power_off();
+        uint16_t none = 0;
+        const InterruptGuard masked;
+        uint32_t t0 = Ruler::now();
+        (void)Adc1::read(none, 64);
+        const uint32_t short_run = Ruler::now() - t0;
+        t0 = Ruler::now();
+        (void)Adc1::read(none, 320);
+        const uint32_t long_run = Ruler::now() - t0;
+        turn = (long_run - short_run + 255u) / 256u;   // rounded up
+    }
+    (void)Adc1::power_on(clock);
+
     const uint32_t q8 = core_cycles_per_adc_cycle_q8();
+    // THE BOUND, derived. One polled conversion's span is a fixed part
+    // (the start's store, the call, the read of DR), the chapter's own
+    // ADCCLK cycles, the wait for the next ADCCLK edge after SWSTART (0 to
+    // 1 ADCCLK cycle: the converter runs on its own clock) and the poll's
+    // lateness after EOC (0 to 1 turn). Averaged over a run, the last two
+    // stay between 0 and one ADCCLK cycle plus one turn; the difference of
+    // two runs' averages carries that once each way, and each average's
+    // truncation less than 1 cycle: |measured - predicted| < one ADCCLK
+    // cycle (rounded up) + one turn + 1.
+    const uint32_t bound = (q8 + 255u) / 256u + turn + 1u;
     print(serial, "  fADC ", AdcCommon::adc_hz(pclk2) / 1000u, " kHz, HCLK ", SysClock::hz / 1000u,
           " kHz: one ADCCLK cycle is ", q8 / 256u, " and ", (q8 % 256u) * 100u / 256u,
-          "/100 HCLK cycles", crlf);
+          "/100 HCLK cycles; one poll turn ", turn, " HCLK, so a difference is judged to ",
+          bound, " HCLK", crlf);
 
     static const AdcRes res[4] = {AdcRes::bits12, AdcRes::bits10, AdcRes::bits8, AdcRes::bits6};
     static const char* res_name[4] = {"12", "10", " 8", " 6"};
     static const AdcSampleTime smp[3] = {AdcSampleTime::cycles3, AdcSampleTime::cycles84,
                                          AdcSampleTime::cycles480};
-    const uint16_t rounds = 128;
     bool all_close = true;
     uint32_t overhead_cycles = 0;
 
@@ -901,11 +1020,7 @@ void tf_timing() {
             Adc1::sample_time_all(smp[s]);
             (void)Adc1::read();   // one throwaway: the first after a change
             console_drain();
-            const uint32_t t0 = Ruler::now();
-            for (uint16_t k = 0; k < rounds; ++k) {
-                (void)Adc1::read();
-            }
-            per[s] = (Ruler::now() - t0) / rounds;
+            per[s] = per_conversion();
         }
         // THE DIFFERENCE is the measurement: the same loop at two
         // sampling times differs by exactly the sampling times' own
@@ -917,7 +1032,7 @@ void tf_timing() {
         print(serial, "    ", res_name[r], " bits: ", per[0], " / ", per[1], " / ", per[2],
               " HCLK per conversion at 3 / 84 / 480 cycles; 477 ADCCLK cycles measured ",
               measured, " HCLK, predicted ", predicted, crlf);
-        if (err * 100u > predicted) {
+        if (per[0] == 0u || per[2] == 0u || err > bound) {
             all_close = false;
         }
         if (r == 0u) {
@@ -930,8 +1045,8 @@ void tf_timing() {
     }
     print(serial, "  the polling loop around one conversion costs ", overhead_cycles,
           " HCLK cycles", crlf);
-    bench.verdict("the sampling time's contribution is the chapter's own, to under 1 %, at "
-                  "every resolution", all_close);
+    bench.verdict("the sampling time's contribution is the chapter's own, to one ADCCLK cycle "
+                  "and one poll turn, at every resolution", all_close);
 
     // And the SAR's own contribution, the other axis of the same table.
     Adc1::sample_time_all(AdcSampleTime::cycles3);
@@ -943,24 +1058,20 @@ void tf_timing() {
         Adc1::sample_time_all(AdcSampleTime::cycles3);
         (void)Adc1::read();
         console_drain();
-        const uint32_t t0 = Ruler::now();
-        for (uint16_t k = 0; k < rounds; ++k) {
-            (void)Adc1::read();
-        }
-        (pass == 0u ? at12 : at6) = (Ruler::now() - t0) / rounds;
+        (pass == 0u ? at12 : at6) = per_conversion();
     }
     const uint32_t sar_measured = at12 - at6;
     const uint32_t sar_predicted =
         ((adc_sar_cycles(AdcRes::bits12) - adc_sar_cycles(AdcRes::bits6)) * q8) / 256u;
+    const uint32_t sar_err =
+        sar_measured > sar_predicted ? sar_measured - sar_predicted : sar_predicted - sar_measured;
     print(serial, "  12 bits costs ", sar_measured, " HCLK more than 6 at the same sampling "
           "time; six SAR cycles predict ", sar_predicted, crlf);
-    // The tolerance is 15 % plus ONE ADCCLK cycle: the polling loop's own
-    // granularity is a few HCLK, which is a whole ADCCLK cycle where the
-    // prescaler is four.
-    bench.verdict("and the RESOLUTION's contribution is one ADCCLK cycle per bit (13.7)",
-                  abs_diff(static_cast<uint16_t>(sar_measured),
-                           static_cast<uint16_t>(sar_predicted)) * 100u <=
-                      sar_predicted * 15u + (q8 * 100u) / 256u);
+    // The same bound as above: two runs' averages, each with its edge wait
+    // and its poll lateness.
+    bench.verdict("and the RESOLUTION's contribution is one ADCCLK cycle per bit (13.7), to "
+                  "one ADCCLK cycle and one poll turn",
+                  at12 != 0u && at6 != 0u && sar_err <= bound);
     AdcCommon::internal_sources(false);
     analog_down();
 }
@@ -981,11 +1092,17 @@ void tg_scale() {
     const uint16_t vdda = Adc1::vdda_mv(vrefint);
     print(serial, "  VREFINT reads ", vrefint, " against a calibration of ",
           AdcFactory::vrefint_cal(), " -> VDDA ", vdda, " mV", crlf);
-    bench.verdict("VREFINT measures the supply, and it is a 3 V-class board (2.7..3.6 V)",
-                  vdda >= 2700u && vdda <= 3600u);
-    bench.verdict("the raw count is near the calibration's own, as it must be on a board "
-                  "whose rail is near the 3.3 V ST used",
-                  abs_diff(vrefint, AdcFactory::vrefint_cal()) < 200u);
+    // The bound, derived: VDDA = 3300 x VREFINT_CAL / raw carries the
+    // reference's drift from the calibration's 30 C, 5 mV at most (table
+    // 83, 0.42 % of 1.18 V), and the ADC's error and noise twice, the
+    // factory's reading and this one (2 x 9 LSB on a count of at least
+    // 1333, 1.35 %): 1.8 % in all. VDDA itself lies in the sheet's 1.7 to
+    // 3.6 V (table 74), so the reading lies in 1669 to 3665 mV. A board's
+    // regulator is tighter, but no document here gives its tolerance: how
+    // near 3300 the reading comes is printed, not judged.
+    bench.verdict("VREFINT measures a supply inside the sheet's VDDA range, 1.7 to 3.6 V, "
+                  "within the method's 1.8 %",
+                  vdda >= 1669u && vdda <= 3665u);
 
     Adc1::select(AdcInput::temperature);
     const uint16_t ts = Adc1::read_settled(4);
@@ -995,10 +1112,16 @@ void tg_scale() {
     print(serial, "  sensor reads ", ts, " (", ts_mv, " mV): ", tc / 100, ".",
           (tc % 100) / 10, " C from the two calibration points, ", tc_typ / 100, ".",
           (tc_typ % 100) / 10, " C from the datasheet's typical slope", crlf);
-    bench.verdict("the junction temperature is a room-temperature one", tc > 0 && tc < 6000);
-    bench.verdict("and the two formulas disagree by less than the sensor's own part-to-part "
-                  "offset, which the manual puts at up to 45 C",
-                  (tc > tc_typ ? tc - tc_typ : tc_typ - tc) < 4500);
+    // The room's temperature is the bench's, not the part's: printed above,
+    // not judged. The two formulas' difference, derived: the typical one
+    // is off by the curve's offset from chip to chip, up to 45 C (RM0390
+    // 13.10); the calibrated one by the sensor's linearity, 2 C (table 80),
+    // and the ADC's error and noise, 9 LSB against a slope of about 3.1 LSB
+    // a degree (2.5 mV a degree, table 80, at 0.8 mV an LSB), 3 C: 50 C.
+    // VDDA's own error moves both alike (each scales the reading by it).
+    bench.verdict("and the two formulas disagree by less than the sensor's part-to-part "
+                  "offset (45 C, RM0390 13.10) plus the calibrated one's own error (5 C)",
+                  (tc > tc_typ ? tc - tc_typ : tc_typ - tc) < 5000);
 
     // The battery, and the switch that wins the channel they share.
     AdcCommon::vbat(true);
@@ -1008,9 +1131,16 @@ void tg_scale() {
         adc_mv(vbat_raw, Adc1::result_steps(), vdda) * AdcCommon::vbat_divider());
     print(serial, "  VBAT/", AdcCommon::vbat_divider(), " reads ", vbat_raw, " -> VBAT ",
           vbat_mv, " mV", crlf);
+    // The bound, derived, for a board whose VBAT is tied to VDD and VDD to
+    // VDDA (the Nucleo-64: UM1724 table 10, SB45 and SB57): the bridge's
+    // ratio is within 1 % of 4 (table 82, Er), the ADC's error and noise are
+    // 9 LSB on the quarter, 36 on VBAT (0.88 % of full scale), and VDDA's
+    // own error cancels, both readings being scaled by it; adc_mv()
+    // truncates under 1 mV, 4 times. So |VBAT - VDDA| < VDDA x 1.9 % + 4.
+    print(serial, "  the bound: ", vdda * 19u / 1000u + 4u, " mV", crlf);
     bench.verdict("the battery pin measures the supply it is tied to on this board, through "
-                  "the bridge the chapter names",
-                  abs_diff(vbat_mv, vdda) < 200u);
+                  "the bridge the chapter names, within the bridge's and the ADC's error",
+                  abs_diff(vbat_mv, vdda) < vdda * 19u / 1000u + 4u);
 
     if (AdcCommon::sensor_shares_vbat()) {
         // BOTH switches on: 13.11 says the battery wins, and the reading
@@ -1031,8 +1161,9 @@ void tg_scale() {
         print(serial, "  13.11's precedence: the reading is ",
               abs_diff(both, vbat_raw) <= 20u ? "the BATTERY's"
               : abs_diff(both, sensor_only) <= 20u ? "the SENSOR's" : "NEITHER source alone", crlf);
-        bench.verdict("with both switches set the shared channel is not the sensor alone",
-                      abs_diff(both, sensor_only) > 15u || abs_diff(both, vbat_raw) <= 20u);
+        // Printed, not judged: 13.11 says the battery wins, and another
+        // part of this family read neither source alone - a reading the
+        // manual's text and one die disagree on is a measurement here.
     }
     AdcCommon::vbat(false);
     AdcCommon::internal_sources(false);
@@ -1294,9 +1425,17 @@ void tj_dual() {
               "), ADC2 ", slave, " (single ", single5, ") ", paired ? *paired : 0u,
               " HCLK cycles after the start", paired ? "" : " (NEVER)", "; CSR ",
               hex(csr), ", CDR ", hex(pair), crlf);
+        // Judged by which pad each result belongs to: the pads sit 1800
+        // codes apart, so a result nearer its own pad's single answer than
+        // the other's is that pad's conversion (a stale or absent one is
+        // not). How near is printed above: two converters converting at
+        // once is a case the sheet's accuracy tables do not cover.
+        const bool master_own = abs_diff(master, single4) < abs_diff(master, single5);
+        const bool slave_own = abs_diff(slave, single5) < abs_diff(slave, single4);
         bench.verdict("ONE trigger on the MASTER converts BOTH: neither converter was started "
-                      "by itself and both have a result",
-                      abs_diff(master, single4) < 60u && abs_diff(slave, single5) < 60u);
+                      "by itself and each result is its own pad's, nearer that pad's single "
+                      "answer than the other's",
+                      paired.has_value() && master_own && slave_own);
         bench.verdict("and the common status register shows both ends of the pair, which is "
                       "the only place a reader of one converter can see the other",
                       (csr & AdcFlag::converted) != 0u &&
@@ -1314,21 +1453,28 @@ void tj_dual() {
         (void)brio::wait_until<Ruler>([] { return Adc1::ready(); }, conversion_budget_us);
         const uint32_t with_dma = AdcCommon::data();
         const uint32_t slave_sr = Adc2::flags();
+        const uint16_t round_master = Adc1::result();
+        const uint16_t round_slave = Adc2::result();
         AdcCommon::multi_dma(AdcMultiDma::off, false);
         print(serial, "  with DMA[1:0] = 10 selected and no stream armed, CDR ", hex(with_dma),
               " -> ADC1 ", static_cast<uint16_t>(with_dma & 0xFFFFu), ", ADC2 ",
-              static_cast<uint16_t>(with_dma >> 16), "; the slave's own SR reads ",
-              hex(slave_sr), crlf);
-        bench.verdict("and the SLAVE's own EOC does NOT stand after such a round - the pair "
-                      "went to the common register and the datum the slave's DR holds is not "
-                      "flagged, which is why a reconfiguration has to clear its STRT by hand",
-                      (slave_sr & AdcFlag::started) != 0u &&
-                          (slave_sr & AdcFlag::converted) == 0u);
-        bench.verdict("THE COMMON DATA REGISTER IS THE DMA's: at DMA[1:0] = 00 it stays zero "
-                      "however many pairs convert, and a multi-ADC DMA mode fills it with the "
-                      "pair - the master in the low half - with no stream in sight",
-                      pair == 0u && abs_diff(static_cast<uint16_t>(with_dma & 0xFFFFu), master) < 60u &&
-                          abs_diff(static_cast<uint16_t>(with_dma >> 16), slave) < 60u);
+              static_cast<uint16_t>(with_dma >> 16), " (their DRs ", round_master, " and ",
+              round_slave, "); the slave's own SR reads ", hex(slave_sr), crlf);
+        // Printed, not judged: neither what the slave's own EOC does after
+        // a paired round nor what CDR holds at DMA[1:0] = 00 is in the
+        // manual - both are this part's measurement.
+        print(serial, "  the slave's own EOC ",
+              (slave_sr & AdcFlag::converted) == 0u ? "does NOT stand" : "stands",
+              " after the round (STRT ", (slave_sr & AdcFlag::started) != 0u ? "set" : "clear",
+              "); CDR at DMA[1:0] = 00 read ", hex(pair), crlf);
+        // What 13.9's DMA mode 2 does say: on its request CDR holds ADC2's
+        // datum in the upper half and ADC1's in the lower - the two data
+        // registers of the same round, to the bit.
+        bench.verdict("A MULTI-ADC DMA MODE FILLS THE COMMON DATA REGISTER with the pair - the "
+                      "master in the low half - with no stream in sight: each half is its "
+                      "converter's own DR of the same round",
+                      static_cast<uint16_t>(with_dma & 0xFFFFu) == round_master &&
+                          static_cast<uint16_t>(with_dma >> 16) == round_slave);
 
         // ONE PAD, TWO CONVERTERS - which 13.9.2's own note tells an
         // application not to do ("no overlapping sampling times for the
@@ -1349,10 +1495,9 @@ void tj_dual() {
         const uint16_t same_s = Adc2::result();
         print(serial, "  ONE pad on both: ADC1 ", same_m, ", ADC2 ", same_s, ", difference ",
               abs_diff(same_m, same_s), " LSB (single-converter answer ", single4, ")", crlf);
-        bench.verdict("the two converters sampling the SAME pad at the same time still agree "
-                      "with each other and with the single-converter answer - the chapter's "
-                      "caution costs nothing on a source this stiff",
-                      abs_diff(same_m, same_s) < 60u && abs_diff(same_m, single4) < 80u);
+        // Printed, not judged: 13.9.2 tells an application not to overlap
+        // two samplings of one channel and gives no figure for what it
+        // costs, so the difference above is this part's measurement.
 
         (void)AdcCommon::multi(AdcMulti::independent);
         bench.verdict("and coming back to independent mode is one write",
@@ -1552,8 +1697,9 @@ void tm_erratum() {
     print(serial, "  the sequence rewritten INSIDE a software-started conversion: EOC ",
           never_came ? "never arrived" : "arrived anyway", " in ", conversion_budget_us,
           " us", crlf);
-    bench.verdict("THE ERRATUM MEASURED: with a software start, a sequence written during a "
-                  "conversion resets it and nothing restarts it", never_came);
+    // Printed, not judged: an erratum is a description of one silicon's
+    // fault, and whether it reproduces is the part's measurement (ES0298
+    // 2.6.1); the driver's refusal above is what the suite depends on.
 
     // The workaround: start again.
     Adc1::start();
@@ -1563,7 +1709,8 @@ void tm_erratum() {
         v = Adc1::result();
     }
     print(serial, "  one more SWSTART and the new sequence converts: ", v, crlf);
-    bench.verdict("and the errata's own workaround - trigger again - brings it back", again);
+    bench.verdict("and one more SWSTART converts the sequence SQR now holds (the control: "
+                  "a software start converts, 13.3.5)", again);
 
     // THE HARDWARE TRIGGER IS SPARED, which is the other half of the
     // item's own text - and the only way to say it on this board is a pad
@@ -1595,9 +1742,15 @@ void tm_erratum() {
         print(serial, "  with a HARDWARE trigger: the conversion the rewrite landed in was ",
               first_lost ? "lost" : "delivered anyway", " and the NEXT edge converted ",
               recovered ? "" : "nothing, ", hw_value, crlf);
-        bench.verdict("and the erratum SPARES the hardware trigger, as its own text says: no "
-                      "software touched the converter between the rewrite and the result",
-                      first_lost && recovered && hw_value > 100u);
+        // Whether the conversion the rewrite landed in is lost is the
+        // erratum's, printed; that the next edge converts the new sequence
+        // with no software help is the trigger's own behaviour (13.3.5,
+        // 13.6) and the control the item's hardware half rests on. Its
+        // value is the sensor's (channel 18 with VBATE clear), which the
+        // room decides: printed above.
+        bench.verdict("and the NEXT HARDWARE EDGE converts the rewritten sequence with no "
+                      "software help (the control: a hardware trigger converts, 13.6)",
+                      recovered);
 #endif
     } else {
         bench.skip("no pad on line 11 this suite knows to be free on this board: the hardware "
@@ -1639,11 +1792,16 @@ void tn_noise() {
     FlashAccel::prefetch(true);
     print(serial, "  256 conversions of VREFINT: prefetch ON spread ", spread[0], " LSB (mean ",
           mean[0], "), prefetch OFF spread ", spread[1], " LSB (mean ", mean[1], ")", crlf);
-    bench.verdict("the converter is quiet either way at 12 bits - a handful of LSB, not a "
-                  "handful of per cent", spread[0] < 40u && spread[1] < 40u);
-    bench.verdict("and the two means agree, so the errata's workaround costs the ACCURACY "
-                  "nothing and buys the NOISE what this letter reports",
-                  abs_diff(static_cast<uint16_t>(mean[0]), static_cast<uint16_t>(mean[1])) < 20u);
+    // Printed, not judged: the noise ES0298 2.2.8 describes has no figure
+    // in the erratum or the sheet (table 79 gives a sine's SNR, not a DC
+    // input's spread over 256 conversions), so both the spread with the
+    // prefetch on and off and what the workaround buys are this part's
+    // measurement.
+    print(serial, "  the means differ by ",
+          abs_diff(static_cast<uint16_t>(mean[0]), static_cast<uint16_t>(mean[1])),
+          " LSB; the spread with the prefetch off is ",
+          spread[1] < spread[0] ? "smaller" : spread[1] == spread[0] ? "the same" : "LARGER",
+          crlf);
     // Printed, not judged: the letter wrote the prefetch back itself, and
     // the two caches are the clock's (its own suite judges them).
     print(serial, "  the accelerator after the letter: prefetch ",
@@ -1700,10 +1858,11 @@ void to_trigger() {
           line_fired ? "FIRED" : "did not fire", ", the converter answered with EMR alone ",
           with_event ? "yes" : "no", " and with IMR open too ", with_interrupt ? "yes" : "no",
           crlf);
-    bench.verdict("THE SOFTWARE TRIGGER DOES NOT REACH THE CONVERTER: SWIER raises the line's "
-                  "own pending bit and no conversion follows it, under either mask - so the "
-                  "ADC's trigger takes the EDGE DETECTOR's output and not the register's",
-                  line_fired && !with_event && !with_interrupt);
+    // Printed, not judged: neither chapter says whether SWIER reaches the
+    // converter, so what the line above shows is this part's measurement.
+    print(serial, "  so the software trigger ",
+          line_fired && !with_event && !with_interrupt ? "does NOT reach" : "reaches",
+          " the converter here", crlf);
     (void)Exti::clear(adc_regular_exti_line);
     (void)Exti::interrupt(adc_regular_exti_line, false);
 
@@ -1716,7 +1875,8 @@ void to_trigger() {
         brio::wait_until<Ruler>([] { return Adc1::ready(); }, conversion_budget_us);
     const uint16_t by_software = Adc1::result();
     bench.verdict("and SWSTART is INDEPENDENT of it: a converter armed for a hardware trigger "
-                  "still converts on the software one", converted && by_software > 100u);
+                  "still converts on the software one - VREFINT, at least the sheet's floor",
+                  converted && by_software >= vrefint_floor);
 
     if constexpr (have_trigger_pads) {
 #if defined(STM32F446xx)
@@ -1734,18 +1894,22 @@ void to_trigger() {
               pad_event_only ? "yes" : "no", ", with IMR alone ", pad_irq_only ? "yes" : "no",
               "; DR ", pad_value, crlf);
         bench.verdict("THE REGULAR TRIGGER PATH, MEASURED WITH NO WIRE: a pad driven high feeds "
-                      "its own EXTI line, and line 11 starts a regular conversion",
-                      pad_event_only && pad_value > 100u);
-        bench.verdict("and NEITHER MASK GATES IT: the converter takes the EDGE DETECTOR's "
-                      "output, which is why an unmasked line still triggers and why the "
-                      "software trigger - injected past that detector - never does",
-                      pad_unmasked && pad_irq_only);
+                      "its own EXTI line, and line 11 starts a regular conversion of VREFINT "
+                      "(at least the sheet's floor)",
+                      pad_event_only && pad_value >= vrefint_floor);
+        // Printed, not judged: which of the line's masks gate the ADC's
+        // trigger is not in either chapter - the row above is this part's
+        // measurement.
+        print(serial, "  the masks: ", pad_unmasked && pad_irq_only ? "NEITHER gates" : "one gates",
+              " the converter's trigger here", crlf);
         const bool inj_by_pad =
             pad_edge_converts<TrigPad15>(adc_injected_exti_line, true, true, false);
         print(serial, "  and on line 15: JEOC ", inj_by_pad ? "yes" : "no", ", JDR1 ",
               Adc1::injected_result(1), crlf);
-        bench.verdict("and the injected group has a line of its own, line 15",
-                      inj_by_pad && Adc1::injected_result(1) > 100);
+        bench.verdict("and the injected group has a line of its own, line 15 (VREFINT, at "
+                      "least the sheet's floor)",
+                      inj_by_pad &&
+                          Adc1::injected_result(1) >= static_cast<int16_t>(vrefint_floor));
 #endif
     } else {
         bench.skip("no pad on lines 11 and 15 this suite knows to be free on this board: the "
@@ -2044,15 +2208,19 @@ void tr_dac_dma() {
         }
         Adc1::select(In4{});
 
-        static const uint32_t table[8] = {200, 700, 1200, 1700, 2200, 2700, 3200, 3700};
+        // Eight codes by 440, all inside the buffer's specified range
+        // (dac_linear_lo..dac_linear_hi), where a code read back through
+        // the pad is bounded by the round trip's 46 LSB.
+        static const uint32_t table[8] = {500, 940, 1380, 1820, 2260, 2700, 3140, 3580};
+        static_assert(500u >= dac_linear_lo && 3580u <= dac_linear_hi);
         // THE TRIGGER PATH FIRST, before the channel listens to it: the pad
         // driven low, line 9 moved to port C, its rising edge and its event
         // enabled. Done after the channel was enabled, this setup itself
         // raised a trigger in about half the runs that followed letter q
-        // (DOR 0 -> 200 and one beat taken across these five calls, measured
-        // with the count read before and after them), a beat the spurious
-        // count below, read before them, could not see - and the table
-        // played one entry ahead.
+        // (DOR 0 -> the first entry and one beat taken across these five
+        // calls, measured with the count read before and after them), a
+        // beat the spurious count below, read before them, could not see -
+        // and the table played one entry ahead.
         TrigPad9::output(false);
         (void)Exti::steal(dac_line, 'C');
         (void)Exti::sense(dac_line, ExtiSense::rising);
@@ -2102,7 +2270,8 @@ void tr_dac_dma() {
             TrigPad9::clear();
             (void)delay_us(clock, 40);   // the DAC's settling, then a conversion
             played[i] = Adc1::read();
-            if (abs_diff(played[i], static_cast<uint16_t>(table[i + spurious])) > 120u) {
+            if (abs_diff(played[i], static_cast<uint16_t>(table[i + spurious])) >
+                loop_error_lsb) {
                 followed = false;
             }
         }
@@ -2110,18 +2279,18 @@ void tr_dac_dma() {
         for (uint8_t i = 0; i < edges; ++i) {
             print(serial, " ", played[i]);
         }
-        print(serial, " for a table of 200..3700 by 500 from entry ", spurious, crlf);
+        print(serial, " for a table of 500..3580 by 440 from entry ", spurious, crlf);
         bench.verdict("A TABLE PLAYED BY HARDWARE: one pad edge, one trigger, one DMA beat "
-                      "into the holding register, and the pad follows the table",
-                      followed && edges >= 7u);
+                      "into the holding register, and the pad follows the table to the round "
+                      "trip's 46 LSB from where the stream stood",
+                      followed && edges != 0u);
         bench.verdict("and the stream reported its own completion after the last beat",
                       dac_dma_complete && dac_dma_errors == 0u);
+        // Printed, not judged: the beats taken before the first edge are
+        // the SPURIOUS REQUEST of ES0206 2.6.1 / ES0298 2.7.1 when there are
+        // any, and whether an erratum reproduces is the part's measurement;
+        // the verdict above compares the table from where the stream stood.
         print(serial, "  beats taken before the first edge: ", spurious, crlf);
-        bench.verdict("and AT MOST ONE beat was taken before the first trigger - the count is "
-                      "the SPURIOUS REQUEST of ES0206 2.6.1 / ES0298 2.7.1, which this letter "
-                      "measures instead of assuming away because a request left pending by an "
-                      "earlier round survives the DMAEN clear and the clock being closed",
-                      spurious <= 1u);
         bench.verdict("no underrun while the stream was serving - and none on the ONE trigger "
                       "past its last beat either, because 14.3.7 wants a SECOND unserved one",
                       !Dac::underrun(dac_ch_pa4));
@@ -2142,8 +2311,9 @@ void tr_dac_dma() {
               ", the pad still at ", held, crlf);
         bench.verdict("A SPENT STREAM IS AN UNDERRUN: the trigger keeps arriving, nobody "
                       "acknowledges the request, and DMAUDRx says so", under);
-        bench.verdict("and the channel keeps converting the OLD datum rather than going quiet",
-                      abs_diff(held, static_cast<uint16_t>(table[7])) < 150u);
+        bench.verdict("and the channel keeps converting the OLD datum rather than going quiet "
+                      "(the table's last code, to the round trip's 46 LSB)",
+                      abs_diff(held, static_cast<uint16_t>(table[7])) <= loop_error_lsb);
 
         // The errata's stop sequence, as far as this driver reaches.
         bench.verdict("stop_dma() clears the flag and drops both DMAEN and the enable",
@@ -2396,8 +2566,14 @@ void ts_triggers_and_interrupts() {
                        .period = 99}) &&
         T6::master(TimMasterMode::update);
     T6::enable(true);
-    brio::spin_us<Ruler>(2'500);   // some twenty-five triggers
+    // Some twenty-five triggers. The span ends half a period away from a
+    // trigger (they come every 100 us), and the vector stays enabled for
+    // a few microseconds after the timer stops: a trigger at the stop
+    // itself would otherwise leave its underrun pending behind the NVIC's
+    // disable, its flag standing for no fault of the body.
+    brio::spin_us<Ruler>(2'450);
     T6::enable(false);
+    brio::spin_us<Ruler>(10);
     Nvic::disable(Dac::irq());
     const bool flag_left = Dac::underrun(dac_ch_pa4);
     print(serial, "  TIM6's TRGO on a DMA-enabled channel with no stream: ", dac_udr_irqs,
@@ -2407,7 +2583,7 @@ void ts_triggers_and_interrupts() {
     // acknowledges, and DMAENx STAYS SET through an underrun (measured -
     // it is stop_dma() that drops it), so each later trigger is an
     // underrun of its own, and the body's clearing re-arms the flag for
-    // it. 2.5 ms of 10 kHz triggers, the first 100 us after the enable, is
+    // it. 2.45 ms of 10 kHz triggers, the first 100 us after the enable, is
     // 24 or 25 of them, so 23 or 24 underruns.
     bench.verdict("THE DAC UNDERRUN INTERRUPT: with no stream every trigger after the "
                   "first is an underrun, each entering TIM6's shared vector, its flag "

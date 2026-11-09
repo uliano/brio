@@ -70,7 +70,9 @@
 // every byte still comes back. Every letter that loops or sets a rate on
 // a transmitter therefore times a run of its frames on TIM2 against
 // their time AT THE RATE ASKED, prints the reading in thousandths and
-// judges it -1 % to +3 % (res_wire_permille, port_wire_permille). The
+// judges it -1 % to +3 % (res_wire_permille, port_wire_permille), or 982
+// to 1023 thousandths where the kernel is the LSE crystal and the ruler's
+// own HSI16 error is in the reading (lse_wire_ok). The
 // letters whose rate is a RECEIVER's - f, g, i and the receive halves of
 // h, k and l - are fed by the bit-banged transmitter, which TIM2 paces at
 // the rate asked: a receiver that decodes it is within its own tolerance
@@ -731,7 +733,8 @@ uint32_t frame_bits(const UartFormat& f) {
 // the answer is in thousandths of the wire's time. TIM2 and every kernel
 // clock but the LSE derive from HSI16 on these boards (no HSE fitted), so
 // the oscillator's own error cancels and what is read is the divisor's;
-// against the LSE crystal the reading carries HSI16's trim as well.
+// against the LSE crystal the reading carries HSI16's error as well, and
+// lse_wire_ok() judges it with that error's data-sheet range.
 
 /// How many frames time a rate.
 uint32_t wire_frames(uint32_t baud) {
@@ -744,16 +747,34 @@ uint32_t wire_frames(uint32_t baud) {
 /// than three per cent.
 bool wire_ok(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
 
+/// The verdict on a reading whose KERNEL is the 32768 Hz crystal, where
+/// the ruler's oscillator no longer cancels: the frames run on the LSE
+/// (20 ppm, UM2324's NX3215SA: nothing at a thousandth) and TIM2 counts
+/// them on HSI16 through the PLL, so the reading carries the HSI's whole
+/// error. DS13560 table 44, both rows: 15.88..16.08 MHz at 30 C and a
+/// further -1..+1 % over 0..85 C, so -1.75 % to +1.5 % on a room bench.
+/// Beside it, on the slow side only: the divisor's rounding, at most
+/// +0.19 % (LPUART1 at 9600 from the LSE, LPUARTDIV 874 for 873.8; the
+/// USART's 2048 and 4096 and the LPUART's 300 are exact), and the first
+/// frame's start on the next baud clock edge (33.5.17), at most one bit
+/// of the shortest run timed on the LSE - sixteen frames at 300, 160
+/// bits, 6.25 per mille. So 1000 x 0.9825 = 982.5, read as 982 (the
+/// reading floors), to 1000 x 1.015 x 1.0019 x 1.00625 = 1023.3, read as
+/// 1023.
+bool lse_wire_ok(uint32_t permille) { return permille >= 982u && permille <= 1023u; }
+
 /// The lowest and highest of a set of readings, and whether every one
 /// passed.
 struct WireSpan {
     uint32_t low = 0xFFFFFFFFu;
     uint32_t high = 0;
     bool ok = true;
-    void add(uint32_t pm) {
+    void add(uint32_t pm) { add(pm, wire_ok(pm)); }
+    /// A reading judged by its own bound (lse_wire_ok on the crystal).
+    void add(uint32_t pm, bool judged) {
         low = pm < low ? pm : low;
         high = pm > high ? pm : high;
-        ok = ok && wire_ok(pm);
+        ok = ok && judged;
     }
 };
 
@@ -1835,9 +1856,9 @@ void td_lse_legs() {
         bench.verdict("OVER8 doubles what a 32768 Hz kernel clock can carry",
                       lse8_good == 4u);
         bench.verdict("AND THE CRYSTAL'S RATES ARE THE RATES ASKED: 2048 and 4096 baud "
-                      "timed against TIM2, -1 % to +3 % (the ruler runs on HSI16, so "
-                      "its trim is in the reading)",
-                      wire_ok(lse_pm) && wire_ok(lse8_pm));
+                      "timed against TIM2, 982 to 1023 thousandths (the ruler runs on "
+                      "HSI16, so its data-sheet error is in the reading: lse_wire_ok)",
+                      lse_wire_ok(lse_pm) && lse_wire_ok(lse8_pm));
     } else {
         bench.skip("a USART clocked by the 32768 Hz crystal needs one, and this "
                    "board is declared without it (board_lse_fitted)");
@@ -2432,8 +2453,20 @@ void tg_autobaud() {
               (st & UsartFlag::abre) ? "set" : "clear", ", BRR ", brr,
               " where the truth is ", truth_brr, " (", off, " per mille off)",
               crlf);
+        // THE BOUND IS THE RECEIVER'S OWN TOLERANCE. The pacer and the
+        // kernel share HSI16, so its error cancels; the detector counts
+        // kernel cycles across one bit (mode 0) or more, so the count is
+        // exact to a cycle an edge (0.05 per mille of 21333); and the pacer
+        // places each edge within one turn of its spin, some ten cycles.
+        // What no data sheet bounds is the line's own asymmetry (33.5.8's
+        // DTCL): mode 0 times a falling edge against a rising one, each
+        // through the 40 k pull into the pad and its wire. So "converges"
+        // is judged as what a learnt BRR is for: inside the tolerance of
+        // the receiver that will use it - 8N1, OVER16, three samples and a
+        // non-zero BRR[3:0] (21333 is 0x5355), table 189's 3.33 %, so 33
+        // per mille (the reading floors). The figure itself is printed.
         if ((st & UsartFlag::abrf) != 0u && (st & UsartFlag::abre) == 0u &&
-            off <= 40u) {
+            off <= 33u) {
             ++learned_ok;
         }
     }
@@ -2441,7 +2474,8 @@ void tg_autobaud() {
           " of 4 modes learned a rate the receiver was never told, from ONE "
           "character put on the pad by software", crlf);
     bench.verdict("all four of 33.5.9's patterns converge on the bit-banged "
-                  "line's real rate", learned_ok == 4u);
+                  "line's real rate: each learnt BRR within table 189's 3.33 % of it, "
+                  "the tolerance of the receiver that uses it", learned_ok == 4u);
 
     // ABRE: mode 3 wants a 0x55 and is given a 0x00, which has no
     // intermediate transitions to check itself against.
@@ -2656,6 +2690,9 @@ void ti_mute_modbus() {
     (void)U1::receiver_timeout(22);
     U1::enable(true);
     U1::clear_flags(UsartClear::all);
+    // The span below is judged against a derived bound: it opens with the
+    // console quiet, or the verdict skips.
+    const bool rto_quiet = brio::console_drain<Ruler, Serial>();
     bang_frame(frame_plan(mb, 0x7E, 8, UartParity::none, 1));
     (void)U1::read_word();
     // RTOF timed from the read, 60 ms at most (22 bit times are 9.2 ms);
@@ -2669,10 +2706,28 @@ void ti_mute_modbus() {
           rto_bits_x10 / 10u, ".", rto_bits_x10 % 10u,
           " bit times (the count starts at the END of the stop bit, so the "
           "read's own delay is inside this)", crlf);
-    bench.verdict("Modbus/RTU's silent gap is the receiver time-out, and it "
-                  "is twenty-two bit times to within the measurement",
-                  (U1::status() & UsartFlag::rtof) != 0u &&
-                      within(rto_bits_x10, 150u, 260u));
+    // THE BOUND, DERIVED. 33.5.16 starts the count at the end of the stop
+    // bit and 33.8.10 (RTOF) sets the flag between RTO and RTO + 2 sample
+    // times after it: 22 to 22.125 bits. The receiver's end of the stop
+    // bit trails bang_frame()'s by its start-bit detection, at most one
+    // sample time (1/16 bit), and by the pad's fall through the pull-down
+    // (DS13560's 55 k at most into the pad and its wire: 27.5 us of time
+    // constant at 500 pF); the poll sees the flag up to one turn and one
+    // handler late (microseconds): the two together under a tenth of this
+    // 417 us bit for any wire under 500 pF. The span itself starts a
+    // little after bang_frame()'s end - the guard's unmask serves the tick
+    // that matured during the frame, then the read: microseconds, under a
+    // tenth. The pacer and the receiver share HSI16 (BRR 26667 against the
+    // reading's 26666 cycles a bit: 22 cycles in 22 bits). So 22.0 - 0.1
+    // to 22.125 + 0.0625 + 0.1 bits, in tenths floored: 219 to 222.
+    if (!rto_quiet) {
+        bench.skip("the receiver time-out's span: the console did not go quiet before it");
+    } else {
+        bench.verdict("Modbus/RTU's silent gap is the receiver time-out, and it "
+                      "is twenty-two bit times: 21.9 to 22.2 (derived)",
+                      (U1::status() & UsartFlag::rtof) != 0u &&
+                          within(rto_bits_x10, 219u, 222u));
+    }
     U1::clear_flags(UsartClear::rtof);
     bench.verdict("and RTOF has an ICR bit of its own",
                   (U1::status() & UsartFlag::rtof) == 0u);
@@ -2822,12 +2877,14 @@ void edge_counter_down(uint8_t line) {
 // signal taken off the interrupt output arrives only while the line's
 // IMR bit is SET, where one taken off the event output does not care.
 // So the question is put to the SILICON at boot, on PB3 - a pad this
-// board drives itself, with the far end of its jumper in analog - with
+// board drives itself once it has followed its own pull (the far end of
+// its jumper must be an input or analog) - with
 // a REAL edge as the stimulus and the channel's own CNDTR as the
 // witness, in both arrangements. The NVIC line is never enabled, so an
 // unmasked EXTI dispatches nothing.
 bool exti_dma_ok = false;         ///< the counter works with both masks armed
 bool exti_dma_needs_imr = false;  ///< ...and ONLY with the interrupt mask
+bool exti_probe_pad_free = true;  ///< PB3 followed its own pull, so the probe drove it
 
 /// Toggle PB3 `n` times as a plain output and say how many words moved.
 uint32_t edge_probe_pulses(uint8_t n) {
@@ -2845,6 +2902,17 @@ uint32_t edge_probe_pulses(uint8_t n) {
 
 void probe_exti_dma_trigger() {
     using Pb3 = Pin<'B', 3>;
+    // PB3 IS A DESK WIRE as well (the far board's SPI clock line, letter
+    // r): the probe drives it push-pull only once it has followed its own
+    // pull both ways, which a pad something else drives does not.
+    exti_probe_pad_free = pull_walks<Pb3>();
+    if (!exti_probe_pad_free) {
+        Pb3::release();
+        print(serial, crlf, "probe: PB3 does not follow its own pull (something "
+              "drives the wire on it), so the EXTI-to-DMAMUX probe drove nothing "
+              "and the letters that count edges with it will say so", crlf);
+        return;
+    }
     // THE DMAMUX IS CLOCKED BY DMA1's AHB ENABLE: a generator configured
     // through a closed gate is configured nowhere (this probe's own first
     // version measured that instead of the silicon).
@@ -2951,6 +3019,12 @@ bool need_exti_dma() {
     if (exti_dma_ok) {
         return true;
     }
+    if (!exti_probe_pad_free) {
+        bench.skip("this check counts edges with a DMAMUX request generator triggered by an "
+                   "EXTI line, and the boot probe could not ask whether that path works: "
+                   "PB3, its stimulus, did not follow its own pull");
+        return false;
+    }
     const auto id = brio::DeviceIdcode::read();
     bench.skip("this check counts edges with a DMAMUX request generator triggered by an "
                "EXTI line, and the boot probe found that path dead in both mask "
@@ -2963,6 +3037,66 @@ bool need_exti_dma() {
 // ---------------------------------------------------------------------------
 // j: smartcard
 // ---------------------------------------------------------------------------
+
+/// One character written in smartcard mode, the first `nacks` of its
+/// frames refused by a staged NACK: the wire pulled low for one baud
+/// period from the middle of the 1.5 stop bits, which is all a card's
+/// NACK is (33.5.17). The character is 0x00 with its even parity of 0,
+/// so a frame is low from its start bit to the end of its parity bit and
+/// has ONE falling edge: the start bits after the first are the retries.
+/// Interrupts masked throughout (some 50 baud periods at the most).
+struct NackRun {
+    uint8_t retries = 0;    ///< start bits after the first frame's
+    uint32_t status = 0;    ///< ISR once the line stayed idle
+};
+
+NackRun nack_run(uint8_t nacks, uint32_t bit_cycles) {
+    NackRun r{};
+    InterruptGuard guard;
+    // A dropped wait writes anyway: no start bit, the run reads none.
+    (void)wait_until<Ruler>(u1_flag(UsartFlag::txe), flag_budget_us);
+    U1::write_word(0x00);
+    // The first start bit within 20 ms of the write (the shifter starts
+    // within a baud period, 833 us); each retry's within ten baud periods
+    // of the NACK's end - 33.5.17 puts its start bit 2.5 baud periods
+    // after the NACK is detected, which is inside the NACK itself. A
+    // start bit not seen in its window ends the run.
+    uint32_t window = SysClock::hz / 50u;
+    for (uint8_t frame = 0; frame < 8u; ++frame) {
+        const uint32_t w0 = Ruler::now();
+        bool fell = false;
+        while (!fell && Ruler::now() - w0 < window) {
+            fell = !TxPin::read();
+            if (U1::flag(UsartFlag::rxne)) {
+                (void)U1::read_word();   // the frame's own echo, read: no overrun
+            }
+        }
+        if (!fell) {
+            break;
+        }
+        const uint32_t fall = Ruler::now();
+        if (frame != 0u) {
+            ++r.retries;
+        }
+        // Out to the middle of the 1.5 stop bit: start, eight data bits
+        // and parity, plus half of the stop.
+        while (Ruler::now() - fall < bit_cycles * 10u + bit_cycles / 2u) {
+        }
+        if (frame < nacks) {
+            TxPin::pull(PinPull::down);          // the card says NACK
+            spin_cycles(bit_cycles);
+            TxPin::pull(PinPull::up);
+        }
+        // The line back up on its pull before the next start bit is
+        // looked for.
+        const uint32_t up0 = Ruler::now();
+        while (!TxPin::read() && Ruler::now() - up0 < bit_cycles) {
+        }
+        window = bit_cycles * 10u;
+    }
+    r.status = U1::status();
+    return r;
+}
 
 void tj_smartcard() {
     feed();
@@ -3058,9 +3192,20 @@ void tj_smartcard() {
           gt_bits_x10 / 10u, ".", gt_bits_x10 % 10u,
           " baud periods where the register asked for 32; TCBGT rose before "
           "TC: ", tcbgt_first ? "yes" : "no", crlf);
+    // THE BOUND, DERIVED. GT counts baud clock periods of the divisor:
+    // BRR 208 on the 250 kHz kernel is 208 x 256 = 53248 cycles, against
+    // the reading's 53333 (64 MHz / 1200), so 32 of them read 31.95. Each
+    // leg's span starts at the write and the shifter starts on the next
+    // baud clock edge (33.5.17: and half a baud clock more in smartcard
+    // mode, the same in both legs), anywhere within one period, so the
+    // difference of two legs is 32 periods plus or minus one; the poll of
+    // TC and a handler inside it are microseconds against an 833 us
+    // period, and the clocks are one HSI16. So 31 x 53248 to 33 x 53248
+    // cycles, in tenths of 53333 floored: 309 to 329.
     bench.verdict("the guard time is counted in BAUD PERIODS after the stop "
-                  "bit and it holds TC down for exactly that long",
-                  within(gt_bits_x10, 290u, 350u));
+                  "bit and it holds TC down for that long: 30.9 to 32.9 of "
+                  "them read for the 32 asked (derived)",
+                  within(gt_bits_x10, 309u, 329u));
     bench.verdict("and TCBGT is the flag that says the frame left with no "
                   "NACK behind it, without waiting for the guard time",
                   tcbgt_first);
@@ -3121,7 +3266,11 @@ void tj_smartcard() {
     // THE NACK, staged with no card: the wire is pulled low for one baud
     // period during the 1.5 stop bit, which is all a NACK is. SCARCNT
     // then counts the retries, and every retry is another frame on the
-    // pad - so the falling edges are the count.
+    // pad - one start bit each (nack_run()). Twice: one NACK, the
+    // control, which costs one retry and no error; then a NACK on every
+    // frame, which must stop after SCARCNT retries with FE up (33.8.4,
+    // SCARCNT; 33.8.10, FE: "set when the maximum number of transmit
+    // attempts is reached without success").
     feed();
     U1::enable(false);
     (void)U1::smartcard({.nack = true, .retries = 2, .guard_time = 0,
@@ -3130,44 +3279,20 @@ void tj_smartcard() {
     U1::enable(true);
     U1::clear_flags(UsartClear::all);
     console_drain();
-    uint32_t frames = 0;
-    uint32_t st_after = 0;
-    {
-        InterruptGuard guard;
-        // A dropped wait writes anyway: no start bit, no retry counted.
-        (void)wait_until<Ruler>(u1_flag(UsartFlag::txe), flag_budget_us);
-        const uint32_t t0 = Ruler::now();
-        U1::write_word(0x66);
-        // Wait for the start bit, then out to the middle of the 1.5 stop
-        // bit: start + 9 data/parity bits, plus half of the stop.
-        while (TxPin::read() && to_us(Ruler::now() - t0) < 20000u) {
-        }
-        const uint32_t fall = Ruler::now();
-        while (Ruler::now() - fall < bit_cycles * 10u + bit_cycles / 2u) {
-        }
-        TxPin::pull(PinPull::down);          // the card says NACK
-        spin_cycles(bit_cycles);
-        TxPin::pull(PinPull::up);
-        // Count the falling edges that follow: each retry is a frame.
-        uint32_t deadline = Ruler::now();
-        bool low = false;
-        while (to_us(Ruler::now() - deadline) < 60000u) {
-            const bool level = TxPin::read();
-            if (!level && !low) {
-                ++frames;
-                low = true;
-            } else if (level) {
-                low = false;
-            }
-        }
-        st_after = U1::status();
-    }
-    print(serial, "  a NACK pulled onto the wire during the 1.5 stop bit, "
-          "SCARCNT = 2: ", frames, " further start bits followed, and the ISR "
-          "then read ", hex(st_after), crlf);
-    bench.verdict("the automatic retry of 33.5.17 is real and countable on "
-                  "the pad, and it gives up after SCARCNT tries",
-                  frames >= 1u && frames <= 4u);
+    const NackRun once = nack_run(1, bit_cycles);
+    U1::clear_flags(UsartClear::all);
+    spin_us<Ruler>(5000);
+    const NackRun every = nack_run(8, bit_cycles);
+    print(serial, "  SCARCNT = 2, one NACK pulled onto the wire during the 1.5 stop bit: ",
+          once.retries, " retry frame(s) followed, ISR ", hex(once.status),
+          "; a NACK on every frame: ", every.retries, " retry frame(s), ISR ",
+          hex(every.status), crlf);
+    bench.verdict("the control: one NACK costs exactly one automatic retry of 33.5.17, "
+                  "counted on the pad, and no framing error",
+                  once.retries == 1u && (once.status & UsartFlag::fe) == 0u);
+    bench.verdict("and a card that NACKs every frame gets SCARCNT = 2 retries and no "
+                  "third, then FE - the give-up",
+                  every.retries == 2u && (every.status & UsartFlag::fe) != 0u);
     U1::stop_retries();
 
     // Block mode: BLEN counts the characters of a block and EOBF marks
@@ -3283,10 +3408,18 @@ void tk_irda() {
     print(serial, "  IrDA low-power with PSC = 64 on a 4 MHz kernel: the "
           "pulse is ", to_us(lp_pulse), " us where three periods of the ",
           lp_clock, " Hz low-power clock are ", want_us, " us", crlf);
+    // THE BOUND, DERIVED. 33.5.18 makes the pulse three periods of the
+    // low-power clock (16 us each here) and says nothing of where the
+    // divider stands when the bit begins: the first period may be cut
+    // short, or a whole one may pass before the count starts, so 2 to 4
+    // periods, 32 to 64 us. Each end is seen by a poll within one turn
+    // (some twenty cycles, a third of a microsecond) and the reading
+    // floors to the microsecond: 31 to 64 us - against 156 us for 3/16 of
+    // this bit, which is what the leg tells apart.
     bench.verdict("in low-power mode the pulse stops being 3/16 of a BIT and "
-                  "becomes three periods of the PSC clock - a width that no "
-                  "longer moves with the baud rate",
-                  lp_ok && permille_off(to_us(lp_pulse), want_us) <= 150u);
+                  "becomes three periods of the PSC clock, to within one of "
+                  "them - a width that no longer moves with the baud rate",
+                  lp_ok && within(to_us(lp_pulse), 31u, 64u));
     print(serial, "  and the frames on the /16 kernel: 16 in ", ir_lp_pm,
           " thousandths of their wire time at 1200", crlf);
     bench.verdict("while the FRAME still moves with it: 16 low-power frames in their "
@@ -3380,11 +3513,38 @@ void tk_irda() {
         RxPin::pull(PinPull::up);
         spin_us<Ruler>(4000);
     }
-    const bool short_rejected = (U1::status() & UsartFlag::rxne) == 0u &&
-                                (U1::status() & UsartFlag::receive_errors) == 0u;
+    // A frame the pulse had started would end its stop bit ten bits
+    // (33.3 ms at 300 baud) after it: twelve bits, 40 ms, before the
+    // receiver is asked whether anything came.
+    const bool short_taken = wait_until<Ruler>(
+        u1_flag(UsartFlag::rxne | UsartFlag::receive_errors), 40'000);
+    const bool short_rejected = !short_taken;
+    // THE CONTROL, in the same arrangement: a pulse of 3/16 of this bit,
+    // 625 us - some twenty PSC periods, past the two above which 33.5.18
+    // says a pulse is always accepted - is a start bit, and with no pulse
+    // after it the frame decodes as 0xFF; its stop bit ends ten bits on,
+    // so 40 ms is its budget too.
+    U1::clear_flags(UsartClear::all);
+    (void)U1::read_word();
+    const uint32_t bit300 = SysClock::hz / 300u;
+    {
+        InterruptGuard guard;
+        RxPin::pull(PinPull::up);
+        spin_us<Ruler>(2000);
+        RxPin::pull(PinPull::down);
+        spin_cycles((bit300 * 3u) / 16u);
+        RxPin::pull(PinPull::up);
+    }
+    const bool long_taken = wait_until<Ruler>(u1_flag(UsartFlag::rxne), 40'000);
+    const uint16_t long_word = long_taken ? U1::read_word() : 0xFFFFu;
     print(serial, "  one PSC period is ", psc_period_us,
           " us here; a low pulse of half of it started nothing: ",
-          short_rejected ? "rejected" : "IT WAS TAKEN", crlf);
+          short_rejected ? "rejected" : "IT WAS TAKEN",
+          "; one of 3/16 of a bit started a frame: ", long_taken ? "yes, read as " : "NO, ",
+          hex(long_word), crlf);
+    bench.verdict("the control: a pulse of twenty PSC periods on the same receiver "
+                  "starts a frame (33.5.18: past two periods a pulse is accepted)",
+                  long_taken);
     bench.verdict("the decoder's glitch filter throws away a pulse shorter "
                   "than one PSC period - which is what PSC is FOR on the "
                   "receive side, and why the ENDEC refuses PSC = 0",
@@ -3441,9 +3601,17 @@ void tl_de_rts_cts() {
               to_us(assert_cycles), " us before the start bit = ",
               assert_sixteenths, " sixteenths of a bit, where a bit is ",
               to_us(de_bit), " us", crlf);
+        // THE BOUND, DERIVED. DE rises at the write and the start bit
+        // follows DEAT sample times later (33.5.20), counted on the
+        // oversampling clock - so DEAT to DEAT + 1 sample times, wherever
+        // the first tick falls; a sample time is BRR / 16 = 1667 cycles.
+        // Each edge is seen by a poll within one turn (some twenty cycles)
+        // and the reading floors. So [16, 17) sample times, read as 15
+        // (16 less a turn) to 16.
         bench.verdict("DEAT is counted in SAMPLE times and not bit times - "
-                      "sixteen of them is one whole bit at OVER8 = 0",
-                      de_ok && de_free && within(assert_sixteenths, 13u, 19u));
+                      "sixteen of them is one whole bit at OVER8 = 0: 15 or 16 "
+                      "sixteenths read (derived)",
+                      de_ok && de_free && within(assert_sixteenths, 15u, 16u));
         print(serial, "  and the DE signal came out on PB3, which is the SAME PAD "
               "as RTS and the synchronous CK (USART1_RTS_DE_CK)", crlf);
 
@@ -3484,27 +3652,42 @@ void tl_de_rts_cts() {
         CtsPin::function(u1_cts.function, {.pull = PinPull::up});   // CTS high: stop
         U1::clear_flags(UsartClear::all);
         spin_us<Ruler>(2000);
-        // Dropped waits write anyway: the stall reading and the count below show it.
+        // A dropped wait writes anyway: the stall reading and the count below show it.
         (void)wait_until<Ruler>(u1_flag(UsartFlag::txe), flag_budget_us);
-        U1::write_word(0x22);
-        (void)wait_until<Ruler>(u1_flag(UsartFlag::txe), flag_budget_us);
-        U1::write_word(0x23);     // this one must wait for CTS
+        U1::write_word(0x22);     // CTS is high: this one must wait
         spin_us<Ruler>(8000);
+        // Stalled: the character still held in TDR (TXE down) and NOTHING
+        // on the wire - CTS was high before it was written, so it never
+        // started (33.5.20: the next data does not start until CTS is
+        // asserted). The shifter is not loaded while CTS stops the
+        // transmitter, so TDR is the one place a character waits: a second
+        // write here would find TXE down and have nowhere to go.
         const uint32_t st_stalled = U1::status();
-        const bool stalled = (st_stalled & UsartFlag::txe) == 0u;
+        const bool stalled = (st_stalled & UsartFlag::txe) == 0u &&
+                             (st_stalled & UsartFlag::rxne) == 0u;
         CtsPin::pull(PinPull::down);                                 // CTS low: go
-        spin_us<Ruler>(8000);
+        // The held frame goes, and the next one is written as soon as TDR
+        // frees. Each is read as it arrives - RDR holds one, so a late read
+        // would lose the second to ORE: each within 5 ms, a frame being
+        // 1.04 ms at 9600.
+        const bool room = wait_until<Ruler>(u1_flag(UsartFlag::txe), 5000);
+        if (room) {
+            U1::write_word(0x23);
+        }
+        uint16_t got[2] = {0xFFFFu, 0xFFFFu};
         uint8_t arrived = 0;
-        while ((U1::status() & UsartFlag::rxne) != 0u && arrived < 4u) {
-            (void)U1::read_word();
+        while (arrived < 2u && wait_until<Ruler>(u1_flag(UsartFlag::rxne), 5000)) {
+            got[arrived] = U1::read_word();
             ++arrived;
-            spin_us<Ruler>(200);
         }
         print(serial, "  CTS held high: ISR ", hex(st_stalled),
-              "; released, ", arrived, " characters arrived", crlf);
-        bench.verdict("CTS stops the transmitter BETWEEN frames and lets it go "
-                      "again, with the line pull-walked and no wire",
-                      cts_free && stalled && arrived >= 1u);
+              "; released, ", arrived, " characters arrived: ", hex(got[0]),
+              " ", hex(got[1]), crlf);
+        bench.verdict("CTS stops the transmitter BEFORE a frame and lets it go "
+                      "again, both characters in order, with the line pull-walked "
+                      "and no wire",
+                      cts_free && stalled && room && arrived == 2u && got[0] == 0x22u &&
+                          got[1] == 0x23u);
     }
 }
 
@@ -3640,6 +3823,14 @@ void tm_synchronous() {
         bench.skip(ck_pad_skip);
         return;
     } else {
+        // PB3 is a desk wire too (the boot probe's note): CK drives it
+        // push-pull only once it has followed its own pull.
+        if (!pull_walks<DePin>()) {
+            DePin::release();
+            bench.skip("the synchronous master drives its CK on PB3, and PB3 does not "
+                       "follow its own pull (something drives the wire on it)");
+            return;
+        }
         constexpr uint32_t sync_baud = 9600;
         struct SyncCase { bool lbcl; bool cpol; };
         static const SyncCase scases[] = {{false, false}, {true, false}, {false, true}};
@@ -3875,7 +4066,9 @@ void tn_lpuart_wire() {
             }
             const uint32_t good = lp_run<L1>(4, c.timeout);
             const uint32_t pm = res_wire_permille<L1>(c.baud);
-            lp_wire.add(pm);
+            // On the crystal the ruler's HSI16 error is in the reading
+            // (lse_wire_ok); on PCLK and HSI16 it cancels (wire_ok).
+            lp_wire.add(pm, c.kernel == UsartClock::lse ? lse_wire_ok(pm) : wire_ok(pm));
             print(serial, "  LPUART1 ", c.name, ": BRR ", L1::brr(), ", ", good,
                   " of 4 bytes round its own wire; ", wire_frames(c.baud), " frames in ",
                   pm, " thousandths of their wire time", crlf);
@@ -3887,8 +4080,10 @@ void tn_lpuart_wire() {
                       "byte-exact on its own single wire", lp_ok == lp_tried &&
                                                                lp_tried >= 3u);
         bench.verdict("AT THE RATE ASKED on every kernel: each run's frames in their wire "
-                      "time, -1 % to +3 % (the twenty-bit LPUARTDIV of 34.4.7 averages "
-                      "the 3.4 kernel periods a bit is at 9600 on the LSE)",
+                      "time, -1 % to +3 % on PCLK and HSI16, 982 to 1023 thousandths on the "
+                      "LSE, whose reading carries the ruler's HSI16 error (the twenty-bit "
+                      "LPUARTDIV of 34.4.7 averages the 3.4 kernel periods a bit is at 9600 "
+                      "on the LSE)",
                       lp_wire.ok && lp_tried >= 3u);
 
         // The PCLK ceiling: 34.4.7 puts it at fck / 3, which from 64 MHz is
@@ -4125,14 +4320,26 @@ void to_irtim() {
         const uint32_t b = edge_count_reset();
         edge_counter_down(9);
         const uint32_t edges = b - a;
-        const uint32_t want = (carrier_hz / 10u) / 2u;   // 100 ms, 50 % duty
+        // THE PRODUCT, COUNTED EXACTLY. The carrier is 64 MHz / 1684
+        // (26.31 us, high for 841 counts of 1684), the envelope 1000 us,
+        // high for 499 us (CCR 499 at 1 MHz), one clock for both and for
+        // the window. An envelope high holds 499 / 26.31 = 18.96 carrier
+        // periods: 18 or 19 carrier rises inside it, plus one rise at the
+        // envelope's own edge when the carrier is high there - 19 or 20 a
+        // period by the carrier's phase at the envelope's rise, which
+        // moves only 0.005 of a carrier period from one envelope period to
+        // the next (38.005 carrier periods in one). So 100 periods give
+        // 1900 to 2000; the window's two ends add or drop one rise where
+        // the phase has moved, and its end, read a handler late, one more.
+        // 1899 to 2002.
         print(serial, "  a 38 kHz carrier under a 1 kHz 50 % envelope: ",
               edges, " rising edges on PB9 in 100 ms, where the product of "
-              "the two waveforms is ", want, crlf);
+              "the two waveforms is 19 or 20 a period by the carrier's phase "
+              "at the envelope's rise: 1899 to 2002", crlf);
         bench.verdict("IRTIM really ANDs TIM17's carrier with TIM16's "
                       "envelope, and the pad carries exactly the product - "
                       "counted by a DMA channel with no CPU",
-                      permille_off(edges, want) <= 60u);
+                      within(edges, 1899u, 2002u));
     }
 
     // IR_POL, on the idle level: with both timers stopped the output is
@@ -4200,8 +4407,9 @@ void to_irtim() {
         print(serial, "  IR_MOD = 01 (USART1 as the envelope, and NO PAD ON "
               "THE USART AT ALL - figure 278's connection is internal): an "
               "IDLE line passes ", idle_rate, " carrier edges a millisecond; "
-              "twenty 0x00 frames pass ", sent_rate, " a millisecond, against "
-              "a free-running carrier's ", carrier_per_ms, crlf);
+              "twenty 0x00 frames pass ", sent_rate, " a millisecond (",
+              sent_edges, " in all), against a free-running carrier's ",
+              carrier_per_ms, crlf);
         print(serial, "  THE FINDING: the USART envelope is ACTIVE LOW where "
               "TIM16's is active high. An idle transmit line - which is HIGH "
               "- shuts the gate completely, and a 0x00 frame, which holds the "
@@ -4209,13 +4417,17 @@ void to_irtim() {
               "nine tenths of the time. That is the right way round for "
               "infrared (no light at rest, light for a zero) and chapter 27 "
               "draws one AND gate and says nothing about it.", crlf);
-        const uint32_t want_nine_tenths = (carrier_per_ms * 9u) / 10u;
+        // COUNTED EXACTLY, as above. An idle line is high, the gate shut:
+        // no rise at all. A 0x00 frame holds the line low for nine bits,
+        // 9 x 53333 cycles (BRR 53333) = 7500 us = 285.03 carrier periods:
+        // 285 or 286 rises inside, plus one at the gate's opening when the
+        // carrier is high there - 285 to 287 a frame, 5700 to 5740 for the
+        // twenty, the counter read before the first write and after TC.
         bench.verdict("a USART's own transmit line is an IRTIM envelope over "
                       "an INTERNAL connection, and the gate is the frame: "
-                      "shut while the line idles, open for nine tenths of a "
-                      "zero character",
-                      idle_rate == 0u &&
-                          permille_off(sent_rate, want_nine_tenths) <= 120u);
+                      "shut while the line idles, open for the nine low bits "
+                      "of each zero character (5700 to 5740 rises for twenty)",
+                      idle_edges == 0u && within(sent_edges, 5700u, 5740u));
         // The envelope's own frames, timed to TC against 20 frames at the
         // rate asked: the gate's length is the divisor's.
         env_pm = static_cast<uint32_t>(1000ull * env_took / (200ull * SysClock::hz / env_baud));
@@ -4551,9 +4763,9 @@ void tw_wake() {
         const bool wall_ok = RtcDomain::selected() == RtcClockSource::lse &&
                              RtcDomain::lse_ready();
         if (!wall_ok) {
-            print(serial, "  the RTC is not on the crystal: this letter has no wall "
-                          "clock to time the Stop with", crlf);
-            bench.verdict("the wake letter needs the RTC wall clock", false);
+            bench.skip("the RTC domain is not on a running LSE (RTCSEL is one-way and this "
+                       "suite never resets the domain), so there is no wall clock to time the "
+                       "Stop with");
             return;
         }
 
@@ -5984,6 +6196,44 @@ static_assert(agree_ppm == (SRAM_SIZE_MAX >= 0x4000UL ? 7 : 48),
 int32_t hsi_ppm = 0;                         ///< letter 1's figure: this HSI against the far crystal
 bool hsi_known = false;
 
+/// THE BOUND A RATE ACROSS THE WIRE IS JUDGED WITHIN, DERIVED (letters 2
+/// and 3; docs/stm32g0/usart.md, "The rates across the wire"). A rate
+/// figure is a span between two stamps against its frames' nominal time,
+/// so it errs by a TIME at each end of the span, whatever its length:
+///  - the stamps' shift of about 0.4 bit from run to run, measured on both
+///    peers, the cause not located (span_frames());
+///  - the poll that stamps: 22 cycles at 180 MHz on the far F446 (0.12
+///    us), some 40 at 64 MHz in collect() here (0.63 us), its idle turn
+///    in the release listing;
+///  - one SysTick handler on a stamp: some 45 cycles there (0.25 us), some
+///    64 here (1 us: the M0+'s entry and return around a handler of 13
+///    instructions at two flash wait states);
+///  - this end's tracker over the window (0.47 us, agree_tracker_ns).
+/// So a span of `span_half_bits` half bits at `rate` errs by
+/// ceil(1e6 x (0.4 bit + end_ns) / span) ppm, which is
+/// ceil(2 x (4e8 + end_ns x rate) / (1000 x span_half_bits)).
+constexpr int32_t run_err_ppm(uint32_t rate, uint32_t span_half_bits, uint32_t end_ns) {
+    const uint64_t num = (400'000'000ull + uint64_t{end_ns} * rate) * 2u;
+    const uint64_t den = uint64_t{span_half_bits} * 1000u;
+    return den == 0u ? 1'000'000 : static_cast<int32_t>((num + den - 1u) / den);
+}
+/// The far receiver's stamps (its poll and its SysTick) and the tracker.
+constexpr uint32_t far_end_ns = 122u + 250u + agree_tracker_ns;
+/// This receiver's stamps (collect()'s poll and the SysTick) and the tracker.
+constexpr uint32_t here_end_ns = 625u + 1000u + agree_tracker_ns;
+static_assert(run_err_ppm(9600, 863u * 20u, far_end_ns) == 48, "864 frames at 9600: 0.4 bit in 0.9 s");
+
+/// THE TWO CRYSTALS' OFFSET - the far ST-LINK's 8 MHz against this
+/// board's LSE, which no data sheet bounds tightly enough (UM1724 states
+/// no tolerance for the former) - MEASURED, and every rate across the wire
+/// judged against it: letter 1's three runs (their mean), or one run of
+/// letter 2's own when letter 1 has not run in this boot. Its error is one
+/// run's at 1 Mbaud over agree_frames, plus three whole ppm: the two
+/// figures of a run, each whole, and the mean's own division.
+int32_t crystal_offset_ppm = 0;
+bool crystal_offset_known = false;
+constexpr int32_t crystal_offset_err = run_err_ppm(calib_rate, (agree_frames - 1u) * 20u, far_end_ns) + 3;
+
 // ---------------------------------------------------------------------------
 // 1 - the rendezvous, and this core's HSI16 against the far crystal
 // ---------------------------------------------------------------------------
@@ -6099,6 +6349,10 @@ void t1_link() {
         hsi_ppm = k[0].ppm;
         hsi_known = true;
     }
+    if (agree && hi - lo <= agree_ppm) {
+        crystal_offset_ppm = (k[0].ppm - k[0].hsi + k[1].ppm - k[1].hsi + k[2].ppm - k[2].hsi) / 3;
+        crystal_offset_known = true;
+    }
 
     // The other direction, on this end's ruler: the far crystal's 1 Mbaud
     // blast timed on TIM2 - this HSI's error seen from the other side.
@@ -6187,7 +6441,11 @@ uint16_t span_frames(uint32_t rate) {
     if (n < 1000u) n = 1000u;
     const uint32_t cap = static_cast<uint32_t>((uint64_t{rate} * (Tracker::entries_ms * 9u / 10u)) / 10'000u);
     if (n > cap) n = cap;
-    return static_cast<uint16_t>(n < 64u ? 64u : (n > 20'000u ? 20'000u : n));
+    // The ring's cap wins over the 64-frame floor: on a part whose ring
+    // holds less than 64 frames at the rate (the 8 KB parts at 9600), a
+    // longer span leaves the ring and the tracker answers nothing.
+    if (n < 64u && cap >= 64u) n = 64u;
+    return static_cast<uint16_t>(n == 0u ? 1u : (n > 20'000u ? 20'000u : n));
 }
 
 /// `n` bytes of the peer's counting blast through a Uart task, read as
@@ -6214,12 +6472,30 @@ uint32_t task_receive(uint32_t n, uint16_t ms, uint8_t& ore) {
     return got;
 }
 
+/// The crystals' offset letter 1 measured in this boot, or one run at 1
+/// Mbaud taken here when it has not (letter 2 by name).
+bool crystal_offset_ready() {
+    if (!crystal_offset_known) {
+        link::Cfg c{};
+        c.rate = calib_rate;
+        const Calib k = calibrate(c, agree_frames);
+        if (k.ok && k.hsi_ok) {
+            crystal_offset_ppm = k.ppm - k.hsi;
+            crystal_offset_known = true;
+        }
+    }
+    return crystal_offset_known;
+}
+
 void t2_rates() {
     if (!ensure_link()) {
         bench.verdict("the peer is reachable", false);
         link_release();
         return;
     }
+    const bool offset_ok = crystal_offset_ready();
+    print(serial, "  the far crystal against this LSE: ", crystal_offset_ppm, " ppm",
+          offset_ok ? "" : " (NOT MEASURED: the rate verdicts below fail)", crlf);
     for (const uint32_t rate : matrix_rates) {
         link::Cfg c{};
         c.rate = rate;
@@ -6242,16 +6518,22 @@ void t2_rates() {
         //    the divisor's error and the HSI's over the same run, read off
         //    this board's own LSE: what is judged is the divisor on the
         //    wire, never the oscillator's walk.
+        //    What remains of the far figure is the two crystals' offset
+        //    (measured above) and the run's own error, derived
+        //    (run_err_ppm): three whole-ppm figures beside it (the far
+        //    one, the HSI's, the divisor's) and the offset's own error.
         const uint16_t n = span_frames(rate);
         const Calib k = calibrate(c, n);
-        const int32_t expect = k.hsi + divisor_ppm(rate);
+        const int32_t expect = k.hsi + divisor_ppm(rate) + crystal_offset_ppm;
+        const int32_t tol_b = run_err_ppm(rate, (n - 1u) * 20u, far_end_ns) + 3 + crystal_offset_err;
         print(serial, "  ", rate, ": ", n, " frames, the far receiver times ");
         print_ppm(k.ppm);
-        print(serial, " against this divisor's ", divisor_ppm(rate), " and the HSI's ", k.hsi,
-              " (this board's LSE)", crlf);
-        judge(num(rate), " baud: this transmitter's rate on the wire, timed by the far chip, within 100 ppm "
-                         "of the divisor's and the HSI's over the run",
-              k.ok && k.hsi_ok && near(k.ppm, expect, 100));
+        print(serial, " against this divisor's ", divisor_ppm(rate), ", the HSI's ", k.hsi,
+              " (this board's LSE) and the crystals' ", crystal_offset_ppm, ": ", k.ppm - expect,
+              " ppm off, within ", tol_b, crlf);
+        judge(num(rate), " baud: this transmitter's rate on the wire, timed by the far chip, that of the "
+                         "divisor, the HSI and the crystals' offset, within the run's derived error",
+              offset_ok && k.ok && k.hsi_ok && near(k.ppm, expect, tol_b));
         // c. The peer's blast into this end: the polled receiver timing it,
         //    then the interrupt receiver and the receive engine.
         {
@@ -6259,6 +6541,9 @@ void t2_rates() {
             a.cfg = c;
             a.count = n;
             a.ms = bound_ms(rate, n);
+            // The stamps' bound counts one SysTick handler and no console
+            // line: the window opens with the console quiet.
+            const bool quiet_c = brio::console_drain<Ruler, Serial>();
             const bool acted = peer_act(link::Op::blast, a);
             const bool up = acted && dut_link(c);
             const Drain dr = up ? collect(a.ms, n) : Drain{};
@@ -6270,17 +6555,29 @@ void t2_rates() {
             // report_rate_stated - 0 then exact; the flag clear from a peer
             // that cannot tell) less this HSI's error over the window: the
             // far transmitter judged as tightly as this one.
+            // The far crystal reads the offset's other sign on this ruler;
+            // the run's error is this end's stamps' (run_err_ppm), three
+            // whole-ppm figures (this span's, the HSI's, the far one) and
+            // the offset's own. A far end that does not state its rate
+            // leaves nothing to judge the rate against: printed then.
             const int32_t far = static_cast<int16_t>(r.aux16);
             const bool known = have && (r.flags & link::report_rate_stated) != 0u && hsi.has_value();
+            const int32_t want = far - hsi.value_or(0) - crystal_offset_ppm;
+            const int32_t tol_c =
+                run_err_ppm(rate, dr.frames > 1u ? (dr.frames - 1u) * 20u : 0u, here_end_ns) + 3 +
+                crystal_offset_err;
             print(serial, "    the far blast on this ruler: ", dr.frames, " of ", n, ", ORE ", dr.ore, ", ");
             print_ppm(ppm);
-            print(serial, " against the far divisor's ", far, " less the HSI's ", hsi.value_or(0), crlf);
-            judge(num(rate), known ? " baud: the far blast arrives whole on the polled receiver, its rate within "
-                                     "100 ppm of the far divisor's less the HSI's"
-                                   : " baud: the far blast arrives whole on the polled receiver, inside a per "
-                                     "cent of its rate (the far end does not state its own)",
+            print(serial, " against the far divisor's ", far, " less the HSI's ", hsi.value_or(0),
+                  " and the crystals' ", crystal_offset_ppm, ": ", ppm - want, " ppm off, within ", tol_c,
+                  crlf);
+            judge(num(rate), known ? " baud: the far blast arrives whole on the polled receiver, its rate that "
+                                     "of the far divisor less the HSI and the crystals' offset, within the "
+                                     "run's derived error"
+                                   : " baud: the far blast arrives whole on the polled receiver (the far end "
+                                     "does not state its rate: printed)",
                   up && dr.frames == n && dr.fe == 0u && dr.ore == 0u &&
-                      (known ? near(ppm, far - *hsi, 100) : near(ppm, 0, 10'000)));
+                      (!known || (offset_ok && quiet_c && near(ppm, want, tol_c))));
         }
         for (uint8_t which = 1; which <= 2u; ++which) {
             link::Params a{};
@@ -6384,14 +6681,21 @@ void t3_frames() {
         c.rate = calib_rate;
         c.stop = stop;
         const Calib k = calibrate(c, 2000);
+        // Each run against the HSI over its own window (this board's LSE):
+        // what is left of each is the crystals' offset - the same in both,
+        // so it cancels - and each run's own error (run_err_ppm over its
+        // 1999 frames), two whole-ppm figures in each.
+        const uint32_t half = link::frame_half_bits(8, 0, stop);
+        const int32_t tol3 = run_err_ppm(calib_rate, 1999u * 20u, far_end_ns) +
+                             run_err_ppm(calib_rate, 1999u * half, far_end_ns) + 4;
         print(serial, "  ", stop == link::stop_half ? "8N0.5" : "8N1.5", " at 1 Mbaud: ");
         print_ppm(k.ppm);
-        print(serial, " against frames of ", link::frame_half_bits(8, 0, stop), " half bits (8N1: ", r0.ppm,
-              ")", crlf);
-        // Each run against the HSI over its own window (this board's LSE).
+        print(serial, " against frames of ", half, " half bits (8N1: ", r0.ppm, "); the HSI taken out, ",
+              k.ppm - k.hsi, " against ", r0.ppm - r0.hsi, ", within ", tol3, crlf);
         judge(stop == link::stop_half ? "half a stop bit" : "one and a half stop bits",
-              ": the frame on the wire is that long, within 100 ppm of an 8N1 run's, the HSI taken out",
-              r0.ok && k.ok && r0.hsi_ok && k.hsi_ok && near(k.ppm - k.hsi, r0.ppm - r0.hsi, 100));
+              ": the frame on the wire is that long - an 8N1 run's figure, the HSI taken out, within the two "
+              "runs' derived error",
+              r0.ok && k.ok && r0.hsi_ok && k.hsi_ok && near(k.ppm - k.hsi, r0.ppm - r0.hsi, tol3));
     }
     link_release();
 }
@@ -6981,14 +7285,16 @@ void t5_shapes() {
     //    8N2 at 115200 in either stop bit. The glitch is an EIGHTH of a bit
     //    (a quarter at 1 Mbaud, where an eighth is under the far engine's
     //    floor of 0.19 us; a tenth at OVER8, whose last sample leaves an
-    //    eighth of the bit), and the verdict's sits in the SECOND half past
+    //    eighth of the bit), and the printed one sits in the SECOND half past
     //    the majority's last sample with the start's detection latency
     //    added: from 75 % at OVER16 (the samples at 8, 9 and 10 sixteenths
     //    reach 69 % at 9600, measured by the noise flag), from 88 % at OVER8
     //    (4, 5 and 6 eighths, and one more) - a glitch over a sample is a
     //    noise flag, not the erratum. "Data corrupted" with no flag is the
-    //    erratum; the control, the same glitch from 6 %, decodes eight of
-    //    eight.
+    //    erratum, printed and not judged; the control, the same glitch from
+    //    6 % - ending before the first of those samples, so the
+    //    receiver's sampling promises a clean frame - decodes eight of
+    //    eight, and that is the verdict.
     struct Glitch1111 { uint32_t base; bool over8; uint8_t stop; int8_t cell; uint8_t width; const char* name; };
     static constexpr Glitch1111 g1111[] = {
         {2400, false, 1, 9, 12, "2400 8N1"},
@@ -7044,7 +7350,13 @@ void t5_shapes() {
         if (at.seen != 0xFFFFu) {
             print(serial, "    0x96 read as ", hex(at.seen), crlf);
         }
-        judge("ES0548 2.11.1 REPRODUCES at ", g.name, at.up && at.drawn && at.silent != 0u);
+        // Printed, never judged: an erratum is a statement about some
+        // dies, and whether this one reproduces it is a figure, not a
+        // contract (the control below is the verdict the letter needs).
+        print(serial, "    ES0548 2.11.1 at ", g.name, ": ",
+              at.up && at.drawn ? (at.silent != 0u ? "REPRODUCED, " : "not reproduced, ")
+                                : "not drawn, ",
+              at.silent, " of 8 frames wrong with no flag", crlf);
     }
     judge("and the control - the same glitch from 6 % of the stop bit - decodes eight of eight, clean, at every "
           "rate", control_clean);
@@ -7796,10 +8108,12 @@ void t9_idle() {
     // it, which a faster sender's frame ends ahead of by the sender's
     // error over the frame: one sender idle frame is then short of ten of
     // this receiver's bits by that much more.
-    judge("ES0298 2.13.1's own case on THIS receiver: one idle frame and then a character from a sender 3 % "
-          "fast, and the idle frame is not told - nor at 10.5 sender bits, 10.2 of this receiver's, past the "
-          "exact sender's threshold: the same geometry, though ES0548 lists no such item",
-          fast_ten == 1u && fast_more == 1u);
+    // Printed, never judged: no sheet of this die describes the case, so
+    // what this receiver does with it is a figure of this die.
+    print(serial, "  ES0298 2.13.1's own case on THIS receiver, a sender 3 % fast: one idle frame and then a "
+          "character told ", fast_ten, " time(s) of 16, at 10.5 sender bits (10.2 of this receiver's) ",
+          fast_more, " (one, the train's end, where the idle frame goes untold; ES0548 lists no such item)",
+          crlf);
     link_release();
 }
 
@@ -9130,7 +9444,9 @@ void tu_stop_wake() {
         return;
     } else {
         if (!(RtcDomain::selected() == RtcClockSource::lse && RtcDomain::lse_ready())) {
-            bench.verdict("the wake letter needs the RTC wall clock on the crystal", false);
+            bench.skip("the RTC domain is not on a running LSE (RTCSEL is one-way and this "
+                       "suite never resets the domain), so there is no wall clock and no "
+                       "backstop for the Stop");
             return;
         }
         if (!ensure_link()) {

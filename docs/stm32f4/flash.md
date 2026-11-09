@@ -420,7 +420,14 @@ accelerator off the count is exactly ZERO: 972 ms of erase and not one
 turn of the loop completed. The erase itself takes the same time either
 way (975 ms with the ART against 972 without, and the spread between
 two runs with it on is larger than that), the accelerator being the
-CPU's side of the interface and not the array's.
+CPU's side of the interface and not the array's; the letter prints the
+two durations and does not compare them, the datasheet giving tERASE a
+typical and a maximum and no spread. It prints the tick with the
+accelerator on too - whether SysTick's vector and handler come out of
+the ART's caches during the stall is not the manual's to say - and
+judges the freeze with the accelerator off, where every fetch is the
+array's: three ticks at most (one before the erase starts, the one
+pending bit every period inside the stall collapses into, one after).
 
 **Programming.** 1024 bytes at x32, word by word with a status wait
 after each: 3665 us, or 14.3 us a word against the datasheet's 16 us
@@ -511,6 +518,10 @@ Implemented but not bench-verified, each with what would measure it:
   and g have measured sector 23's erase and the read-while-write of a
   bank-1 erase with the test zone in the other bank (the bench findings'
   opening); the rest of this item was not run there.
+- **The kernel tick through an erase with the accelerator off** (letter
+  g's freeze verdict, at most three ticks on a single-bank part, every
+  tick on the other bank of a dual-bank one): the figures above were
+  taken with the accelerator on; a run of letter g measures it.
 - **`mass_erase()`**, exposed and never called: it takes down the
   running image, so only a program that lives in RAM or a boot loader
   can measure it.

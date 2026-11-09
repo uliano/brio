@@ -382,6 +382,13 @@ struct Ruler {
 };
 static_assert(CycleRuler<Ruler>);
 
+/// One run of SysTick_Handler as it lengthens a window, in core cycles: its
+/// body (Ticker::tick(), 18 instructions, 28 cycles at most from the release
+/// listing), the exception's entry and exit (12 each, Cortex-M4 TRM 3.9.1)
+/// and four flash lines missed in the ART (6 cycles each at five wait states,
+/// RM0390 3.4.1) - 76.
+constexpr uint32_t systick_run_cycles = 28u + 12u + 12u + 4u * 6u;
+
 /// The protocol's settle after each command window (spi_link.hpp).
 void settle() { brio::spin_us<Ruler>(spilink::settle_ms * 1000u); }
 
@@ -883,6 +890,27 @@ uint32_t timed_frames(SpiClock c, uint16_t n) {
     return came ? took : 0u;
 }
 
+/// THE POLL'S TURN, for letter b's bound: timed_frames()'s wait on RXNE run
+/// with the block idle, so that RXNE never rises and the condition ends the
+/// wait itself after `turns` calls. The count it keeps adds an increment, a
+/// compare and a branch to every turn, so the figure is the turn plus those:
+/// an upper bound on it, rounded up; the least of three windows, each an
+/// upper bound (a kernel tick inside one only lengthens it).
+uint32_t poll_turn_bound() {
+    constexpr uint32_t turns = 64;
+    uint32_t least = UINT32_MAX;
+    for (uint8_t k = 0; k < 3u; ++k) {
+        uint32_t n = 0;
+        const uint32_t t0 = Ruler::now();
+        // The answer is the count's, not RXNE's: the block is idle, and 64 turns
+        // end the wait long before its 1 ms.
+        (void)brio::wait_until<Ruler>([&n] { return S::rx_ready() || ++n == turns; }, 1'000);
+        const uint32_t per_turn = (Ruler::now() - t0 + turns - 1u) / turns;
+        least = per_turn < least ? per_turn : least;
+    }
+    return least;
+}
+
 void tb_rates() {
     if (!link_command_mode()) {
         bench.verdict("the host came up", false);
@@ -894,23 +922,44 @@ void tb_rates() {
     // block's restart) runs from there: a frame takes the longer of eight
     // bits and seven and a half bits plus the turn. So the turn is read as
     // the frame time less seven and a half bits, at the codes where it
-    // shows (where it is longer than the half bit).
+    // shows (where it is longer than a bit, twice the half bit it may hide in).
     constexpr uint16_t frames = 32;
     uint32_t took[8] = {};
+    bool ticked[8] = {};
     bool monotone = true;
     uint32_t lowest = 0xFFFFFFFFu;
     uint32_t highest = 0;
     uint8_t shown = 0;
-    uint32_t slowest_error_permille = 0;
+    uint32_t slowest_diff_ns = 0;
+    uint32_t slowest_bound_ns = 0;
     // The eight codes timed first and printed after: a console line going out
-    // beside a run would put its interrupt inside the time.
+    // beside a run would put its interrupt inside the time. One untimed run
+    // first, so that the timed ones run from the ART's cache.
     if (!brio::console_drain<Ruler, Serial>()) {
         bench.skip("the console did not drain: the timed runs would carry its interrupt");
         return;
     }
+    (void)timed_frames(SpiClock::div2, 2);   // the warm-up: nothing read from it
     for (uint8_t code = 0; code < 8u; ++code) {
+        const brio::TickWitness<P> witness;
         took[code] = timed_frames(static_cast<SpiClock>(code), frames);
+        ticked[code] = !witness.quiet();
     }
+    const uint32_t turn = poll_turn_bound();
+    // THE SPREAD'S BOUND, derived. The loop runs phase-locked to the block, so
+    // a code's turn is a fixed path plus how late the poll sees RXNE: somewhere
+    // inside one turn of the poll (`turn`, measured above), at a different place
+    // at each code (seven and a half bits modulo the turn). The write after it
+    // waits for PCLK1's next edge, 0 to HCLK/PCLK1 - 1 = 3 core cycles. The
+    // lead before the first frame and the tail after the last RXNE are the
+    // same path with their own phase, spread over the 32 frames: under a cycle
+    // a frame. The three truncations of the nanosecond arithmetic below (the
+    // frame, the wire, the half bit) move one turn by under 2 ns, so two turns
+    // apart by under 3. SCK and the ruler both count HCLK: no clock error
+    // enters. A code a kernel tick landed in is printed and left out.
+    const uint32_t ratio = SysClock::hz / Host::reference_hz();
+    const uint32_t bound_cycles = turn + (ratio - 1u) + 1u;
+    const uint32_t bound_ns = bound_cycles * 1000u / cycles_per_us + 3u;
     for (uint8_t code = 0; code < 8u; ++code) {
         const SpiClock c = static_cast<SpiClock>(code);
         const uint32_t stated = spi_sck_hz(Host::reference_hz(), c);
@@ -924,11 +973,12 @@ void tb_rates() {
         print(serial, "  div", static_cast<uint32_t>(1u << (code + 1u)), ": SCK ", stated / 1000u,
               " kHz, ", frames, " frames in ", took[code] / cycles_per_us, " us -> ",
               per_frame_ns, " ns a frame against the wire's ", wire_ns, " ns; the turn after "
-              "RXNE ", turn_ns, " ns", shows ? "" : " (hidden by the half bit)", crlf);
+              "RXNE ", turn_ns, " ns", shows ? "" : " (hidden by the half bit)",
+              ticked[code] ? " (a tick landed in it)" : "", crlf);
         if (code > 0u && took[code] <= took[code - 1u]) {
             monotone = false;
         }
-        if (shows) {
+        if (shows && !ticked[code]) {
             ++shown;
             if (turn_ns < lowest) {
                 lowest = turn_ns;
@@ -938,25 +988,41 @@ void tb_rates() {
             }
         }
         if (code == 7u) {
-            const uint32_t diff =
+            slowest_diff_ns =
                 per_frame_ns > wire_ns ? per_frame_ns - wire_ns : wire_ns - per_frame_ns;
-            slowest_error_permille = wire_ns == 0u ? 1000u : (diff * 1000u) / wire_ns;
+            slowest_bound_ns = wire_ns / 512u + 2u;
         }
     }
     bench.verdict("the eight codes are eight different rates, each slower than the last",
                   monotone);
-    print(serial, "  the turn where it shows: ", lowest, " to ", highest, " ns (",
-          (lowest * cycles_per_us) / 1000u, " to ", (highest * cycles_per_us) / 1000u,
-          " core cycles) at ", shown, " codes", crlf);
+    print(serial, "  the turn where it shows, no tick in the window: ", lowest, " to ", highest,
+          " ns (", (lowest * cycles_per_us) / 1000u, " to ", (highest * cycles_per_us) / 1000u,
+          " core cycles) at ", shown, " codes; the poll's turn ", turn,
+          " cycles at most, so the spread's bound is ", bound_ns, " ns", crlf);
     bench.verdict("what the one-frame polled loop costs is a CONSTANT TURN after RXNE - one "
-                  "read, one write, the restart - and not a share of the rate, at every code "
-                  "where it outlasts the half bit",
-                  shown >= 2u && highest - lowest < lowest / 5u);
-    print(serial, "  at the slowest code the frame is ", slowest_error_permille,
-          " parts per thousand off eight bits", crlf);
-    bench.verdict("... so at PCLK1/256 the measured frame time IS eight bits at the rate the "
-                  "arithmetic states",
-                  slowest_error_permille < 20u);
+                  "read, one write, the restart - and not a share of the rate: at two codes or "
+                  "more where it outlasts a bit, within one turn of the poll, PCLK1's edge and "
+                  "the arithmetic's truncations",
+                  shown >= 2u && highest - lowest <= bound_ns);
+    // AT PCLK1/256 THE TURN IS HIDDEN, and the frame is eight bits. While the
+    // turn and the poll's turn stay under the half bit (512 core cycles here,
+    // the condition reads it), the next write is queued before the frame ends
+    // and the 32 frames run back to back: the window is 32 frames less the last
+    // half bit, plus the lead before the first edge and the tail after the
+    // last RXNE. Those two are at least nothing and at most a turn, a poll's
+    // turn and the two SysTick runs a window of 1.5 ms can meet - under one
+    // bit (1024 cycles) - so the frame is eight bits within half a bit spread
+    // over 32 frames, a 512th of the wire, plus the truncations' 2 ns.
+    const uint32_t half_bit_256 = 128u * ratio;
+    const uint32_t highest_cycles = (highest * cycles_per_us + 999u) / 1000u;
+    const bool hidden = shown != 0u && highest_cycles + turn < half_bit_256 &&
+                        highest_cycles + turn + 2u * systick_run_cycles < 2u * half_bit_256;
+    print(serial, "  at the slowest code the frame is ", slowest_diff_ns,
+          " ns off eight bits, the bound ", slowest_bound_ns, " ns", crlf);
+    bench.verdict("... so at PCLK1/256, the turn hidden in the half bit, the measured frame time "
+                  "IS eight bits at the rate the arithmetic states, within half a bit over the "
+                  "window",
+                  hidden && slowest_diff_ns <= slowest_bound_ns);
 }
 
 // =============================================================================
@@ -2136,20 +2202,22 @@ bool climb(Ext e) {
     return all;
 }
 
+/// What frame_permille() answers when every pair of windows carried a kernel
+/// tick: a lengthened time, printed and not judged.
+constexpr uint32_t lengthened = UINT32_MAX;
+
 /// THE WIRE'S TIME, from the difference of two windows of 16 and 48
 /// frames at the same rung - the transaction's fixed cost cancels - in
 /// permille of the frame's SCK periods (a bit is division x HCLK/PCLK1 =
 /// 4 x division core cycles). The time asks that every frame was clocked
 /// and heard by the peer, and the read-back where readback_judged() says;
 /// zero otherwise, the window that failed named first. WHAT LENGTHENS A WINDOW
-/// IS NOT JUDGED: at PCLK1/2 the difference is 32 x 128 = 4096 cycles, so a
-/// handler of 41 cycles in the shorter window alone is the -1 % of wire_ok().
-/// The console is drained first (a console that will not drain times nothing:
-/// zero), and a pair a tick landed in, printed, is run again. The two windows last 50 us at PCLK1/2 against a 1 ms tick, so one
-/// pair in twenty takes one and four tries leave one chance in 160 000 of a
-/// tick still judged; at PCLK1/8 they last some 200 us, one pair in five and
-/// one in 600 in four tries, and there a tick of 76 cycles is 0.5 % of the
-/// difference, inside the bound.
+/// IS NOT JUDGED: the console is drained first (a console that will not drain
+/// times nothing: zero), and a pair a tick landed in, printed, is run again, up
+/// to four pairs; when all four carried one the answer is `lengthened`. The two
+/// windows last 50 us at PCLK1/2 against a 1 ms tick, so one pair in twenty
+/// takes one and four in a row come one time in 160 000; at PCLK1/8 they last
+/// some 200 us, one pair in five and four in a row one time in 600.
 uint32_t frame_permille(Ext e) {
     Ext shorter = e;
     shorter.count = 16;
@@ -2170,6 +2238,10 @@ uint32_t frame_permille(Ext e) {
         print(serial, "      a tick landed in that pair of windows: run again", crlf);
         console_drain();
     }
+    if (a.ticked || b.ticked) {
+        print(serial, "      a tick in all four pairs: the time is not taken", crlf);
+        return lengthened;
+    }
     const bool judged = readback_judged(e, e.rate);
     auto timed = [judged](const Ext& x, const Outcome& o) {
         return judged ? exact(x, o) : peer_heard(x, o) && o.clocked;
@@ -2188,15 +2260,38 @@ uint32_t frame_permille(Ext e) {
     return per_frame_x1000 / wire;
 }
 
-bool wire_ok(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
+/// THE STREAMS' BOUND, derived, in permille of a rung's frame (`wire` core
+/// cycles). On the streams the frames run back to back, so the two windows
+/// differ by 32 frames exactly and by how much their fixed costs differ, at
+/// most J core cycles:
+///   3   start()'s first APB1 access waits for PCLK1's next edge, 0 to
+///       HCLK/PCLK1 - 1 cycles, and the rest of its path, the streams' first
+///       beat included, follows at that phase
+///   6   the completing vector's two APB1 accesses (finish_dma()'s read and
+///       write of CR2), 0 to 3 each for the same edge; the rest of its path
+///       is AHB1 and SRAM, synchronous to the core
+///   11  how late the wait on host_done sees the vector's store: one turn of
+///       its poll (the release listing: ldrb, cbnz, the DWT's ldr, subs, cmp
+///       and a taken bcc, 2 + 1 + 2 + 1 + 1 + 4)
+///   2   the exception's entry, by the poll's instruction it lands on (a load
+///       of two cycles)
+///   2   the receive stream's last write to SRAM waiting on the core's poll of
+///       it (one core access)
+/// - J = 24. Both windows run the same code after the same commands, so the
+/// ART holds the same lines at each one's vector and its misses cancel. The
+/// figure is truncated twice (per frame, then per mille): under 1 more below.
+constexpr uint32_t window_jitter_cycles = 3u + 6u + 11u + 2u + 2u;
 
-/// The polled loop's frame in permille of the wire's `wire` cycles: from
-/// -1 % (wire_ok's floor) to the wire plus the turn. The turn on this APB1
-/// instance is at most 68 cycles (bench_stm32f4 letter e's spi.frame lines,
-/// the worst row), and one SysTick run of 76 cycles may land in the longer
-/// window's 32 extra frames, 3 cycles a frame: 71 cycles at most.
-bool polled_wire_ok(uint32_t permille, uint32_t wire) {
-    return permille >= 990u && permille <= (wire + 71u) * 1000u / wire;
+/// The permille either side of 1000 the streams' frame may read at a rung of
+/// `wire` cycles a frame: J over 32 frames, rounded up, and the truncations.
+constexpr uint32_t streams_slack(uint32_t wire) {
+    return (window_jitter_cycles * 1000u + 32u * wire - 1u) / (32u * wire) + 1u;
+}
+static_assert(streams_slack(16u * 2u * 4u) == 7u && streams_slack(16u * 8u * 4u) == 3u);
+
+bool streams_wire_ok(uint32_t permille, uint32_t wire) {
+    const uint32_t slack = streams_slack(wire);
+    return permille >= 1000u - slack && permille <= 1000u + slack;
 }
 
 }  // namespace ext
@@ -2225,13 +2320,14 @@ void tu_wide() {
                   "frame), likewise",
                   path_ok[1]);
 
-    // THE WIRE'S TIME: the engines at every rate. The polled loop keeps one
-    // frame in flight, so its frame is the wire's plus at most its turn; its
-    // bound below is that arithmetic. PCLK1/2 is printed: the read there
-    // fails on these wires, whichever way it runs.
+    // THE WIRE'S TIME: the engines at every rate, judged against the bound
+    // streams_slack() derives. The polled loop keeps one frame in flight, so
+    // its frame is the wire's less the half bit RXNE hides plus its turn - a
+    // cost of code whose APB1 accesses RM0390 gives no time for (2.1.8): it
+    // is printed beside them, with no verdict, and letter b measures the turn.
     static constexpr SpiClock timed[] = {SpiClock::div8, SpiClock::div4, SpiClock::div2};
     bool engines_wire = true;
-    bool polled_wire = true;
+    uint8_t engines_judged = 0;
     for (const SpiClock c : timed) {
         const uint32_t frame_cycles =
             16u * ext::division(c) * (SysClock::hz / SysClock::pclk1_hz);
@@ -2241,22 +2337,25 @@ void tu_wide() {
             e.wide = true;
             e.rate = c;
             const uint32_t pm = ext::frame_permille(e);
-            const bool judged = e.path == ext::Path::engines || c != SpiClock::div2;
+            if (pm == ext::lengthened) {
+                continue;
+            }
+            const bool engines = e.path == ext::Path::engines;
             print(serial, "  ", ext::path_name(e.path), " at PCLK1/", ext::division(c),
-                  ": a 16-bit frame takes ", pm, " permille of its 16 SCK periods",
-                  judged ? "" : " (printed)", crlf);
-            if (e.path == ext::Path::engines) {
-                engines_wire = engines_wire && ext::wire_ok(pm);
-            } else if (judged) {
-                polled_wire = polled_wire && ext::polled_wire_ok(pm, frame_cycles);
+                  ": a 16-bit frame takes ", pm, " permille of its 16 SCK periods");
+            if (engines) {
+                print(serial, " (1000 +- ", ext::streams_slack(frame_cycles), ")", crlf);
+                engines_wire = engines_wire && ext::streams_wire_ok(pm, frame_cycles);
+                ++engines_judged;
+            } else {
+                print(serial, " (printed)", crlf);
             }
         }
     }
     bench.verdict("THE STREAMS' 16-BIT FRAMES RUN AT THE WIRE'S TIME: a frame inside the window "
-                  "is its sixteen SCK periods, -1 % to +3 %, at PCLK1/8, /4 and /2",
-                  engines_wire);
-    bench.verdict("...and the polled loop's frame is the wire's plus at most its turn, at PCLK1/8 and /4",
-                  polled_wire);
+                  "is its sixteen SCK periods, to the two windows' fixed costs over 32 frames, at "
+                  "PCLK1/8, /4 and /2",
+                  engines_judged != 0u && engines_wire);
 
     // The peer's own 16-bit RUN (spare_polled_pump): the other end's
     // SpiClient::exchange in uint16_t frames.
@@ -3209,7 +3308,8 @@ void tg_stall_irqs() {
 // longer than without the handler by what the arithmetic below allows.
 //
 // THE BOUND, in core cycles at 180 MHz. The handler's period is P = 900 (5 us;
-// TIM7 counts the crystal's 90 MHz). One run holds the core for
+// TIM7 counts the APB1 timer clock, 90 MHz, from the core's own PLL, so no
+// clock error enters). One run holds the core for
 //   hold_min = 350 + 12 + 12                           = 374   (the spin, the
 //              exception's entry and exit, Cortex-M4 TRM 3.9.1)
 //   hold_max = 374 + 9 (a spin turn's overshoot) + 12 (the five instructions
@@ -3225,15 +3325,17 @@ void tg_stall_irqs() {
 //   lower = floor(T_min / P) x (hold_min - W)
 //   upper = (T_max + hold_max + tick) x P / (P - hold_max) - T_min
 // the second from T' <= T_max + (T' / P + 1) x hold_max + tick, with tick = 76
-// the one SysTick run the window can meet (28 of body, entry and exit, flash).
-// Both are worst cases of the phase; neither is a figure chosen by eye.
+// the one SysTick run the window can meet (systick_run_cycles). Both are worst
+// cases of the phase; neither is a figure chosen by eye. The console is drained
+// before the twenty windows and nothing prints until they are over, so no
+// console line's interrupt is inside one.
 
 constexpr uint32_t hog_cycles = 350;
 constexpr uint32_t hog_period = 900;
 constexpr uint32_t hog_hold_min = hog_cycles + 12u + 12u;
 constexpr uint32_t hog_hold_max = hog_hold_min + 9u + 12u + 16u + 18u;
 constexpr uint32_t hog_frame = 256;
-constexpr uint32_t hog_tick = 76;
+constexpr uint32_t hog_tick = systick_run_cycles;
 static_assert(hog_hold_min > hog_frame && hog_hold_max < hog_period);
 volatile bool hog_armed = false;   ///< this series binds the handler at all
 volatile uint32_t hog_count = 0;
@@ -3342,6 +3444,10 @@ HoldTally hold_series(bool hog, uint8_t rounds) {
 
 void th_handler_gap() {
     if (!need_peer()) {
+        return;
+    }
+    if (!brio::console_drain<Ruler, Serial>()) {
+        bench.skip("the console did not drain: the timed windows would carry its interrupt");
         return;
     }
     Tim<7>::init();
@@ -3964,8 +4070,25 @@ void sweep() {
     time_vector = false;
 }
 
+/// THE WAIT'S BOUND, derived. The vector starts from the same edge in every
+/// mode - the last RXNE, the last sampling edge - and its path is the same in
+/// all four but for the wait for the pad's idle level, which in mode 1 is
+/// already over (the last sampling edge is the frame's last edge) and in
+/// mode 0 lasts until half a bit after that edge. So the longest vector in
+/// mode 0 is at most the longest in mode 1 plus half a bit plus what the
+/// wait itself adds after the edge:
+///   13  one turn of wire_ended()'s poll (the release listing: the IDR's ldr,
+///       eor, lsls, a taken bmi, subs and a taken bne, 2 + 1 + 1 + 4 + 1 + 4)
+///   1   the pad's level reaching IDR, sampled every AHB1 cycle (RM0390 7.3.11)
+///   2   the pad's own edge, 10 ns at most at the medium class and 50 pF, 4 at
+///       very high (DS10693 table 58): two core cycles
+/// - 16 cycles. Mode 1's longest is read as its least plus its spread at that
+/// rung, both measured in the same sweep.
+constexpr uint32_t wait_past_half_cycles = 13u + 1u + 2u;
+
 /// The figures, measured first and printed after: no console line beside a run.
-bool report(const char* name, uint32_t ratio, uint32_t& worst_over) {
+/// `within`: at every rung, mode 0's longest vector is inside the bound above.
+bool report(const char* name, uint32_t ratio, bool& within) {
     uint32_t seen = 0;
     print(serial, "  ", name, ": ", reads, " requests ended, ", no_end, " with no end, ", bad_status, " not spi_ok", crlf);
     for (uint8_t w = 0; w < way_count; ++w) {
@@ -3982,7 +4105,8 @@ bool report(const char* name, uint32_t ratio, uint32_t& worst_over) {
             }
         }
     }
-    worst_over = 0;
+    within = true;
+    uint32_t worst_over = 0;
     print(serial, "    the vector, core cycles, read or write, mode 0 then mode 1, least..most:", crlf);
     for (uint8_t code = 0; code < 8u; ++code) {
         const uint32_t half = (1u << code) * ratio;
@@ -3990,9 +4114,16 @@ bool report(const char* name, uint32_t ratio, uint32_t& worst_over) {
               vector_most[0][code], "  ", vector_least[1][code], "..", vector_most[1][code], crlf);
         const uint32_t floor = vector_least[1][code];
         const uint32_t over = vector_most[0][code] > floor + half ? vector_most[0][code] - (floor + half) : 0u;
+        const uint32_t spread1 =
+            vector_most[1][code] > floor ? vector_most[1][code] - floor : 0u;
         worst_over = over > worst_over ? over : worst_over;
+        if (vector_most[1][code] == 0u || over > spread1 + wait_past_half_cycles) {
+            within = false;
+        }
     }
-    print(serial, "    the longest wait past half a bit, mode 0 over mode 1's least: ", worst_over, " cycles", crlf);
+    print(serial, "    the longest wait past half a bit, mode 0 over mode 1's least: ", worst_over,
+          " cycles (the bound: mode 1's own spread at that rung plus ", wait_past_half_cycles, ")",
+          crlf);
     return seen == 0u && no_end == 0u && bad_status == 0u;
 }
 
@@ -4010,8 +4141,8 @@ void tE_wire_ended() {
     dma_host_live = true;
     sweep<DmaHost, Sck2>();
     dma_host_live = false;
-    uint32_t over2 = 0;
-    const bool spi2_ok = report("SPI2 on APB1", SysClock::hz / DmaHost::reference_hz(), over2);
+    bool within2 = false;
+    const bool spi2_ok = report("SPI2 on APB1", SysClock::hz / DmaHost::reference_hz(), within2);
     bench.verdict("SPI2: WHEN A REQUEST ENDS THE WIRE HAS ENDED: all four modes, every rate, polled and on the engines, "
                   "read and write, through a select and a null one - SCK at its idle level every time (the bound is "
                   "zero: a pad read at the active level is an early end and nothing else)",
@@ -4053,19 +4184,16 @@ void tE_wire_ended() {
     Dma<2>::init();
     (void)Host1::init(clock);
     sweep<Host1, Sck1>();
-    uint32_t over1 = 0;
-    const bool spi1_ok = report("SPI1 on APB2", SysClock::hz / Host1::reference_hz(), over1);
+    bool within1 = false;
+    const bool spi1_ok = report("SPI1 on APB2", SysClock::hz / Host1::reference_hz(), within1);
     Host1::release();
     Select::release();
     bench.verdict("SPI1: WHEN A REQUEST ENDS THE WIRE HAS ENDED, the same sweep on the other APB clock", spi1_ok);
 
-    // The wait's bound: the fastest vector at this rung plus half a bit is what
-    // the wire asks; on top, BSY's lag behind the edge and one poll that just
-    // missed the fall - two reads of SR at under 16 core cycles on APB1 and a
-    // handful of the core's own - bound by 64 core cycles.
+    // The wait's bound: wait_past_half_cycles, derived above.
     bench.verdict("THE LONGEST WAIT IN THE VECTOR IS HALF A BIT: on both APB clocks, every rung, the vector's most in "
-                  "mode 0 is within 64 core cycles of mode 1's least plus half a bit",
-                  over2 <= 64u && over1 <= 64u);
+                  "mode 0 is within mode 1's most plus half a bit plus one turn of the pad's poll and the pad's edge",
+                  within2 && within1);
     (void)link_command_mode();
     bench.verdict("the command channel survives the letter", command(Op::ping));
 }
@@ -4888,6 +5016,13 @@ struct Ruler {
 };
 static_assert(CycleRuler<Ruler>);
 
+/// One run of SysTick_Handler as it lengthens a window, in core cycles: its
+/// body (Ticker::tick(), 18 instructions, 28 cycles at most from the release
+/// listing), the exception's entry and exit (12 each, Cortex-M4 TRM 3.9.1)
+/// and four flash lines missed in the ART (6 cycles each at five wait states,
+/// RM0090 3.5.1) - 76.
+constexpr uint32_t systick_run_cycles = 28u + 12u + 12u + 4u * 6u;
+
 bool same(const uint8_t* a, const uint8_t* b, uint16_t n) {
     for (uint16_t i = 0; i < n; ++i) {
         if (a[i] != b[i]) {
@@ -5040,27 +5175,73 @@ uint32_t timed_frames(SpiClock c, uint16_t n) {
     return came ? took : 0u;
 }
 
+/// THE POLL'S TURN, for letter b's bound: timed_frames()'s wait on RXNE run
+/// with the block idle, so that RXNE never rises and the condition ends the
+/// wait itself after `turns` calls. The count it keeps adds an increment, a
+/// compare and a branch to every turn, so the figure is the turn plus those:
+/// an upper bound on it, rounded up; the least of three windows, each an
+/// upper bound (a kernel tick inside one only lengthens it).
+uint32_t poll_turn_bound() {
+    constexpr uint32_t turns = 64;
+    uint32_t least = UINT32_MAX;
+    for (uint8_t k = 0; k < 3u; ++k) {
+        uint32_t n = 0;
+        const uint32_t t0 = Ruler::now();
+        // The answer is the count's, not RXNE's: the block is idle, and 64 turns
+        // end the wait long before its 1 ms.
+        (void)brio::wait_until<Ruler>([&n] { return S::rx_ready() || ++n == turns; }, 1'000);
+        const uint32_t per_turn = (Ruler::now() - t0 + turns - 1u) / turns;
+        least = per_turn < least ? per_turn : least;
+    }
+    return least;
+}
+
 void tb_rates() {
     if (!host_ready()) {
         bench.verdict("the host came up", false);
         return;
     }
+    // WHAT THE LOOP COSTS IS A TURN. In mode 3 (CPHA = 1) RXNE rises on the
+    // frame's LAST edge, its last sampling edge (28.3.5), and the loop's turn
+    // (the read, the next write, the block's restart) runs from there: every
+    // frame is eight bits plus the turn, at every code, and the turn is read
+    // as the frame time less eight bits.
     constexpr uint16_t frames = 32;
     uint32_t took[8] = {};
+    bool ticked[8] = {};
     uint32_t overhead[8] = {};
     bool monotone = true;
     uint32_t lowest = 0xFFFFFFFFu;
     uint32_t highest = 0;
-    uint32_t slowest_error_permille = 0;
+    uint8_t judged = 0;
     // The eight codes timed first and printed after: a console line going out
-    // beside a run would put its interrupt inside the time.
+    // beside a run would put its interrupt inside the time. One untimed run
+    // first, so that the timed ones run from the ART's cache.
     if (!brio::console_drain<Ruler, Serial>()) {
         bench.skip("the console did not drain: the timed runs would carry its interrupt");
         return;
     }
+    (void)timed_frames(SpiClock::div2, 2);   // the warm-up: nothing read from it
     for (uint8_t code = 0; code < 8u; ++code) {
+        const brio::TickWitness<P> witness;
         took[code] = timed_frames(static_cast<SpiClock>(code), frames);
+        ticked[code] = !witness.quiet();
     }
+    const uint32_t turn = poll_turn_bound();
+    // THE SPREAD'S BOUND, derived. The loop runs phase-locked to the block, so
+    // a code's turn is a fixed path plus how late the poll sees RXNE: somewhere
+    // inside one turn of the poll (`turn`, measured above), at a different place
+    // at each code (eight bits modulo the turn). The write after it waits for
+    // PCLK2's next edge, 0 to HCLK/PCLK2 - 1 = 1 core cycle. The lead before
+    // the first frame and the tail after the last RXNE are the same path with
+    // their own phase, spread over the 32 frames: under a cycle a frame. The two
+    // truncations of the nanosecond arithmetic below (the frame, the wire) move
+    // one cost by under 1 ns, so two apart by under 2. SCK and the ruler both
+    // count HCLK: no clock error enters. A code a kernel tick landed in is
+    // printed and left out of the spread.
+    const uint32_t ratio = SysClock::hz / Host::reference_hz();
+    const uint32_t bound_cycles = turn + (ratio - 1u) + 1u;
+    const uint32_t bound_ns = bound_cycles * 1000u / cycles_per_us + 2u;
     for (uint8_t code = 0; code < 8u; ++code) {
         const SpiClock c = static_cast<SpiClock>(code);
         const uint32_t stated = spi_sck_hz(Host::reference_hz(), c);
@@ -5071,34 +5252,42 @@ void tb_rates() {
         print(serial, "  div", static_cast<uint32_t>(1u << (code + 1u)), ": SCK ", stated / 1000u,
               " kHz, ", frames, " frames in ", took[code] / cycles_per_us, " us -> ", per_frame_ns,
               " ns a frame; the wire alone is ", wire_ns, " ns, so the loop costs ",
-              overhead[code], " ns", crlf);
+              overhead[code], " ns", ticked[code] ? " (a tick landed in it)" : "", crlf);
         if (code > 0u && took[code] <= took[code - 1u]) {
             monotone = false;
         }
-        if (overhead[code] < lowest) {
-            lowest = overhead[code];
-        }
-        if (overhead[code] > highest) {
-            highest = overhead[code];
-        }
-        if (code == 7u) {
-            const uint32_t diff = per_frame_ns > wire_ns ? per_frame_ns - wire_ns : wire_ns - per_frame_ns;
-            slowest_error_permille = wire_ns == 0u ? 1000u : (diff * 1000u) / wire_ns;
+        if (code < 7u && !ticked[code]) {
+            ++judged;
+            if (overhead[code] < lowest) {
+                lowest = overhead[code];
+            }
+            if (overhead[code] > highest) {
+                highest = overhead[code];
+            }
         }
     }
     bench.verdict("the eight codes are eight different rates, each slower than the last", monotone);
-    print(serial, "  the loop's own cost per frame: ", lowest, " to ", highest, " ns across the "
-          "whole ladder (", (lowest * cycles_per_us) / 1000u, " to ", (highest * cycles_per_us) / 1000u,
-          " core cycles)", crlf);
+    print(serial, "  the loop's own cost per frame, PCLK/2 to PCLK/128 with no tick in the window: ",
+          lowest, " to ", highest, " ns (", (lowest * cycles_per_us) / 1000u, " to ",
+          (highest * cycles_per_us) / 1000u, " core cycles) at ", judged, " codes; the poll's turn ",
+          turn, " cycles at most, so the spread's bound is ", bound_ns, " ns", crlf);
     bench.verdict("what the polled loop adds is a CONSTANT per frame - one write, one RXNE spin "
-                  "and one read - and not a share of the rate: the same handful of core cycles at "
-                  "PCLK/2 as at PCLK/256",
-                  highest != 0u && highest - lowest < lowest / 2u);
-    print(serial, "  at the slowest code the loop's cost is ", slowest_error_permille,
-          " parts per thousand of a frame", crlf);
-    bench.verdict("... so at PCLK/256, where that cost is one per cent of a frame, the measured "
-                  "frame time IS eight bits at the rate the arithmetic states",
-                  slowest_error_permille < 20u);
+                  "and one read - and not a share of the rate: from PCLK/2 to PCLK/128, within one "
+                  "turn of the poll, PCLK2's edge and the arithmetic's truncations",
+                  judged >= 2u && lowest != 0u && highest - lowest <= bound_ns);
+    // AT PCLK/256 the frame less that turn is eight bits at the stated rate:
+    // its cost within the same bound of the lowest, plus a SysTick run spread
+    // over the 32 frames, since a window of 0.74 ms can meet one and is judged
+    // with it.
+    const uint32_t tick_share_ns = ((systick_run_cycles + frames - 1u) / frames) * 1000u / cycles_per_us + 1u;
+    const uint32_t slowest_bound_ns = bound_ns + tick_share_ns;
+    const uint32_t slowest_diff_ns =
+        overhead[7] > lowest ? overhead[7] - lowest : lowest - overhead[7];
+    print(serial, "  at the slowest code the loop's cost is ", overhead[7], " ns, ", slowest_diff_ns,
+          " ns from the lowest above, the bound ", slowest_bound_ns, " ns", crlf);
+    bench.verdict("... so at PCLK/256 the measured frame time IS eight bits at the rate the "
+                  "arithmetic states, plus that same turn",
+                  judged >= 2u && lowest != 0u && slowest_diff_ns <= slowest_bound_ns);
 }
 
 // =============================================================================
@@ -5656,35 +5845,43 @@ void tk_engines() {
                   want == 0u ? who[0] != 0x00u && who[0] != 0xFFu : who[0] == want);
 
     // How fast the engined data phase really runs: the streams keep the
-    // shifter fed, so this IS the wire and not the loop.
+    // shifter fed, so this IS the wire and not the loop. The five blocks are
+    // timed first and printed after, behind a drain: a console line going out
+    // beside a block would put its interrupt inside the time.
     uint8_t block[64] = {};
     const uint8_t bcmd[1] = {static_cast<uint8_t>(gyro_read | gyro_increment | gyro_ctrl1)};
-    for (uint8_t code = 3; code < 8u; ++code) {
-        const SpiClock c = static_cast<SpiClock>(code);
-        DmaHost::Request b{};
-        b.cs = GyroCs::ref();
-        b.cmd = lend<Lease::reply>(bcmd);
-        b.cmd_len = 1;
-        b.tx = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
-        b.rx = lend<Lease::reply>(block);
-        b.len = 64;
-        b.mode = gyro_mode;
-        b.clock = c;
-        b.engine = SpiEngine::dma;
-        const uint32_t t0 = Ruler::now();
-        const bool inside = DmaHost::start(b);
-        // 10 ms against 65 frames at PCLK2/256, 1.5 ms. Printed, not judged: a
-        // block that never ends prints the budget.
-        if (!inside) {
-            (void)brio::wait_until<Ruler>([] { return GyroCs::read_out(); }, 10'000);
+    uint32_t took[8] = {};
+    if (!brio::console_drain<Ruler, Serial>()) {
+        print(serial, "  the console did not drain: the blocks' times are not taken", crlf);
+    } else {
+        for (uint8_t code = 3; code < 8u; ++code) {
+            DmaHost::Request b{};
+            b.cs = GyroCs::ref();
+            b.cmd = lend<Lease::reply>(bcmd);
+            b.cmd_len = 1;
+            b.tx = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
+            b.rx = lend<Lease::reply>(block);
+            b.len = 64;
+            b.mode = gyro_mode;
+            b.clock = static_cast<SpiClock>(code);
+            b.engine = SpiEngine::dma;
+            const uint32_t t0 = Ruler::now();
+            const bool inside = DmaHost::start(b);
+            // 10 ms against 65 frames at PCLK2/256, 1.5 ms. Printed, not judged: a
+            // block that never ends prints the budget.
+            if (!inside) {
+                (void)brio::wait_until<Ruler>([] { return GyroCs::read_out(); }, 10'000);
+            }
+            took[code] = Ruler::now() - t0;
         }
-        const uint32_t took = Ruler::now() - t0;
-        const uint32_t stated = spi_sck_hz(DmaHost::reference_hz(), c);
-        const uint32_t ns_per_frame = (took * 1000u) / (65u * cycles_per_us);
-        print(serial, "  64 frames at SCK ", stated / 1000u, " kHz: ", took / cycles_per_us,
-              " us -> ", ns_per_frame, " ns a frame (the wire alone is ",
-              stated == 0u ? 0u : static_cast<uint32_t>(8u * 1'000'000'000ULL / stated), " ns)",
-              crlf);
+        for (uint8_t code = 3; code < 8u; ++code) {
+            const uint32_t stated = spi_sck_hz(DmaHost::reference_hz(), static_cast<SpiClock>(code));
+            const uint32_t ns_per_frame = (took[code] * 1000u) / (65u * cycles_per_us);
+            print(serial, "  64 frames at SCK ", stated / 1000u, " kHz: ", took[code] / cycles_per_us,
+                  " us -> ", ns_per_frame, " ns a frame (the wire alone is ",
+                  stated == 0u ? 0u : static_cast<uint32_t>(8u * 1'000'000'000ULL / stated), " ns)",
+                  crlf);
+        }
     }
 
     dma_host_live = false;

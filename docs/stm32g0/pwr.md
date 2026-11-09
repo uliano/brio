@@ -417,10 +417,15 @@ clock in the chip stopped.
   kernel tick by 32 ms over 30..31 ms of wall.
 - **What each rung costs to leave is BELOW THIS DESK'S RESOLUTION, and
   the suite says so instead of guessing.** Thirty-two arm-sleep-wake
-  rounds measure 7933 us each for Sleep and 7964 for Stop 0, Stop 1 and
-  Stop 1 with the flash powered down - a difference of exactly ONE WALL
-  TICK (30 us), where DS13560 table 37 puts these wakes at 5.6 us
-  (Stop 0) and 9.0 (Stop 1). So the measurement is a BOUND that agrees
+  rounds measure 7932..7933 us each for Sleep, 7964 for Stop 0 and
+  Stop 1 and 7992..7993 for Stop 1 with the flash powered down - ONE
+  WALL TICK (30.5 us) more for a Stop and one more for the flash, where
+  DS13560 table 37 puts these wakes at 5.6 us (Stop 0) and 9.0 (Stop 1).
+  A round is a whole number of wall ticks (the wake-up timer counts the
+  wall's own root), so a cost of c us adds at most ceil(c / 30.5) ticks:
+  a Stop's wake (at most 11.2 us) and the PLL's relock (at most 40 us,
+  table 47) are two at most, the flash's power-down one, and those are
+  the bounds judged. So the measurement is a BOUND that agrees
   with the datasheet, and the ORDERING the ladder's mapping rests on -
   Stop 1 deeper than Stop 0 - is DECLINED as unmeasured: it rests on
   4.1.3's regulator argument and on table 37, and every counter fine
@@ -475,10 +480,15 @@ clock in the chip stopped.
 
 ### The third site, measured (test_stm32_lptim letter h)
 
-- **A 500 ms deadline through a Stop 1 matures at 501 ms of wall and
-  never earlier**, with the LPTIM as both the alarm and the witness and
-  the RTC untouched; the resync hands back 500 ticks of frozen span.
+- **A 500 ms deadline through a Stop 1 matures at 501..502 ms of wall
+  and never earlier**, with the LPTIM as both the alarm and the witness
+  and the RTC untouched; the resync hands back 500 ticks of frozen span.
   Six repeats of 150 ms all land at 151..152 ms and NOT ONE IS EARLY.
+  The band is derived: under one count of the site's 1024 Hz counter
+  late by its alarm arithmetic, the wake and the PLL's relock (under
+  0.1 ms, tables 37 and 47), one kernel tick for a dispatch that waits
+  in idle, the wall's two readings - each term rounded up to a whole
+  millisecond, the deadline plus 3 ms.
   The letter synchronizes to a SysTick edge before stamping the wall,
   which is what makes "never early" a fair test rather than a lucky one:
   a deadline armed at an arbitrary phase inside a tick is only N - 1 to

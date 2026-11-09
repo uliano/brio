@@ -295,7 +295,7 @@ while (brio::Rtc::shift_pending()) { }
 
 ## Bench findings
 
-The reference suite is `test_stm32_rtc` (fourteen letters in `z`, 126
+The reference suite is `test_stm32_rtc` (fourteen letters in `z`, 127
 verdicts - a letter is one command key of the suite's console and the group of verdicts it runs, `z` the key that runs them all; letter `v` outside it reboots the board once, and letter `w`
 outside it spends the five backup registers and the calendar's value on
 the erase and the calendar overflow). Nothing is wired: TIM16's input
@@ -305,8 +305,8 @@ no pad.
 
 - **THE NUCLEO'S X2 CRYSTAL IS FITTED AND IT RUNS**: LSE starts, LSERDY
   rises, and the period measures **32703 Hz against the core** - 1983
-  ppm from 32768, which is the CORE's own error (HSI16 is trimmed to
-  1 %) and not the crystal's. Sixty-four consecutive periods span
+  ppm from 32768, which is the CORE's own error (inside DS13560 table
+  44's band for HSI16, -1.85..+1.56 %) and not the crystal's. Sixty-four consecutive periods span
   1952..1968 timer ticks, so the instrument resolves a 32 kHz period to
   a handful of core cycles.
 - **LSI measures 32586 Hz on this die**, and that confirms the figure
@@ -348,7 +348,9 @@ no pad.
   again the core's error against the crystal.
 - **THE FIRST ASSERTION OF WUTF IS SHORT, exactly as 30.6.6 warns**: a
   ck_spre wake-up of two counts measures 1032 ms on its first period and
-  2005 ms on every one after it.
+  2005 ms on every one after it (judged: the period inside table 44's
+  band for the HSI16 the kernel tick runs on, the first period at least
+  one count and no longer than the period).
 - **THE SMOOTH CALIBRATION DOES NOT REACH THE DIVIDED RTCCLK WAKE-UP
   CLOCKS.** On ck_spre the full swing between CALP and CALM = 511
   measures **1022 ppm** where 30.3.13's range is 975 (-487.1 .. +488.5),
@@ -386,8 +388,9 @@ no pad.
   initialization entries, against sixteen guarded ones that also did
   not. Recorded as unreproduced, not disproved: it is a race, sixteen
   tries is not a proof, and the workaround costs one RTCCLK period.
-- **The two locks have different reach**, measured: a write to RCC_BDCR
-  with DBP clear is dropped; a write to a protected RTC register with
+- **The two locks have different reach**, measured: a write to a backup
+  register with DBP clear is dropped and the same write with DBP set
+  lands (letter `a`, with the word put back); a write to a protected RTC register with
   DBP set and no key is dropped; and a write to a BACKUP register lands
   with the RTC's key never written and is dropped with DBP clear. So the
   RTC's WPR does not cover chapter 31's registers.
@@ -534,7 +537,7 @@ with the same letters and the same verdicts.
   unselected); letter `a` claims it with the ordinary one-way RTCSEL
   write, and LSERDY rises inside the driver's bounded wait. The crystal
   measures **32736 Hz** against the core (976 ppm off 32768) where the
-  G0B1RE's reads 32703 - both of them the CORE's own 1 % trim and not
+  G0B1RE's reads 32703 - both of them the CORE's own HSI16 error and not
   the crystal's.
 - **There are TWO external tamper inputs and not three.**
   `tamp_external_inputs()` counts the TAMPxE enable bits and finds two;
@@ -553,7 +556,7 @@ with the same letters and the same verdicts.
 
 ## On the STM32G031K8
 
-`test_stm32_rtc` claims 109 of its 125 verdicts in `z` on the
+`test_stm32_rtc` claims 110 of its 126 verdicts in `z` on the
 Nucleo-G031K8 (DEV_ID 0x466, REV_ID 0x1003), with `w` (11 verdicts) and
 `v` (4) outside it. **THE CRYSTAL RUNS THERE AS ON THE NUCLEO-64s**:
 letter `a` claims it from an empty domain, letter `b` weighs it at

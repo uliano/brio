@@ -701,26 +701,27 @@ void td_variants() {
     // here (the numbers are printed; the doc says what was seen). So the
     // verdict is the direction and not the size: a deeper variant is
     // never CHEAPER to leave.
-    // Two microseconds of slack: where the two laps are equal (the
-    // STM32F411 shows no step at all) the alarm's own jitter decides the
-    // sign of a one-microsecond difference.
+    // The direction is judged to the measurement's own resolution: a lap
+    // is a wall span over `laps` laps whose two ends are each read to one
+    // sub-second tick (wall_us(1), 30.5 us at this suite's PREDIV_A 0 on a
+    // 32768 Hz root) and whose division floors, so one lap is known to
+    // within wall_us(1) / laps + 1 us either way (under 2 us here), and two
+    // laps compared to twice that (4 us here). Where two variants cost the
+    // same (MR and LP on the STM32F446RE: 4545 and 4546 us; the STM32F411
+    // shows no step at all) the sign of the difference is that
+    // resolution's.
+    const uint32_t lap_slack = 2u * ((wall_us(1) + laps - 1u) / laps + 1u);
     bench.verdict("the low-power regulator is never cheaper to leave than the "
                   "main one",
-                  lap_us[1] + 2u >= lap_us[0]);
+                  lap_us[1] + lap_slack >= lap_us[0]);
     // The flash's own wake is the big step on one part (92 us measured
     // against DS10693's 92 typical on the STM32F446) and no step at all on
     // another (the STM32F411 leaves every variant at the same lap) - a fact
     // of the part, printed above and judged only in its direction.
     print(serial, "  the flash in power-down costs ", lap_us[2] - lap_us[1],
           " us more than the regulator alone on this part", crlf);
-    // The direction is judged to the measurement's own resolution: a lap
-    // is a wall span over `laps` laps whose two ends are each read to one
-    // sub-second tick (wall_us(1)) and whose division floors, so one lap
-    // is known to within wall_us(1) / laps + 1 us either way, and two laps
-    // compared to twice that. Where two variants cost the same (the LP +
-    // FPDS family on the STM32F446RE: 4637 and 4638 us) the sign of the
-    // difference is that resolution's.
-    const uint32_t lap_slack = 2u * ((wall_us(1) + laps - 1u) / laps + 1u);
+    // The same resolution, lap_slack above: the LP + FPDS family on the
+    // STM32F446RE reads 4637 and 4638 us.
     bench.verdict("and the flash in power-down is never cheaper to leave than the "
                   "regulator alone",
                   lap_us[2] + lap_slack >= lap_us[1] && lap_us[3] + lap_slack >= lap_us[1]);

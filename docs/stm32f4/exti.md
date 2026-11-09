@@ -322,8 +322,8 @@ while (!brio::Syscfg::compensation_ready()) { }
 ## Bench findings
 
 `test_stm32f4_exti`, 12 letters in `z` (plus `p`, which waits for a press
-and is not part of `z`), 65 verdicts, WIRELESS - on the Nucleo-F446RE
-(DEV_ID 0x421, REV_ID 0x1000) at 180 MHz, and the same 65 on the
+and is not part of `z`), 68 verdicts, WIRELESS - on the Nucleo-F446RE
+(DEV_ID 0x421, REV_ID 0x1000) at 180 MHz, and the same letters on the
 32F469IDISCOVERY (DEV_ID 0x434, LD1 on PG6 as the pad the program
 drives, the blue button on PA0 reading 1 when pressed). Two stimuli, both inside the
 chip: the software trigger, which needs no pad and reaches the peripheral
@@ -389,9 +389,10 @@ never read-modify-writes it. The store and the read-back that follows it
 cost 80 cycles together, and the read already sees the flag gone. **A
 handler that clears its line as its LAST store was entered once, not
 twice** - the delay the errata item describes did not outlive the exception
-return on this part. That is a measurement and not a licence: the driver
-still clears at the top, which is what the errata asks for and costs
-nothing.
+return on this part. That is a measurement and not a licence - the
+letter prints the count and judges only its control, one entry for a
+handler that clears first - and the driver still clears at the top,
+which is what the errata asks for and costs nothing.
 
 **The compensation cell** reported READY 38 to 39 polls of `CMPCR` after
 being powered up.

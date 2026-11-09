@@ -264,18 +264,19 @@ void ta_reset_state() {
     Wave::release();
     bench.verdict("release() closes the gate again", !Wave::bus_clock());
 
-    // The geometry the reserve states, printed and asserted.
+    // The geometry the reserve states: constants, so asserted by the
+    // compiler, and printed.
+    static_assert(Wide::counter_bits == 32 && Meter::counter_bits == 32 &&
+                      Wave::counter_bits == 16 && Adv::counter_bits == 16,
+                  "the two 32-bit counters are TIM2 and TIM5, and no other");
+    static_assert(Adv::has_break && Adv::has_repetition && Adv::complementary_channels == 3 &&
+                      !Wave::has_break && !Meter::has_break,
+                  "the break unit, the repetition counter and the complementary outputs "
+                  "are one fact under three names, and TIM1's alone here");
     print(serial, "  TIM1: ", Adv::counter_bits, " bits, ", Adv::channels, " channels, ",
           Adv::complementary_channels, " complementary; TIM2: ", Wide::counter_bits,
           " bits; TIM9: ", Small2::channels, " channels; TIM11: ", Small1::channels,
           " channel", crlf);
-    bench.verdict("the two 32-bit counters are TIM2 and TIM5, and no other",
-                  Wide::counter_bits == 32 && Meter::counter_bits == 32 &&
-                      Wave::counter_bits == 16 && Adv::counter_bits == 16);
-    bench.verdict("the break unit, the repetition counter and the complementary outputs "
-                  "are one fact under three names, and TIM1's alone here",
-                  Adv::has_break && Adv::has_repetition && Adv::complementary_channels == 3 &&
-                      !Wave::has_break && !Meter::has_break);
 
     // A small timer refuses what it has not got, rather than storing into
     // a hole in the address map.
@@ -314,48 +315,86 @@ void ta_reset_state() {
 // b - the time base: TIMxCLK measured, TIMPRE, and the shadow registers
 // =============================================================================
 
-/// Count `t`'s ticks over a window of about `ms` milliseconds and return
-/// the rate its counter really runs at, in Hz. The timer must be 32-bit
-/// (or prescaled enough not to wrap).
+/// A timer clock measured against the core clock: the central figure and
+/// the bracket the readings allow the true rate, all in Hz.
+struct Rate {
+    uint32_t hz;
+    uint32_t lo;
+    uint32_t hi;
+};
+
+/// Count `t`'s ticks over a window of about `ms` milliseconds against the
+/// DWT. Each end reads the counter between two cycle stamps, under the
+/// mask so that nothing stretches the pair: the count was taken
+/// somewhere inside it. The bracket is then derived, not chosen: the
+/// window lasted between (a1 - b0) and (b1 - a0) cycles, and the count
+/// is the timer's ticks to one prescaler step at each end (the step's
+/// phase is unread), so the true rate lies between
+/// (ticks - step) x HCLK / (b1 - a0) and (ticks + step) x HCLK / (a1 - b0).
+/// Every timer clock is HCLK times a ratio of the same PLL's dividers, so
+/// no crystal error enters the comparison. The timer must be 32-bit (or
+/// prescaled enough not to wrap).
 template <class T>
-uint32_t measure_rate(uint32_t ms, uint16_t prescaler) {
+Rate measure_rate(uint32_t ms, uint16_t prescaler) {
     T::init();
     (void)T::configure({.prescaler = prescaler, .period = T::max_period});
     T::enable(true);
-    const uint32_t c0 = Ruler::now();
-    const uint32_t n0 = T::count();
+    uint32_t a0 = 0;
+    uint32_t n0 = 0;
+    uint32_t b0 = 0;
+    {
+        P::CriticalSection cs;
+        a0 = Ruler::now();
+        n0 = T::count();
+        b0 = Ruler::now();
+    }
     const uint32_t t0 = Ticker::ticks();
     // A window on the tick; a stopped tick ends it at twice its length.
     (void)brio::wait_until<Ruler>([&] { return Ticker::ticks() - t0 >= ms; }, ms * 2'000u);
-    const uint32_t n1 = T::count();
-    const uint32_t c1 = Ruler::now();
+    uint32_t a1 = 0;
+    uint32_t n1 = 0;
+    uint32_t b1 = 0;
+    {
+        P::CriticalSection cs;
+        a1 = Ruler::now();
+        n1 = T::count();
+        b1 = Ruler::now();
+    }
     T::enable(false);
-    const uint64_t ticks = static_cast<uint64_t>((n1 - n0) & T::max_period) *
-                           (static_cast<uint64_t>(prescaler) + 1u);
-    return static_cast<uint32_t>(ticks * SysClock::hz / (c1 - c0));
+    const uint64_t step = static_cast<uint64_t>(prescaler) + 1u;
+    const uint64_t ticks = static_cast<uint64_t>((n1 - n0) & T::max_period) * step;
+    const uint64_t hclk = SysClock::hz;
+    const uint64_t mid = (static_cast<uint64_t>(a1 - a0) + (b1 - b0)) / 2u;
+    return Rate{
+        .hz = static_cast<uint32_t>(ticks * hclk / mid),
+        .lo = static_cast<uint32_t>((ticks - step) * hclk / (b1 - a0)),
+        .hi = static_cast<uint32_t>((ticks + step) * hclk / (a1 - b0)) + 1u,
+    };
 }
+
+/// Whether `expected` lies in the bracket `r` derives.
+bool in_bracket(const Rate& r, uint32_t expected) { return r.lo <= expected && expected <= r.hi; }
 
 void tb_time_base() {
     quiet_everything();
 
     // TIM9 is 16-bit, so it is prescaled far enough not to wrap inside
     // the window; TIM2 is 32-bit and counts its clock undivided.
-    const uint32_t apb1_measured = measure_rate<Wide>(200, 0);
-    const uint32_t apb2_measured = measure_rate<Small2>(200, 4999);
+    const Rate apb1_measured = measure_rate<Wide>(200, 0);
+    const Rate apb2_measured = measure_rate<Small2>(200, 4999);
     print(serial, "  HCLK ", SysClock::hz / 1'000'000u, " MHz, PCLK1 ",
           SysClock::pclk1_hz / 1'000'000u, " MHz (prescaler ", SysClock::apb1_div,
           "), PCLK2 ", SysClock::pclk2_hz / 1'000'000u, " MHz (prescaler ",
           SysClock::apb2_div, ")", crlf);
-    print(serial, "  an APB1 timer counts ", apb1_measured, " Hz (the header says ",
-          apb1_tim_hz, "), an APB2 timer ", apb2_measured, " Hz (", apb2_tim_hz, ")", crlf);
-    const uint32_t tol1 = apb1_tim_hz / 500u;
-    const uint32_t tol2 = apb2_tim_hz / 500u;
+    print(serial, "  an APB1 timer counts ", apb1_measured.hz, " Hz (", apb1_measured.lo, "..",
+          apb1_measured.hi, " by the readings; the header says ", apb1_tim_hz,
+          "), an APB2 timer ", apb2_measured.hz, " Hz (", apb2_measured.lo, "..",
+          apb2_measured.hi, "; ", apb2_tim_hz, ")", crlf);
     bench.verdict("AN APB1 TIMER'S CLOCK IS NOT ITS BUS CLOCK: measured against the core "
                   "clock it is what tim_clock_hz() derives from the prescalers, within "
-                  "two parts in a thousand",
-                  apb1_measured + tol1 > apb1_tim_hz && apb1_measured < apb1_tim_hz + tol1);
-    bench.verdict("and so is an APB2 timer's",
-                  apb2_measured + tol2 > apb2_tim_hz && apb2_measured < apb2_tim_hz + tol2);
+                  "what the readings allow",
+                  in_bracket(apb1_measured, apb1_tim_hz));
+    bench.verdict("and so is an APB2 timer's", in_bracket(apb2_measured, apb2_tim_hz));
     bench.verdict("the silicon's own prescalers agree with the clock task's",
                   Wide::clock_hz_now(SysClock::hz) == apb1_tim_hz &&
                       Small2::clock_hz_now(SysClock::hz) == apb2_tim_hz);
@@ -363,16 +402,15 @@ void tb_time_base() {
     // TIMPRE: on a bus divided by more than two it doubles the timers'
     // clock; where every prescaler is 1 or 2 it can change nothing.
     Rcc::timpre(true);
-    const uint32_t apb1_high = measure_rate<Wide>(200, 0);
+    const Rate apb1_high = measure_rate<Wide>(200, 0);
     const uint32_t expect_high = tim_clock_hz(clock, false, true);
     Rcc::timpre(boot.timpre);
-    print(serial, "  with TIMPRE set an APB1 timer counts ", apb1_high, " Hz (the header "
-          "says ", expect_high, ")", crlf);
-    const uint32_t tolh = expect_high / 500u;
+    print(serial, "  with TIMPRE set an APB1 timer counts ", apb1_high.hz, " Hz (",
+          apb1_high.lo, "..", apb1_high.hi, " by the readings; the header says ", expect_high,
+          ")", crlf);
     bench.verdict("TIMPRE moves the timers' clock exactly as the rule says - HCLK at a "
                   "prescaler of 1 or 2, four times PCLK beyond",
-                  Rcc::timpre() == boot.timpre && apb1_high + tolh > expect_high &&
-                      apb1_high < expect_high + tolh);
+                  Rcc::timpre() == boot.timpre && in_bracket(apb1_high, expect_high));
 
     // The two shadow registers (17.4.11, 17.4.12). The counter is left
     // free-running over the whole 32 bits so a delta is a delta.
@@ -669,8 +707,9 @@ void tf_widths() {
     const uint32_t narrow_holds = Wave::count();
     print(serial, "  0xFFFFFFF0 written into TIM2's counter reads ", hex(wide_holds),
           ", into TIM3's ", hex(narrow_holds), crlf);
+    static_assert(Wide::max_period == 0xFFFFFFFFUL, "TIM2's period is the whole 32 bits");
     bench.verdict("TIM2's counter is thirty-two bits wide and holds what was written",
-                  wide_holds == 0xFFFFFFF0UL && Wide::max_period == 0xFFFFFFFFUL);
+                  wide_holds == 0xFFFFFFF0UL);
     bench.verdict("a 16-bit counter takes the low half and the driver masks the write "
                   "rather than letting it wrap",
                   narrow_holds == 0xFFF0u);
@@ -770,13 +809,21 @@ void tg_option_lse() {
     print_hz("THE 32768 Hz CRYSTAL on TIM5's channel 4", lse_mhz);
     const int32_t ppm = static_cast<int32_t>((static_cast<int64_t>(lse_mhz) - 32'768'000) *
                                              1000000 / 32'768'000);
+    // The figure is printed and not judged: the ruler is the HSE (the
+    // timer clock comes from it through the PLL), and the tolerance of
+    // the crystal behind it - the ST-LINK's on a Nucleo - is stated
+    // nowhere, so no written bound fits a crystal weighed against it.
+    // The span's own resolution is a count of a 90 MHz timer clock over
+    // half a second, a few hundredths of a ppm.
     print(serial, "  which is ", ppm, " ppm from nominal", crlf);
-    bench.verdict("THE LSE REACHES A CAPTURE CHANNEL WITH NO PAD, and weighs within a "
-                  "hundred parts per million of 32768 Hz",
-                  lse_mhz > 32'764'000u && lse_mhz < 32'772'000u);
+    bench.verdict("THE LSE REACHES A CAPTURE CHANNEL WITH NO PAD: the captures arrive",
+                  lse_mhz != 0u);
 
     const uint32_t lsi_mhz = weigh_input4(Tim5Input4::lsi, 256, TimCapturePrescaler::every8, 8);
     print_hz("the LSI on the same channel", lsi_mhz);
+    // The band is the data sheet's (DS10693 table 42 on the bench part;
+    // the same on the other parts of this suite); the ruler's own error,
+    // a crystal's, is negligible against it even at 1000 ppm.
     bench.verdict("and so does the LSI, inside the manual's own 17..47 kHz window",
                   lsi_mhz > 17'000'000u && lsi_mhz < 47'000'000u);
 
@@ -1707,12 +1754,16 @@ void tn_meters() {
     }
     const uint32_t mhz = taken == 0u ? 0u
         : static_cast<uint32_t>(static_cast<uint64_t>(apb1_tim_hz) * 8u * 1000u * taken / total);
+    const int32_t ppm = static_cast<int32_t>((static_cast<int64_t>(mhz) - 32'768'000) *
+                                             1000000 / 32'768'000);
+    // The figure is printed and not judged, for letter g's reason: the
+    // ruler's crystal has no stated tolerance.
     print(serial, "  TimIntervalMeter over ", taken, " captures of eight crystal periods: ",
-          mhz / 1000u, ".", mhz % 1000u, " Hz", crlf);
+          mhz / 1000u, ".", mhz % 1000u, " Hz, ", ppm, " ppm from nominal", crlf);
     bench.verdict("THE INTERVAL METER IS THE TASK AN APPLICATION FEEDS A MeterLatch "
-                  "FROM: its captures weigh the crystal to the same hundred parts per "
-                  "million the raw verbs did",
-                  lse && up && mhz > 32'764'000u && mhz < 32'772'000u);
+                  "FROM: it hands back an interval for every one of 1024 captures of "
+                  "the crystal",
+                  lse && up && taken == 1024u);
     bench.verdict("and it says nothing at all on the first edge, there being no interval "
                   "yet",
                   (Crystal::restart(), !Crystal::interval().has_value()));

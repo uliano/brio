@@ -1018,7 +1018,6 @@ void tc_timing() {
     };
     constexpr uint16_t n = 256;
     uint8_t exact = 0;
-    uint8_t one_over = 0;
     uint8_t rows_done = 0;
     for (const Row& r : rows) {
         AdcConfig c = cfg_pad;
@@ -1045,18 +1044,28 @@ void tc_timing() {
               (predicted & 1u) ? 5u : 0u, " ADC cycles, measured ",
               measured_half / 2u, ".", (measured_half & 1u) ? 5u : 0u,
               " (", cycles, " CPU cycles for ", n, " conversions)", crlf);
-        const uint32_t diff = measured_half > predicted ? measured_half - predicted
-                                                        : predicted - measured_half;
-        if (diff <= 1u) {
+        // THE BAND, the prediction or one CPU cycle over it. The span holds
+        // the 256 conversions back to back plus what is paid once: the
+        // rest of the opening ruler read and Adc::start()'s call to the
+        // ADSTART store (about 35 cycles), the trigger latency and the
+        // data register's write latency at CKMODE 01 (6.5 and 4.5 PCLK
+        // cycles, DS13560 table 62), the channel's last transfer (a few),
+        // the poll's turn on the flag (a flag read and a ruler read, under
+        // 80 cycles in the listing), the closing read up to its sample
+        // (about 30) and one tick handler landing on the poll (under 150):
+        // under 320 cycles, under 384 = 1.5 x 256. Divided by 256 and
+        // rounded, that adds 0 or 1 to the predicted CPU cycles - never
+        // more, and never less.
+        if (measured_half >= predicted && measured_half <= predicted + 1u) {
             ++exact;
-        } else if (measured_half > predicted && diff <= 3u) {
-            ++one_over;
         }
     }
     bench.verdict("every sampling time and every resolution converts in "
-                  "EXACTLY 15.3.9's tSMPL + tSAR - the chapter's arithmetic "
-                  "measured against a clock that is exactly twice fADC",
-                  rows_done == 6u && exact + one_over == 6u && exact >= 4u);
+                  "15.3.9's tSMPL + tSAR to the CPU cycle - the chapter's "
+                  "arithmetic measured against a clock that is exactly twice "
+                  "fADC, 256 conversions together, their start and end "
+                  "latencies under one CPU cycle a conversion",
+                  rows_done == 6u && exact == 6u);
 
     // ES0548 2.6.4 wants a SINGLE conversion, or the first of a sequence:
     // in continuous mode above, the extra cycle (if it is there at all)
@@ -1095,11 +1104,18 @@ void tc_timing() {
           " CPU cycles, 7.5 cycles ", best_long, ", 39.5 cycles ", best_control,
           "; 7.5 - 1.5 = ", step, " (the chapter 12, with ES0548 2.6.4 10), 39.5 - 7.5 = ",
           control, " (64, no erratum)", crlf);
-    bench.verdict("ES0548 2.6.4 MEASURED: a single conversion at 1.5 sampling "
-                  "cycles takes ONE ADC CYCLE MORE than the chapter says - the "
-                  "step to 7.5 cycles is 10 CPU cycles and not 12, on an "
-                  "instrument that reads the 7.5 -> 39.5 step as exactly 64",
-                  step >= 9u && step <= 11u && control >= 63u && control <= 65u);
+    // THE ERRATUM'S STEP IS PRINTED, NOT JUDGED: an erratum is a behaviour
+    // of the dies its sheet was written on, and one die on this desk
+    // cannot say it holds for the family. THE CONTROL IS JUDGED, because
+    // the chapter promises it and without it the step means nothing: 32
+    // ADC cycles are 64 CPU cycles under PCLK/2, and each timed start can
+    // fall on either CPU cycle of an ADC clock period, so a difference of
+    // two bests reads 64 within one CPU cycle.
+    bench.verdict("THE CONTROL OF ES0548 2.6.4's MEASUREMENT: the instrument "
+                  "reads the step from 7.5 to 39.5 sampling cycles, which no "
+                  "erratum names, as the chapter's 64 CPU cycles within one - "
+                  "so the 1.5 -> 7.5 step printed above is the silicon's",
+                  control >= 63u && control <= 65u);
     quiet_everything();
 }
 
@@ -2788,14 +2804,15 @@ void tm_comp_analog() {
           " mV, and ten milliseconds of looking elsewhere move it by ", moved,
           " counts; two full settles either side of that land at ", first,
           " and ", back, crlf);
-    bench.verdict("A FREE PAD IS A STABLE ANALOG SOURCE ON THIS BOARD, which "
-                  "is what letter i's declined threshold sweep needed and did "
-                  "not have: released from VDD a floating pad does NOT stay "
-                  "at the rail - it relaxes, in a few milliseconds, to an "
-                  "equilibrium a third of the way up the supply and SITS "
-                  "there, reproducibly, to a handful of counts",
-                  dac_up && first > 800u && first < 3000u &&
-                      back + 40u > first && first + 40u > back);
+    // PRINTED, NOT JUDGED: where a floating pad settles, and how closely
+    // two settles agree, is the board's leakage and no chapter's - a
+    // figure of this board, not a property of the family. What the legs
+    // below need from it, a level between the rails, the DAC-threshold
+    // verdict judges itself (the node above a DAC at 0, below one at
+    // 4095).
+    print(serial, "  two settles of the same length land ",
+          static_cast<uint32_t>(first > back ? first - back : back - first),
+          " counts apart", crlf);
     print(serial, "  (the equilibrium is where the pad's own leakage paths "
           "balance - nothing in any chapter names it, and it is a BOARD fact: "
           "a different pad or a different board will settle somewhere else, "
@@ -2824,7 +2841,7 @@ void tm_comp_analog() {
                   "dac.md have both carried as unverified: the settled pad "
                   "reads ABOVE a DAC at zero and BELOW a DAC at full scale, "
                   "over an INTERNAL connection that claims no pad at all",
-                  comp_up && over_zero && under_full);
+                  dac_up && comp_up && over_zero && under_full);
 
     // ---- 3+4. the offset and the four hysteresis levels --------------------
     // The threshold is swept UP through the node (so the DIFFERENCE the
@@ -2919,11 +2936,16 @@ void tm_comp_analog() {
           "it should be zero and where table 68's LARGEST level is 30 mV; "
           "with HYST clear the crossings sit ", offset_mv, " mV from the "
           "ADC's own reading of the node", crlf);
+    // The verdict is the stimulus: every sweep crossed the node inside its
+    // window. The floor itself is the printed band with HYST clear - zero
+    // would be a perfect node and a perfect comparator, not a failure.
     bench.verdict("the four HYST codes are each configured, enabled and swept "
-                  "against a real analog node - and the sweep's own floor is "
-                  "MEASURED rather than assumed, which is what makes the "
-                  "decline that follows a result and not a shrug",
-                  sweeps_ok && width_mv[0] != 0);
+                  "against a real analog node, every sweep crossing it inside "
+                  "its window - and the sweep's own floor is MEASURED (the "
+                  "band with HYST clear, printed above) rather than assumed, "
+                  "which is what makes the decline that follows a result and "
+                  "not a shrug",
+                  sweeps_ok);
     // The levels and the offset are not judged by this instrument either
     // way: a floor above table 68's largest level is the node's motion
     // (above), and a floor under it was never given a verdict of its own.

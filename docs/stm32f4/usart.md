@@ -118,12 +118,17 @@ because the receive engine's burst edge is the line's IDLE (below) and
 the erratum has no workaround, and on the F446 ES0298 2.13.2 (PE
 cleared by a write of DR in full duplex), because the task counts
 parity errors while it may be transmitting - both staged from a foreign
-sender ("Against a far board": the first reproduced in its own case,
-one idle frame from a faster sender, and read entry for entry the same
-on the far STM32G0, whose sheet lists no such item; the second
-reproduced in the erratum's order and absent from the task). ES0298
-2.13.3 (no PE for an address with a parity error that ends mute mode)
-is staged too, and reproduces after a software mute alone. The rest
+sender ("Against a far board": the first seen on the desk's die in its
+own case, one idle frame from a faster sender, and read entry for entry
+the same on the far STM32G0, whose sheet lists no such item; the second
+seen in the erratum's order, and in one run of 40 one parity error of 64
+missed both in the workaround's order and through the task, below).
+ES0298 2.13.3
+(no PE for an address with a parity error that ends mute mode) is staged
+too, and showed after a software mute alone. What each erratum does on
+the die is printed by the suite, not judged: one board of the part is on
+the desk, and an erratum that must reproduce is a behaviour of the die;
+the stages' controls and the task's own order are the verdicts. The rest
 shape nothing in it (no break, no smartcard and no flow control in the
 transport), each of which the mode's future user meets. Driver:
 `stm32f4/usart.hpp` (`Usart<n>` the resource, `Uart<n, pins, rx_size,
@@ -553,9 +558,15 @@ prints the two rates and skips that verdict.
 **A loop cannot tell a wrong rate**: both ends share the divisor, so a
 divisor twice too large is a loop twice too slow and every byte still
 comes back. Letters a and c therefore time 1024 frames out through the
-transmit engine against their wire time - 10 x 1024 bit times - and judge
-it within three per cent; the OVER8 arithmetic is also pinned against
-the manual's example at compile time.
+transmit engine against their wire time - 10 x 1024 bit times - on the
+cycle counter, which runs off the same PLL as the USART: the crystal's
+error cancels, and a run at the divisor asked reads 1000 thousandths and
+its fixed cost (some 1700 cycles), never less. The window is derived up
+to the figure the next divisor would read, one kernel cycle longer a bit:
+1125 at 11.25 Mbaud (a bit of 8 kernel cycles), 1022 at 2 Mbaud (45), so
+a neighbouring divisor on either side fails it. Measured 1006 and 1001,
+sixteen runs alike. The OVER8 arithmetic is also pinned against the
+manual's example at compile time.
 
 **Errors under the engine** (letter d): 120 data bytes with 14 breaks
 between them, each followed by a clean frame - all 120 delivered intact
@@ -569,7 +580,10 @@ it (40 of 40 data bytes, FE 10 for 10).
 STM32F446RE): the default ring loses nothing beside four copies at very_high at 5.625 and 11.25
 Mbaud; armed low (`rx_priority`), it loses nothing beside two, and beside three or four,
 the copies started by the thread that feeds the line, 1 to 5 of 4096 frames reach it, with an
-overrun reported. The vector is quiet after every starved leg (the overrun with nothing to
+overrun reported. The starving four are the stage's control, judged because the verdicts on a
+starved ring need it, not a promise: RM0390 9.3.5 grants the higher level first, and whether four
+copies keep the ring waiting past a frame is this controller's timing (letter `8`'s the same, with a
+wire as the sender). The vector is quiet after every starved leg (the overrun with nothing to
 take, above). Inside such a leg it takes 4 entries, the wait for a frame down after the
 third, the thread at most 2661 cycles late. With RXNEIE left armed the same legs took 31000 to 137000
 entries and the thread up to 28300 cycles late, which is also what kept its copies from starting.
@@ -583,17 +597,24 @@ the handler's own bound of a tenth of a second ended the load. With a consumer t
 while the ring stays starved: 5540 to 5815 entries over 3993 to 4103 looks, the
 thread at most 3308 cycles late, 563 to 751 frames delivered and the rest behind counted overruns.
 
-**`tx_idle()` is the wire's** (letter e): its first true lands 1594..1603
-and 1598..1604 cycles after the last stop bit's rising edge on the pad at
-115200 (a bit is 1562) - interrupt transmitter and transmit engine - and
-202 and 218..221 at 1 Mbaud (a bit is 180), four runs alike, the edge's
-EXTI latency taken off: within a quarter bit of TC rising at the stop
-bit's end, on both paths. The latency is the MEDIAN of seven software
-triggers of the same line, 34 cycles (34..39): one trigger alone met the
-SysTick's entry or a flash line's fill now and then and read the
-interrupt transmitter bimodal run to run (215 or 338..348 cycles), and
-the console is drained first (its transmit interrupt, entered as the
-stop bit rises, once read the edge 22 cycles early).
+**`tx_idle()` is the wire's** (letter e): never before the last stop
+bit's end, the contract the letter judges (TC rises there, 25.6.1). Its
+first true lands 22..52 and 27..52 cycles past that end at 115200 (a bit
+is 1562) - interrupt transmitter and transmit engine - and 154..174 and
+46..52 at 1 Mbaud (a bit is 180), over sixteen runs, the edge's EXTI
+latency taken off. The lag is printed and not judged: it is the polling
+thread's - a turn of its wait, the EXTI handler that stamps the edge,
+and under the interrupt receiver the echo's receive vector, entered at
+the stop bit's middle sample and still running at the stop bit's end at
+1 Mbaud - and no document bounds those handlers' cycles. The latency is
+the MEDIAN of seven software triggers of the same line, 34 or 35 cycles
+(34..41): one trigger alone met the SysTick's entry or a flash line's
+fill now and then and read the interrupt transmitter bimodal run to run,
+and the console is drained first (its transmit interrupt, entered as the
+stop bit rises, once read the edge 22 cycles early). The pad's edge
+reaches EXTI through an input synchronizer the software trigger skips,
+which reads the figure a few cycles small, against the smallest excess
+of 22.
 
 **The burst edge from the vector** (letter f, nothing polled): every
 burst of one frame told; a burst of 16 at 1 Mbaud told 1954 cycles after
@@ -691,9 +712,9 @@ the protocol every architecture on the link compiles
 core is an HSI16 it TRACKS against its LSE crystal (docs/stm32g0/
 clock.md, "The core against the LSE, tracked"), so every rate it times
 is crystal against crystal - and every rate it SENDS it states (a
-`send` or `blast` Report's aux16: its divisor on its tracked core). Score:
-**150 of 150**, and four checks skipped with their reasons: the three
-frames this USART has no word for and RS-485 (no driver enable).
+`send` or `blast` Report's aux16: its divisor on its tracked core). The
+letters hold 145 verdicts, and four checks skipped with their reasons: the
+three frames this USART has no word for and RS-485 (no driver enable).
 
 - **The rendezvous and the refusal path** (`1`): ping, IDENT (kind 0x03,
   another die, a crystal-referenced time base), a bad checksum NAKed, a
@@ -703,9 +724,17 @@ frames this USART has no word for and RS-485 (no driver enable).
   MHz / 90, exact) timed by the far chip, judged to agree within 10 ppm
   - a bound DERIVED below, "The rendezvous's bound" - and measured
   within 2: 75 figures over 25 runs between -9 and -6 ppm, the ST-LINK's
-  8 MHz against the far LSE, within their tolerances; the far chip's own
-  1 Mbaud blast on this DWT +2999 ppm against the +2989 it states (64 of
-  its 64.2 MHz core) less the clocks' -8: 2 ppm apart.
+  8 MHz against the far LSE. How far apart the two crystals sit is
+  printed and not judged: UM1724 states no tolerance for the ST-LINK's
+  crystal, and an untracked HSI16 may read anywhere in DS13560's range,
+  zero included, so no bound tells the two apart - the IDENT's crystal
+  flag and the 10 ppm agreement are the verdicts on the time base. The
+  far chip's own 1 Mbaud blast on this DWT is judged within 70 ppm of the
+  rate it states (64 of its 64.2 MHz core) less the clocks' figure - a
+  bound derived in the suite (`blast_ppm`: this end's stamps, its
+  receiver's start sampling, the far tracker's conversion, the clocks'
+  figure and three whole-ppm roundings over the 40 ms run) - and measured
+  within 7 over six runs (+2216 against +2201 less -8).
 - **The baud matrix** (`2`) on the two dividers' COMMON ladder: this
   USART divides 90 MHz by any whole k from 8 (OVER8's three-bit fraction
   counts eighths), the far one 64 MHz by a whole n (its OVER8 adds no
@@ -732,58 +761,79 @@ frames this USART has no word for and RS-485 (no driver enable).
 - **The receiver's errors from a foreign sender** (`4`): odd parity into
   an even receiver, PE on each and the data readable; THE FE ONSET with
   the far divisor 0..8 % off 9600, back to back: clean within 4 % either
-  way, FE from +5 % and -6 % (25.4.5's 3.75 % at OVER16 with no
-  fraction, NE rising from 4 %); a run of 8 read late - ORE, DR keeping
+  way and judged clean to 3 % (25.4.5's table 161, 3.33 % at OVER16 with
+  a fraction - this receiver's 9600 is 90 MHz / 16 / 585 15/16), FE from
+  +5 % and -6 % and judged at 8 % either way, where the stop bit's vote
+  lands in the next start bit (fast) or in data bit 7 (slow), NE rising
+  from 4 %; a run of 8 read late - ORE, DR keeping
   the run's first frame, the rest lost (one data register); THE START
   BIT'S VOTE, one low pulse of w ticks on the idle line at 9600 (a
   sixteenth is 156): nothing under 1350, a start with NE from 1350 to
   1500 and a clean start from 1550 with ONEBIT clear, a start from 1350
   and NE at no width with ONEBIT set; a break of 20 bit times one frame
-  with FE and data 0x00, and LBD SET WITH LIN MODE OFF as well as on -
-  the detector runs whatever LINEN says (25.6.1's description of the bit
-  ties it to no mode).
-- **ES0298 2.13.2 STAGED AND REPRODUCED** (`5`): 64 odd-parity frames
-  into this end at 8E1 while it transmits back to back. Polled in the
-  ERRATUM'S ORDER - an SR read and a DR write every turn, then the SR
-  read the receive is decided on - PE was seen on 11 and 16 of 64 in two
-  runs; in the WORKAROUND'S (one SR read, the DR read, then the write)
-  64 of 64. THROUGH THE TASK, transmitting the whole time, every one of
-  the 64 counted and none delivered: the vector's one SR read decides the
+  with FE and data 0x00, and LBD set with LIN mode off as well as on
+  (printed, not judged: 25.6.1's description of the bit ties it to no
+  mode, and 25.4.8 says nothing of the flag with LINEN clear).
+- **ES0298 2.13.2 STAGED** (`5`): 64 odd-parity frames into this end at
+  8E1 while it transmits back to back. Polled in the ERRATUM'S ORDER - an
+  SR read and a DR write every turn, then the SR read the receive is
+  decided on - PE was seen on 10 to 17 of 64 over six runs, printed and
+  not judged (the control judged: that order reads all 64 frames); in the
+  WORKAROUND'S (one SR read, the DR read, then the write) 64 of 64.
+  THROUGH THE TASK, transmitting the whole time, every one of the 64
+  counted and none delivered: the vector's one SR read decides the
   receive before the transmit writes DR, which is the workaround's order
-  by construction.
+  by construction. Both are judged, and both missed ONE parity error of
+  64 in one run each of 40 runs of the letter (the workaround's order 63
+  of 64; the task 63 of 64 with that byte delivered): a frame that
+  completes between the one SR read and the DR write would have its PE
+  cleared by the write - 2.13.2's own sequence - and be taken clean by the
+  next read. That mechanism is inferred, not measured; the window it
+  needs is the vector's span from SR read to DR write against a frame
+  time.
 - **The far engine's shapes** (`6`), the STM32G0B1RE's TIM1: where a
   start is believed - eight low pulses a width at 115200, nothing under
   half a bit, 5 of 8 taken at 110 ticks (8.4 sixteenths) with NE, every
   one from 117, clean from 130 at OVER16 and 156 at OVER8; the
   operational range of a gapped 0x00 frame - decoded from -50 to +50 per
   mille at 9600 and 115200, broken by FE slow and by 0x80 fast, NE first
-  from +-45..50 per mille: 25.4.5's 3.41 % inside both ways; one
+  from +-45..50 per mille. Judged: every step inside 25.4.5's 3.33 %
+  (table 161 - this receiver's divisor has a fraction at both rates)
+  decoded, to 30 per mille both ways; how far past it the frame still
+  decodes is the die's, printed. One
   stretched cell of 0x55 at 115200 - 30 % either way decoded, 45 % not
   for the start cell, the stop cell free.
-- **ES0298 2.13.1 STAGED, NOT REPRODUCED** (`7`): twenty bursts of
-  sixteen frames at 50000 baud from a far end 0 to 3 % FASTER, gaps of
-  200 us (one frame), 300 us and 1 ms: the polled receiver saw IDLE once
-  a burst in every leg, and THE RECEIVE ENGINE'S CONTRACT HOLDS - its
-  edges the same 39 for 20 bursts at every gap and offset (each burst's
-  first frame and its IDLE, the very first frame's merged with the
-  start), no IDLE edge missed. The erratum's case is an idle frame and
-  no more followed at once by a fast sender's start bit; a gap the far
-  peer can time in 100 us steps reaches one frame and a few
-  microseconds, and the edge held there. THE ERRATUM'S OWN CASE, drawn by
+- **ES0298 2.13.1 STAGED** (`7`): twenty bursts of sixteen frames at
+  50000 baud from a far end 0 to 3 % FASTER, gaps of 200 us (one frame),
+  300 us and 1 ms: the polled receiver saw IDLE once a burst in every
+  leg, and the receive engine's edges were the same 39 for 20 bursts at
+  every gap and offset (each burst's first frame and its IDLE, the very
+  first frame's merged with the start), no IDLE edge missed. JUDGED at
+  300 us and 1 ms, where the idle - fifteen of this receiver's bits and
+  more after the stop bit, the far end timing the gap after its TC - holds
+  a whole idle frame wherever the receiver starts counting: there THE
+  RECEIVE ENGINE'S CONTRACT HOLDS. The one-frame gap is printed and not
+  judged: the erratum's case is an idle frame and no more followed at once
+  by a fast sender's start bit, and a gap the far peer times in 100 us
+  steps reaches one frame and an unstated few microseconds. THE ERRATUM'S
+  OWN CASE, drawn by
   the far engine with the gap stated in ITS bit times (the `stage` op):
   sixteen frames, an idle of 9.5 to 11 sender bits after each, the
   sender exact, 1 % and 3 % fast. From the exact sender IDLE follows
   every frame from ten bits and none at 9.75; from 1 % fast from 10.25
   of its bits, from 3 % fast from 11 - ONE IDLE FRAME AND THEN A
   CHARACTER FROM A SENDER 3 % FAST IS NOT TOLD, nor ten and a half of its
-  bits (10.2 of this receiver's, past the exact sender's threshold):
-  2.13.1 REPRODUCES. And the far STM32G0's letter `9` reads THE SAME
+  bits (10.2 of this receiver's, past the exact sender's threshold): the
+  case ES0298 2.13.1 describes, seen on the desk's die and printed, not
+  judged. And the far STM32G0's letter `9` reads THE SAME
   TABLE, entry for entry, where ES0548 lists nothing: the receiver
   counts its idle frame from the stop bit as IT sampled it, which a
   faster sender's frame ends ahead of by the error over the frame -
   every USART's geometry, the F446's sheet the one that names it. The
-  receive engine's contract (a burst told within two frames) is the
-  one-frame gap above, which holds.
+  receive engine's contract (a burst told within two frames) rests on
+  that IDLE, so it holds where the idle is past the erratum's reach (the
+  judged gaps above); at the stage's gaps the engine was not run ("Not
+  covered yet").
 - **The ring under copies, with a real sender** (`8`): letter `g`'s
   arrangement on USART1's receive engine (DMA2 stream 2), 4096 frames
   back to back from the far chip at 4.27 and 6.4 Mbaud: at its default
@@ -806,17 +856,25 @@ frames this USART has no word for and RS-485 (no driver enable).
   20: set, each also a 0x00 frame with FE) - letter `4`'s finding
   staged: 25.4.8 says that with LINEN = 0 the receiver works "without
   taking into account the break detection", and this detector runs
-  whatever LINEN says, at LBDL's length. THIS END'S BREAK timed by the
-  far receiver, from the break to a 0x55 written as SBK clears:
-  13.99..14.00 bit times in LIN mode (thirteen and the one high bit of
-  25.4.8) and 10.99..11.06 without (a frame's ten and the bit of 25.4.2),
-  over four runs.
+  whatever LINEN says, at LBDL's length - printed, not judged: no
+  document says what the flag does with LINEN clear, and brio depends on
+  neither answer. THIS END'S BREAK timed by the far receiver, from the
+  break to a 0x55 written as SBK clears: 13.99..14.00 bit times in LIN
+  mode (thirteen and the one high bit of 25.4.8) and 10.99..11.06 without
+  (a frame's ten and the bit of 25.4.1), judged within 0.19 bit of 14 and
+  11 - a window derived in the suite from the far receiver's sixteenth-bit
+  start detection, letter `1`'s far stamp terms, this end's write behind
+  SBK, the crystals and the truncation.
 - **IrDA SIR against the far ST ENDEC** (`r`), the far G0's TXINV and
   RXINV supplying the one inversion each direction needs (that chip's
   letter `r` reads them on the pad): THIS ENCODER idles LOW with a HIGH
-  pulse a zero, 3516 cycles at 9600 and 294 at 115200 (3/16 exactly);
-  low power at PSC 49 (1.84 MHz) a pulse of 294 cycles at either rate,
-  three periods; the far decoder takes 32 frames of 32 in all four legs.
+  pulse a zero, 3507..3521 cycles at 9600 and 285..294 at 115200 over six
+  runs (3/16 of the divisor's bit is 3515.6 and 292.9); low power at PSC
+  49 (1.84 MHz) a pulse of 285..299 cycles at either rate, three periods
+  being 294; each judged within 12 cycles, a window derived from the
+  measuring loop's turn (10 cycles, interrupts masked) and the kernel
+  clock's grain (2); the far decoder takes 32 frames of 32 in all four
+  legs.
   THIS DECODER takes the far encoder's 32 of 32 - normal pulses at 9600
   and 115200, low-power ones (1.69 us) at 115200 and at 9600, where the
   pulse is a sixtieth of a bit, in normal mode and in low-power mode
@@ -840,16 +898,17 @@ frames this USART has no word for and RS-485 (no driver enable).
   and 0x95 - which the far G0's seven-bit mode tells apart - and on a
   9-bit word (the mark bit 8) every group whose low nibble is 5. ES0298
   2.13.3 STAGED - 8O1 frames into this 8E1 receiver, every one a parity
-  error, the control with no mute mode flagging all nine: muted by
-  SOFTWARE (RWU written), the first matching address wakes the receiver
-  with NO PE, its data and the next address with PE - REPRODUCED; muted
-  by the HARDWARE (a non-matching address set RWU), the matching
-  address after it wakes the receiver WITH PE, every address of the leg
-  flagged, three runs alike; awake under the address mark, the matching
-  address is checked as any frame. So the erratum - and 25.4.7's own
-  note, "the receiver does not check the parity of the address data" -
-  is the first address after a software mute; the far G0 flags it in
-  every case.
+  error, the control with no mute mode flagging all nine, and the wake
+  itself judged (0x85 and 0x95 alone wake the receiver, their data
+  flagged): muted by SOFTWARE (RWU written), the first matching address
+  woke the receiver with NO PE, the next address with PE; muted by the
+  HARDWARE (a non-matching address set RWU), the matching address after
+  it woke the receiver WITH PE, every address of the leg flagged, over
+  six runs; awake under the address mark, the matching address is
+  checked as any frame. The waking addresses' flags are printed, not
+  judged: on the desk's die the erratum - and 25.4.7's own note, "the
+  receiver does not check the parity of the address data" - is the first
+  address after a software mute; the far G0 flags it in every case.
 - **`set_baud()` at run time, and two interrupt enables** (`u`, twelve
   runs green): a `Uart` task brought up at 115200 - a rate the far chip
   is not speaking - and moved by `set_baud()` alone, the clock standing
@@ -860,9 +919,12 @@ frames this USART has no word for and RS-485 (no driver enable).
   rate: every one counted, timed within 35 ppm of the divisor's figure
   less the clocks' offset (letter 2's 200 ppm bound). TCIE, armed after
   the sixteenth of sixteen gapless frames at 115200, runs its vector once
-  173.2..173.8 us after that write - two frame times (173.6 us), the
-  write landing as the fifteenth enters the shifter, against the derived
-  window of one to two frames plus a microsecond. LBDIE in LIN mode
+  173.2..173.8 us after that write - two frame times (173.6 us, 31240
+  cycles), the write landing as the fifteenth enters the shifter -
+  against a window derived from the listing, the console drained first:
+  up to 100 cycles short (the write's stamp a wait's turn and a SysTick
+  late) and 150 long (the vector's entry and dispatch to its stamp, and a
+  SysTick). LBDIE in LIN mode
   (LBDL eleven bits) takes the far engine's 13-bit break to the vector
   once, the vector's clear leaving no LBD standing.
 
@@ -952,6 +1014,18 @@ Driver gaps:
 - Bytes out of order under a ring armed low: a consumer reading during a starved leg saw them in one
   control leg, on an image before the wait for a frame came down; 0 of 30 such legs on the final image.
   The cause is not known, so that is a rate and not a proof.
+- The receive engine's burst edge where ES0298 2.13.1 reaches: the edge
+  is the line's IDLE, which the polled receiver did not see after an idle
+  of about one frame before a faster sender's next character (letter
+  `7`'s stage); the erratum has no workaround, and the engine was not run
+  at those gaps - letter `7`'s stage played into the receive engine would
+  measure what a consumer is told there.
+- A parity error the task can miss while it transmits (ES0298 2.13.2):
+  one of 64 delivered as a clean byte in one run of 40 of letter `5`
+  (above); closing it needs the vector to tell a frame that completed
+  after its SR read from one it saw, which no register here offers short
+  of reading SR again after the DR write - not tried, and the mechanism
+  is inferred.
 - A wake from Stop: this USART has no wake unit (the G0's WUF); the
   power chapter says what a Stop does to a pending receive.
 - The receive errors' COUNTS under the engine are bounded, not exact

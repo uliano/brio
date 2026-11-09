@@ -213,7 +213,9 @@ both ends and cannot tell a wrong one, so letter `n` times a run of each
 rate's frames on TIM2 from the first store to TC against their time at
 the rate ASKED (usart.md, "The rate on the wire, timed", has the method
 and the USART's table): a hundredth of a second of frames, 16 at least
-and 1024 at most, judged -1 % to +3 %.
+and 1024 at most, judged -1 % to +3 % - and on the LSE 982 to 1023
+thousandths, the reading carrying the ruler's HSI16 error, which only
+there does not cancel (usart.md, "The rate on the wire, timed").
 
 | run | rate asked | STM32G0B1RE | STM32G071RB |
 |---|---|---|---|

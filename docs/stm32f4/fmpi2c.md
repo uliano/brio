@@ -632,7 +632,7 @@ The board is a Nucleo-F446RE at 180 MHz with 45 MHz on APB1, and the two
 pads are PC6 and PC7, wired to I2C1's PB8 and PB9 with a 2.2 kOhm
 pull-up on each line. Letters a to l but `f` see that bus with I2C1 silent -
 what a bus with nobody answering can be made to say - letter `f` runs I2C1 as a
-second host beside it, and letters m, q, r, u and v make I2C1 the target. `test_stm32f4_fmpi2c` is 122 verdicts over sixteen
+second host beside it, and letters m, q, r, u and v make I2C1 the target. `test_stm32f4_fmpi2c` is 121 verdicts over sixteen
 letters in `z`, green in three runs of three, letters `m` and `f` in ten of ten more, `q`,
 `r` and `u` in twelve of twelve more, and letter `v`, which `z` does not run, in fifteen of
 fifteen. The figures of every section below that names a suite are of one image of it, and of
@@ -712,10 +712,12 @@ makes the letter count again. These are thirteen runs on one image; another
 image's placement moves a row by a few of the loop's turns.
 
 With each APB1 row's measured tSYNC stated to `init()`, the same speeds give 99502,
-392156 or 393013 and 989010 Hz on the pad (1809, 459 or 458 and 182 core cycles of
-mean gap), where `scl_hz()`, the period formula with that tSYNC, states 99337, 394736
-and 1000000 Hz. Each is good to the prescaler's resolution and to the
-instrument's.
+392156 or 384615 and 1011235 Hz on the pad (1809, 459 or 468 and 178 core cycles of
+mean gap), where the period formula with that tSYNC states 1808, 456 or 460 and 180
+cycles. The letter judges each against a bound of some 21 cycles, derived: the two
+measurements' resolution (the instrument below), the stated tSYNC rounded to a
+kernel cycle, and two kernel periods by which the synchronization of a period's two
+edges (2 to 3 kernel periods each, 23.4.9) can differ between the runs.
 
 The instrument: a turn of the loop that counts the edges is 31 to 34 core cycles at
 180 MHz (the letter measures it: the cycles between the first and the last dated
@@ -764,9 +766,11 @@ it BUSY is clear and both lines read high: the STOP landed on the wire.
 
 **The idle time-out needs no peer.** TIMEOUTA with TIDLE set watches both
 lines standing high, which is what an empty bus does: armed at 50 us it
-raised TIMEOUT after **51.1 or 51.2 us**. It is a level and not an event -
-cleared on a bus that is still idle it came back in another 8984 or 8990 core
-cycles, 50 us again. The same code with TIDLE clear - the SCL-low watcher
+raised TIMEOUT after **51.1 or 51.2 us**, judged never sooner than the 9008 core
+cycles (TIMEOUTA + 1) x 4 kernel periods make after the enable (23.4.12), the 204 past
+them printed. Cleared on a bus that is still idle it came back in another 8975 to 8990
+core cycles, 50 us again: a level and not an event on this die, printed, since the
+manual says nothing of a clear on an idle bus. The same code with TIDLE clear - the SCL-low watcher
 - stayed quiet over the same wait, which is the two modes measured apart.
 
 **And an armed time-out reaches the error vector, where this host sweeps it.**
@@ -1136,7 +1140,7 @@ date RXNE late and shorten that window. Every poll is good to a turn of three re
 timed. The chapter states no bound on a stream's lag, and the load table above has tenures that had a
 running stream at STOPF, so the entry's read of SxCR is what a read on a stream rests on.
 
-**Against a partner board** (set `t`, letters `n`, `o`, `p` and `s`, 39 verdicts,
+**Against a partner board** (set `t`, letters `n`, `o`, `p` and `s`, 38 verdicts,
 green in three runs of three, letters `o`, `p` and `s` in twelve of twelve more). The bullets just below are letter `n`'s 12 verdicts;
 letters `o` and `p` have their own paragraphs after them, and `s` is in "A load makes a
 stream late by itself" and "The same stop on the host's own path" above. The
@@ -1150,8 +1154,8 @@ partner's command address would answer one of them.
   eight bytes at the 1 MHz row, byte-exact, the partner's target - solved
   for Fm+ - accounting 8 taken and 8 served; the write, on the pump, averages **768 to
   782 kHz** of SCL (81 periods in a stopwatch that holds the request's cost
-  and the partner's polled target stretching each byte), never above
-  the rate.
+  and the partner's polled target stretching each byte), judged never above
+  the ceiling the Fm+ word makes with the floor's tSYNC (1 MHz, 23.4.9).
 - **`unstick()` against a client that really holds SDA**: held by the
   partner's GPIO until four SCL falling edges (latched by its EXTI), the
   line is free at the **fourth pulse** and `unstick()` answers 4; held to
@@ -1176,7 +1180,12 @@ partner's command address would answer one of them.
   48 MHz solves TIMINGR for 12 MHz where 24 runs and the bus goes at **1809
   thousandths** of 100 kHz, and at 16 MHz at 1713, on a kernel clock read as 8 MHz.
   Derived, at core rates of 180, 48 and 16 MHz the bus goes at **954, 942 and 904
-  thousandths**, byte-exact against the partner at each.
+  thousandths**, byte-exact against the partner at each. The letter reads TIMINGR back
+  against the chooser's word for each rung's APB1 and judges the write never faster than
+  the ceiling that word makes with the floor's tSYNC (996, 1001 and 988 thousandths with
+  the truncations, 23.4.9) nor below a quarter under the rate asked (the framework's
+  window for an I2C clock, [overview.md](../design/overview.md)); how much slower inside
+  it - the request's own cost and the partner's polled target - is printed.
 
 **ES0298 2.12.8: no stall on the host's path, in the band or out of it.**
 The band is measured at one ratio, 2.81; the rest of it rests on the arithmetic
@@ -1220,7 +1229,9 @@ Two more controls show the
 letter can fail: a transmit interrupt taken away after `start()` parks a tenure
 with SCL low inside the same bound, the partner holding the byte `start()` stored,
 and a byte changed after its sum was taken
-moves the partner's sum by what was changed. Letter `o` was green in 15 runs of
+moves the partner's sum by what was changed. Whether the erratum reproduces in the
+control is printed and not judged: it is the behaviour of a die, which the errata
+sheet describes and does not promise. Letter `o` was green in 15 runs of
 15. No Request is longer than 255 bytes, so no write runs through RELOAD.
 
 **A refused write, position by position** (letter `p`, 12 verdicts): the partner

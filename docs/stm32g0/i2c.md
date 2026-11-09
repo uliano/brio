@@ -396,24 +396,26 @@ the reason is in the findings.
 
 ## Bench findings
 
-Measured by `test_stm32_i2c` on the Nucleo-G0B1RE, 238 verdicts
+Measured by `test_stm32_i2c` on the Nucleo-G0B1RE, 233 verdicts
 in two sets, `z` green in three runs, `w` in three, letters `c`, `u`, `v`
 and `B` in ten each and `C` and `D` in fifteen each
 (the letters named below are the suite's console keys, each the group of
 verdicts it runs). The findings ahead of "The peer bus" are the self-link's (I2C1 host
 PB8/PB9, I2C2 client PA11/PA12, both AF6, 2.2 kOhm pull-ups): `z`,
-letters `a`..`m`, `u`, `v`, `B`, `C` and `D`, **203 verdicts** and five checks skipped by
+letters `a`..`m`, `u`, `v`, `B`, `C` and `D`, **198 verdicts** and five checks skipped by
 name (a glitch source, the target's PEC check, the SMBus ALERT, the Stop on the self-link and
 ES0548 2.10.1's wrong sampling: no pad or wire here gives them), the cost sections
 `bench_stm32`'s on the same link. The ones under "The peer bus" are a
 second chip's, the STM32F446RE running `twi_peer` on the same two nodes:
 the second all-key `w`, letters `n`..`t`, **35 verdicts**.
 
-**The enable protection is real here, which is the opposite of the SPI's
-answer.** A raw write with PE set lands on none of the four PE-gated
-fields - TIMINGR, NOSTRETCH, ANFOFF and DNF all refuse - where
-`test_stm32_spi` measures the silicon enforcing not one line of 35.5.7.
-Two chapters of one manual, two different dispositions.
+**The driver refuses the four PE-gated fields with PE set; what the silicon
+does with such a write is printed, not judged.** 32.9.1 and 32.9.5 make
+TIMINGR, NOSTRETCH, ANFOFF and DNF the programmer's to write with PE clear
+and say nothing of a write with PE set. On the bench's STM32G0B1RE a raw
+write with PE set lands on none of the four, where `test_stm32_spi`
+measures that die's SPI taking every such write of 35.5.7 - one die each,
+recorded as a reading and not a property of the part.
 
 **The silicon names its own column of table 165.** 32.9.6 makes
 `I2C_TIMEOUTR` "reserved, and its bits are forced by hardware to 0" on an
@@ -503,7 +505,10 @@ under tSYNC - two kernel periods, tAF(min) and DNF x tI2CCLK an edge,
 three rungs become 100 / 400 / 1000 kHz at most on any wire; on this one
 letter `d` measures 97.1, 364.3 and 807.1 kHz, none above its speed.
 Stated to `init()`, the measured delay brings the 100 kHz rung to the
-rate asked within one per cent (measured); the arithmetic gives 400 and
+re-chosen register's own period on this wire - 99.6 kHz, its halves
+rounded up into prescaler units - judged to the synchronizer's jitter
+(32.4.9's third kernel period on either edge) and the chooser's rounding
+of the stated delay, 43 ns at 64 MHz, and never above the rate asked; the arithmetic gives 400 and
 970 kHz for the other two - the last held under the rate by table 171's
 tLOW, which the chooser keeps with the floor's edge rather than trust a
 split of the stated delay between the two edges.
@@ -513,10 +518,16 @@ controller's clock, so it carries every byte whatever TIMINGR made of
 the rate, and only the stopwatch can see a wrong one: every letter that
 sets an SCL rate times its tenure (9 SCL periods a byte and the address,
 START, STOP and the request's own cost inside the reading) against the
-speed the request named and judges it - never above it by more than
-2 %, and within a quarter below it, the wire's tSYNC (above) being what
-only lengthens a period. On the STM32G0B1RE, in thousandths of the rate
-asked:
+speed the request named and judges it never above it: the chooser
+rounds both halves up and charges the least detection delay any wire
+can have, and the stopwatch (SysTick on HCLK) shares the kernel's
+oscillator, so what is left is the reading's own truncation - 1001
+thousandths at most. How far below the rate a wire lands is its rise
+and a stretching target's, which no document of this board bounds, so
+the floor is the framework's window for an I2C clock, a quarter below
+the rate asked (750 thousandths; docs/design/overview.md, "A loop
+proves the bytes, never the rate"), a reading under it a finding to
+explain. On the STM32G0B1RE, in thousandths of the rate asked:
 
 | letter | tenure | rate asked | reading |
 |---|---|---|---|
@@ -566,16 +577,22 @@ NACK on an overrun follows, and the controller reads `i2c_nack_data`.
 With the target stretching, the same 1 MHz bus is byte-exact.
 
 **Clock stretching is linear and free of the data.** Commanded holds of
-20 / 50 / 100 us per event lengthen an 8-byte read by nine holds a step
-(the address event and eight bytes): from 20 to 50 us the tenure grew
-281 or 282 us against 270, from 50 to 100 by 468 or 469 against 450,
-byte-exact throughout. At holds of 20, 50 and 100 us a tenure runs 282, 563
-or 564 and 1032 us, where the baseline plus nine holds would be 419, 689 and
-1139: some 12 to 15 us a hold short, because
-a commanded hold lands on top of the client's own turnaround, its ISR's
-entry and read, which already stretch SCL in the unstretched baseline;
-the suite judges the slope, where most of that shortfall cancels (the slope itself
-reads 4 per cent over the commanded step). With NOSTRETCH set, a
+20 / 50 / 100 us per event lengthen an 8-byte read by TEN holds a step:
+the address event, the eight TXIS that load the bytes, and the TXIS the
+eighth byte's handoff to the shifter raises (32.4.8: TXIS whenever TXDR
+empties), whose byte is never clocked - the tenure ends at the host's
+completion, a vector of the same priority as the client's, which waits
+behind that tenth hold. From 20 to 50 us the tenure grew 299 to 301 us
+against 300, from 50 to 100 by 498 to 500 against 500, byte-exact
+throughout. The suite judges the step from 50 to 100 us, where no hold
+is shorter than the byte in the shifter and the STOP (25 us at
+400 kHz) and so none can hide, to 8 us: the readings' truncation,
+`delay_us()`'s poll turn on each of the ten holds and the SysTick
+handlers a millisecond's tenure meets. At holds of 20, 50 and 100 us a
+tenure runs 306 or 307, 606 or 607 and 1105 or 1106 us, short of the
+baseline plus ten holds by the client's own turnaround, its ISR's entry
+and read, which already stretch SCL in the unstretched baseline and
+which the step cancels. With NOSTRETCH set, a
 late target raises OVR and **0xFF goes out in the missing byte's place**,
 exactly as 32.4.8 says, while the tenure itself completes - an underrun
 is not a fault the controller sees.
@@ -630,7 +647,9 @@ reply; what will not fit the queue is rejected on the spot and every
 request is still answered exactly once; an idle bus votes for the sleep
 and a busy one against it; and a tenure into a wedged wire is answered
 **i2c_timeout at 20 ms, the arbiter's own limit, with SDA still low at
-the reply** - after which `recover()`'s PE cycle lets the same arbiter
+the reply** (judged no later than two ticks past the limit: one tick
+boundary can fall between the post and the arming, one between the
+maturity and the reply) - after which `recover()`'s PE cycle lets the same arbiter
 carry the next tenure to `i2c_ok`.
 
 **ES0548 2.10.2 did not fire once.** The spurious master BERR was swept 0
@@ -638,7 +657,7 @@ times across a whole `z` run. The driver counts it and never reports it -
 the erratum's own workaround - so `i2c_bus_error` from the host is
 `start()`'s answer below and never a flag this erratum can forge.
 
-**A START still standing is not taken by the ICR on this die.** 32.9.8 says
+**A START still standing is not taken by the ICR on the bench's die.** 32.9.8 says
 writing ADDRCF "also clears the START bit", and `start()` opens with that write.
 Letter `c` parks a START behind a held SDA with `I2c<n>`'s own verb, with ADDR not
 set: the START stands through the write, where the same sequence on the
@@ -646,7 +665,9 @@ STM32F446RE's FMPI2C takes it at once ([../stm32f4/fmpi2c.md](../stm32f4/fmpi2c.
 So the CR2 store at the end of `start()` can refuse (32.9.2 forbids moving CR2 while
 START stands), and the host answers `i2c_bus_error` with nothing on the wire and CR2
 unmoved; the first byte stays in TXDR, and under `dma` the channels stay started until
-`recover()` stops them. No request through the arbiter meets this: a parked tenure is
+`recover()` stops them. One die of each part, and nothing written says which is right:
+the letter prints which this die does and judges the driver's answer under either.
+No request through the arbiter meets this: a parked tenure is
 timed out, and `recover()`'s PE cycle, which the letter also judges, takes the START.
 
 ### The host's cost (bench_stm32 letter i)
@@ -1124,14 +1145,17 @@ two (letter `b`).
 parked where nobody calls answers `i2c_nack_addr` both to a write and to
 the empty request an address scanner sends, and a commanded refusal of
 the third data byte answers `i2c_nack_data`. Commanded stretching is
-priced against its own baseline - eight 8-byte tenures unstretched in 6
-ms, one 8-byte tenure at 2 ms a byte in 16 ms, completing `i2c_ok`: the
+priced against its own baseline - eight 8-byte tenures unstretched in
+about 6 ms, one 8-byte tenure at 2 ms a byte judged at least 15895 us
+(eight holds and two byte times, below, with this end's stopwatch on an
+HSI16 1.75 % slow, DS13560 table 44's two rows), completing `i2c_ok`: the
 controller simply waits, which is what flow control means.
 
 **The rate asked, between two chips** (letter `q`): the write's SCL at
 **950 and 859 thousandths** of 100 and 400 kHz in each of `w`'s three runs -
-under the rate, and inside the quarter the verdict allows, the request's
-own cost being inside the reading. All three speeds carry a write and a
+never above the rate and inside the quarter below it, which is what the
+verdict judges; how far under is the peer target's stretch and the
+request's own cost inside the reading. All three speeds carry a write and a
 read byte-exact, Fm+ included - at **722..723 thousandths of 1 MHz**,
 which is the far end's doing and not this controller's: the peer's
 target is a 400 kHz peripheral that stretches every byte, so the verdict on
@@ -1227,7 +1251,10 @@ data byte lengthens the tenure by N-1 holds and not N. The address match
 is a stretch too (ADDR holds the clock exactly as RXNE and TXIS do), so
 an instrument that spends its commanded hold at ADDR as well puts the
 full N back inside the measured window - which is how 2 ms a byte
-prices an 8-byte tenure at the 16 ms the model predicts.
+prices an 8-byte write at eight holds, 16 ms, plus the two byte times no
+hold overlaps (the address and the first byte; every later byte shifts in
+during the hold before the previous take, the block being one byte
+deep), the floor letter `p` judges.
 
 ### The stack under the preemptive kernel (`test_stm32_rubato_i2c`)
 
@@ -1385,7 +1412,7 @@ Read on this board from the peer letters: the three speeds byte-exact both ways,
 tenure shapes
 with the repeated START counted from the far end as two address matches,
 the whole vocabulary on the wire, commanded stretching at 2 ms a byte
-costing exactly 16 ms for eight, and the kernel letter running `I2cBus`
+costing eight holds and two byte times for a write of eight, and the kernel letter running `I2cBus`
 with an `i2c_timeout` recovered and the next tenure `i2c_ok`.
 
 ES0418's I2C items: **2.11.1** (the tSU;DAT floors) is the G0B1's 2.10.1
@@ -1490,7 +1517,7 @@ Implemented but not bench-verified:
   in letter a's refusals, but its pads carry no wire here.
 - **The suite as it stands on the two smaller parts.** It is built for the
   STM32G071RB and the STM32G031K8 and today's verdict counts are the
-  STM32G0B1RE's alone (203 and 35). Letters `u`, `v`, `C` and `D` and the figures of "Which engine"
+  STM32G0B1RE's alone (198 and 35). Letters `u`, `v`, `C` and `D` and the figures of "Which engine"
   are measured on the STM32G0B1RE only; those letters on a self-link on those two
   boards, and `bench_stm32`'s letter `i` there, would measure them. The STOPF entry is the
   one host's on all three, and its late path has run on neither smaller part: their DMA1 is
@@ -1579,8 +1606,8 @@ USART's receive channel would say whether that peripheral does.
   wire are alternate functions. The rate is carried by the register
   instead - the 16 MHz rung's own TIMINGR on the same 16 MHz kernel.
 - **The Fm+ drive's electrical effect.** With the drive on and off the
-  measured SCL period reads 1248 or 1249 ns and 1240 ns, under one per cent
-  apart and inside the verdict's 120 ns bound; 8.1.1 makes the drive a pad
+  measured SCL period reads 1248 to 1251 ns and 1240 to 1243 ns, under one
+  per cent apart, printed and not judged; 8.1.1 makes the drive a pad
   property and the period is TIMINGR's, so what the 20 mA buys is the edge,
   which an oscilloscope on the pads would see and no instrument on this
   board can.

@@ -46,7 +46,7 @@ channel pads); errata ES0548 Rev 3 items 2.7.1..2.7.3, read on the bench
 chip's revision Z column. Driver: `stm32g0/tim.hpp`; the per-instance
 presence and vector facts come from `stm32g0/device_tables.hpp` (the
 reserve: the table of what each part has, read off the device header).
-Bench suite: `test_stm32_tim` (13 letters, 128 verdicts, wireless; a
+Bench suite: `test_stm32_tim` (13 letters, 125 verdicts, wireless; a
 letter is one command key of the suite's console and the group of
 verdicts it runs). Family
 fixture `test/family_stm32g0/tim.cpp` plus seven negatives under
@@ -388,7 +388,9 @@ rising edges gave 12800 periods in 12800151 cycles edge-aligned
 (**1000.0 ticks where ARR + 1 = 1000**) and 6406 periods in 12800139
 cycles centre-aligned (**1998.1 ticks where 2 x ARR = 1998 and
 2 x (ARR + 1) = 2000**), so the measurement tells the two candidate
-formulas apart and 21.3.2's sequence, from 0 up to ARR - 1 and from ARR down
+formulas apart - its own resolution, derived from one edge of count and
+the reads around the window, is 3 tenths of a tick edge-aligned and 5
+centre-aligned, where the two formulas are 20 apart - and 21.3.2's sequence, from 0 up to ARR - 1 and from ARR down
 to 1, is right. The
 three CMS codes differ only in WHEN the compare flag rises: 100 flags in
 100 ms counting up, 200 counting both.
@@ -402,7 +404,9 @@ stores** exactly - a latch discards, and says exactly how much. (The
 stores are one fewer than the captures: the first edge has no previous
 one to measure an interval from.)
 
-**ES0548 2.7.2 did NOT reproduce.** Staged eight times with the
+**ES0548 2.7.2 did NOT reproduce** (printed, not judged: whether an
+erratum reproduces is a fact about one die, and the staging's control is
+what the letter judges). Staged eight times with the
 prescaler at its maximum so one counter tick is 1.024 ms: a match at
 CNT = CCR = ARR, then CCR moved to 0 inside that tick so the wrap makes a
 second match in the very next counter cycle. The first match fired eight
@@ -532,7 +536,10 @@ is what catches it.
 
 **The four with channels drive pads.** TIM4's FOUR at once, all on port
 B so one sampling loop reaches them: PB6/PB7/PB8/PB9 at AF9 read
-200/400/601/801 per mille against 200/400/600/800 asked. TIM14's single
+200/400/601/801 per mille against 200/400/600/800 asked (198..801 over
+the runs; the samplers read a duty to 17 per mille - their loops' phase
+lattice on the 1000-cycle waveform and the kernel tick's handler,
+always at the same phase - and that is the band judged). TIM14's single
 channel on **PA7 at AF4 - the very pad letter `g` drives as TIM1_CH1N at
 AF2** - reads 351 against 350, which is the alternate-function
 multiplexer made visible: one pad, two timers, the AF number choosing,
@@ -558,7 +565,7 @@ timer suite has no instrument for.
 ## On the STM32G071RB
 
 `test_stm32_tim` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID 0x2000)
-and scores **114/114** against the G0B1RE's 118, the difference being
+and scores **113/113** against the G0B1RE's 117, the difference being
 TIM4 and nothing else:
 
 - **NINE TIMERS, NOT TEN.** `tim_present(4)` is false, so `Tim<4>` does
@@ -598,7 +605,7 @@ timer.
 
 ## On the STM32G031K8
 
-`test_stm32_tim` scores **108 of 118** on the Nucleo-G031K8 (DEV_ID
+`test_stm32_tim` scores **107 of 117** on the Nucleo-G031K8 (DEV_ID
 0x466, REV_ID 0x1003). WHAT THIS PART HAS NOT GOT is four of the ten
 instances - TIM4, TIM6, TIM7 and TIM15 - so ten verdicts are skipped by
 name with `tim_present(n)` printed beside each: TIM4's counter, its four

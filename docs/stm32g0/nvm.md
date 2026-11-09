@@ -303,7 +303,9 @@ of 125 - so the high-voltage ramp is per double word and not per call.
 **Fast programming is what the datasheet says.** A whole row of 32
 double words under FSTPG takes **1682 us**, table 48's 1.7 ms typical
 (2.8 ms maximum); the same 256 bytes the ordinary way take **2801 us**,
-that table's 2.7 ms. 1682 us over 32 double words is about 52 us each:
+that table's 2.7 ms typical - judged only against its 4.6 ms maximum
+(4780 us on the core's HSI16 scale with the call's own work between the
+cells), since the table gives no minimum. 1682 us over 32 double words is about 52 us each:
 3.3.8's "around 20 us" bounds the interval between two double words'
 requests, not what each costs. The row is timed inside the critical
 section the mode needs, where the tick is frozen, so the window opens
@@ -322,7 +324,9 @@ down the same erase raises nothing at all.
 
 **Read-while-write, measured rather than assumed.** During a 22037 us
 erase of a bank-2 page, the polling loop in `flash.hpp` - which lives in
-bank 1 - completed **87879 turns**, one every 16 core cycles, with the
+bank 1 - completed **87879 turns**, one every 16 core cycles (the loop
+is six instructions in three words, at most 17 cycles a turn uncached
+even with no overlap of fetch and execution - the bound judged), with the
 instruction cache off for the measurement: a loop that small runs out of
 the cache without reading bank 1 at all, and would count its turns on a
 stalled bank too. With the cache off every turn fetches from bank 1, and

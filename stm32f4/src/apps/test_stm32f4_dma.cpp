@@ -161,6 +161,9 @@ using LoopSerial = Uart<console_instance, console_pins, rx_ring_bytes, 256, Cons
 constexpr uint32_t stress_ring_bytes = 256;
 using StressSerial = Uart<console_instance, console_pins, stress_ring_bytes, 256,
                           ConsoleTxEngine, ConsoleRxEngine>;
+/// The least a sink leg must receive to be called fed: two laps of that
+/// ring (letters u and p).
+constexpr uint32_t sink_fed_floor = 2u * stress_ring_bytes;
 
 TestBench<Serial, 20> bench;
 
@@ -616,11 +619,23 @@ void td_fifo() {
 void te_throughput() {
     Block::init();
     fill_source();
-    print(serial, "  ", buffer_bytes, " bytes at ", SysClock::hz / 1'000'000u,
-          " MHz, memory to memory, source and destination in SRAM:", crlf);
 
+    // Every rung is timed first and printed after, behind a drained console:
+    // a line going out while a block runs puts the transmit interrupt inside
+    // its span (util/test_wait.hpp).
+    if (!brio::console_drain<Ruler, Serial>()) {
+        bench.skip("the console did not drain: the ladder's spans would carry its handler");
+        return;
+    }
     constexpr DmaBurst bursts[3] = {DmaBurst::single, DmaBurst::incr4, DmaBurst::incr8};
     constexpr DmaWidth widths[3] = {DmaWidth::byte, DmaWidth::half, DmaWidth::word};
+    struct Rung {
+        uint8_t bytes_per;
+        uint8_t beats;
+        uint32_t cycles;
+        bool ok;
+    };
+    Rung rungs[9] = {};
     uint8_t ran = 0, exact = 0;
     uint32_t single_of[3] = {0, 0, 0};   ///< the single-beat cycles per width
     uint32_t burst_best[3] = {0, 0, 0};  ///< the best BURST cycles per width
@@ -642,8 +657,9 @@ void te_throughput() {
             t.config.peripheral_burst = bursts[b];
             const uint32_t cycles = timed_block(t);
             Work::stop();
-            ++ran;
             const bool ok = cycles != 0u && same(buffer_bytes);
+            rungs[ran] = {bytes_per, static_cast<uint8_t>(dma_burst_beats(bursts[b])), cycles, ok};
+            ++ran;
             if (ok) {
                 ++exact;
             }
@@ -652,12 +668,18 @@ void te_throughput() {
             } else if (cycles != 0u && (burst_best[w] == 0u || cycles < burst_best[w])) {
                 burst_best[w] = cycles;
             }
-            const uint32_t per100 = cycles == 0u ? 0u : (buffer_bytes * 100u) / cycles;
-            print(serial, "    ", static_cast<uint32_t>(bytes_per), "-byte beats, burst ",
-                  static_cast<uint32_t>(dma_burst_beats(bursts[b])), ": ", cycles, " cycles (",
-                  per100, " bytes per 100 cycles, ", cycles / cycles_per_us, " us)",
-                  ok ? "" : "  MISMATCH", crlf);
         }
+    }
+
+    print(serial, "  ", buffer_bytes, " bytes at ", SysClock::hz / 1'000'000u,
+          " MHz, memory to memory, source and destination in SRAM:", crlf);
+    for (uint8_t k = 0; k < ran; ++k) {
+        const Rung& g = rungs[k];
+        const uint32_t per100 = g.cycles == 0u ? 0u : (buffer_bytes * 100u) / g.cycles;
+        print(serial, "    ", static_cast<uint32_t>(g.bytes_per), "-byte beats, burst ",
+              static_cast<uint32_t>(g.beats), ": ", g.cycles, " cycles (", per100,
+              " bytes per 100 cycles, ", g.cycles / cycles_per_us, " us)",
+              g.ok ? "" : "  MISMATCH", crlf);
     }
     bench.verdict("every width and burst moved the block exactly", ran != 0u && exact == ran);
     // The WIDTH is what buys the throughput - a word beat moves four
@@ -1015,6 +1037,16 @@ void tk_priority() {
     // second stream can STALL after its first FIFO fill on one part of the
     // family (measured below, reported and not judged); the timed races
     // keep the gap so that what they measure is the arbitration.
+    // Every race is run first and printed after, behind a drained console:
+    // a line going out while the streams race puts the transmit interrupt
+    // inside the spans (util/test_wait.hpp).
+    struct Stall {
+        bool seen = false;
+        bool enabled = false;
+        uint32_t ndtr = 0;
+        uint32_t flags = 0;
+    };
+    static Stall stall;
     auto race = [](DmaPriority work, DmaPriority rival, bool gap) {
         DmaTransfer a = mem_to_mem(rival_bytes, DmaWidth::byte, DmaBurst::single,
                                    DmaFifoThreshold::full, work);
@@ -1046,16 +1078,19 @@ void tk_priority() {
                 return first != 0u && second != 0u;
             },
             2'000);
-        if (second == 0u) {
-            print(serial, "    the second stream STALLED: EN=", Rival::enabled() ? 1u : 0u,
-                  " NDTR=", Rival::regs().NDTR, " of ", rival_bytes, " flags=",
-                  hex(Rival::flags()), crlf);
+        if (second == 0u && !stall.seen) {
+            stall = {true, Rival::enabled(), Rival::regs().NDTR, Rival::flags()};
         }
         Work::stop();
         Rival::stop();
         return static_cast<uint64_t>(first) << 32 | second;
     };
 
+    stall = Stall{};
+    if (!brio::console_drain<Ruler, Serial>()) {
+        bench.skip("the console did not drain: the races' spans would carry its handler");
+        return;
+    }
     // What the same block costs with nobody to share the ports with -
     // the yardstick both racers are measured against.
     const uint32_t alone =
@@ -1065,11 +1100,9 @@ void tk_priority() {
 
     // First the back-to-back start, both ways, as a probe: does the second
     // enable's stream run at all?
-    print(serial, "  two enables back to back, the low stream second:", crlf);
     const uint64_t bb = race(DmaPriority::very_high, DmaPriority::low, false);
     const bool stalled = static_cast<uint32_t>(bb) == 0u;
-    print(serial, "    ", stalled ? "the low stream stalled and never finished"
-                                  : "both streams finished", crlf);
+    const Stall bb_stall = stall;
     const uint64_t low_high = race(DmaPriority::low, DmaPriority::very_high, true);
     const uint32_t s0_low = static_cast<uint32_t>(low_high >> 32);
     const uint32_t s3_high = static_cast<uint32_t>(low_high);
@@ -1077,6 +1110,18 @@ void tk_priority() {
     const uint32_t s0_high = static_cast<uint32_t>(high_low >> 32);
     const uint32_t s3_low = static_cast<uint32_t>(high_low);
 
+    print(serial, "  two enables back to back, the low stream second:", crlf);
+    if (bb_stall.seen) {
+        print(serial, "    the second stream STALLED: EN=", bb_stall.enabled ? 1u : 0u,
+              " NDTR=", bb_stall.ndtr, " of ", rival_bytes, " flags=", hex(bb_stall.flags),
+              crlf);
+    }
+    print(serial, "    ", stalled ? "the low stream stalled and never finished"
+                                  : "both streams finished", crlf);
+    if (stall.seen && !bb_stall.seen) {
+        print(serial, "    a timed race's second stream STALLED: EN=", stall.enabled ? 1u : 0u,
+              " NDTR=", stall.ndtr, " of ", rival_bytes, " flags=", hex(stall.flags), crlf);
+    }
     print(serial, "  ", rival_bytes, " bytes alone: ", alone, " cycles", crlf);
     print(serial, "  with a few cycles between the two enables:", crlf);
     print(serial, "  ", rival_bytes, " bytes each, both streams started together:", crlf);
@@ -1268,10 +1313,23 @@ void tl_engines() {
     // A byte is ten bits on the wire at 115200, so the block's own
     // length says how long it must have taken: the time measures the
     // LINE and not the ring, which is the whole claim of a DMA console.
+    // The bound, derived: r.millis is the difference of two reads of the
+    // 1 kHz tick count, so it reads the true span T to within one tick
+    // either way (T - 1 < millis < T + 1). T is the line's time
+    // queued x 10 / baud: `expected` truncates it to whole milliseconds
+    // (0 to 1 ms low), the BRR's rounding to the nearest sixteenth of
+    // USARTDIV leaves the rate within 0.5 / (16 x 24.4) = 0.13 % of 115200
+    // on the slowest console clock here, 45 MHz (0.07 ms on 575 bytes), and
+    // the crystal adds under 0.05 ms even at 1000 ppm. The stream's re-arm
+    // between two ring runs happens while DR and the shifter still hold
+    // two frames (174 us), so the line never idles inside the block. So
+    // expected - 1.12 < millis < expected + 2.12: in whole milliseconds,
+    // expected - 1 to expected + 2.
     const uint32_t expected = r.queued * 10'000u / 115200u;
-    print(serial, "  the line's own time for ", r.queued, " bytes is ", expected, " ms", crlf);
+    print(serial, "  the line's own time for ", r.queued, " bytes is ", expected,
+          " ms (the bound ", expected - 1u, " to ", expected + 2u, " ms)", crlf);
     bench.verdict("the time is the line's, not the CPU's",
-                  r.millis + 5u >= expected && r.millis <= expected + 5u);
+                  r.millis + 1u >= expected && r.millis <= expected + 2u);
 }
 
 // ---- m  the circular receive, on the transmitter's own echo ---------------------------
@@ -1627,17 +1685,34 @@ void ts_copy_widths() {
                                     reinterpret_cast<const uint32_t*>(cp_src + 2), 4u) &&
                       !Copier::busy());
 
-    // abandon(): a 4096-word block stopped a few microseconds in - true,
-    // the engine free, the block counted lost, part of it landed - and the
-    // engine copies whole again right after.
+    // abandon(): a 1024-word block stopped two microseconds after its
+    // first word landed - true, the engine free, the block counted lost,
+    // part of it landed - and the engine copies whole again right after.
+    // Why part of it, derived: the first word has landed before the clock
+    // starts, so at least one did; and the memory port is one AHB master,
+    // one 32-bit data phase a cycle at most, so the other 1023 words need
+    // at least 1023 HCLK cycles (5.7 us at 180 MHz, 10.2 us at 100 MHz),
+    // while abandon() is reached 2 us (delay_us) plus a few dozen
+    // instructions after the first word - masked, so no handler lands in
+    // between - and the stream stops issuing beats when EN falls.
     for (uint32_t i = 0; i < 1024u; ++i) {
         load_src[0][i] = 0xA5A50000u + i;
         load_dst[0][i] = 0u;
     }
     const uint32_t faults0 = Copier::faults();
-    const bool started = Copier::copy(&load_dst[0][0], &load_src[0][0], 1024u);
-    (void)delay_us(clock, 2);
-    const bool stopped = Copier::abandon();
+    bool started = false;
+    bool first_word = false;
+    bool stopped = false;
+    {
+        const InterruptGuard masked;
+        started = Copier::copy(&load_dst[0][0], &load_src[0][0], 1024u);
+        volatile const uint32_t* const head = &load_dst[0][0];
+        // A word copy of this letter starts within microseconds; 100 us
+        // is the time-out, and a block that never started is judged below.
+        first_word = brio::wait_until<Ruler>([head] { return *head != 0u; }, 100);
+        (void)delay_us(clock, 2);
+        stopped = Copier::abandon();
+    }
     uint32_t landed = 0;
     for (const uint32_t w : load_dst[0]) {
         landed += w != 0u ? 1u : 0u;
@@ -1646,13 +1721,14 @@ void ts_copy_widths() {
     const bool again = Copier::copy(&load_dst[1][0], &load_src[0][0], 1024u) &&
                        brio::wait_until<Ruler>([] { return !Copier::busy(); }, cp_budget_us) &&
                        load_dst[1][1023] == 0xA5A503FFu && load_dst[1][0] == 0xA5A50000u;
-    print(serial, "  abandon() 2 us into a 1024-word block: ", stopped ? "true" : "false",
+    print(serial, "  abandon() 2 us after the first word of a 1024-word block",
+          first_word ? "" : " (the first word NEVER landed)", ": ", stopped ? "true" : "false",
           ", ", landed, " words had landed, the engine ", freed ? "free" : "NOT free",
           ", the next block ", again ? "whole" : "WRONG", crlf);
     bench.verdict("abandon(): a running block stopped where it is and counted lost, part "
                   "of it landed, and the engine copies whole again at once",
-                  started && stopped && landed > 0u && landed < 1024u && freed && again &&
-                      !Copier::abandon());
+                  started && first_word && stopped && landed > 0u && landed < 1024u && freed &&
+                      again && !Copier::abandon());
 }
 
 
@@ -1784,9 +1860,11 @@ void tu_stress() {
               leg.lost, " lost in all, ", leg.bad, " bad, the first gap at byte ", leg.first_gap,
               "; ", leg.looks, " look(s), laps missed ", leg.rx_overruns, ", ORE ",
               leg.hw_overruns, ", line errors ", leg.line_errors, ", faults ", leg.faults, crlf);
-        // The bridge carries what it carries: a quarter of the line's own
-        // rate over the pump's second is enough to call the leg fed.
-        if (!leg.up || leg.in < baud / 10u / 4u) {
+        // FED means the host's stream exercised what the letter judges: at
+        // least two laps of the receive ring, so the circular stream wrapped
+        // under the consumer twice. How much more the host sends is the
+        // bridge's carriage, which no document here states (printed above).
+        if (!leg.up || leg.in < sink_fed_floor) {
             all_fed = false;
         }
         if (leg.gaps != 0u || leg.bad != 0u || leg.first_gap != 0u || leg.rx_overruns != 0u ||
@@ -1794,7 +1872,8 @@ void tu_stress() {
             all_whole = false;
         }
     }
-    bench.verdict("the host fed every rung (brio stress on the other end)", all_fed);
+    bench.verdict("the host fed every rung, two laps of the receive ring at least (brio "
+                  "stress on the other end)", all_fed);
     bench.verdict("and every byte it sent arrived, in order, at every rung: none lost "
                   "between laps, no lap missed, no overrun in silicon",
                   all_whole);
@@ -1840,7 +1919,7 @@ void tp_ring_beside_copies() {
                   leg.lost, " lost, ", leg.bad, " bad; laps missed ", leg.rx_overruns,
                   ", ORE ", leg.hw_overruns, ", line errors ", leg.line_errors, ", faults ",
                   leg.faults, crlf);
-            if (!leg.up || leg.in < baud / 10u / 4u) {
+            if (!leg.up || leg.in < sink_fed_floor) {
                 all_fed = false;
             }
             // The whole window: a restart in every millisecond of it (the
@@ -1855,7 +1934,8 @@ void tp_ring_beside_copies() {
             }
         }
     }
-    bench.verdict("the host fed every leg (brio stress on the other end)", all_fed);
+    bench.verdict("the host fed every leg, two laps of the receive ring at least (brio "
+                  "stress on the other end)", all_fed);
     bench.verdict("the four copies ran the whole window, block after block", all_loaded);
     bench.verdict("THE RING AT ITS DEFAULT LEVEL LOSES NOTHING beside four copies on DMA2, at "
                   "their own level and at very_high: every byte in order, no overrun",

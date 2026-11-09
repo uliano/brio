@@ -717,14 +717,25 @@ void td_scan() {
     print(serial, "  from Mid: a post to Low (asks nothing) ", quiet,
           " cycles; a post to High (road 2, High's dispatch inside) ", road2,
           " cycles; the scheduling's share ", road2 > quiet ? road2 - quiet : 0u, crlf);
-    // The rulers. Each pair of reads in the span is taken back to back,
-    // so the two deltas differ by the skew between the pairs: at most the
-    // composed read's own length (its two-read cost, about 65) plus one
-    // retry of its loop when a reload falls between its reads (another
-    // 65); 160 is the two with a fifth.
+    // The rulers. Both count HCLK (SysTick on the processor clock, TIM2 on
+    // PCLK = HCLK), so over the span their deltas differ only by how the
+    // skew between the two reads of a pair changed from the first pair to
+    // the second. In the listing both pairs call the same cycles() and
+    // load TIM2's CNT as the first instruction after its return; the
+    // composed value is the VAL load of cycles()' last pass through its
+    // loop, so a retry (a reload between its two pending reads) runs
+    // BEFORE the sample and moves nothing. What can differ is only
+    // whether each 64-bit flash line on the way from that VAL load to the
+    // CNT load - six of cycles()' tail and the one at the return target -
+    // is fetched with or without LATENCY's two wait states (RM0444 3.3.4,
+    // 64 MHz): at most 7 x 2 = 14 cycles. Masked, no handler lands
+    // between the two reads of a pair.
+    constexpr uint32_t agree_max = 14u;
     bench.verdict("TIM2 reads cheaper than the ticker's composed cycles()", ruler < ticker_ruler);
-    bench.verdict("the two rulers agree over the span within 160 cycles (both count HCLK)",
-                  agree_hi <= 160u);
+    bench.verdict("the two rulers agree over the span within 14 cycles (both count HCLK; "
+                  "the skew between the two reads of a pair is the same instructions "
+                  "twice, its flash fetches the only difference)",
+                  agree_hi <= agree_max);
     // The bounds below are the release listing's count at zero wait
     // states (the core's table, letter c's comment), plus every refill
     // the path can pay - up to 3 cycles at each call, return and taken

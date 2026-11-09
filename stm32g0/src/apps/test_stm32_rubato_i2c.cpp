@@ -255,10 +255,17 @@ struct I2cTraits {
     /// tenure (the controller NACKs the eighth after it), nine holds. A
     /// write of 8: the tenure ends once the eighth byte can complete, which
     /// needs DR emptied of the seventh - the take after the seventh hold -
-    /// so the address and seven, eight holds. The wire adds nine byte times
-    /// (810 us at 100 kHz), more than this end's HSI16 can take off eight
-    /// or nine milliseconds (1 %, docs/stm32g0/clock.md), so the bound is
-    /// the holds alone.
+    /// so the address and seven, eight holds. The peer's holds are spins on
+    /// its cycle counter, at least the hold on the crystal behind its PLL;
+    /// this end's ruler (TIM2) runs on the HSI16, whose lowest is DS13560
+    /// table 44's 15.88 MHz at 30 C less its drift row's 1 % over 0..85 C,
+    /// -1.75 % in all: 158 us off nine milliseconds and 140 off eight. The
+    /// wire the holds do not overlap covers each: the read's nine byte
+    /// times (the address and eight, each given after its hold and shifted
+    /// whole before the next, 810 us at 100 kHz) and the write's two (the
+    /// address and the first byte; every later one shifts in during the
+    /// hold before the previous take, 180 us). So the bound is the holds
+    /// alone.
     static constexpr uint8_t stretch_write_holds = 8;
     static constexpr uint8_t stretch_read_holds = 9;
 };

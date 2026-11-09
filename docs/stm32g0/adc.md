@@ -52,7 +52,7 @@ ES0548 Rev 3 items 2.6.1..2.6.5, read on the bench chip's revision Z
 column. Driver: `stm32g0/adc.hpp`; the reference vocabulary is
 `stm32g0/vref.hpp`'s (see [vref.md](vref.md)), the per-part facts come
 from `stm32g0/device_tables.hpp` (the reserve: the table of what each part has, read off the device header). Bench suite:
-`test_stm32_analog` (18 letters, 138 verdicts, wireless; a letter is one command key of the suite's console and the group of verdicts it runs),
+`test_stm32_analog` (18 letters, 137 verdicts, wireless; a letter is one command key of the suite's console and the group of verdicts it runs),
 shared with the DAC, the reference buffer and the comparators. Family fixture
 `test/family_stm32g0/adc.cpp` plus four negatives under
 `brio check stm32g0`.
@@ -231,19 +231,26 @@ the asynchronous clock at 8 MHz: 160.5 cycles there is 20 us.
 **CONVERSION TIME IS EXACT TO THE CPU CYCLE.** With CKMODE = PCLK/2 the
 ADC clock is exactly half the CPU clock, so 15.3.9's tSMPL + tSAR is an
 integer number of CPU cycles and a DMA channel counting 256 conversions
-measures it with no reader in the loop:
+measures it with no reader in the loop. The span also holds what is paid
+once - the trigger and data-register latencies (DS13560 table 62), the
+start's call, the poll's turn on the channel's flag and the ruler's
+reads, under 384 cycles by the listing's count - so divided by 256 it
+reads the prediction or one CPU cycle (half an ADC cycle) over it, and
+that is the band judged. Over the runs on record (ADC cycles, and the
+CPU cycles of the 256):
 
 | sampling + tSAR | predicted | measured | CPU cycles / 256 conversions |
 |---|---|---|---|
-| 1.5 + 12.5 (12-bit) | 14.0 | **14.0** | 7278 |
-| 3.5 + 12.5 | 16.0 | **16.0** | 8298 |
-| 7.5 + 12.5 | 20.0 | **20.0** | 10348 |
-| 39.5 + 12.5 | 52.0 | **52.0** | 26728 |
-| 7.5 + 6.5 (6-bit) | 14.0 | **14.0** | 7272 |
-| 160.5 + 12.5 | 173.0 | **173.0** | 88676 |
+| 1.5 + 12.5 (12-bit) | 14.0 | **14.0..14.5** | 7290..7411 |
+| 3.5 + 12.5 | 16.0 | **16.0..16.5** | 8310..8360 |
+| 7.5 + 12.5 | 20.0 | **20.0..20.5** | 10360..10426 |
+| 39.5 + 12.5 | 52.0 | **52.0..52.5** | 26740..26803 |
+| 7.5 + 6.5 (6-bit) | 14.0 | **14.0..14.5** | 7284..7340 |
+| 160.5 + 12.5 | 173.0 | **173.0..173.5** | 88693..88774 |
 
-Table 76's four tSAR rows and the eight sampling times are therefore
-right to the cycle, and so is the resolution's own saving.
+The once-paid part is 116 to 243 cycles in those runs. Table 76's four
+tSAR rows and the eight sampling times are therefore right to the cycle,
+and so is the resolution's own saving.
 
 **ES0548 2.6.4 measured, and the answer is one cycle.** The erratum says
 a sampling time of 1.5 or 3.5 cycles takes one extra cycle on a SINGLE
@@ -255,7 +262,11 @@ short conversion pays the erratum's one ADC cycle, two CPU cycles at
 twice fADC. THE INSTRUMENT IS THE CORE'S WAKE, NOT A POLL: masked, the
 core sleeps in WFI from the start until EOC pends the converter's line,
 and the 7.5 -> 39.5 step on the same instrument, where neither time is
-the erratum's, reads exactly the chapter's 64. A polled read cannot
+the erratum's, reads exactly the chapter's 64 - the letter's CONTROL,
+judged within one CPU cycle (each start falls on either CPU cycle of an
+ADC clock period). The erratum's step itself is printed and not judged:
+an erratum describes the dies its sheet was written on, and one die on
+the desk does not make it the family's. A polled read cannot
 resolve this step - its loop, an APB read of ADC_ISR, a test and two
 branches, is about as long as the twelve cycles it would measure, so it
 rounds each end of conversion up to its next look, and where the looks
@@ -445,7 +456,8 @@ a `disable()` whose failure aborts the rebase. There is no third store.
 `configure_while_enabled()` is the deliberate staging ground and is named
 for what it is. 2.6.6 corrects the trigger latency figures to 6.5 / 12.5
 / 3.5 PCLK cycles typical; no letter of this suite measures a trigger
-latency, so nothing here is judged against them.
+latency, and letter c's band only counts the CKMODE 01 figure among the
+cycles a timed run pays once.
 
 The only ADC-side letter that moves is letter q's trigger census: table
 75's TIM4_TRGO row needs a TIM4, so a part without one walks five timer
@@ -454,7 +466,7 @@ rows instead of six and says so.
 ## On the STM32G031K8
 
 On the Nucleo-G031K8 (DEV_ID 0x466, REV_ID 0x1003) `test_stm32_analog`
-claims **67 of its 138** verdicts, and the shortfall is not the ADC's:
+claims **67 of its 137** verdicts, and the shortfall is not the ADC's:
 **this part has no DAC and no comparators at all**, so eight of the
 suite's eighteen letters (the DAC's four - `d`, `e`, `o`, `p` - the
 comparators' three - `i`, `m`, `n` - and `k`, which pairs a DAC stream

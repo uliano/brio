@@ -385,9 +385,9 @@ constexpr uint16_t block_len = 32;
 /// cycles of transfer, four times the length that failed and sixty times
 /// the entry it has to outlive.
 ///
-/// AND IT IS THE BUDGET'S LAST WORD. At 256 the small part's image is
-/// 6288 bytes of data and bss, which leaves 1904 for the stack of an 8 KB
-/// SRAM - and the linker says nothing when that number goes down, so an
+/// AND IT IS THE BUDGET'S LAST WORD. At 256 the small part's first image
+/// is 6360 bytes of data and bss, which leaves 1832 for the stack of an
+/// 8 KB SRAM - and the linker says nothing when that number goes down, so an
 /// edit that adds an array here has to check it (arm-none-eabi-size on
 /// the .elf: data + bss, against 8192 less the stack the suite wants).
 #if defined(STM32G031xx)
@@ -800,9 +800,13 @@ void tb_mem_to_mem() {
                   "twelve times into twelve", fill_ok);
 
     // The throughput, at the width that costs least per byte. The block
-    // is `big_words` long, which is what the part's SRAM allows; the
-    // per-word cost is what the verdict is about and the line prints the
-    // length it was measured over.
+    // is `big_words` long, which is what the part's SRAM allows, and the
+    // line prints the length it was measured over. The lines above are
+    // still leaving through the console's transmit engine, whose channel
+    // would take bus slots from the block and whose interrupt would land
+    // in the span, so the console is drained first and the figure is
+    // printed after the measurement.
+    const bool quiet = brio::console_drain<Ruler, Serial>();
     for (uint16_t i = 0; i < big_words; ++i) {
         big_src[i] = 0x5A000000u + i;
         big_dst[i] = 0;
@@ -817,13 +821,23 @@ void tb_mem_to_mem() {
     }
     const uint32_t bytes = big_words * 4u;
     const uint32_t kbs = cyc == 0u ? 0u : (bytes * (SysClock::hz / 1000u)) / cyc;
+    const uint32_t cpw_hundredths = (cyc * 100u) / big_words;
     print(serial, "  ", big_words, " words (", bytes, " bytes) in ", cyc,
-          " cycles = ", cyc / big_words, " cycles per word, ", kbs,
-          " kB/s at 64 MHz", crlf);
-    bench.verdict("the whole block crosses SRAM byte-exact, and one word costs "
-                  "the two AHB accesses 10.4.3 describes and no more than five "
-                  "cycles",
-                  big_ok && cyc / big_words <= 5u);
+          " cycles = ", cpw_hundredths / 100u, ".", (cpw_hundredths % 100u) / 10u,
+          (cpw_hundredths % 10u), " cycles per word, ", kbs, " kB/s at 64 MHz",
+          quiet ? "" : " (the console did not drain: the span may carry its transfers)",
+          crlf);
+    // THE COST IS PRINTED, NOT JUDGED: the chapter gives no cycle figure
+    // for a transfer, so no upper bound can be drawn from it. What 10.4.3
+    // does give is a FLOOR: every single transfer is two AHB transfers, a
+    // read and a write, and each takes at least one bus cycle, so a word
+    // cannot cost under 2 cycles - a span shorter than that is a ruler
+    // that read short or a block that never ran. Anything that lengthens
+    // the span only moves it further from the floor.
+    bench.verdict("the whole block crosses SRAM byte-exact, and no faster than "
+                  "the two AHB transfers 10.4.3 puts in every single transfer "
+                  "allow: at least 2 cycles a word",
+                  big_ok && cyc >= 2u * big_words);
 
     quiet_everything();
 }
@@ -956,27 +970,60 @@ void tc_arbitration() {
         return static_cast<int32_t>(left_b) - static_cast<int32_t>(left_a);
     };
 
+    // The console's transmit channel is a third requester the alternation
+    // would serve between the two (one slot per byte it moves), so the
+    // lines above leave the wire before the races.
+    if (!brio::console_drain<Ruler, Serial>()) {
+        bench.skip("the console did not drain: its transmit channel would take "
+                   "slots in the races");
+        quiet_everything();
+        return;
+    }
     const int32_t a_high = race(DmaPriority::very_high, DmaPriority::low);
     const int32_t b_high = race(DmaPriority::low, DmaPriority::very_high);
     const int32_t equal = race(DmaPriority::medium, DmaPriority::medium);
     print(serial, "  two MEM2MEM channels, lead of channel 1 over channel 2 at "
                   "the first finish (of ", big_words, "): very_high vs low ",
           a_high, ", low vs very_high ", b_high, ", equal ", equal, crlf);
+    // THE BOUND, from the listing and 10.4.3/10.4.4. Channel 1's EN is
+    // written first and channel 2's one call later: from the first store
+    // to the second, nine instructions (the read back and the return of
+    // channel 1's enable(), the call, the bit and the literal, the
+    // read-modify-write of channel 2's CCR) - 16 cycles at zero wait
+    // states (the return 2, the call 3, the loads 2 each), 22 with
+    // LATENCY's two wait states (RM0444 3.3.4, 64 MHz) on the return, the
+    // call and the literal load. Channel 1 runs alone through them, and
+    // 10.4.3 puts two AHB transfers - two bus cycles at the least - in
+    // every single transfer: at most 11 words of head start. The
+    // alternation then keeps the order, one transfer each, so when
+    // channel 1 moves its last word channel 2 is behind by that head
+    // start plus the alternation's own one, plus one more if the arbiter
+    // took a transfer to see channel 2's request: 13. The poll reads the
+    // two counts after the finish, so channel 2's progress meanwhile, or
+    // any interrupt that lengthens the poll, can only SHRINK the lead,
+    // and a count is never negative: 0..13. A software priority obeyed
+    // would put the very-high channel a whole block ahead.
+    constexpr int32_t lead_max = 13;
     bench.verdict("TWO MEMORY-TO-MEMORY CHANNELS ALTERNATE ONE TRANSFER EACH, "
                   "and the software priority does not enter into it - 10.4.4 "
                   "says so in a clause easy to read past (\"the arbiter "
                   "automatically alternates and grants the other "
                   "highest-priority requested channel, WHICH MAY BE OF LOWER "
                   "PRIORITY than the memory-to-memory channel\"): at the "
-                  "first finish the loser is within eight of the whole "
-                  "block, whatever the two levels are",
-                  a_high >= 0 && a_high <= 8 && b_high >= 0 && b_high <= 8 &&
-                      equal >= 0 && equal <= 8);
-    bench.verdict("and the small lead that is left is the HARDWARE tie-break: "
-                  "channel 1 is ahead in all three arrangements, including "
-                  "the one where it is the LOW-priority channel - the lower "
-                  "index wins and no register configures it",
-                  a_high > 0 && b_high > 0 && equal > 0);
+                  "first finish the loser is within 13 of the whole block - "
+                  "the head start the enable order gives channel 1 and the "
+                  "alternation's own one - whatever the two levels are",
+                  a_high >= 0 && a_high <= lead_max && b_high >= 0 &&
+                      b_high <= lead_max && equal >= 0 && equal <= lead_max);
+    // WHICH CHANNEL IS AHEAD IS PRINTED, NOT JUDGED: channel 1 is both the
+    // lower index (10.4.4's hardware tie-break) and the channel enabled
+    // first (the head start above), so this stimulus cannot tell the two
+    // apart, and a poll that reads late can bring the lead to 0.
+    print(serial, "  channel 1 ahead in ",
+          static_cast<uint32_t>(a_high > 0) + static_cast<uint32_t>(b_high > 0) +
+              static_cast<uint32_t>(equal > 0),
+          " of the three arrangements - the lower index and the channel "
+          "enabled first, which this stimulus does not separate", crlf);
 
     // So the software priority needs channels the arbiter does NOT
     // alternate by design: two REQUEST-DRIVEN ones, asking faster than
@@ -1271,16 +1318,27 @@ void tf_multiplexer() {
     (void)ChE::enable(true);
 
     brio::spin_us<Ruler>(10'000);   // 10 ms = ten triggers
+    // A batch is four requests served within a microsecond of the edge
+    // (CNT 0, OC1REF's rise in PWM mode 1); with TIM14's count past 2 of
+    // its 1 MHz steps the last batch is whole when the count is read.
+    (void)brio::wait_until<Ruler>([] { return T14::count() >= 2u; }, 2'000);
     const uint16_t moved = generated_so_far(64);
     Gen0::enable(false);
     ChE::stop();
     print(serial, "  TIM14_OC at 1 kHz, GNBREQ + 1 = ", batch, " requests a "
           "trigger: ", moved, " words moved in 10 ms (", moved / batch,
           " triggers)", crlf);
+    // THE BAND, by the code's own arithmetic: TIM14 and the ruler run on
+    // one clock (TIM14 divides the 64 MHz by 64 x 1000 exactly), so the
+    // HSI's error cancels; the generator's window - from its enable to
+    // the read - is at least the 10 ms spin and under 11 ms (the spin's
+    // overshoot and the wait above are microseconds), and holds 10 or 11
+    // rising edges: 40 or 44 words.
     bench.verdict("THE REQUEST GENERATOR TURNS AN EDGE INTO DMA REQUESTS "
-                  "(11.4.5): ten triggers of four requests each moved 40 "
-                  "words, plus or minus one trigger's worth",
-                  gen_ok && moved >= 36u && moved <= 44u &&
+                  "(11.4.5): ten or eleven triggers of four requests each in "
+                  "a window of 10 ms and some microseconds moved 40 or 44 "
+                  "words",
+                  gen_ok && moved >= 40u && moved <= 44u &&
                       (moved % batch) == 0u);
     bench.verdict("and the batch is exactly GNBREQ + 1: the count is a "
                   "multiple of four and never a stray word",
@@ -1430,11 +1488,15 @@ void tf_multiplexer() {
     pace_stop();
     print(serial, "  channel 1 served ", served, " requests with an event every ",
           per_event, "; channel 5 moved ", chained, " words off those events", crlf);
+    // EXACT, by the arithmetic: 64 requests at 20 kHz take 3.2 ms of the
+    // 10 ms window, so channel 1 has served its whole block and stopped
+    // long before the read, every one of its 16 events has had its one
+    // request served on channel 5, and nothing else drives channel 5.
     bench.verdict("EGE MAKES A CHANNEL PACE ANOTHER ONE THROUGH THE FABRIC "
                   "ALONE: one dmamux_evt0 per four served requests, each "
-                  "moving one word on a channel with no peripheral of its own",
-                  chained > 0u && chained <= served / per_event + 2u &&
-                      chained + 2u >= served / per_event);
+                  "moving one word on a channel with no peripheral of its own - "
+                  "64 served, 16 moved",
+                  served == chain_len && chained == served / per_event);
 
     quiet_everything();
 }
@@ -1485,6 +1547,10 @@ void tg_fixed_point() {
     brio::spin_us<Ruler>(5'000);   // 5 ms more
     const uint16_t left_b = ChE::count();
     const bool still_running = ChE::enabled();
+    // Stopped BEFORE the slots are compared: a request landing while the
+    // loop walks the buffer would move the one boundary past the index
+    // the loop is at and count it twice.
+    ChE::stop();
     // The self-checking payload: consecutive slots differ by the pace.
     const uint32_t step = pace_step(20'000u);
     uint32_t bad = 0;
@@ -1494,7 +1560,6 @@ void tg_fixed_point() {
             ++bad;
         }
     }
-    ChE::stop();
     print(serial, "  circular, interrupt disarmed: CNDTR ", left_a, " then ", left_b,
           ", channel ", still_running ? "still enabled" : "STOPPED",
           "; slot-to-slot step ", step, " wrong in ", bad, " of 63 places", crlf);
@@ -1684,26 +1749,46 @@ void th_console_rate() {
           ", hw overruns ", Serial::hw_overruns(), ", ring overruns ",
           Serial::rx_overruns(), ", frame ", Serial::frame_errors(), crlf);
 
+    // THE BAND, 1000..1001 thousandths. The ruler and the USART's kernel
+    // clock are one clock, so the HSI's error cancels and what is read is
+    // the divisor: init() rounds 64 MHz / 115200 to BRR 556 (the
+    // static_assert), and 1024 frames of 10 bit times of 556 cycles, all
+    // inside the span (it opens before the first store and closes on TC,
+    // after the last stop bit), read 1000.8 against the wire computed at
+    // 115200 - never under 1000. The neighbouring divisors read 999 (555)
+    // and 1002 (557), so 1001 is the top. What the span adds - the store's
+    // way to the first start bit, the poll's turn on TC - is microseconds,
+    // under a thousandth; and the line has no gap to add: the transmit
+    // ring is refilled while TDR and the shift register still hold two
+    // frames, 174 us, by a completion handler and a feed loop of a few
+    // microseconds each (usart.hpp, tx_room()).
+    static_assert(brio::usart_brr(SysClock::pclk_hz, 115200u) == uint16_t{556},
+                  "the band below is drawn for BRR 556");
+    constexpr uint32_t rate_pm_lo = 1000u;
+    constexpr uint32_t rate_pm_hi = 1001u;
     bench.verdict("THE CONSOLE'S LINE RUNS AT THE RATE ASKED: a kilobyte fed in bulk "
-                  "in its wire time at 115200, -1 % to +3 % - what a loop or a reader "
-                  "at the far end, sharing the rate, could not tell",
-                  bulk_fed && bulk_pm >= 990u && bulk_pm <= 1030u);
+                  "in its wire time at 115200, 1000 or 1001 thousandths - the asked "
+                  "divisor and not a neighbour, what a loop or a reader at the far "
+                  "end, sharing the rate, could not tell",
+                  bulk_fed && bulk_pm >= rate_pm_lo && bulk_pm <= rate_pm_hi);
     if constexpr (engines) {
         bench.verdict("fed in BULK the transmit engine saturates the wire: a "
                       "kilobyte at 115200 costs what 115200 costs, and the fact "
                       "you can READ this line is the end-to-end proof, since it "
                       "left the chip the same way",
-                      bulk_fed && bulk_pm >= 990u && bulk_pm <= 1030u && bulk_bps > 11000u);
+                      bulk_fed && bulk_pm >= rate_pm_lo && bulk_pm <= rate_pm_hi &&
+                          bulk_bps > 11000u);
         bench.verdict("AND AT THIS RATE FEEDING IT BYTE BY BYTE COSTS NOTHING - "
                       "a per-byte pump loses a third of the wire at MEGABAUD, "
                       "and here "
                       "the wire is five hundred times slower than the pump, the "
                       "ring is always full when a block ends, and every block "
                       "the engine gets is a long one: byte by byte the kilobyte "
-                      "takes its wire time too, -1 % to +3 %. What the two feeds "
-                      "cost apart is a question for a rate this VCP may not reach "
-                      "(letter u)",
-                      per_byte_fed && per_byte_pm >= 990u && per_byte_pm <= 1030u);
+                      "takes its wire time too, 1000 or 1001 thousandths. What "
+                      "the two feeds cost apart is a question for a rate this "
+                      "VCP may not reach (letter u)",
+                      per_byte_fed && per_byte_pm >= rate_pm_lo &&
+                          per_byte_pm <= rate_pm_hi);
         bench.verdict("and nothing was dropped or abandoned on the way",
                       Serial::dma_faults() == 0u && Serial::frame_errors() == 0u);
     } else {
@@ -1823,12 +1908,15 @@ void ti_timer_round_trip() {
     const bool played = Loop::start(duty_table, 8);
 
     // The mean of the table is what a pad sampled over hundreds of
-    // periods must show: 8 entries summing to 4200 of 1000 each.
+    // periods must show: 8 compares summing to 4200, each over a period
+    // of pwm_top + 1 counts (PWM mode 1 is high while CNT < CCR), so
+    // 4200 / 8008 = 524.48 per mille, rounded.
     uint32_t sum = 0;
     for (uint8_t i = 0; i < 8; ++i) {
         sum += duty_table[i];
     }
-    const uint16_t predicted = static_cast<uint16_t>(sum / 8u);
+    const uint16_t predicted = static_cast<uint16_t>(
+        (sum * 1000u + 4u * (pwm_top + 1u)) / (8u * (pwm_top + 1u)));
     brio::spin_us<Ruler>(10'000);
     const uint16_t measured = sample_permille<led_pad.port>(PadLed::pin_number, 60000u);
     brio::spin_us<Ruler>(20'000);
@@ -1846,13 +1934,37 @@ void ti_timer_round_trip() {
     print(serial, "  eight duties played by DMA at 16 kHz: pad reads ", measured,
           " per mille where the table's mean is ", predicted, "; ", laps,
           " laps counted, handler calls ", seen, crlf);
+    // THE BAND, +-17 per mille, from the sampler's listing. Its loop is
+    // seven instructions, the pad's load on the single-cycle IOPORT: 8
+    // cycles a sample at the least, 10 with LATENCY's two wait states on
+    // the branch back. So 60000 samples span at least 480000 cycles - 15
+    // laps of the table (8 periods of 4 x 1001 cycles) less a fraction,
+    // and the worst fraction a window of that length can start and end on
+    // moves the mean by 9.5 per mille (the duty table's cumulative swing
+    // over the window, computed for every start phase). Each high stretch
+    // is counted to within one sample, at most 10 cycles in a period of
+    // 4004: 2.5. The window loses to interrupts what they take: the lap's
+    // completion (2000 a second, at the start of a period, which is high)
+    // and the tick (1000 a second), each under 150 cycles entry and exit
+    // included - 0.47 % of the samples biased by at most 0.48, 0.23 % by
+    // at most 0.52: 3.4. The result's rounding and the prediction's: 1.
+    // 9.5 + 2.5 + 3.4 + 1 = 16.4. The clocks cancel: the sampler counts
+    // samples, not time.
+    constexpr uint16_t duty_band = 17;
     bench.verdict("A LOOP ENGINE PLAYS A TABLE INTO A LIVE PWM: the duty read "
-                  "off the board LED's own pad is the table's mean within 20 "
+                  "off the board LED's own pad is the table's mean within 17 "
                   "per mille, with the CPU touching not one compare value",
-                  played && measured + 20u >= predicted && measured <= predicted + 20u);
+                  played && measured + duty_band >= predicted &&
+                      measured <= predicted + duty_band);
+    // AT LEAST 74 LAPS, by the arithmetic: the spins and the sampler hold
+    // the stream for at least 10 ms + 7.5 ms (480000 cycles) + 20 ms =
+    // 2400000 cycles, and a lap is 8 periods of 4004 cycles on the same
+    // clock: 74.9, less the first period before the first request.
+    constexpr uint32_t laps_floor = 74u;
     bench.verdict("and the stream is alive by the one fact that says so: "
-                  "laps() moving, every lap counted by an interrupt that "
-                  "does not create it", running && laps > 50u && seen == laps);
+                  "laps() moving - at least 74 in the 37.5 ms it was watched - "
+                  "every lap counted by an interrupt that does not create it",
+                  running && laps >= laps_floor && seen == laps);
 
     // A single duty, for contrast: stop the stream and the last value the
     // controller wrote is simply what stays.
@@ -1916,10 +2028,15 @@ void ti_timer_round_trip() {
         for (uint16_t i = 1; i < block_len; ++i) {
             const uint16_t d = static_cast<uint16_t>(b[i] - b[i - 1]);
             last_step = d;
-            // LSI is nominally 32 kHz and the counter runs at 1 MHz, so a
-            // period is ~31 ticks; anything outside a generous band is a
-            // torn or missing capture and not a slow oscillator.
-            if (d < 25u || d > 40u) {
+            // THE BAND, 28..35 ticks: the LSI runs 29.5..34 kHz over the
+            // whole range (DS13560 table 46) and the counter's 1 MHz is
+            // the HSI16's divided, 15.88..16.08 MHz at 30 C (table 44)
+            // and 1 % more each way from 0 to 85 C: -1.75..+1.5 %. A
+            // period is therefore 1e6 x 0.9825 / 34000 = 28.9 to
+            // 1e6 x 1.015 / 29500 = 34.4 ticks, and a difference of two
+            // captures reads the whole tick either side. A missed capture
+            // reads two periods (57 or more), a torn block anything.
+            if (d < 28u || d > 35u) {
                 ++bad_steps;
             }
         }
@@ -1934,7 +2051,7 @@ void ti_timer_round_trip() {
     pong_is_capture = false;
     print(serial, "  ", drained, " blocks of ", block_len, " LSI captures "
           "drained, last step ", last_step, " us, ", bad_steps,
-          " steps outside 25..40 us; laps ", laps2, ", overruns ", over2,
+          " steps outside 28..35 us; laps ", laps2, ", overruns ", over2,
           ", handler blocks ", pong_blocks, crlf);
     bench.verdict("A PING-PONG ENGINE DRAINS A CAPTURE CHANNEL: four whole "
                   "blocks handed over, with no CPU between the capture and "
@@ -1980,6 +2097,7 @@ public:
         seams_ = 0;
         last_tail_ = 0;
         have_tail_ = false;
+        worst_dev_ = 0;
         Base::start(&running);
     }
     static void dispatch(const Event& e) { Base::dispatch(e); }
@@ -1990,21 +2108,25 @@ public:
     static uint32_t first_bad() { return first_bad_; }
     static void expect_step(uint32_t s) { step_ = s; }
 
-    /// A STEP IS THE PACE PERIOD, WITHIN THE BUS'S OWN JITTER. The datum
-    /// is TIM2's counter READ BY THE DMA at the pacer's edge, and what
-    /// can move that read by a cycle or two is the AHB: a CPU access in
-    /// flight delays the controller's own. Where the console rides its
-    /// own DMA channels the CPU is idle through the capture and every
-    /// step is exact; where it does not - a part with five channels,
-    /// whose letters own all five - the kernel loop and the transmit
-    /// interrupt share the bus with the capture, and four samples in ten
-    /// blocks landed 2 ticks long (measured). That is not a torn block:
-    /// a torn one is off by a WHOLE PERIOD or more, which this slack
-    /// cannot hide.
-    static constexpr uint32_t step_slack = console_engines ? 0u : 8u;
+    /// A STEP IS THE PACE PERIOD; WHAT IS JUDGED IS THAT NO SAMPLE WAS
+    /// TORN OR MISSED. The datum is TIM2's counter READ BY THE DMA at the
+    /// pacer's edge, and that read can be held back by whatever else asks
+    /// the bus at the same moment - another channel's transfer (the
+    /// console's), a CPU access in flight - by cycles the chapter gives no
+    /// figure for, so the step's exactness is a measurement: the largest
+    /// deviation is printed. The verdicts draw their line where the claim
+    /// does, at half a period: a missed request reads a step of two
+    /// periods, a sample from the wrong lap or a cleared slot a whole
+    /// block or more away, and no bus wait comes near half of the 32000
+    /// cycles a step is.
     static bool step_ok(uint32_t d) {
-        return d + step_slack >= step_ && d <= step_ + step_slack;
+        const uint32_t dev = d > step_ ? d - step_ : step_ - d;
+        if (dev > worst_dev_ && dev < step_ / 2u) {
+            worst_dev_ = dev;
+        }
+        return dev < step_ / 2u;
     }
+    static uint32_t worst_dev() { return worst_dev_; }
 
 private:
     static Status running(const Event& e) {
@@ -2046,6 +2168,7 @@ private:
     static inline uint32_t step_ = 0;
     static inline uint32_t last_tail_ = 0;
     static inline bool have_tail_ = false;
+    static inline uint32_t worst_dev_ = 0;
 };
 
 class Relay : public BlockRelay<Stm32g0Platform<>, Subs, Pong> {};
@@ -2092,14 +2215,16 @@ void tj_relay() {
           "-tick step (first wrong step ", Consumer::first_bad(), "), ",
           Consumer::seams(), " bad seams; engine laps ", laps, ", overruns ",
           over, ", relay published ", Relay::published(), crlf);
+    print(serial, "  the largest step's deviation from the pace period, the bus's "
+          "own wait on the DMA's read: ", Consumer::worst_dev(), " cycles", crlf);
     bench.verdict("BlockRelay RUNS UNCHANGED ON THE THIRD ARCHITECTURE: ten "
                   "caller-owned blocks travelled from a DMA engine to a "
                   "subscriber as Lease::dispatch loans, inside a real "
                   "kernel", started && Consumer::blocks() >= want);
     bench.verdict("and every sample inside every block is one pace period "
-                  "after the one before it, to the bus's own jitter - the "
+                  "after the one before it, within half a period - the "
                   "loan was read while the engine was filling the OTHER "
-                  "buffer, so nothing was torn", Consumer::bad() == 0u);
+                  "buffer, so nothing was torn or missed", Consumer::bad() == 0u);
     bench.verdict("the SEAMS hold too: the last sample of a block and the "
                   "first of the next are one period apart, so no block was "
                   "skipped between them", Consumer::seams() == 0u &&
@@ -2224,23 +2349,37 @@ void tk_synchronization() {
           "1 kHz of sync: unsynchronized ", free_run, " words, then NBREQ ",
           batch, " on the rising edge ", rising, ", on the falling edge ",
           falling, ", on BOTH ", both, ", and NBREQ 1 rising ", one_each, crlf);
+    // THE BANDS, by the code's own arithmetic. TIM3 (the requests, 20 kHz)
+    // and TIM14 (the sync, 1 kHz, its compare at half the period) divide
+    // the ruler's own clock exactly, so the HSI's error cancels. Each
+    // window, from the multiplexer's configuration to the read, is at
+    // least the 5 ms spin and under 6 ms (the spin's overshoot and the
+    // verbs around it are microseconds), so it holds 5 or 6 edges of one
+    // polarity, 10 to 12 of both. An edge lets the next NBREQ requests
+    // through, one every 50 us, so a batch is whole 200 us after its edge
+    // (50 us for NBREQ 1) and only the last edge of a window can find its
+    // batch cut by the read: 4 x (5 - 1) = 16 to 4 x 6 = 24 words on one
+    // polarity, 4 x (10 - 1) = 36 to 48 on both, 4 to 6 at NBREQ 1. The
+    // control moves its whole block: 100 requests in 5 ms against 64
+    // words.
     bench.verdict("THE SYNCHRONIZATION BLOCK HOLDS A CHANNEL'S REQUESTS BACK "
                   "AND LETS EXACTLY NBREQ OF THEM THROUGH PER EDGE, which is "
                   "what dma.md has been carrying as built-but-never-run: five "
-                  "sync edges times four requests is twenty words where the "
-                  "same channel unsynchronized saturates its whole transfer "
-                  "in the same window",
-                  free_run >= 60u && rising >= 16u && rising <= 24u);
+                  "or six sync edges times four requests is 16 to 24 words "
+                  "(the last batch cut by the read) where the same channel "
+                  "unsynchronized saturates its whole transfer in the same "
+                  "window",
+                  free_run == 64u && rising >= 16u && rising <= 24u);
     bench.verdict("...and SPOL is a real selector, not a formality: the "
-                  "falling edge serves the same number as the rising one and "
-                  "BOTH serves twice as many, which is the only reading of "
-                  "11.6.1's three codes that a square wave can tell apart",
-                  falling >= 16u && falling <= 24u &&
-                      both >= 2u * rising - 8u && both <= 2u * rising + 8u);
+                  "falling edge serves as many as the rising one, 16 to 24, "
+                  "and BOTH serves twice as many edges' worth, 36 to 48, which "
+                  "is the only reading of 11.6.1's three codes that a square "
+                  "wave can tell apart",
+                  falling >= 16u && falling <= 24u && both >= 36u && both <= 48u);
     bench.verdict("...and NBREQ is the count and not the count minus one - "
-                  "the struct's own claim, measured: one request an edge is a "
-                  "quarter of four requests an edge",
-                  one_each >= 4u && one_each <= 8u);
+                  "the struct's own claim, measured: one request an edge, "
+                  "4 to 6 words, is a quarter of four requests an edge",
+                  one_each >= 4u && one_each <= 6u);
 
     // --- SOFx: a sync edge arriving while the previous batch is still
     // being served. 11.4.4 says the overrun is per multiplexer channel
@@ -2330,6 +2469,15 @@ void tk_synchronization() {
         Gen0::enable(true);
         (void)ChE::enable(true);
         brio::spin_us<Ruler>(10'000);   // 10 ms = ten TIM14 periods
+        // The request an edge makes is served within a microsecond, so
+        // the read waits until TIM14's 1 MHz count stands two steps clear
+        // of both edges (the rise at 0, the fall at the compare, 500).
+        (void)brio::wait_until<Ruler>(
+            [] {
+                const uint32_t c = T14::count();
+                return c >= 2u && (c < 500u || c >= 502u);
+            },
+            2'000);
         gen_moved[i] = generated_so_far(64);
         Gen0::release();
         ChE::stop();
@@ -2338,14 +2486,17 @@ void tk_synchronization() {
     print(serial, "  the request generator over ten TIM14 periods: rising ",
           gen_moved[0], " words, falling ", gen_moved[1], ", both ",
           gen_moved[2], crlf);
+    // THE BANDS, as letter f's: the generator's window, from its enable
+    // to the read, is at least the 10 ms spin and under 11 ms, on TIM14's
+    // own clock, and each edge's one request is served before the read:
+    // 10 or 11 edges of one polarity, 20 to 22 of both.
     bench.verdict("THE GENERATOR'S THREE POLARITIES ARE ALL REAL, the two "
                   "dma.md had never staged included: a square wave gives the "
-                  "same count on either single edge and twice as many on "
-                  "both",
-                  gen_moved[0] >= 8u && gen_moved[0] <= 12u &&
-                      gen_moved[1] >= 8u && gen_moved[1] <= 12u &&
-                      gen_moved[2] >= 2u * gen_moved[0] - 4u &&
-                      gen_moved[2] <= 2u * gen_moved[0] + 4u);
+                  "same count on either single edge, 10 or 11 in its window, "
+                  "and twice as many on both, 20 to 22",
+                  gen_moved[0] >= 10u && gen_moved[0] <= 11u &&
+                      gen_moved[1] >= 10u && gen_moved[1] <= 11u &&
+                      gen_moved[2] >= 20u && gen_moved[2] <= 22u);
 
     T14::release();
     quiet_everything();
@@ -2493,14 +2644,33 @@ void tl_timer_burst() {
           "compare left at 500 - reads ", control_duty, " per mille, where the "
           "time-weighted prediction is 4 x 500 / 10000 = 200", crlf);
 
+    // THE BANDS, +-15 per mille each, from the sampler's listing as
+    // letter i draws them: 60000 samples of at least 8 cycles span at
+    // least 480000 cycles, 12 laps of the four periods (10000 counts of
+    // 4 cycles) less a fraction. Every burst period is exactly half high,
+    // and the worst fraction a window of that length can start and end on
+    // moves the burst's mean by 8.2 per mille and the control's (500
+    // counts high in each of the four periods) by 6.5 (computed for every
+    // start phase). One sample of at most 10 cycles per high stretch, in
+    // periods of 4000 cycles or more: 2.5. Interrupts, each under 150
+    // cycles: the channel's completion once a lap, at the start of a
+    // period (high), 0.375 % of the samples biased by at most 0.5 (burst)
+    // or 0.8 (control), and the tick, 0.23 % by at most 0.5 or 0.8: 3.1
+    // and 4.9. The rounding: 0.5. Burst 8.2 + 2.5 + 3.1 + 0.5 = 14.3,
+    // control 6.5 + 2.5 + 4.9 + 0.5 = 14.4.
+    constexpr uint16_t burst_band = 15;
+    constexpr uint16_t control_band = 15;
     bench.verdict("THE BURST ENGINE REWRITES A WHOLE WAVEFORM OFF ONE "
                   "REQUEST, which is tim.md's own first gap line: with the "
                   "pad's compare at half of its own ARR in every row the pad "
                   "reads 500 per mille whatever the period is doing, where the "
-                  "SAME periods with that compare left alone read 200 - and the "
+                  "SAME periods with that compare left alone read 200 (each "
+                  "within 15) - and the "
                   "only difference between the two legs is DCR's length field",
-                  armed && armed2 && burst_duty > 470u && burst_duty < 530u &&
-                      control_duty > 170u && control_duty < 230u);
+                  armed && armed2 && burst_duty >= 500u - burst_band &&
+                      burst_duty <= 500u + burst_band &&
+                      control_duty >= 200u - control_band &&
+                      control_duty <= 200u + control_band);
     bench.verdict("...and the three registers a burst walked are COHERENT "
                   "when it stops: CCR1 is exactly half the ARR beside it and "
                   "CCR2 exactly a quarter, which they could not be if the "
@@ -2644,14 +2814,26 @@ void stress_rungs(const uint32_t* rungs, uint8_t count, uint32_t& best_source,
             every_sink = false;
             continue;
         }
-        const StressLeg s = stress_leg("source", baud, 600, 12000);
+        constexpr uint32_t source_count = 12000;
+        const StressLeg s = stress_leg("source", baud, 600, source_count);
         print(serial, "  source at ", baud, ": ", s.sent, " bytes in ", s.us,
               " us", crlf);
         const StressLeg k = stress_leg("sink", baud, 600, 0);
         print(serial, "  sink at ", baud, ": ", k.got, " bytes in, ", k.bad,
               " wrong, hw overruns ", Serial::hw_overruns(), ", frame ",
               Serial::frame_errors(), crlf);
-        if (s.sent >= 6000u) {
+        // A full window: the board kept the wire busy. The window runs on the
+        // tick count, more than 599 ms, and a transmitter that never went
+        // idle has put on the wire - and so accepted - at least that much
+        // of its line at the rate its divisor really makes (BRR rounded to
+        // the nearest, usart_actual_baud()), less the frame in flight; the
+        // count the board was asked for caps it (12000, reached in under
+        // 600 ms from 230400 up).
+        const auto brr = brio::usart_brr(SysClock::pclk_hz, baud);
+        const uint32_t actual = brr ? brio::usart_actual_baud(SysClock::pclk_hz, *brr) : 0u;
+        const uint32_t on_wire = actual / 10u * 599u / 1000u - 1u;
+        const uint32_t source_floor = on_wire < source_count ? on_wire : source_count;
+        if (s.sent >= source_floor) {
             best_source = baud;
         } else {
             every_source = false;
@@ -3297,6 +3479,19 @@ uint32_t u1_wire_permille() {
     return queued < frames ? 0u : static_cast<uint32_t>(1000ull * took / wire);
 }
 
+/// THE LOOP'S BAND, 1000..1014 thousandths, for letters o and x. At
+/// 1 Mbaud the USART's divisor is 64 MHz / 1 Mbaud = 64, exact (the
+/// static_assert), and 1024 frames all inside the span read 1000 against
+/// the wire at the rate asked, never under. The neighbouring divisors read
+/// 984 (63) and 1015 (65), so 1014 is the top; what lies between - the
+/// store's way to the first start bit, the poll's turn on TC and any gap
+/// the 16-byte transmit ring leaves between the engine's runs - may take
+/// up to 14 frames, 140 us, before the band calls it a wrong divisor.
+static_assert(brio::usart_brr(SysClock::pclk_hz, u1_baud) == uint16_t{64},
+              "the loop's band is drawn for BRR 64");
+constexpr uint32_t loop_pm_lo = 1000u;
+constexpr uint32_t loop_pm_hi = 1014u;
+
 /// Letter o's three legs over a CIRCULAR receive ring - a stream across
 /// many laps, a burst with the consumer away, a consumer a lap behind -
 /// for any transport, its receive engine and its rate, so letter x runs
@@ -3498,14 +3693,24 @@ void to_circular_receive() {
               " with a byte the consumer was told of and has not read (", one,
               " read after)", crlf);
 
-        // --- and the line itself at the rate asked.
-        const uint32_t pm = u1_wire_permille<P>();
-        print(serial, "  1024 frames through the transmit engine in ", pm,
-              " thousandths of their wire time at ", u1_baud, " baud", crlf);
-        bench.verdict("THE LOOP RUNS AT THE RATE ASKED: 1024 frames through the transmit "
-                      "engine in their wire time at 1 Mbaud, -1 % to +3 % - what the "
-                      "stream above, sharing one divisor at both ends, could not tell",
-                      pm >= 990u && pm <= 1030u);
+        // --- and the line itself at the rate asked, timed with the console
+        // quiet: the lines above are still leaving, and the console's
+        // transmit interrupt or channel inside the window would be time the
+        // loop's engine did not take.
+        if (brio::console_drain<Ruler, Serial>()) {
+            const uint32_t pm = u1_wire_permille<P>();
+            print(serial, "  1024 frames through the transmit engine in ", pm,
+                  " thousandths of their wire time at ", u1_baud, " baud", crlf);
+            bench.verdict("THE LOOP RUNS AT THE RATE ASKED: 1024 frames through the "
+                          "transmit engine in their wire time at 1 Mbaud, 1000 to 1014 "
+                          "thousandths - the asked divisor and not a neighbour, what "
+                          "the stream above, sharing one divisor at both ends, could "
+                          "not tell",
+                          pm >= loop_pm_lo && pm <= loop_pm_hi);
+        } else {
+            bench.skip("the loop's rate: the console did not drain, and its "
+                       "transmit would land in the timed window");
+        }
 
         P::release();
         u1_live = false;
@@ -3574,13 +3779,23 @@ void tx_lpuart_ring() {
         Stream tx{0x9E3779B9u};
         Stream rx{0x9E3779B9u};
         ring_legs<P, LpRx, lp_byte_cycles>(tx, rx);
-        const uint32_t pm = u1_wire_permille<P, lp_byte_cycles>();
-        print(serial, "  1024 frames through the LPUART's transmit engine in ", pm,
-              " thousandths of their wire time at ", lp_baud, " baud", crlf);
-        bench.verdict("and the LPUART's loop runs at the rate asked: 1024 frames "
-                      "through its transmit engine in their wire time, -1 % to "
-                      "+3 % (letter o's bound)",
-                      pm >= 990u && pm <= 1030u);
+        // Timed with the console quiet, as letter o's.
+        if (brio::console_drain<Ruler, Serial>()) {
+            const uint32_t pm = u1_wire_permille<P, lp_byte_cycles>();
+            print(serial, "  1024 frames through the LPUART's transmit engine in ", pm,
+                  " thousandths of their wire time at ", lp_baud, " baud", crlf);
+            // The LPUART's divisor is 256 x 64 MHz / 1 Mbaud = 16384, exact, so
+            // the floor is letter o's; a step of it is 1/16384 and no band can
+            // resolve a neighbour, so the top is letter o's allowance for the
+            // same engine and the same 16-byte ring: 14 frames' worth.
+            bench.verdict("and the LPUART's loop runs at the rate asked: 1024 frames "
+                          "through its transmit engine in their wire time, 1000 to "
+                          "1014 thousandths (letter o's band)",
+                          pm >= loop_pm_lo && pm <= loop_pm_hi);
+        } else {
+            bench.skip("the LPUART loop's rate: the console did not drain, and its "
+                       "transmit would land in the timed window");
+        }
         P::release();
         lp_live = false;
         quiet_everything();

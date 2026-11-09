@@ -684,19 +684,31 @@ void tf_rww() {
     FLASH->ACR = FLASH->ACR & ~FLASH_ACR_ICRST;
     FLASH->ACR = FLASH->ACR | FLASH_ACR_ICEN;
 
+    // THE BOUND, DERIVED. The polling loop (Flash::wait_ready() in the
+    // release listing) is six instructions in three words: an AHB load of
+    // FLASH_SR, four single-cycle operations and a taken branch, 8 cycles
+    // executed; uncached at two wait states each word costs 3 cycles to
+    // fetch, 9 a turn, so even with no overlap at all between fetch and
+    // execution a turn takes at most 17 cycles. Outside the loop: the
+    // erase's own setup and release, a few hundred cycles, and one kernel
+    // tick handler a millisecond, under 300 cycles uncached. So
+    //   cycles <= 17 x turns + 300 x (ms + 1) + 1000.
+    const uint32_t turn_bound =
+        17u * turns + 300u * (cycles_to_us(cycles) / 1000u + 1u) + 1000u;
     print(serial, "  bank-2 page erase: ", cycles_to_us(cycles), " us, ",
           turns, " turns of a bank-1 polling loop, instruction cache off (",
-          turns == 0u ? 0u : cycles / turns, " cycles per turn)", crlf);
+          turns == 0u ? 0u : cycles / turns, " cycles per turn; the bound ", turn_bound,
+          " cycles against ", cycles, ")", crlf);
 
     bench.verdict("the erase succeeded", err == 0u);
     bench.verdict("READ-WHILE-WRITE IS REAL (3.3.9): the CPU executed tens of "
                   "thousands of instructions out of bank 1 while bank 2 was "
                   "being erased - a stalled bus would have allowed none",
                   turns > 10'000u);
-    bench.verdict("and the turns account for the whole duration at a "
-                  "plausible few cycles each, so nothing was lost to a stall "
-                  "in the middle",
-                  turns != 0u && (cycles / turns) <= 32u);
+    bench.verdict("and the turns account for the whole duration at the loop's "
+                  "own cost - at most 17 cycles a turn uncached - so nothing was "
+                  "lost to a stall in the middle",
+                  turns != 0u && cycles <= turn_bound);
 
     // A CONTROL IS NOT POSSIBLE and the letter says so rather than
     // pretending: the only same-bank erase available is an erase of the
@@ -789,10 +801,17 @@ void tg_fast() {
     bench.verdict("FAST IS FASTER, which is the whole reason the mode exists: "
                   "one high-voltage ramp for 32 double words instead of 32",
                   fast_cycles < slow_cycles);
-    bench.verdict("the ORDINARY row is what table 48 says a row costs in "
-                  "normal programming - 2.7 ms typ, 4.6 max",
-                  cycles_to_us(slow_cycles) >= 2'000u &&
-                      cycles_to_us(slow_cycles) <= 4'600u);
+    // THE BOUND, DERIVED. Table 48 gives a normal row 4.6 ms at most and
+    // no minimum (2.7 ms typical, printed above). The ruler is SysTick on
+    // the PLL over HSI16, so 4.6 ms reads at most 4600 x 1.0156 = 4672 us
+    // (table 44); the call's own work between the 32 cells - about sixty
+    // instructions a double word outside the waits in the release listing,
+    // under 200 cycles - adds under 100 us, and the kernel tick's handler,
+    // a few times, a few more: at most 4780 us. The lower end has nothing
+    // to be derived from, so it is not judged.
+    bench.verdict("the ORDINARY row costs no more than table 48's normal-programming "
+                  "maximum, 4.6 ms (the typical 2.7 printed)",
+                  cycles_to_us(slow_cycles) <= 4'780u);
     // THE FAST ROW IS WHAT TABLE 48 SAYS: 1.7 ms typical, 2.8 ms maximum
     // (DS13560 Rev 5). It is about 52 us per double word, not 3.3.8's
     // "around 20 us" - that note bounds the interval between two double

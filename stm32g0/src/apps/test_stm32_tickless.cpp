@@ -802,6 +802,17 @@ void tb_lap_carry() {
 // =============================================================================
 // c - idle_until outside the kernel
 // =============================================================================
+/// A nap of n ticks on TIM2's scale, its least and its most (letter c
+/// derives them): n x 976.5625 us x 0.9815 - 31 and x 1.0156 + 31.
+uint32_t nap_low_us(uint32_t n) {
+    return static_cast<uint32_t>((static_cast<uint64_t>(n) * 9'765'625u * 9'815u) /
+                                 100'000'000u) - 31u;
+}
+uint32_t nap_high_us(uint32_t n) {
+    return static_cast<uint32_t>((static_cast<uint64_t>(n) * 9'765'625u * 10'156u +
+                                  99'999'999u) / 100'000'000u) + 31u;
+}
+
 void tc_idle_until() {
     feed();
     console_drain();
@@ -813,14 +824,13 @@ void tc_idle_until() {
         feed();
         naps[i] = nap(std::optional<int32_t>{static_cast<int32_t>(spans[i])});
     }
-    // TIM2 rides the PLL, i.e. HSI16, which is 0.2..0.3 % off the crystal
-    // and drifts with the board's temperature: a nap is judged on the
-    // wall's OWN scale - one tick weighed on TIM2 first. Judged on a
-    // nominal scale instead, a nap misses by some 80 us of drift.
-    // Both waits ride the tick: its next edge (a millisecond, 10 ms of
-    // budget) and 256 more (250 ms; 280 on an LSI at table 46's floor,
-    // 400 ms of budget). A timebase that stops there leaves no scale, and
-    // the first verdict below says so.
+    // TIM2 rides the PLL, i.e. HSI16, which is off the crystal by up to
+    // table 44's band and drifts with the board's temperature: one tick is
+    // weighed on TIM2 first, a finer scale to print each nap against than
+    // the band the verdicts use. Both waits ride the tick: its next edge
+    // (a millisecond, 10 ms of budget) and 256 more (250 ms; 280 on an LSI
+    // at table 46's floor, 400 ms of budget). A timebase that stops there
+    // leaves no scale, and the line says so; the naps' verdicts need none.
     console_drain();
     const uint32_t cal_k0 = Tb::ticks();
     const bool cal_edge =
@@ -829,10 +839,26 @@ void tc_idle_until() {
     const bool cal_span =
         brio::wait_until<Ruler>([cal_k0] { return Tb::ticks() - cal_k0 >= 257u; }, 400'000);
     const uint32_t tick_ns = (((t2() - cal_t0) / 256u) * 1000u) / (t2_hz / 1'000'000u);   // ns per tick
-    print(serial, "  one tick is ", tick_ns, " ns on TIM2's scale (976563 nominal)", crlf);
-    bool all_ok = cal_edge && cal_span;
+    print(serial, "  one tick is ", tick_ns, " ns on TIM2's scale (976563 nominal)",
+          cal_edge && cal_span ? "" : " - THE TICK STOPPED: no scale", crlf);
+    // THE BANDS, DERIVED. A nap starts on a tick edge (sync_to_count(): the
+    // edge seen within one poll turn, and the stamp after it - under one
+    // 30.5 us count all told) and ends on the deadline's own edge, where
+    // the compare is placed, plus the wake: so it lasts N ticks of the
+    // crystal (976.5625 us each, 20 ppm) less under a count, plus the wake
+    // path, which the claim is: under a count too. TIM2 counts the PLL
+    // over HSI16, so on its scale those microseconds read times table 44's
+    // 0.9815..1.0156:
+    //   N x 976.5625 x 0.9815 - 31 <= t2_us <= N x 976.5625 x 1.0156 + 31.
+    // In the timebase's own units nothing is scaled: ticks() must read the
+    // deadline itself at return - not before (never early) and not after
+    // (the wake is the deadline's tick). The calibrated tick above is a
+    // finer scale, printed beside each nap; how far HSI16 wanders between
+    // the calibration and a nap is in no table, so it judges nothing.
+    bool all_ok = true;
     bool one_irq = true;
     bool never_early = true;
+    bool on_the_tick = true;
     uint32_t worst_over_us = 0;
     for (uint8_t i = 0; i < n_spans; ++i) {
         const Nap& r = naps[i];
@@ -841,24 +867,22 @@ void tc_idle_until() {
         const uint32_t over = r.t2_us > nominal_us ? r.t2_us - nominal_us : 0u;
         if (over > worst_over_us) worst_over_us = over;
         print_nap("idle_until(now + N)", r);
-        // THE LOWER BOUND SCALES WITH THE SPAN, because the nominal does
-        // not come from a specification: `tick_ns` is the LSE measured
-        // against TIM2 ON THE PLL, i.e. against HSI16's own 1 % trim, and
-        // the residue of that ratio grows with the sleep. One per mille
-        // plus the 40 us of quantisation is what the calibration can
-        // claim; NEVER EARLY is judged separately below, in the
-        // timebase's own units, where no scale enters at all.
-        if (!within(r.t2_us, nominal_us - nominal_us / 1000u - 40u,
-                    nominal_us + 1040u)) {
+        const uint32_t lo = nap_low_us(n);
+        const uint32_t hi = nap_high_us(n);
+        print(serial, "    the band ", lo, "..", hi, " us; ", nominal_us,
+              " us on the calibrated tick", crlf);
+        if (!within(r.t2_us, lo, hi)) {
             all_ok = false;
         }
         // One CMPM ends the sleep; a lap in the way adds one ARRM and one round.
         if (r.irqs != r.rounds || (r.served & LptimFlag::cmpm) == 0u || r.rounds > 2u) one_irq = false;
         if (static_cast<int32_t>(r.ticks_after - r.asked) < 0) never_early = false;
+        if (r.ticks_after != r.asked) on_the_tick = false;
         if (!r.interrupts_after) all_ok = false;
     }
-    bench.verdict("N ticks asked, N ticks slept (within one count of the phase), "
-                  "interrupts back on at return",
+    print(serial, "  the worst nap over the calibrated nominal: ", worst_over_us, " us", crlf);
+    bench.verdict("N ticks asked, N ticks slept (inside table 44's band on TIM2's scale, "
+                  "within a count of the phase), interrupts back on at return",
                   all_ok);
     bench.verdict("exactly ONE LPTIM interrupt per sleep and it served CMPM - no "
                   "spurious wake, no completion interrupt (a lap in the way costs one "
@@ -867,9 +891,10 @@ void tc_idle_until() {
     bench.verdict("NEVER EARLY in the timebase's own units: ticks() >= the deadline at "
                   "every return",
                   never_early);
-    bench.verdict("the wake lands within a count of the nominal (no phase conversion: "
-                  "the compare is the same LSE edge the count is)",
-                  worst_over_us < 1040u);
+    bench.verdict("and never a tick late: ticks() reads the deadline itself at every "
+                  "return (no phase conversion: the compare is the same LSE edge the "
+                  "count is)",
+                  on_the_tick);
 
     // A DEADLINE ONE TICK AWAY, right after a tick edge: 32 counts of
     // room, well past the six-count floor - it sleeps and lands at the
@@ -877,10 +902,11 @@ void tc_idle_until() {
     // matter of phase and is counted, not staged: floor_declines().
     const Nap one = nap(std::optional<int32_t>{1});
     print_nap("idle_until(now + 1)", one);
+    print(serial, "    the band ", nap_low_us(1), "..", nap_high_us(1), " us", crlf);
     bench.verdict("A DEADLINE ONE TICK AWAY sleeps to that tick: the compare is placed to "
                   "the count, 30 us, not to the tick",
-                  one.ticks_after - one.ticks_before == 1u && within(one.t2_us, 700u, 1100u) &&
-                      one.irqs == 1u);
+                  one.ticks_after - one.ticks_before == 1u &&
+                      within(one.t2_us, nap_low_us(1), nap_high_us(1)) && one.irqs == 1u);
     print(serial, "  arms declined for the six-count floor so far: ", Tb::floor_declines(),
           "; for a standing completion: ", Tb::deferrals(), crlf);
 
@@ -1243,23 +1269,44 @@ void tg_delay() {
 
     // MEASURED FIRST AND PRINTED AFTER: a console line leaving beside a
     // span puts the USART's handler inside it.
+    // THE BAND, DERIVED. TIM2 and SysTick both count the 64 MHz SYSCLK, so
+    // a span reads in the same cycles it spins (the HSI16's error cancels)
+    // and t2_us() truncates to whole microseconds. Never early: the spin
+    // alone is span x 64 cycles, so took >= span. Never much more: from one
+    // TIM2 read to the next the release listing counts at most 79 cycles
+    // besides the spin - 9 to the call, 25 from delay_us's entry to its
+    // first VAL read, at most 23 from its last VAL read to the return (19,
+    // or 23 when that turn folded a SysTick reload), 7 to the second TIM2
+    // read, and the spin ending less than one poll turn after its count is
+    // met (12 cycles, 16 with the fold: 15) - and the flash's two wait
+    // states add at most two cycles per flash access on the path (48
+    // instruction halfwords, each counted as its own fetch, and 4 literal
+    // and table loads): 79 + 104 = 183 cycles, under 3 us, so took <=
+    // span + 2. A span the LPTIM's lap interrupt landed in (this program's
+    // one live vector besides the console's) is reported, not judged.
     static const uint32_t spans[] = {5, 30, 100, 500, 900};
     constexpr uint8_t n_spans = sizeof(spans) / sizeof(spans[0]);
     uint32_t took[n_spans] = {};
     bool ok[n_spans] = {};
+    bool quiet[n_spans] = {};
     for (uint8_t i = 0; i < n_spans; ++i) {
+        const uint32_t irq0 = lptim_irqs;
         const uint32_t t0 = t2();
         ok[i] = delay_us(clock, spans[i]);
         took[i] = t2_us(t2() - t0);
+        quiet[i] = lptim_irqs == irq0;
     }
     bool all_exact = true;
     for (uint8_t i = 0; i < n_spans; ++i) {
-        print(serial, "  delay_us(", spans[i], ") -> ", took[i], " us on TIM2", crlf);
-        if (!ok[i] || took[i] < spans[i] || took[i] > spans[i] + 12u) {
+        print(serial, "  delay_us(", spans[i], ") -> ", took[i], " us on TIM2 (the band ",
+              spans[i], "..", spans[i] + 2u, ")",
+              quiet[i] ? "" : " - the lap interrupt landed in it: not judged", crlf);
+        if (!ok[i] || took[i] < spans[i] || (quiet[i] && took[i] > spans[i] + 2u)) {
             all_exact = false;
         }
     }
-    bench.verdict("delay_us serves 5..900 us AT LEAST on a SysTick with no interrupt",
+    bench.verdict("delay_us serves 5..900 us AT LEAST on a SysTick with no interrupt, "
+                  "and no more than its own listed cycles beyond",
                   all_exact);
 
     uint32_t min_took = 0xFFFFFFFFu;
@@ -1435,20 +1482,34 @@ void th_lsi_witness() {
     // ceiling, 34000 - never early on any part, and this many late on
     // this one, priced with the rate measured above.
     if (lsi_hz != 0u) {
-        const uint32_t late_per_mille = (34'000u * 1000u) / lsi_hz - 1000u;
+        const int32_t late_per_mille =
+            static_cast<int32_t>((34'000u * 1000u) / lsi_hz) - 1000;
+        // THE BAND, DERIVED. The die's LSI is a die fact; what holds on
+        // every part is table 46's band, 29.5..34 kHz, whose ceiling the
+        // default states. The meter reads that rate against PCLK at its
+        // nominal 64 MHz, so the reading carries table 44's HSI16 band
+        // (a true rate f reads f x 16 MHz / fHSI16, 1/1.0156 .. 1/0.9815
+        // of it) and one count of the median period in `per_count`. So a
+        // part inside table 46 reads
+        //   29500 / 1.0156 x (1 - 1/per_count) .. 34000 / 0.9815 x (1 + 1/per_count),
+        // and inside that the default is late by at most the ceiling over
+        // the floor (153 per mille, printed with the die's own figure).
+        const uint32_t floor_hz = static_cast<uint32_t>(
+            (29'500ULL * 10'000u * (per_count - 1u)) / (10'156ULL * per_count));
+        const uint32_t ceiling_hz = static_cast<uint32_t>(
+            (34'000ULL * 10'000u * (per_count + 1u) + 9'815ULL * per_count - 1u) /
+            (9'815ULL * per_count));
         print(serial, "  the default statement (34000 Hz) on this die's ", lsi_hz,
               " Hz: every millisecond asked lands ", late_per_mille,
               " per mille late, never early (", LsiDefault::ticks_per_second,
-              " ticks a second would be counted at ", lsi_hz >> 5, ")", crlf);
-        // THE BAND IS TABLE 46'S OWN, because the number is a DIE fact and
-        // the dies differ: the ceiling over the band's floor is
-        // 34000/29500, 153 per mille, and any part of this family lands
-        // under it. A die measured above the ceiling makes the subtraction
-        // wrap and the verdict fail, which is the rule broken.
-        bench.verdict("the default over-states the rate, so a program that does not "
-                      "measure its LSI is late and never early - by at most what table "
-                      "46's own ceiling over its own floor allows",
-                      late_per_mille > 0u && late_per_mille < 160u);
+              " ticks a second would be counted at ", lsi_hz >> 5,
+              "); table 46's band through the meter reads ", floor_hz, "..", ceiling_hz, " Hz",
+              crlf);
+        bench.verdict("the default over-states the rate: the die's LSI, read through the "
+                      "meter, lies inside table 46's band, whose ceiling the default states "
+                      "- so a program that does not measure its LSI is late and never "
+                      "early, by at most the band's ceiling over its floor",
+                      per_count > 1u && within(lsi_hz, floor_hz, ceiling_hz));
     } else {
         bench.skip("the directional rule's price on this die needs the die's LSI rate, "
                    "and TIM16's capture saw no edge");

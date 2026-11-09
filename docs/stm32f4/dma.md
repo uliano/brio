@@ -611,14 +611,18 @@ the same letter:
 | a 16-byte copy, start to completion | 1040 cycles | 86 cycles |
 | a transport's masked window | the whole start | the run-time `claim()`: twelve instructions |
 
-The SPI's numbers are spi.md's, the masked window usart.md's.
+The SPI's numbers are spi.md's, the masked window usart.md's. The copy's
+row was timed with a bare poll of the completion; the letter's poll
+carries a call and a ruler read a turn, and reads 135 cycles for the same
+copy.
 
 **The DMA copies memory slower than the core, and frees it.** Word beats
-with sixteen-byte bursts at both ports, SRAM to SRAM: 0.88 cycles a byte
-at the margin (4096 bytes in 3707 cycles) and a fixed 72 cycles a block,
-start to completion; a fill, its source the caller's cell read single,
-1.26 cycles a byte and 85 fixed. The runtime's memcpy moves the same 4096
-bytes in 2818 and memset in 1540 (`bench_stm32f4` letter m).
+with sixteen-byte bursts at both ports, SRAM to SRAM: 0.87 cycles a byte
+at the margin (4096 bytes in 3694 cycles) and a fixed 122 cycles a block,
+start to completion, the poll's turn included (a call and a ruler read
+each); a fill, its source the caller's cell read single, 1.22 cycles a
+byte and 116 fixed. The runtime's memcpy moves the same 4096 bytes in 2878
+and memset in 1541 (`bench_stm32f4` letter m).
 Against one beat a cycle of the DMA's clock - four bytes a cycle - the
 copy runs at 3.6 x: both ports serve one SRAM, so every word is a read
 and a write on the same slave, two cycles at best, and the FIFO's
@@ -645,21 +649,23 @@ that.
 1.4 us at 180 MHz, less than the time a print takes to reach the wire, so a
 later look at `enabled()` can find the block already done.
 
-**The throughput ladder**, 2048 bytes SRAM to SRAM, both ports at the same
-width and the same burst, threshold full:
+**The throughput ladder**, on the STM32F446RE: 2048 bytes SRAM to SRAM,
+both ports at the same width and the same burst, threshold full, each
+rung timed from the enable to the completion the poll saw (one turn of
+it included), every rung run before any is printed:
 
 | beat | single | INCR4 | INCR8 |
 |------|--------|-------|-------|
-| byte | 8748 cycles (0.23 B/cycle) | 6154 (0.33) | 5398 (0.37) |
-| half-word | 4632 (0.44) | 3382 (0.60) | 2962 (0.69) |
-| word | 2616 (0.78) | 1954 (1.04) | refused by table 49 |
+| byte | 8659..8678 cycles (0.23 B/cycle) | 6085 (0.33) | 5315 (0.38) |
+| half-word | 4545 (0.45) | 3247 (0.63) | 2863..2873 (0.71) |
+| word | 2499 (0.81) | 1839 (1.11) | refused by table 49 |
 
 **The width is worth more than the burst, and both are worth having.** A
 word beat moves four bytes for the two bus accesses a byte beat pays for -
 3.3x - and bursting both ports on top of that buys another 1.3 to 1.6x.
-The fastest legal configuration on this silicon moves 2048 bytes in 1954
-core cycles, a byte and a fraction per cycle; the slowest legal one takes
-4.5 times as long for the same block.
+The fastest legal configuration on this silicon moves 2048 bytes in 1839
+core cycles, a byte and a tenth per cycle; the slowest legal one takes
+4.7 times as long for the same block.
 
 **All forty-eight cells of table 49 answer as the table says**: twelve
 single-burst cells plus eleven bursting ones are accepted (seven at the
@@ -667,15 +673,16 @@ byte width, three at the half-word, one at the word), the other twenty-five
 are refused before the enable, and every accepted one moves its block
 byte-exact with no FIFO error.
 
-**Priority arbitration, measured**: a 512-byte memory-to-memory block takes
-2337 cycles with the controller to itself (2321 at 100 MHz on the
-STM32F411 - the DMA's clock is HCLK). Two of them started a few cycles
-apart finish in 2475 and 4300 cycles when one stream is `very_high` and the
-other `low` - and the order follows the PRIORITY and not the stream index,
-because reversing the two reverses the result (2408 against 4323; on the
-STM32F411 2726 against 4312 and 4299 against 3059). So the loser pays 1.8x
+**Priority arbitration, measured** on the STM32F446RE, every race run
+before any is printed: a 512-byte memory-to-memory block takes 2235
+cycles with the controller to itself (2321 at 100 MHz on the STM32F411 -
+the DMA's clock is HCLK). Two of them started a few cycles apart finish
+in 2367 and 4217 cycles when stream 3 is `very_high` and stream 0 `low` -
+and the order follows the PRIORITY and not the stream index, because
+reversing the two reverses the result (2279 against 4253; on the
+STM32F411 2726 against 4312 and 4299 against 3059). So the loser pays 1.9x
 for the company - what sharing two AHB ports costs - and what the winner
-pays is within the measurement (2626 and 2285 against 2340 alone, the
+pays is within the measurement (2367 and 2279 against 2235 alone, the
 second figure for the stream enabled first).
 
 **A load of SxCR in the cycles after the EN store WEDGES the stream - on
@@ -813,12 +820,13 @@ has the rows), and made one late against a wire that does not wait for it
 EN's clear on a stream below it ran out `abort()`'s whole bound, 200000 reads of SxCR: the
 release contract above is what keeps a correct program out of that.
 
-**The abort's wait is real and short**: EN comes down in 33 core cycles on
+**The abort's wait is real and short**: EN comes down in 32 core cycles on
 an idle stream and 74 on one in the middle of a memory-to-memory block -
-the flush - and the flush sets TCIF, so an abort looks like a completion to
-anything that only reads the flags. SxNDTR then says exactly how much was
-left (2007 of 2048 in the suite's run), and 10.3.14's resume from that
-count finishes the block.
+the flush - on the STM32F446RE, each span taken masked on the DWT; and the
+flush sets TCIF, so an abort looks like a completion to anything that only
+reads the flags. SxNDTR then says exactly how much was left (2034 of 2048
+in the suite's run), and 10.3.14's resume from that count finishes the
+block.
 
 **Circular mode needs no CPU at all**: five laps of a sixteen-byte table
 into the console's transmitter, with nothing re-arming anything, NDTR
@@ -843,8 +851,10 @@ flags are cleared.
 
 **The console's own transmitter is a DMA console**: 575 bytes through the
 transmit stream in 50 ms, which is the LINE's time and not the CPU's (a
-byte is ten bits at 115200, so the block's own length says 49 ms), with no
-block thrown away.
+byte is ten bits at 115200, so the block's own length says 49 ms; the
+letter's bound, 48 to 51 ms, is the tick count's millisecond either way,
+the truncation and the baud generator's rounding), with no block thrown
+away.
 
 **Single-wire half duplex is the wire this family does not need**: with
 HDSEL the receiver listens on the transmit pad, so everything the port
@@ -895,7 +905,7 @@ bytes sent after it read whole and in order. The run engine in the same
 place offered nothing, counted nothing and raised ORE.
 
 **What one `harvest()` costs** (the least of three, the ruler's own pair
-taken off): 57 core cycles with nothing new and 84 with bytes waiting -
+taken off): 65 core cycles with nothing new and 88 with bytes waiting -
 the restart flag, one look of the view (SxNDTR and the lap count) and the
 gate, no call and no register of the USART: the edge is the vectors' now
 ([usart.md](usart.md)), and `harvest()` the same gate asked from the
@@ -909,9 +919,10 @@ the element, and filled at every destination offset: bytes 272 cases of
 guard bytes on either side untouched, the ports bursting from a
 sixteen-byte boundary and beating singly off one; an element off its
 own alignment is refused before anything starts. **`abandon()`** two
-microseconds into a 1024-word block stops it with 152 words landed in
-every run of ten, counts it lost, frees the engine, and the next block
-copies whole.
+microseconds after the first word of a 1024-word block lands stops it
+with part of the block landed - the rest could not have: the memory port
+moves at most a word a cycle, and 1023 more need 5.7 us - counts it lost,
+frees the engine, and the next block copies whole.
 
 **The reset state**: both AHB1 gates closed, every flag register at zero,
 every stream's SxCR at zero and SxFCR at 0x21 (the FIFO empty, threshold a

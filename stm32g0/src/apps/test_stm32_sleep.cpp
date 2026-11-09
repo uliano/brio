@@ -711,18 +711,22 @@ void td_wake_cost() {
     print(serial, "  Stop 0 - Sleep = ", stop0, " us, Stop 1 - Sleep = ",
           stop1, " us, per round", crlf);
 
-    // THE SPREAD, largest leg minus smallest. Each figure is one wall span
-    // over 32 rounds, so its own reading error is a tick over 32, about
-    // 1 us. The legs differ in what a round costs beyond the armed
-    // interval: the wake itself (table 37: 11.2 us at most), the flash's
-    // own wake (about 4 us) and the PLL's re-lock in resume_clock(),
-    // which only a Stop needs - and a round is a whole number of wall
-    // ticks, because the wake-up timer counts the wall's own root, so a
-    // cost that crosses a tick edge costs the whole tick. Two ticks is the
-    // bound the two verdicts below hold the Stop legs to as well, here
-    // converted whole (wall_us(2), 61 us on the crystal, where twice the
-    // truncated tick is 60) and one more for each figure's own truncation
-    // to a whole microsecond.
+    // THE BOUNDS, DERIVED. A round is a whole number of wall ticks: the
+    // wake-up timer counts the wall's own root and is re-armed on its
+    // edges, so a cost that crosses a tick edge costs the whole tick, and
+    // a cost of c microseconds adds at most ceil(c / 30.5) ticks. What a
+    // Stop adds to a Sleep's round is its wake - at most 11.2 us, DS13560
+    // table 37's Stop 1 from a powered-down flash, the dearest row - and
+    // the PLL's relock in resume_clock(), at most 40 us (table 47's
+    // tLOCK): 51.2 us, two ticks. Each figure is one wall span over 32
+    // rounds truncated twice (to whole microseconds, then per round), so
+    // a difference of two figures is off by under 2 us. Hence:
+    //   any leg minus another   <= wall_us(2) + 2   (61 + 2 on the crystal)
+    //   flash down minus flash on <= wall_us(1) + 2  (11.2 us is under a tick)
+    const uint32_t two_ticks = wall_us(2u) + 2u;
+    const uint32_t one_tick = wall_us(1u) + 2u;
+    print(serial, "  the bounds: legs within ", two_ticks, " us of each other, the "
+          "flash's power-down within ", one_tick, " us", crlf);
     uint32_t round_lo = 0xFFFFFFFFu;
     uint32_t round_hi = 0;
     for (uint8_t i = 0; i < n; ++i) {
@@ -735,11 +739,12 @@ void td_wake_cost() {
     }
     bench.verdict("every rung wakes: no round was lost, and the four legs "
                   "took the same time to within two wall ticks per round",
-                  n == 4u && round_lo != 0u && round_hi - round_lo <= wall_us(2u) + 1u);
-    bench.verdict("A STOP COSTS LESS THAN ONE WALL TICK MORE TO LEAVE THAN "
-                  "A SLEEP - which is the whole of what this desk can say, "
+                  n == 4u && round_lo != 0u && round_hi - round_lo <= two_ticks);
+    bench.verdict("A STOP COSTS AT MOST TWO WALL TICKS MORE TO LEAVE THAN "
+                  "A SLEEP - its wake and the PLL's relock, quantized to the "
+                  "wall's ticks - which is the whole of what this desk can say, "
                   "and it agrees with the datasheet's 5.6..11.2 us",
-                  stop0 <= 2u * tick_us && stop1 <= 2u * tick_us);
+                  stop0 <= two_ticks && stop1 <= two_ticks);
     // THE ORDERING IS DECLINED, and saying so is the point: the mapping
     // of `standby` to Stop 0 and `deep` to Stop 1 rests on 4.1.3's
     // regulator argument and on table 37, not on a measurement this
@@ -751,10 +756,9 @@ void td_wake_cost() {
     bench.skip("the ordering of Stop 0 and Stop 1: every counter fine enough "
                "to resolve it stops in Stop, so the ladder's ordering rests on "
                "4.1.3 and DS13560 table 37 and is not claimed as measured");
-    bench.verdict("and powering the flash down over a Stop changes nothing "
-                  "this instrument can see either (table 37 prices it at "
-                  "about 4 us)",
-                  per_round[3] <= per_round[2] + 2u * tick_us);
+    bench.verdict("and powering the flash down over a Stop costs at most the one "
+                  "wall tick its wake can cross (table 37 prices it at about 4 us)",
+                  per_round[3] <= per_round[2] + one_tick);
 }
 
 // =============================================================================

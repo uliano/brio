@@ -445,9 +445,13 @@ a polling loop locates to a few hundred nanoseconds.
 - **An alarm lands 31 microseconds after the second it matches**: alarm
   A on a seconds match raised its handler 3190 core cycles - 31 us -
   after the calendar's own second edge (letter `f`). A sub-second alarm at
-  MASKSS = 15, SS = 128 landed 496 ms into the second against the 500 ms
-  its arithmetic asks for, the difference being one ck_apre period and
-  the reading loop.
+  MASKSS = 15, SS = 128 landed 496 ms into the second, which is its
+  arithmetic: RTC_SSR reloads to PREDIV_S = 255 at the edge and reads
+  128 after 127 periods of the 256 Hz ck_apre, 496.1 ms. The letter
+  reads the offset in calendar time (the second weighed in core cycles
+  first, so neither crystal enters) and judges it from 2 us before that
+  (the edge's polling turn) to the millisecond alarm A's latency verdict
+  allows after it.
 - **Smooth calibration lands on its arithmetic** (letter `i`): against
   an uncalibrated +36 ppm, CALP gave +524 (+488 measured, +488 priced),
   CALM 256 gave -207 (-243 measured, -244 priced) and CALM 511 gave -467
@@ -476,7 +480,10 @@ a polling loop locates to a few hundred nanoseconds.
   1499 ms. The asymmetry is the register's - ADD1S bumps the calendar the
   instant the shift lands and then pushes the next update back.
 - **RTC_CALIB counts out on the pad** (letter `m`): 511 rising edges in
-  0.99938 s at COSEL = 0, and exactly 4 in 4.2 s at COSEL = 1, read
+  0.99938 s of core clock at COSEL = 0, printed; what the letter judges
+  is the count in one calendar second, 512 by the divider chain
+  (RTCCLK / 64 against RTCCLK / 32768) to the one edge a polling turn
+  can catch at either end. Exactly 4 in 4.2 s at COSEL = 1, read
   through PC13's own input register with no instrument. The alarm
   output follows the flag it is pointed at - low with WUTF clear, high
   with it set, POL = 0. **POL = 1 inverts it**, and **OPEN DRAIN leaves

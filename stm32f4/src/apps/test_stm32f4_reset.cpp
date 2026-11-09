@@ -33,8 +33,9 @@
 //      single capture. Run it with
 //          brio run <board> i --app test_stm32f4_reset
 //                  --expect="fail" --timeout 120
-//      Legs: a software reset, an IWDG time-out (which measures the real
-//      one and with it LSI), a WWDG window violation, a panic through
+//      Legs: a software reset, an IWDG time-out (timed on the kernel tick
+//      and judged against the LSI weighed on TIM5's channel 4 all through
+//      it), a WWDG window violation, a panic through
 //      ResetReporter, a deliberate HardFault through hard_fault_reset(),
 //      a UsageFault with the fault enabled and its record read, and a
 //      WWDG time-out with the early warning armed.
@@ -68,6 +69,7 @@
 #include "stm32f4/platform.hpp"
 #include "stm32f4/reset.hpp"
 #include "stm32f4/ticker.hpp"
+#include "stm32f4/tim.hpp"
 #include "stm32f4/usart.hpp"
 #include "util/print.hpp"
 #include "util/test_wait.hpp"
@@ -129,6 +131,10 @@ struct Token {
     uint32_t fault_address;
     uint8_t forced_timed;    ///< leg 8: what Iwdg::force_reset() answered
     uint32_t elapsed_cycles; ///< legs 8 and 9: from the force_reset() call to the reset
+    uint32_t lsi_min_mhz;    ///< leg 2: the slowest LSI weighing inside the time-out, mHz
+    uint32_t lsi_max_mhz;    ///< leg 2: the fastest
+    uint16_t lsi_segments;   ///< leg 2: how many weighings completed before the reset
+    uint16_t lsi_overruns;   ///< leg 2: weighings thrown away for a missed capture
 };
 [[gnu::section(".noinit")]] inline Token token;
 
@@ -190,6 +196,43 @@ struct Ruler {
 static_assert(CycleRuler<Ruler>);
 
 uint32_t cycles_to_us(uint32_t cycles) { return cycles / cycles_per_us; }
+
+// ---------------------------------------------------------------------------
+// The LSI's own ruler: TIM5's channel 4 with TI4_RMP pointed at the LSI
+// (RM0390 6.2.11, "an IWDG timeout with an acceptable accuracy" is the
+// use the manual names). TIM5 counts the APB1 timer clock, which comes
+// from the same PLL as the kernel tick, so a time-out measured on the
+// tick and judged against the LSI weighed on TIM5 carries no error of the
+// board's crystal: it cancels.
+// ---------------------------------------------------------------------------
+using Meter = Tim<5>;
+constexpr uint32_t apb1_tim_hz = tim_clock_hz(clock, false);
+/// The input prescaler takes one capture every eight LSI periods; a
+/// weighing is 64 captures, 512 periods - 11..30 ms over DS10693 table
+/// 42's 17..47 kHz, and at least 980000 counts of a 90 MHz timer clock
+/// (1.09 million at the STM32F411's 100 MHz), so the two capture edges'
+/// count each (and the input synchronizer's) are under 4 ppm of it.
+constexpr uint32_t lsi_per_capture = 8;
+constexpr uint32_t lsi_captures = 64;
+
+/// Point TIM5's channel 4 at the LSI and start it. The source is written
+/// after init(), whose reset pulse puts TIM5_OR back on the pad.
+void lsi_meter_start() {
+    Meter::init();
+    (void)Meter::input4_source(Tim5Input4::lsi);
+    (void)Meter::configure({.prescaler = 0, .period = Meter::max_period});
+    (void)Meter::capture_channel(3, {.select = TimChannelSelect::direct,
+                                     .polarity = TimCapturePolarity::rising,
+                                     .prescaler = TimCapturePrescaler::every8});
+    Meter::enable(true);
+}
+
+/// The LSI in millihertz from one weighing's span in timer counts.
+uint32_t lsi_mhz_of(uint32_t span) {
+    return span == 0u ? 0u
+                      : static_cast<uint32_t>(static_cast<uint64_t>(apb1_tim_hz) *
+                                              lsi_captures * lsi_per_capture * 1000ULL / span);
+}
 
 /// Keep a watchdog alive that a reset did not stop (see feed_iwdg). A
 /// no-op on a stopped watchdog: 0xAAAA into a key register nothing is
@@ -774,14 +817,65 @@ void bank(uint8_t leg) {
     // reach: with the watchdog live and LSION never written, the LSI is
     // forced on and Iwdg::running() must say so (7.2.9).
     token.armed_running = Iwdg::running() ? 1u : 0u;
-    // THROUGH A VOLATILE POINTER, and it is not decoration: a plain
+    // THROUGH VOLATILE POINTERS, and it is not decoration: a plain
     // store to a non-volatile object inside a loop that never exits is
     // one gcc is entitled to sink out of the loop - which is to say,
     // never to perform, and the leg then banks a beautiful zero.
     volatile uint32_t* const elapsed = &token.elapsed_ms;
+    volatile uint32_t* const lsi_min = &token.lsi_min_mhz;
+    volatile uint32_t* const lsi_max = &token.lsi_max_mhz;
+    volatile uint16_t* const segments = &token.lsi_segments;
+    volatile uint16_t* const overruns = &token.lsi_overruns;
+    *lsi_min = 0xFFFFFFFFu;
+    *lsi_max = 0;
+    *segments = 0;
+    *overruns = 0;
     const uint32_t t0 = Ticker::ticks();
+    // THE LSI WEIGHED ALL THROUGH THE TIME-OUT IT TIMES: TIM5 captures
+    // every eighth LSI period from here to the reset, and each run of 64
+    // captures is one weighing, the last capture of one the first of the
+    // next - so the weighings tile the window with no gap, and the mean
+    // LSI over the window lies between the slowest and the fastest of
+    // them (all but the unfinished last one, under 30 ms of ~1 s). The
+    // LSION bit is never written: the running watchdog keeps the LSI on.
+    lsi_meter_start();
+    bool have_first = false;
+    uint32_t from = 0;
+    uint32_t taken = 0;
     for (;;) {
         *elapsed = Ticker::ticks() - t0;
+        if (!Meter::flag(Meter::compare_flag(3))) {
+            continue;
+        }
+        const uint32_t at = Meter::compare(3);
+        if (Meter::flag(Meter::overcapture_flag(3))) {
+            // A capture was lost (the loop missed one), so this run's
+            // count of periods is wrong, and which of the two the
+            // register kept is not this letter's question: the next
+            // capture starts a new run.
+            Meter::clear_flags(Meter::overcapture_flag(3));
+            *overruns = static_cast<uint16_t>(*overruns + 1u);
+            have_first = false;
+            continue;
+        }
+        if (!have_first) {
+            from = at;
+            taken = 0;
+            have_first = true;
+            continue;
+        }
+        if (++taken == lsi_captures) {
+            const uint32_t mhz = lsi_mhz_of(at - from);
+            if (mhz < *lsi_min) {
+                *lsi_min = mhz;
+            }
+            if (mhz > *lsi_max) {
+                *lsi_max = mhz;
+            }
+            *segments = static_cast<uint16_t>(*segments + 1u);
+            from = at;
+            taken = 0;
+        }
     }
 }
 
@@ -1156,10 +1250,41 @@ void ti_resume() {
         // THE MEASUREMENT: the elapsed milliseconds ARE the LSI.
         const uint32_t ms = token.elapsed_ms;
         const uint32_t lsi = ms != 0u ? leg_lsi_numerator / ms : 0u;
+        const bool weighed = token.lsi_segments != 0u;
+        const uint32_t lsi_lo = token.lsi_min_mhz;
+        const uint32_t lsi_hi = token.lsi_max_mhz;
+        // THE WINDOW THE TIME-OUT MUST FALL IN, from the LSI weighed
+        // through it (leg_iwdg): the counter takes RL + 1 ticks of LSI / 8
+        // (RM0390 table 121: 0.125 ms at RL 0 and /4), less one tick for
+        // the prescaler's phase at the reload, which the chapter does not
+        // state, and plus 5 LSI cycles for the refresh key to cross into
+        // the LSI domain (the figure 20.4.4 gives RVU's crossing). In LSI
+        // cycles that is RL x 8 at the earliest and (RL + 1) x 8 + 5 at the
+        // latest; in time, divided by the fastest and the slowest weighing.
+        // The tick reading is that time to within one millisecond either
+        // way (t0 is read part-way into a tick, the reset lands part-way
+        // into another); the weighing's own resolution (under 4 ppm, under
+        // 4 us here) and the crystal (it cancels, see the ruler) add
+        // nothing at this scale. 512 ms unconfigured is a factor 1.87
+        // shorter, far outside.
+        const uint64_t early_cycles = static_cast<uint64_t>(leg_reload) * 8u;
+        const uint64_t late_cycles = (static_cast<uint64_t>(leg_reload) + 1u) * 8u + 5u;
+        const uint32_t earliest_us =
+            weighed ? static_cast<uint32_t>(early_cycles * 1'000'000'000ULL / lsi_hi) : 0u;
+        const uint32_t latest_us =
+            weighed ? static_cast<uint32_t>(late_cycles * 1'000'000'000ULL / lsi_lo) + 1u : 0u;
         print(serial, "  the IWDG bit after ", ms, " ms of kernel tick (",
               iwdg_nominal_ms(leg_prescaler, leg_reload),
               " nominal, 512 if nothing had landed); arm() answered ",
               token.armed != 0u ? "true" : "false", "; LSI = ", lsi, " Hz", crlf);
+        print(serial, "  the LSI weighed on TIM5 through the time-out: ", token.lsi_segments,
+              " weighings (", token.lsi_overruns, " thrown away)");
+        if (weighed) {
+            print(serial, ", ", lsi_lo / 1000u, " to ", lsi_hi / 1000u,
+                  " Hz; the time-out due ", earliest_us / 1000u, " to ", latest_us / 1000u,
+                  " ms");
+        }
+        print(serial, crlf);
         bench.verdict("an IWDG time-out resets the device",
                       (boot_flags & ResetFlag::independent_watchdog) != 0u);
         bench.verdict("arm() reported the configuration landed",
@@ -1168,10 +1293,13 @@ void ti_resume() {
                       "the start forced the LSI on with LSION never written, "
                       "which is the witness in the direction `z` cannot reach",
                       token.armed_running != 0u);
+        bench.verdict("the LSI was weighed through the time-out", weighed);
         bench.verdict("and the time-out proves it on the wall clock: it is the "
-                      "configured 955 ms nominal and not the 512 ms an "
-                      "unconfigured watchdog would take",
-                      ms >= 860u && ms <= 1100u);
+                      "configured setting's on the LSI weighed (955 ms at the "
+                      "nominal 32 kHz) and not the 512 ms an unconfigured "
+                      "watchdog would take",
+                      weighed && (static_cast<uint64_t>(ms) + 1u) * 1000u >= earliest_us &&
+                          static_cast<uint64_t>(ms) * 1000u <= latest_us + 1000ULL);
         bench.verdict("the LSI it implies is inside the datasheet's 17..47 kHz",
                       lsi >= 17'000u && lsi <= 47'000u);
 

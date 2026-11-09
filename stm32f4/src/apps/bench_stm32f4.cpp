@@ -37,9 +37,10 @@
 //   r  THE RULER'S SELF-CHECK AND THE INSTRUMENT'S COST.
 //      The counter is enabled (verdict), and DBGMCU_CR.DBG_SLEEP is printed
 //      as found: a probe's connection sets it, and with it HCLK runs through
-//      a Sleep (stm32f4/dwt.hpp). delay_us(clock, 999) is read on the ruler:
-//      verdicts "at least 999 us" and "under 999 us + 5 per cent" - 999 and
-//      not 1000, because cortexm/delay.hpp REFUSES a wait of one SysTick
+//      a Sleep (stm32f4/dwt.hpp). delay_us(clock, 999) is read on the ruler,
+//      interrupts masked: verdicts "at least 999 us" and "at most 999 us
+//      plus the wait's own instructions" (215 cycles, derived beside it) -
+//      999 and not 1000, because cortexm/delay.hpp REFUSES a wait of one SysTick
 //      period or more and returns at once, so 1000 would measure the
 //      refusal. Then three lines, n=0 and wire=0, each the average of its
 //      run, measured right after a tick edge so that no tick lands in it:
@@ -485,16 +486,38 @@ void tr_ruler() {
 
     // delay_us against the ruler: 999 us, the longest wait the core
     // stratum's delay serves (a whole SysTick period is refused).
+    // Masked, because a handler that lands in the wait's last turn would
+    // lengthen it by its own cost, which no document gives: delay_us() is
+    // callable masked (pure VAL reads), the DWT counts there, and the one
+    // tick that falls due in 999 us waits pending and is served after.
     (void)console_drain();
     const uint32_t due = static_cast<uint32_t>(static_cast<uint64_t>(Ruler::hz()) * 999u / 1'000'000u);
+    // The overrun, derived from the release listing: delay_us() sums VAL
+    // deltas, so the first VAL read to the last spans the count itself,
+    // at least `due` (the rate's ceiling in cycles a microsecond, exact
+    // at 180 and 100 MHz) and short of `due` plus one turn of its loop. Beyond the count
+    // the span holds the instructions before the first VAL read (18: the
+    // call, the push, the checks), one turn (11) and the way out after the
+    // last (13): 42 instructions, each at most 4 cycles (1 and a full
+    // pipeline refill of 3, the most any costs on the Cortex-M4, DDI 0439B
+    // 3.3.1; push and pop 5 and 8), plus an ART miss of 6 cycles (5 wait
+    // states and the fetch) on each of the 7 flash lines the path touches:
+    // 168 + 5 + 42 = 215 cycles.
+    constexpr uint32_t delay_overrun = 215;
     Stopwatch<Ruler> sw;
-    sw.start();
-    const bool served = delay_us(clock, 999u);
-    const uint32_t took = sw.elapsed();
+    bool served = false;
+    uint32_t took = 0;
+    {
+        const InterruptGuard masked;
+        sw.start();
+        served = delay_us(clock, 999u);
+        took = sw.elapsed();
+    }
     print(serial, "  delay_us(999) ", served ? "served" : "REFUSED", " in ", took, " cycles, ", due,
-          " due", crlf);
+          " due, ", due + delay_overrun, " at most", crlf);
     bench.verdict("delay_us(999) reads at least 999 us on the ruler", took >= due);
-    bench.verdict("and under 999 us + 5 per cent", took <= due + due / 20u);
+    bench.verdict("and at most 999 us plus the wait's own instructions (215 cycles, the "
+                  "arithmetic beside it)", took <= due + delay_overrun);
 
     // ruler: an empty Stopwatch, a thousand times.
     (void)console_drain();

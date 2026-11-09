@@ -277,12 +277,20 @@ DRIVING peripheral function takes the output driver and the pull with
 it; an INPUT function does not, and that is what makes this whole
 chapter measurable with no wire.)
 
-**All four kernel clocks drive the counter**, each inside its own band:
-LSE 32740 counts a second against the crystal's 32768 (the RTC judging
-the LPTIM on the same crystal - a consistency check, not a frequency),
-LSI 32660 (inside table 46's 29.5..34 kHz, the suite's band; the row is
-printed against the rate the suite measures on TIM16's capture at boot), HSI16
-125210 x 128 and PCLK 501040 x 128 against 64 MHz.
+**All four kernel clocks drive the counter**, each inside its own band
+counted over 100 ms of the wall (the window's own arithmetic: its ends
+are wall readings a tick wide and the count quantizes by one): the LSE
+against the crystal's 32768, 32750..32830 (the RTC judging the LPTIM on
+the same crystal - a consistency check, not a frequency); LSI 32660,
+inside table 46's 29.5..34 kHz (29480..34060 through the window; the row
+is printed against the rate the suite measures on TIM16's capture at
+boot); HSI16 125210 x 128 and PCLK 501040 x 128 against 64 MHz, inside
+DS13560 table 44's band for HSI16 (-1.85..+1.56 %). **A counter read
+the instant it is started is four counts short**: CNTSTRT takes effect
+some kernel clocks later (the 122 us below), so a window opened on that
+first read counts the late start as missing pulses - 32740 for 32768 on
+the LSE, every run. The suite waits for the counter's first move before
+it opens a window.
 
 **26.4.13's and 26.4.7's latencies are REAL KERNEL CLOCKS, not APB
 ones.** On LSE, `enable()` plus the first ARR write to ARROK costs
@@ -326,8 +334,10 @@ settled by experiment, in the header's favour.
 
 **26.7.8's double read has a SECOND reason the chapter does not name.**
 On an asynchronous kernel clock two consecutive CNT reads really do
-disagree - 3 to 9 readings in 2000 at LSE - which is the reason 26.7.8
-gives. But with the counter clocked at ONE COUNT PER CPU CYCLE (PCLK,
+disagree - 3 to 12 readings in 2000 at LSE, a count that depends on
+where the asynchronous edges fall against the loop and is printed, not
+judged - which is the reason 26.7.8 gives, and `count()` still hands
+back a value two reads agree on. But with the counter clocked at ONE COUNT PER CPU CYCLE (PCLK,
 prescaler /1) the two reads NEVER agree, 2000 times in 2000: not because
 the value is incoherent but because it has MOVED. `count()` gives
 nothing there and `count_raw()` is the only reader that means anything
@@ -343,7 +353,8 @@ into a running continuous count stops it at the next ARR match.
 
 **COUNTRST costs 2 extra counts** before it lands, against the three
 kernel clocks 26.4.14 predicts - the chapter's "a few extra pulses" with
-a number on it. RSTARE works as described, and with it set the double
+a number on it (judged 1..4: at least one edge in three kernel clocks,
+at most three, and one more between the first read and the write). RSTARE works as described, and with it set the double
 read is impossible by construction.
 
 **PRELOAD measured as what it is**: with it clear, an ARR halved
@@ -360,13 +371,18 @@ PRINTS.** Measured off the pad:
   own clock, so HSI16's trim cancels - and judges within 64 cycles of
   64000 (the 1000 Hz once counted on the RTC wall, a 5 Hz quantum, could
   not tell 1000 from 1002);
-- the HIGH TIME is **ARR - CMP + 1** ticks - ONE MORE than the
-  chapter's two sentences read on their own - so CMP = 0 is a FULL duty
-  and not one tick short of it: 1000, 751, 501, 251 and 101 per mille
-  for CMP 0, 249, 499, 749 and 899 at ARR 999;
-- and at the pair 26.4.10 forbids (CMP >= ARR) the output is a **FLAT
-  LOW**, not the one tick of duty the formula would extrapolate to, not
-  a fault, and not undefined-looking.
+- the HIGH TIME follows CMP as **ARR - CMP + 1** ticks: 1000, 750..753,
+  500..502, 249..252 and 100..102 per mille for CMP 0, 249, 499, 749 and
+  899 at ARR 999. The pad sampler reads a duty to 14 per mille (its
+  loop's phase lattice on a 1000-cycle waveform, 10, and the kernel
+  tick's handler, always at the same phase, 3), so it does NOT tell
+  ARR - CMP + 1 from ARR - CMP, one tick in a thousand apart: which of
+  the two the silicon does, and so whether CMP = 0 is a full duty or one
+  tick short of it, is not established;
+- and at the pair 26.4.10 forbids (CMP >= ARR) the output is **LOW** -
+  zero duty to the sampler's 14 per mille, not a fault, and not
+  undefined-looking; whether one tick of it is high, as the formula
+  would extrapolate for CMP = ARR, is below what the sampler resolves.
 
 `LptimPwm` maps duty v out of `max` = ARR onto CMP = max - v, which
 makes both endpoints exact by two different routes: v = max puts CMP at
@@ -389,7 +405,7 @@ and it is measured with no pad, no peripheral and no CPU in the loop:
 ARR = 1 on the 32768 Hz crystal drives the DMAMUX request GENERATOR
 through table 56's trigger input 20, and a DMA channel with no
 peripheral counted 3277 edges in 200 ms = 16385 Hz against the kernel
-clock's half, 16384. The same claim at the PCLK extreme (32 MHz of
+clock's half, 16384 (the window's arithmetic allows 16375..16405). The same claim at the PCLK extreme (32 MHz of
 output) is DECLINED: no counter this board can spare resolves it and the
 DMA cannot serve requests that fast.
 
@@ -578,6 +594,13 @@ Implemented but not bench-verified:
   (the leg; it has no comparator): the boards are not on the desk.
 - **`debug_freeze()`**: the DBG block's own gate is opened and the bit
   is written, but nothing here halts a core to watch the counter freeze.
+- **The high time's last tick**: `LptimPwm`'s stated mapping (duty
+  (v + 1) / (max + 1), CMP = max - v) rests on a high time of
+  ARR - CMP + 1 ticks, and the pad sampler resolves 14 per mille, not
+  the one tick in a thousand that tells it from ARR - CMP. A timer
+  capture of the pad's two edges (TIM16 or TIM17 on the same pin), or a
+  sampler run with interrupts masked over whole sweeps of a loop whose
+  length is prime to the period, would count it.
 - **The output rate at the PCLK extreme** (32 MHz with ARR = 1),
   declined: no counter this board can spare resolves it and the DMAMUX
   generator cannot serve requests that fast. The claim is measured at
