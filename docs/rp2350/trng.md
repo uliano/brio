@@ -44,9 +44,11 @@ stops the oscillator, which 12.12.3 asks for when the block is not in
 use.
 
 What decides correctness even there. The sampling interval: the block
-counts it in system clock cycles, and an interval under about 800 ns
-stops the block on its autocorrelation check within microseconds
-(measured, "Bench findings" below) - which is why the default is a time
+counts it in system clock cycles, and an interval too short stops the
+block on its autocorrelation check within microseconds. Where that floor
+lies is the entropy source's own ring oscillator, which no document
+bounds, and it differs between dies: about 800 ns on a stepping A2 die,
+far lower on an A4 (measured, "Bench findings" below) - which is why the default is a time
 turned into cycles at the chip's highest rate and not the cycle count
 the datasheet suggests. A program that passes its own `sample_cycles`
 owns that floor; `init()` refuses only what the chapter forbids
@@ -124,8 +126,8 @@ stops the block.** TRNG_CONFIG picks one of four inverter-chain lengths
 and SAMPLE_CNT1 the clk_sys cycles between two samples. The chapter's
 worked values are "ROSC chain length settings of 0 or 1 and sample count
 settings of 20-25" for an average generation time of about 2 ms, with no
-clock rate stated beside them. Measured here (below), an interval under
-about 800 ns makes the autocorrelation test fail four times in a row
+clock rate stated beside them. Measured on a stepping A2 die (below), an
+interval under about 800 ns makes the autocorrelation test fail four times in a row
 within microseconds and the block ceases functioning. The chapter's two
 figures together name their own clock: a collection takes some 680
 samples (below), and 680 samples of 25 cycles in 2 ms is a clk_sys near
@@ -176,7 +178,8 @@ a one masks).
   `trng_config_legal(cfg)` is the rule both the compile-time and the
   run-time entry points judge by, written once.
 - `trng_min_sample_ns`, `trng_default_sample_ns` and
-  `trng_sample_cycles_for(sys_hz, ns)` - the floor, the default and the
+  `trng_sample_cycles_for(sys_hz, ns)` - the floor (the A2 die's, the
+  highest of the dies measured), the default and the
   arithmetic between a sampling interval and SAMPLE_CNT1, rounded up.
 - `Trng::init(cfg)` / `Trng::init<cfg>()` - the block cycled through its
   subsystem reset, the IP's soft reset with its delay, the settings, every
@@ -253,8 +256,7 @@ on the two halves; where a number differs, both are given.
   and four failures, inside a few microseconds, and the block then hands
   out nothing until it is reset. (Not quite every: at 25 cycles, four
   attempts of 52 later counted saw the test pass once between failures -
-  three tries, two failures - and the collection go on; letter g makes
-  up to three attempts.) At **110 cycles seven runs in ten** do.
+  three tries, two failures - and the collection go on.) At **110 cycles seven runs in ten** do.
   From **120 cycles up, none of ten** does, at chain 0, 1 and 3 alike.
   120 cycles at 150 MHz is **800 ns**, and the chain length moves the
   boundary not at all: it is the INTERVAL that matters. 12.12.2's "sample
@@ -262,6 +264,15 @@ on the two halves; where a number differs, both are given.
   "about 2 milliseconds" implies - near 8.5 MHz, 2.9 us a sample - and
   wrong by an order of magnitude at this one. The default here is 2 us
   (300 cycles at 150 MHz), two and a half times the floor.
+- **ON A STEPPING A4 DIE THE FLOOR IS FAR LOWER.** On the WeAct RP2350A
+  (QFN-60), clk_sys at 150 MHz, both architectures: at 25 cycles (167 ns)
+  the block collected entropy in 26 attempts of 30; at 8 cycles the
+  autocorrelation check stopped it in about one attempt of four, at 3
+  cycles in about one of two. So letter g walks the interval down - 25,
+  8, then 3 cycles - and stops at the first attempt that names
+  AUTOCORR_ERR, skipping the two checks that need the flag if none does;
+  `test_rp2350_blocks` reports **76 pass, 0 fail** there, ten runs on
+  each architecture. The default of 2 us is over the floor of both dies.
 - **WHAT 192 BITS COST at that default.** A collection takes **1360 to
   1427 us on the Cortex-M33 half and 1351 to 1379 us on the Hazard3
   one** - some 680 samples of 300 cycles each, three and a half for every

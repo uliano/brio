@@ -659,6 +659,7 @@ void tt_wire_end() {
     uint32_t bad_status[2] = {};
     uint32_t wrong_way[2] = {};
     uint32_t select_wrong[2] = {};
+    uint8_t rx_line = 0xEEu;
     for (uint8_t k = 0; k < wire_rung_count; ++k) {
         const WireRung& g = wire_rungs[k];
         uint8_t rung_early[2][4] = {};
@@ -679,7 +680,15 @@ void tt_wire_end() {
                         ++early[way];
                         ++rung_early[way][m];
                     }
-                    if (e.status != spi_ok || (read && (rx_buf[0] != 0xFFu || rx_buf[1] != 0xFFu))) {
+                    // No wire is on the receive path: the RP2350B's loop host has a
+                    // receive pad nothing drives, the RP2350A's none at all, so what a
+                    // read takes in is the line's one level - 0xFF or 0x00, the same in
+                    // both frames - and a read is judged written, not by its value.
+                    if (read && rx_line == 0xEEu) {
+                        rx_line = rx_buf[0];
+                    }
+                    if (e.status != spi_ok ||
+                        (read && (rx_buf[0] != rx_buf[1] || (rx_buf[0] != 0xFFu && rx_buf[0] != 0x00u)))) {
                         ++bad_status[way];
                     }
                     if (e.inside != polled) {
@@ -702,7 +711,7 @@ void tt_wire_end() {
     }
     print(serial, "  over the ladder: early ends polled ", early[0], ", dma ", early[1], "; bad status or data ",
           bad_status[0], " / ", bad_status[1], "; the other way ", wrong_way[0], " / ", wrong_way[1], "; select wrong ",
-          select_wrong[0], " / ", select_wrong[1], crlf);
+          select_wrong[0], " / ", select_wrong[1], "; a read took in ", hex(rx_line), crlf);
     bench.verdict("THE POLLED LOOP'S END IS THE WIRE'S: right after start() answers true SCK is at its idle level, every "
                   "mode, read and write, the request's select and the program's, every rung from clk_peri / 65024 to / 2",
                   early[0] == 0u && bad_status[0] == 0u && wrong_way[0] == 0u);

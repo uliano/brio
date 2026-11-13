@@ -284,7 +284,12 @@ on the two halves except ARCHSEL_STATUS, which is the one that must not.
   sixteen per cent under its nominal 32 kHz, which is why anything timed
   by it is calibrated and not assumed), INFO_CRC 0x2C377790,
   FLASH_DEVINFO 0x0 - the last unwritten, so the flash geometry is not
-  declared in OTP on this board and the ROM reports its own 0xC00.
+  declared in OTP on this board and the ROM reports its own 0xC00. On a
+  stepping A4 die (QFN-60) the same rows read ROSC_CALIB **24402 kHz** and
+  LPOSC_CALIB **65142 Hz** - twice the 32 843 Hz its low-power
+  oscillator counts against the crystal. No document bounds what the
+  rows hold, so a program that times by them checks them against its
+  own count first, and the suite judges them readable, not plausible.
 - **KEY_VALID'S BIT 0 IS NOT AN ENROLLED KEY.** 13.5.2 numbers the access
   keys 1..6 (index 7 never matches, index 0 means "no key") and the
   register's reset value is 0x00, but on a part with **every KEY1..KEY6

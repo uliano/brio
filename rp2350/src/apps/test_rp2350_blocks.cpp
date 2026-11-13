@@ -616,33 +616,61 @@ void tg_recovery() {
     // wait out, so the branch that reports it and the verb that cures it
     // are exercised here rather than left to a board that misbehaves.
     //
-    // NOT EVERY ATTEMPT: at 25 cycles 3 attempts of 36 measured saw the
-    // test pass once between failures and the collection go on. So up
-    // to three attempts, each a fresh init(): a miss rate of 1 in 12
-    // leaves about 1 in 1700 for three.
+    // NOT EVERY ATTEMPT, AND NOT AT ONE INTERVAL ON EVERY DIE. Where the
+    // floor lies is the entropy source's own ring oscillator, which no
+    // document bounds. On an A2 die (rp2350/trng.hpp's measurement) 25
+    // cycles failed in 33 attempts of 36; on an A4 die 25 cycles
+    // collected entropy in 26 attempts of 30, and over a few runs 8
+    // cycles named the error in about one attempt of four, 3 cycles in
+    // about one of two, 1 cycle less often than 3. So the interval walks
+    // down - three fresh init()s at 25 cycles, three at 8, six at 3,
+    // every count legal with the decorrelator on - and stops at the
+    // first attempt that names the error: at the A4's rates all twelve
+    // miss about once in 200 runs (0.87^3 x 0.75^3 x 0.5^6). A
+    // source that collects through the whole walk is not starved on this
+    // die at these intervals, and the two checks that need
+    // the fatal flag are skipped with that reason rather than failed;
+    // an attempt that ends in no entropy is judged whatever its cause.
+    static constexpr uint32_t starve_cycles[] = {25u, 25u, 25u, 8u, 8u, 8u, 3u, 3u, 3u, 3u, 3u, 3u};
     bool named = false;
+    bool collected = false;
     Trng::AutocorrStats fatal{};
     uint32_t attempts = 0;
-    while (!named && attempts < 3u) {
+    uint32_t cycles = 0;
+    for (const uint32_t c : starve_cycles) {
+        if (named) {
+            break;
+        }
+        cycles = c;
         ++attempts;
-        Trng::init({.sample_cycles = 25});
+        Trng::init({.sample_cycles = c});
         Trng::clear_autocorr_stats();
         Trng::start();
         const auto starved = Trng::read_blocking();
         fatal = Trng::autocorr_stats();
-        named = !starved.has_value() && Trng::last_error() == TrngError::autocorrelation;
+        collected = starved.has_value();
+        named = !collected && Trng::last_error() == TrngError::autocorrelation;
     }
-    print(serial, "  at 25 cycles between samples: autocorrelation ", fatal.tries,
+    print(serial, "  at ", cycles, " cycles between samples: autocorrelation ", fatal.tries,
           " started, ", static_cast<uint32_t>(fatal.failures), " failed; read_blocking says ",
-          named ? "autocorrelation" : "something else", " (attempt ", attempts, " of 3)", crlf);
-    bench.verdict("a sampling interval far under the measured floor stops the block on "
-                  "AUTOCORR_ERR, and read_blocking names that error rather than timing out",
-                  named && fatal.failures >= 4u);
-    Trng::clear(TrngFlag::all);
-    const bool sticks = (Trng::status() & TrngFlag::autocorr_error) != 0u;
-    bench.verdict("and the flag stands through a write to RNG_ICR, which is why the soft "
-                  "reset is the only cure",
-                  sticks);
+          named ? "autocorrelation" : collected ? "entropy collected" : "another error",
+          " (attempt ", attempts, " of 12)", crlf);
+    if (!collected) {
+        // Starved: whatever ended the last attempt has to be the fatal
+        // check, named as such.
+        bench.verdict("a sampling interval far under the floor stops the block on "
+                      "AUTOCORR_ERR, and read_blocking names that error rather than timing out",
+                      named && fatal.failures >= 4u);
+        Trng::clear(TrngFlag::all);
+        const bool sticks = (Trng::status() & TrngFlag::autocorr_error) != 0u;
+        bench.verdict("and the flag stands through a write to RNG_ICR, which is why the soft "
+                      "reset is the only cure",
+                      sticks);
+    } else {
+        bench.skip("AUTOCORR_ERR raised on purpose: this die's entropy source passed the "
+                   "autocorrelation test through the whole walk, down to 3 cycles between samples");
+        bench.skip("the flag standing through RNG_ICR: never raised on this die");
+    }
     // Back to the settings the rest of this letter measures with.
     Trng::recover();
     Trng::start();
@@ -783,10 +811,15 @@ void th_otp_record() {
         print(serial, "unreadable");
     }
     print(serial, crlf);
-    bench.verdict("the factory's calibration rows carry plausible rates: the ring "
-                  "oscillator in megahertz and the low-power one near 32 kHz",
-                  rosc.has_value() && lposc.has_value() && *rosc > 1'000u &&
-                      *rosc < 60'000u && *lposc > 10'000u && *lposc < 60'000u);
+    // The two rows are the factory's measurements, and no document bounds
+    // what they hold: ROSC_CALIB is taken "with the ROSC configuration
+    // registers in their reset state", which randomises from stepping A3
+    // (appendix C.2.1), and an A4 die's LPOSC_CALIB has been read at
+    // twice the rate its oscillator counts against the crystal. So the
+    // rows are judged readable through the ECC path, and their values
+    // are the record printed above.
+    bench.verdict("the factory's calibration rows read through the ECC path",
+                  rosc.has_value() && lposc.has_value());
     bench.verdict("the chip information CRC row is written", crc.has_value() && *crc != 0u);
 
     // THE CRITICAL FLAGS, decoded bit by bit. These are exactly what

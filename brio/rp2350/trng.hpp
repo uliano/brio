@@ -66,9 +66,11 @@
  * The settings, and why the defaults are what they are. 12.12.2 advises
  * "ROSC chain length settings of 0 or 1 and sample count settings of
  * 20-25" - with no clock rate beside it, and SAMPLE_CNT1 counts clk_sys
- * cycles. Measured here, a sampling interval under about 800 ns makes
- * the autocorrelation test fail four times in a row and stop the block,
- * so the default is stated as a time (`trng_default_sample_ns`) and
+ * cycles. Measured on a stepping A2 die, a sampling interval under
+ * about 800 ns makes the autocorrelation test fail four times in a row
+ * and stop the block; an A4 die collects at 167 ns and fails reliably
+ * only from 8 cycles down, the floor being the entropy source's own ring
+ * oscillator, which no document bounds. So the default is stated as a time (`trng_default_sample_ns`) and
  * turned into a count for the family's highest clk_sys, which is safe at
  * every rate under it. `trng_sample_cycles_for()` is the same arithmetic
  * for a program that knows its own rate. The full measurement is beside
@@ -141,9 +143,9 @@ struct TrngFlag {
  * written with no clock rate beside it but with a time: "about 2
  * milliseconds" a result. A collection is measured here at some 680
  * samples, and 680 samples of 25 cycles in 2 ms is a clk_sys near
- * 8.5 MHz - the order of the ring oscillator this chip boots on, and
+ * 8.5 MHz - the order of the ring oscillator stepping A2 boots on, and
  * 2.9 us a sample. At 150 MHz the same 25 cycles are 167 ns, far under
- * the floor.
+ * the A2 die's floor.
  */
 inline constexpr uint32_t trng_min_sample_ns = 800;
 

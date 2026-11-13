@@ -41,6 +41,13 @@ same piece of hardware and the same probe; only the preset differs
   3V3 rail, with 100 kOhm from the pad to ground - and GP29 is ADC input
   3. None of the three is free: the pin-check tool's wave leaves them
   out, and the converter's suite prints input 3 and never judges it.
+  What the V2.1 at the bench reads agrees with the V20's circuits
+  without proving them: GP24 reads high with no pull and low with its
+  pull-down, as a pad on a divider of VBUS does; GP29 reads 1576 mV with
+  its pulls off, which through the V20's circuit (VSYS halved behind
+  50 kOhm, into the 100 kOhm to ground: VSYS / 3) is a VSYS of 4.73 V on
+  USB power, the 5 V less a diode, and the pad's pulls move it to 2563
+  and 651 mV, a source of some 33 kOhm, which that circuit is.
 - **Console**: none on board. The Debug Probe's UART bridge on UART0,
   GP0 (TX) / GP1 (RX), crossed, is the console
   ([../probes/raspberry-pi-debug-probe.md](../probes/raspberry-pi-debug-probe.md)).
@@ -60,7 +67,9 @@ same piece of hardware and the same probe; only the preset differs
   stepping A2's, and stepping A3 modified the pad circuit to remove it
   (the datasheet's appendix C.2.1), so on this board's A4 a pad whose
   input buffer stays on does not hold its history against its
-  pull-down. The pads are still read the way the A2 needs, with the
+  pull-down - measured so: a pad driven high and released comes down on
+  its own pull-down, and the converter's floating input reads 48 mV.
+  The pads are still read the way the A2 needs, with the
   buffer enabled for the read alone, which costs nothing here.
 
 ## The wires to the WeAct RP2040 board

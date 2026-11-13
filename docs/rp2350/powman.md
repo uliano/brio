@@ -319,7 +319,7 @@ ruler that answers in every state.
   fits a sequencer that never completes the power-down - 6.2.3.2 enables
   the GPIO power-ups only once it has - but the pad's wake is not
   measured from any state, and which domain holds the sequence is not
-  established.
+  established. Both boards are stepping A2.
 - **AND THE DEBUG PORT'S RESCUE DOES NOT REACH A POWERED-DOWN CORE.**
   3.5.8 says the rescue reset works "even when system clocks are stopped
   and the switched core power domain is powered down". The first half is
@@ -393,6 +393,12 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- **A power-down on stepping A4.** The WeAct RP2350A runs every other
+  verdict of this chapter, the dormant and sleep ones included; the
+  power-downs into P1.0 and P1.7 have not been asked of it. What would
+  measure them: the same two letters on that board, P1.0 first, with its
+  supply at hand to cycle - which would also say whether the P1.7
+  finding above belongs to the A2 die or to the sequence.
 - **The four GPIO power-up slots as a wake from a P1.m state.** The slots
   are written, read back and refused for a pad the package has not got,
   and the wake this chapter measures is the alarm's. The one try, a

@@ -339,7 +339,7 @@ void tc_pulls() {
                                                 : "GP36 (the I2C link's SDA, 1.5 kOhm to the partner's 3V3)");
         pulled_net<LinkScl>(rp2350pair::board_a ? "GP17 (its SCL, the same)" : "GP37 (its SCL, the same)");
         pulled_net<LinkCs>(rp2350pair::board_a ? "GP9 (the SPI link's select, 4.7 kOhm to the partner's 3V3)"
-                                               : "GP41 (the SPI link's select, the same)");
+                                               : "GP41 (the SPI link's select, 4.7 kOhm to the partner's 3V3)");
     } else {
         bench.verdict("the link nets' pull-ups are up: the partner board is powered", false);
     }
@@ -389,11 +389,15 @@ void td_erratum_e9() {
           after_high ? 1 : 0, ", after being driven low ", after_low ? 1 : 0,
           "; with the buffer pulsed for the read alone, after being driven high it reads ",
           pulsed ? 1 : 0, crlf);
-    bench.verdict("with its input buffer enabled, a pad that was driven high and released "
-                  "sits HIGH against its own pull-down - the erratum, on this stepping",
+    bench.verdict(leaky ? "with its input buffer enabled, a pad that was driven high and released "
+                          "sits HIGH against its own pull-down - the erratum, live on this stepping"
+                        : "with its input buffer enabled, a pad that was driven high and released "
+                          "comes down to LOW on its own pull-down - this stepping is past the erratum",
                   leaky ? after_high : !after_high);
-    bench.verdict("the errata sheet's workaround reads the same pad LOW: the buffer is what "
-                  "leaks, and read_pulsed() enables it for the read alone",
+    bench.verdict(leaky ? "the errata sheet's workaround reads the same pad LOW: the buffer is what "
+                          "leaks, and read_pulsed() enables it for the read alone"
+                        : "the errata sheet's workaround reads the same pad LOW as well: "
+                          "read_pulsed() enables the buffer for the read alone",
                   !pulsed);
     bench.verdict("a pad driven low and released stays low either way", !after_low);
 
@@ -852,7 +856,7 @@ void tk_package() {
 
 void banner() {
     print(serial, crlf, "test_rp2350_pin - the RP2350's GPIO (datasheet 9), ",
-          static_cast<uint32_t>(gpio_count), " pads, stepping ", hex(ChipId::read().revision),
+          static_cast<uint32_t>(gpio_count), " pads, stepping ", stepping_name(ChipId::stepping()),
           ", on ",
           core_kind == CoreKind::cortex_m33 ? "the Cortex-M33" : "Hazard3", crlf);
     bench.menu();

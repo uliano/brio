@@ -463,7 +463,21 @@ void to_output() {
     bench.verdict("a zero divider is refused", !ClockOut<1>::init(GpoutSource::xosc, 0));
 }
 
+/// This board's own GPOUT0 off before GP20 is counted. Letter o leaves it
+/// running on GP21, the pad beside GP20, and its wire runs beside this
+/// one: with both boards' outputs on, 7 counts of 16 on the WeAct pair
+/// read about 1 % high (1008000 to 1010875 Hz), and 16 of 16 were exact
+/// with one output alone. Every count of the far output has one driver
+/// on the two wires.
+void quiet_own_output() {
+    if (ClockOut<0>::enabled()) {
+        ClockOut<0>::stop();
+        print(serial, "  GPOUT0 stopped first: the output beside GP20 is quiet while it counts", crlf);
+    }
+}
+
 void tp_input() {
+    quiet_own_output();
     ClockIn<0>::init();
     const std::optional<uint32_t> hz = Boot::count_hz(ClockIn<0>::count_source);
     if (!hz) {
@@ -558,6 +572,7 @@ void tr_partner_output() {
         {"/7, no correction", 1'714'286u, 429},
         {"/9, duty corrected", 1'333'333u, 500},
     };
+    quiet_own_output();
     ClockIn<0>::init();
     (void)Pio<0>::reset();
     const bool loaded = Pio<0>::load(sample_program, 0);

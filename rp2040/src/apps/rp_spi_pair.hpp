@@ -906,6 +906,8 @@ struct ClientRun {
     uint16_t windows = 0;         ///< select windows that closed, counted by a PIO machine
     uint32_t pulse_min = 0;       ///< the shortest high pulse inside the burst, in gauge counts
     uint32_t pulses = 0;          ///< how many the gauge measured
+    uint32_t ticks = 0;           ///< kernel ticks served across a vector burst
+    uint32_t misses = 0;          ///< XIP misses across a vector burst
     spilink::Report peer{};
 };
 
@@ -1319,11 +1321,25 @@ ClientRun client_vector_burst(uint8_t mode, bool wide, uint16_t count, uint16_t 
     // 6 us at /64) - or, for a client that takes nothing, 5 ms, twenty
     // times a burst of 24 frames at /64.
     (void)wait_until([] { return !CsPin::read(); }, 200'000u);
+    // THE LENGTHENERS, read around the burst from its select's fall to its
+    // last frame taken: a kernel tick served inside the burst stands
+    // between a receive interrupt and its refill without being the vector
+    // (the lengtheners rule). The XIP misses are counted too, and printed:
+    // the vector's own lines were warmed above, so what misses here is the
+    // program's wait in the flash, which the vector preempts - on the
+    // Cortex-M33 one miss in every burst, the wait's first fetch after the
+    // select's fall - and not a lengthener of the vector.
+    const uint32_t tick0 = Ticker::ticks();
+    const uint32_t hits0 = Xip::hits();
+    const uint32_t miss0 = Xip::accesses() - hits0;
     if (drain) {
         (void)wait_until([] { return cv_got >= cv_count; }, 300'000u);
     } else {
         spin_us(5000);
     }
+    const uint32_t hits1 = Xip::hits();
+    out.misses = (Xip::accesses() - hits1) - miss0;
+    out.ticks = Ticker::ticks() - tick0;
     spin_us(200);
     LinkClient::interrupts(SpiInterrupt::all, false);
     pair_owner = PairOwner::none;
@@ -1397,7 +1413,7 @@ void ts_client_vector() {
         }
         print(serial, crlf);
     }
-    uint8_t runs = 0, exact = 0, tails = 0;
+    uint8_t runs = 0, exact = 0, tails = 0, stretched = 0;
     uint16_t last_admitted = 0;
     for (uint16_t d = 64; d >= 8u; d = static_cast<uint16_t>(d == 64u ? 32u : (d == 32u ? 16u : d - 2u))) {
         const bool judged = client_admits(d);
@@ -1411,12 +1427,21 @@ void ts_client_vector() {
                                                         static_cast<uint8_t>(0x63u + m + 2u * w + d));
                 const bool ok = c.ran && c.got == 67u && c.mism == 0u && c.peer.count == 67u && c.peer.mism == 0u &&
                                 !c.overrun && cv_overrun_entries == 0u;
+                // A run a tick lengthened is printed with its counts and left
+                // out of the judgement.
+                const bool lengthened = c.ticks != 0u;
                 print(serial, " m", m, w != 0u ? "/16 " : "/8 ", ok ? "ok" : "BAD", " ", cv_rx_entries, "+",
                       cv_timeout_entries);
+                if (lengthened || c.misses != 0u) {
+                    print(serial, " (", lengthened ? "lengthened: " : "", c.ticks, " tick, ", c.misses,
+                          " XIP misses)");
+                }
                 if (!ok) {
                     print_client(c, 67);
                 }
-                if (judged) {
+                if (judged && lengthened) {
+                    ++stretched;
+                } else if (judged) {
                     ++runs;
                     exact = static_cast<uint8_t>(exact + (ok ? 1u : 0u));
                 }
@@ -1435,10 +1460,11 @@ void ts_client_vector() {
             last_admitted = d;
         }
     }
-    print(serial, "  (entries: receive-at-half + receive timeout; ", runs, " judged runs down to /", last_admitted, ")",
-          crlf);
+    print(serial, "  (entries: receive-at-half + receive timeout; ", runs, " judged runs down to /", last_admitted,
+          ", ", stretched, " lengthened and printed)", crlf);
     bench.verdict("THE CLIENT FROM ITS VECTOR, every rung it admits down to the ceiling: 67 frames exact both ways in "
-                  "modes 0 and 3, 8- and 16-bit, no overrun - one entry per four frames",
+                  "modes 0 and 3, 8- and 16-bit, no overrun - one entry per four frames, in every run no kernel tick "
+                  "lengthened",
                   runs != 0u && exact == runs);
     bench.verdict("THE RECEIVE TIMEOUT'S TAIL: at /64 the 67 frames are sixteen level entries of four and ONE "
                   "receive-timeout entry for the three under the FIFO's half, in each of the four runs",

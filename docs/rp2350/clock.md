@@ -122,9 +122,13 @@ changed and restarted - and the datasheet asks for its `ENABLED` status
 to be polled rather than for cycles to be counted, because the generated
 clock may be far slower than the one counting them.
 
-**At power-up the chip runs on the ring oscillator**, at a nominal
-11 MHz guaranteed only to sit between 4.6 and 19.6, with the crystal
-off, both PLLs in reset and clk_peri disabled. The crystal oscillator
+**At power-up the chip runs on the ring oscillator**, with the crystal
+off, both PLLs in reset and clk_peri disabled. What the ring oscillator runs
+at is the stepping's: 8.3 guarantees 4.6 to 19.6 MHz (nominal 11) at the
+reset divider of 8 with no randomisation, which is stepping A2's boot;
+from stepping A3 the reset state randomises the first two stages and the
+bootrom sets the divider to 2 (appendix C.2.1 and C.2.2), so clk_sys
+boots between 18.4 and 96.0 MHz. The crystal oscillator
 takes 1 to 50 MHz in one of four range codes and needs a startup delay
 in units of 256 crystal cycles before STATUS.STABLE rises (47 for 12 MHz
 and the 1 ms of the reference design). The system PLL multiplies the
@@ -328,7 +332,10 @@ if (!brio::delay_us(clock, 20)) {     // false, nothing waited, with the ruler s
 All of them on an RP2350 in the QFN-80 package, stepping A2, with a
 12 MHz crystal, and all of them on BOTH architectures: `test_rp2350_clock`
 reports **114 pass, 0 fail** on the Cortex-M33 pair and **114 pass, 0
-fail** on the Hazard3 pair, from one source.
+fail** on the Hazard3 pair, from one source. On an RP2350 in the QFN-60
+package, stepping A4, the suite reports **115 pass, 0 fail** on both
+architectures, ten runs each; the verdict the RP2350B has not run is
+letter g's last, the randomiser given back as it booted.
 
 - **The tree after `Clock<pll, 150 MHz>::init()`**: the crystal STABLE
   and ENABLED at delay 47 in range code 0; PLL_SYS locked at REFDIV 1,
@@ -377,6 +384,11 @@ fail** on the Hazard3 pair, from one source.
   cent with both stages randomised (12 060 562 Hz) and 3 with one
   (11 511 656 Hz), against 11 159 843 Hz with neither - the same
   direction as the datasheet's "up to 22%", and less of it.
+- **On stepping A4 the ring oscillator boots at 48.4 MHz**, divider 2,
+  both stages randomised - inside the 18.4 to 78.4 MHz 8.3's range gives
+  at that divider with the randomiser off, which is how letter g counts
+  it. The low-power oscillator there counts 32 843 Hz, its crystal
+  12 000 000 Hz, and ROSC.BADWRITE stands at boot as on A2.
 - **BADWRITE, and what it caught.** ROSC.BADWRITE stands at every boot
   before brio writes anything: it is not cleared by a processor reset,
   by the debug port's rescue or by the bootrom, so what a program finds

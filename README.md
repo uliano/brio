@@ -183,7 +183,7 @@ chapters, which boards, which gaps) is in its guide.
 | CH32V203 and CH32V303 (`ch32vx03/`) | WeAct CH32V203C8T6, WCH CH32V303 evaluation board | CH32V203 supported; CH32V303 in bring-up; CAN not implemented | [docs/ch32vx03/](docs/ch32vx03/README.md) |
 | CH32X035 (`ch32x035/`) | WCH CH32X035F8U6 evaluation board | in bring-up: platform (both kernels), clock, pins, USARTs, I2C, SPI, timers and DMA | [docs/ch32x035/](docs/ch32x035/README.md) |
 | RP2040 (`rp2040/`) | Raspberry Pi Pico, WeAct RP2040 | supported; two cores run two kernels | [docs/rp2040/](docs/rp2040/README.md) |
-| RP2350 (`rp2350/`) | WeAct RP2350B | in bring-up: one source built for the Cortex-M33 pair and for the Hazard3 pair, every driver's test suite passing on both; no HSTX, no M33 coprocessors | [docs/rp2350/](docs/rp2350/README.md) |
+| RP2350 (`rp2350/`) | WeAct RP2350B, WeAct RP2350A | in bring-up: one source built for the Cortex-M33 pair and for the Hazard3 pair, every driver's test suite passing on both; no HSTX, no M33 coprocessors | [docs/rp2350/](docs/rp2350/README.md) |
 | host (`host/`) | the host itself | supported: the test suites and the simulators | [docs/host/](docs/host/README.md) |
 
 Compilers: avr-gcc 16.2 for the AVR, arm-none-eabi-gcc 16.2 for the

@@ -498,13 +498,26 @@ void tf_ticker() {
 void tg_rosc() {
     Rosc::clear_badwrite();
     const uint8_t boot_div = Rosc::divider();
+    // THE BOOT SETTINGS ARE THE STEPPING'S, AND SO IS THE RATE. 8.3
+    // guarantees 4.6 to 19.6 MHz at the reset divider of 8 without
+    // randomisation - 36.8 to 156.8 MHz before the divider. That is A2's
+    // boot. From A3 the reset state randomises the first two stages and
+    // the bootrom sets the divider to 2 (appendix C.2.1 and C.2.2, and
+    // 8.3's note: clk_sys 18.4 to 96.0 MHz). So the randomiser is turned
+    // off for the whole letter and given back at its end, and the rate
+    // is judged against the oscillator's range divided by the divider it
+    // booted with: 4.6 to 19.6 MHz on A2, 18.4 to 78.4 MHz from A3.
+    const bool boot_random = Rosc::randomised();
+    Rosc::randomise(false, false);
     const uint32_t before = counted(CountSource::rosc);
-    print(serial, "  the ring oscillator: ", before, " Hz, range code ",
-          hex(Rosc::range_code()), ", divider ", boot_div, ", randomised: ",
-          Rosc::randomised() ? "yes" : "no", crlf);
-    bench.verdict("the ring oscillator counts inside the range the datasheet guarantees "
-                  "(4.6 to 19.6 MHz at the boot settings)",
-                  before >= 4'600'000u && before <= 19'600'000u);
+    const uint32_t lowest = boot_div != 0u ? 36'800'000u / boot_div : 0u;
+    const uint32_t highest = boot_div != 0u ? 156'800'000u / boot_div : 0u;
+    print(serial, "  the ring oscillator: ", before, " Hz with the randomiser off, range code ",
+          hex(Rosc::range_code()), ", divider ", boot_div, ", randomised at boot: ",
+          boot_random ? "yes" : "no", "; guaranteed ", lowest, "..", highest, " Hz", crlf);
+    bench.verdict("the ring oscillator counts inside the range the datasheet guarantees at the "
+                  "divider it booted with (4.6 to 19.6 MHz at a divider of 8, 8.3)",
+                  boot_div != 0u && before >= lowest && before <= highest);
 
     Rosc::stop();
     const std::optional<uint32_t> dead = Boot::count_hz(CountSource::rosc, 10);
@@ -561,6 +574,13 @@ void tg_rosc() {
                   !Rosc::badwrite());
     bench.verdict("and the oscillator is back at the divider and range it booted with",
                   Rosc::divider() == boot_div && near(counted(CountSource::rosc), before, 50));
+    // The randomiser as it booted, after the rate's comparison: turning
+    // it on moves the rate by up to 22 % (8.3.6), so the next run of this
+    // letter finds the boot settings and the comparison above stays one
+    // between two rates with the randomiser off.
+    Rosc::randomise(boot_random, boot_random);
+    bench.verdict("and the randomiser is as it booted - on from stepping A3, off on A2",
+                  Rosc::randomised() == boot_random);
 }
 
 // -----------------------------------------------------------------------------
@@ -983,6 +1003,15 @@ void tu_one_hz() {
 }
 
 void tp_input() {
+    // THIS BOARD'S OWN OUTPUT OFF FIRST. Letter o leaves GPOUT0 running on
+    // GP21, the pad beside GP20, and its wire runs beside this one: with
+    // both boards' outputs on, 7 counts of 16 on the WeAct pair read about
+    // 1 % high (1008000 to 1010875 Hz), and 16 of 16 were exact with one
+    // output alone. The count is judged with one driver on the two wires.
+    if (ClockOut<0>::enabled()) {
+        ClockOut<0>::stop();
+        print(serial, "  GPOUT0 stopped first: the output beside GP20 is quiet while it counts", crlf);
+    }
     (void)ClockIn<0>::init();
     const std::optional<uint32_t> hz = Boot::count_hz(ClockIn<0>::count_source);
     if (!hz || *hz == 0u) {

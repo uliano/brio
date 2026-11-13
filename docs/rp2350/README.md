@@ -257,9 +257,12 @@ unit of `test/family_rp2350/` is built four times, for the Cortex-M33
 and for Hazard3, each for the QFN-80 and for the QFN-60, and every
 `neg/` TU, a program that must be refused, must fail; `util_all.cpp`
 goes through both compilers. The bench proves the QFN-80 on both
-architectures; the QFN-60 has the compile check and every app built and
-linked for the WeAct RP2350A on both, with no suite run there yet ("Not
-covered yet" below).
+architectures on stepping A2, and the QFN-60 on both architectures on
+stepping A4: every suite and bench app of the project runs on the WeAct
+RP2350A, its link partners on the WeAct RP2040, bar the letters a
+package of 30 pads cannot serve (each refused at compile time, its
+reason beside it) and the power-down letters of the power chapter
+([powman.md](powman.md)).
 
 ## What the silicon does to a program, before any driver
 
@@ -295,7 +298,8 @@ measured on the bench chip:
   and then released stays low. An idle level on this silicon is history,
   not a measurement: a program that wants to read a floating pad through
   its pulls must drive it first, or use the pull-up and read a low as
-  its signal. Stepping A3 removes the leakage path.
+  its signal. Stepping A3 removes the leakage path, and on an A4 die a
+  pad driven high and released comes down on its own pull-down.
 
 And two more the RISC-V half adds:
 
@@ -370,10 +374,6 @@ Driver gaps, each with its reason:
 - **The programming side of OTP**, in any form: declined permanently
   ([otp.md](otp.md)), and the absence is asserted by the family check
   rather than promised.
-- **The QFN-60 package.** The stratum compiles for it and refuses its
-  absent pads, and every app builds for the WeAct RP2350A, but no suite
-  has run on that board: everything below the compile check is
-  unmeasured there.
 - **Interrupt priorities.** Both halves have sixteen levels and no
   driver uses them: the kernel's promise is that no interrupt nests over
   another, and here it is kept structurally (every line at the reset
@@ -385,8 +385,6 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The QFN-60's compile-time refusals**, above: the suites run on the
-  WeAct RP2350A.
 - **A second console for core 1.** Core 1 itself is measured on both
   architectures (the launch, the two tickers, the bridge, the panic and
   the relaunch, [multicore.md](multicore.md)), but it speaks only
