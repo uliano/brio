@@ -71,7 +71,7 @@ driver: `brio/rp2040/pio.hpp` (the assembler, `Pio<n>` the block,
 `resets.hpp` and `dma_engine.hpp`. The reference suite:
 `test_rp2040_pio`, wireless and on two wires between the chip's own
 pads - wires the bench pair (the WeAct RP2040 the suite runs on,
-wired to a WeAct RP2350B) does not carry
+wired to a WeAct RP2350A) does not carry
 ([../boards/weact-rp2040.md](../boards/weact-rp2040.md)), so the
 six wire letters run by name only, outside z, when they are fitted. A
 suite's letter is one command key of its console and the group of

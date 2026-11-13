@@ -1,8 +1,9 @@
 // test_rp2350_i2c - the reference bench suite for this chip's I2C
 // (rp2350/i2c.hpp over datasheet 12.2, the Synopsys DW_apb_i2c v2.03a):
 // the block WIRELESS, THIS CHIP'S PADS - the isolation latch, the pad
-// register the driver writes, the unstick's hand-over - on the high half
-// of the bank, above GP31, and then the host and the client on a wire to a
+// register the driver writes, the unstick's hand-over - on the link's own
+// pads (above GP31, the high half of the bank, on the WeAct RP2350B; GP16
+// and GP17 on the WeAct RP2350A), and then the host and the client on a wire to a
 // SECOND CHIP: every tenure shape, the vocabulary produced on the wire, the
 // three speeds measured, the DMA engines, util/i2c_bus.hpp's arbiter with
 // its timed bus, the stuck bus, arbitration between two hosts, and this
@@ -15,9 +16,11 @@
 // the console, judged by brio's "ALL: N pass, M fail" grammar
 // (util/testbench.hpp). It is a REFERENCE test.
 //
-// THE WIRE IS THE DESK PARTNER'S. I2C0 on GP36 (SDA) / GP37 (SCL) is
-// wired to the WeAct RP2040's I2C1, each line with 1.5 kOhm to THAT
-// board's 3V3 (docs/boards/weact-rp2350b.md). That board runs `twi_peer`
+// THE WIRE IS THE DESK PARTNER'S. I2C0 on the pair plan's pads
+// (rp2350_pair.hpp: GP16 SDA / GP17 SCL on the WeAct RP2350A, GP36 / GP37
+// on the WeAct RP2350B) is wired to the WeAct RP2040's I2C1, each line
+// with 1.5 kOhm to THAT board's 3V3 (docs/boards/weact-rp2350a.md,
+// weact-rp2350b.md). That board runs `twi_peer`
 // (rp2040/src/apps/twi_peer.cpp), commanded IN BAND over the bus under
 // test through avrxt/src/apps/twi_link.hpp; the two-board letters are the
 // ones both Raspberry Pi suites share, rp2040/src/apps/rp_i2c_pair.hpp,
@@ -64,12 +67,13 @@
 //   i  THE STUCK BUS: the peer holding SDA, unstick() counting the clocks
 //      until it lets go, then a line nine clocks cannot free
 //   j  THE PADS, which is where this chip differs from its predecessor,
-//      on GP36/GP37: the link's pull-ups read the way E9 forces, the
+//      on the link's two: the link's pull-ups read the way E9 forces, the
 //      isolation latch dropped by the driver's own hand-over, the whole
 //      pad register read back against 12.2.1.3, an address phase nobody
-//      answers carried by them, the unstick's hand-over through the HIGH
-//      half's SIO registers and back, and both pads left isolated again
-//      by release()
+//      answers carried by them, the unstick's hand-over through SIO and
+//      back - through the HIGH half's SIO registers on the B, where the
+//      pads are above GP31, through the low half's on the A - and both
+//      pads left isolated again by release()
 //   k  ARBITRATION on the wire, both directions, and an engined read
 //      losing it
 //   l  THE ROLES INVERT: this board's client written to and read from by
@@ -95,7 +99,7 @@
 //   x  (outside z) the hand-made window traced: what the block reports of
 //      a START and a STOP it did not make, and a tenure written inside it
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -129,6 +133,7 @@
 #include "../../../avrxt/src/apps/twi_link.hpp"
 
 #include "pair_power.hpp"
+#include "rp2350_pair.hpp"
 
 namespace {
 
@@ -148,8 +153,8 @@ using Ruler = Timer<0>;
 
 TestBench<Serial> bench;
 
-// I2C0 on the pair's wires: GP37 (SCL), GP36 (SDA).
-constexpr I2cPins link_pins{.scl = 37, .sda = 36};
+// I2C0 on the pair's wires (rp2350_pair.hpp).
+constexpr I2cPins link_pins = rp2350pair::i2c_pins;
 using Host = I2cHost<0, link_pins>;
 using DmaTx = DmaTxEngine<4, uint16_t>;
 using DmaRx = DmaRxEngine<5>;
@@ -165,8 +170,8 @@ using DmaHot = InFlash;
 using DmaHost = I2cHost<0, link_pins, DmaTx, DmaRx, DmaHot>;
 using Client = I2cClient<0, link_pins>;
 using Raw = DwApbI2c<0>;
-using SdaPin = Pin<36>;
-using SclPin = Pin<37>;
+using SdaPin = Pin<rp2350pair::i2c_sda>;
+using SclPin = Pin<rp2350pair::i2c_scl>;
 constexpr uint8_t partner_kind = twilink::peer_rp2040;
 constexpr const char* partner_text = "the WeAct RP2040";
 
@@ -298,7 +303,9 @@ void ta_block() {
 // =============================================================================
 void tj_pads() {
     const pair::PartnerRail rail = pair::partner_rail(clock);
-    print(serial, "  GP36 and GP37 on their own pull-down, the buffer pulsed (E9's workaround): SDA ",
+    print(serial,
+          rp2350pair::board_a ? "  GP16 and GP17 on their own pull-down, the buffer pulsed (E9's workaround): SDA "
+                              : "  GP36 and GP37 on their own pull-down, the buffer pulsed (E9's workaround): SDA ",
           rail.sda ? "HIGH" : "low", ", SCL ", rail.scl ? "HIGH" : "low", crlf);
     bench.verdict("THE LINK'S PULL-UPS READ THE WAY E9 FORCES: both lines high through 1.5 kOhm to the "
                   "RP2040's 3V3 against the pad's own pull-down - the partner powered, the pads free to drive",
@@ -308,13 +315,14 @@ void tj_pads() {
         return;
     }
     host_ready();
-    const uint32_t pad36 = Gpio::pad(36);
-    const uint32_t pad37 = Gpio::pad(37);
+    const uint32_t pad36 = Gpio::pad(SdaPin::number);
+    const uint32_t pad37 = Gpio::pad(SclPin::number);
     const bool fn_ok = SdaPin::function() == PinFunction::i2c && SclPin::function() == PinFunction::i2c;
     const bool iso_ok = !SdaPin::isolated() && !SclPin::isolated();
     const bool ie_ok = SdaPin::input_enabled() && SclPin::input_enabled();
     const uint32_t wanted = pad_value(i2c_pad_config);
-    print(serial, "  after init: GP36 pad=", hex(pad36), " GP37 pad=", hex(pad37), " (the driver asks for ",
+    print(serial, rp2350pair::board_a ? "  after init: GP16 pad=" : "  after init: GP36 pad=", hex(pad36),
+          rp2350pair::board_a ? " GP17 pad=" : " GP37 pad=", hex(pad37), " (the driver asks for ",
           hex(wanted), "), FUNCSEL ", static_cast<uint32_t>(SdaPin::function()), "/",
           static_cast<uint32_t>(SclPin::function()), ", isolated ", SdaPin::isolated(), "/", SclPin::isolated(),
           crlf);
@@ -330,21 +338,26 @@ void tj_pads() {
     bench.verdict("... and the pads so configured carry an address phase: nobody home is i2c_nack_addr",
                   st == i2c_nack_addr);
     // The unstick takes the pads by hand - through the HIGH half's SIO
-    // registers, these being GP36 and GP37 - and gives them back.
+    // registers where they are GP36 and GP37, the low half's where they are
+    // GP16 and GP17 - and gives them back.
     const uint8_t cleared = Host::unstick();
-    const uint32_t pad36_after = Gpio::pad(36);
-    const uint32_t pad37_after = Gpio::pad(37);
+    const uint32_t pad36_after = Gpio::pad(SdaPin::number);
+    const uint32_t pad37_after = Gpio::pad(SclPin::number);
     const bool fn_back = SdaPin::function() == PinFunction::i2c && SclPin::function() == PinFunction::i2c;
     const uint8_t st2 = probe(nobody);
-    print(serial, "  after unstick() (", cleared, "): GP36 pad=", hex(pad36_after), " GP37 pad=", hex(pad37_after),
+    print(serial, "  after unstick() (", cleared, rp2350pair::board_a ? "): GP16 pad=" : "): GP36 pad=", hex(pad36_after),
+          rp2350pair::board_a ? " GP17 pad=" : " GP37 pad=", hex(pad37_after),
           ", the next probe ", st2, crlf);
-    bench.verdict("the unstick reads a healthy bus above GP31 (0), takes both pads to SIO and hands them back "
-                  "to the block with the same pad register: the probe after it lands unchanged",
+    bench.verdict(rp2350pair::i2c_in_high_half
+                      ? "the unstick reads a healthy bus above GP31 (0), takes both pads to SIO and hands them back "
+                        "to the block with the same pad register: the probe after it lands unchanged"
+                      : "the unstick reads a healthy bus (0), takes both pads to SIO and hands them back "
+                        "to the block with the same pad register: the probe after it lands unchanged",
                   cleared == 0u && pad36_after == wanted && pad37_after == wanted && fn_back && st2 == i2c_nack_addr);
     owner = Owner::none;
     Host::release();
-    const uint32_t pad36_released = Gpio::pad(36);
-    print(serial, "  after release(): GP36 pad=", hex(pad36_released), " FUNCSEL ",
+    const uint32_t pad36_released = Gpio::pad(SdaPin::number);
+    print(serial, rp2350pair::board_a ? "  after release(): GP16 pad=" : "  after release(): GP36 pad=", hex(pad36_released), " FUNCSEL ",
           static_cast<uint32_t>(SdaPin::function()), crlf);
     bench.verdict("release() puts the pads back where a reset leaves them (9.11's 0x116: isolated, the "
                   "input buffer off, a pull-down) with no owner",
@@ -697,7 +710,9 @@ void tv_write_fault() {
 
 void banner() {
     print(serial, crlf, "test_rp2350_i2c - the RP2350 I2C (datasheet 12.2, DW_apb_i2c v2.03a) on the ",
-          arch_name(), " half: the block wireless, then I2C0 on GP37/GP36 against the RP2040's twi_peer; clk_sys=",
+          arch_name(),
+          rp2350pair::board_a ? " half: the block wireless, then I2C0 on GP17/GP16 against the RP2040's twi_peer; clk_sys="
+                              : " half: the block wireless, then I2C0 on GP37/GP36 against the RP2040's twi_peer; clk_sys=",
           SysClock::hz, " Hz", crlf);
     bench.menu();
 }
@@ -738,7 +753,8 @@ int main() {
     bench.letter('r', "a released requester: the same owner initialized again", guarded<bench, clock, tr_released_requester>);
     bench.letter('h', "the kernel: I2cBus over I2cHost, the timed bus", guarded<bench, clock, th_kernel>);
     bench.letter('i', "the stuck bus", guarded<bench, clock, ti_unstick>);
-    bench.letter('j', "the pads and the isolation latch, above GP31", tj_pads);
+    bench.letter('j', rp2350pair::i2c_in_high_half ? "the pads and the isolation latch, above GP31"
+                                                   : "the pads and the isolation latch", tj_pads);
     bench.letter('k', "arbitration on the wire", guarded<bench, clock, tk_arbitration>);
     bench.letter('l', "the roles invert: this board as the peer's client", guarded<bench, clock, tl_roles>);
     bench.letter('m', "the client's edges: the overrun, the disable inside a tenure", guarded<bench, clock, tm_client_edges>);

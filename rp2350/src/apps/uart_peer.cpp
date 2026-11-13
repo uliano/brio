@@ -6,23 +6,27 @@
 // are and how the mode line picks one; this file binds it to the RP2350:
 //
 //  - THE LINK is UART1 on GP4 (TX) / GP5 (RX) under the first function
-//    column, at 115200 8N1, crossed to the other board's UART (on the pair
-//    desk, the WeAct RP2040's UART1 - docs/boards/weact-rp2350b.md).
-//  - THE MODE LINE is GP20, an input pulled down, driven by the other
-//    board (on the pair desk, the RP2040's GP21). The LED (GP25) follows
-//    it. IT IS READ WITH ITS BUFFER PULSED (`Pin::read_pulsed()`, erratum
-//    RP2350-E9's workaround, rp2350/pin.hpp): a pad whose buffer stays on
-//    keeps the last level the far end drove once that end lets go, which
-//    would leave this peer SENDING with nobody asking; with the buffer off
-//    between reads the pull-down takes a released line low.
+//    column (rp2350_pair.hpp's plan, the same on both WeAct boards), at
+//    115200 8N1, crossed to the other board's UART (on the pair desk, the
+//    WeAct RP2040's UART1 - docs/boards/weact-rp2350a.md and
+//    weact-rp2350b.md).
+//  - THE MODE LINE is GP20 (the plan's clock input pad, a plain input
+//    here), pulled down, driven by the other board (on the pair desk, the
+//    RP2040's GP21). The board's LED follows it. IT IS READ WITH ITS
+//    BUFFER PULSED (`Pin::read_pulsed()`, erratum RP2350-E9's workaround,
+//    rp2350/pin.hpp): on stepping A2 a pad whose buffer stays on keeps the
+//    last level the far end drove once that end lets go, which would leave
+//    this peer SENDING with nobody asking; with the buffer off between
+//    reads the pull-down takes a released line low.
 //  - THE PARTNER'S RAIL FIRST (pair_power.hpp): the transmitter idles high
 //    on GP4, and an RP2040 pad is not failsafe, so UART1 comes up only once
 //    the I2C link's pull-ups read that board powered, asked again once a
 //    second while they read down.
-//  - ONE DRIVER PER WIRE: no other link pad is touched (GP21, GP28, GP30,
-//    GP31, GP36, GP37 between their sense reads, GP41 stay at reset).
+//  - ONE DRIVER PER WIRE: no other link pad is touched (GP21, the SPI
+//    link's four, and the I2C link's two between their sense reads stay at
+//    reset).
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 
 #include <stdint.h>
 
@@ -35,7 +39,9 @@
 #include "rp2350/platform.hpp"
 #include "rp2350/uart.hpp"
 
+#include "board.hpp"
 #include "pair_power.hpp"
+#include "rp2350_pair.hpp"
 
 namespace {
 
@@ -44,14 +50,11 @@ using namespace brio;
 using SysClock = Clock<ClockSource::pll, 150'000'000UL>;
 constexpr SysClock clock;
 
-constexpr UartPins link_pins{
-    .tx = {4, PinFunction::uart},
-    .rx = {5, PinFunction::uart},
-};
+constexpr UartPins link_pins = rp2350pair::uart_pins;
 using Link = Uart<1, link_pins, 512, 512>;
 
-using ModeLine = Pin<20>;
-using Led = Pin<25>;
+using ModeLine = Pin<rp2350pair::gpin>;
+using Led = board::Led;
 
 void mode_line_up() { (void)ModeLine::input({.pull = PinPull::down, .input_enable = false}); }
 bool mode_high() { return ModeLine::read_pulsed(); }

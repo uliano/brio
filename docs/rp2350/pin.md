@@ -93,10 +93,13 @@ one source (a letter is one command key of the suite's console and the
 group of verdicts it runs; `z` is the key that runs every letter but the
 six that run by name): its pull letter on three of the desk partner's
 link nets, which carry a real pull-up to that board's 3V3
-([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)); its six wire
+([../boards/weact-rp2350a.md](../boards/weact-rp2350a.md),
+[../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)); its six wire
 letters, `b`, `f`, `g`, `h`, `i` and `j`, on four wires between the
 chip's own pads that the pair desk does not carry, by name only, outside
-`z`, when they are fitted.
+`z`, when they are fitted - on the WeAct RP2350B; on the WeAct RP2350A
+six of those eight pads are the pair's links, and the six letters are
+not registered.
 
 ## What the silicon does
 
@@ -406,10 +409,11 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The QFN-60 package**: the stratum compiles for it, the negative tests
-  prove it refuses GP30 and a pin interrupt on GP40, and no QFN-60 part
-  is on the bench. Erratum RP2350-E3, which is that package's alone,
-  is therefore untouched as well.
+- **The QFN-60 package**: the stratum compiles for it, the negative
+  tests prove it refuses GP30 and a pin interrupt on GP40, and no suite
+  has run yet on the QFN-60 board of the bench, the WeAct RP2350A.
+  Erratum RP2350-E3, which is that package's alone, is therefore
+  untouched as well.
 - **Drive strength and slew as EFFECTS.** The four strengths and both
   slew settings are written and read back, and this chip has no way to
   witness an edge rate or a source impedance from the inside: a scope on

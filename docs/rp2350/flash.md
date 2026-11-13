@@ -616,9 +616,10 @@ Driver gaps, each with its reason:
 - **The block heap and the value journal** over `QspiFlash`. Declined
   for this family by the NV stack's own review (CLAUDE.md), which is
   prior to a port; the medium and its bounds are what a program gets.
-- **The QFN-60 package.** Nothing in this chapter is bonded differently
-  - the QSPI pads are not bank 0's - but no QFN-60 part is on the bench,
-  so the statement is a compile check and not a measurement.
+- **The QFN-60 package.** Nothing in this chapter is bonded
+  differently - the QSPI pads are not bank 0's - but no suite has run
+  yet on the QFN-60 board of the bench, the WeAct RP2350A, so the
+  statement is a compile check and not a measurement.
 
 Implemented but not bench-verified, each with what would measure it:
 

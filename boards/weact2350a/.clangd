@@ -1,0 +1,6 @@
+# clangd config for this board file: it parses with the rp2350 project's
+# command line for the board's own package (the database the Arm release
+# configure of that package emits), so the target headers it includes
+# resolve as in the build.
+CompileFlags:
+  CompilationDatabase: ../../build-cmake/rp2350a-arm-release

@@ -438,8 +438,10 @@ bootrom hands over:
 - `Resets` and `ResetBlock` - the subsystem reset controller:
   `release(blocks)` (with its bounded RESET_DONE wait), `hold`, `cycle`,
   `released`, `held`, `watchdog_resets`.
-- `ChipId` - SYSINFO: `read()` (manufacturer, part, the stepping the
-  errata are keyed by, with `revision_a2` / `a3` / `a4` beside it),
+- `ChipId` - SYSINFO: `read()` (manufacturer, part and the raw
+  revision), `stepping()` (the `Stepping` the errata are keyed by:
+  appendix C gives A3 and A4 the same revision, 0x3, and tells them
+  apart by the bootrom's version byte, so it reads both),
   `package_sel()`, `gitref()`, and `asic()`, which reads the testbench
   manager's register and not SYSINFO's of the same name.
 - `device.hpp`'s `hw_set` / `hw_clear` / `hw_xor` - 2.1.3's three
@@ -1276,7 +1278,7 @@ Implemented but not bench-verified, each with what would measure it:
   full key, its 460800 and 921600 legs and the blast into its sink.
 - The QFN-60's run-time refusals: the stratum compiles for that package
   and the suite checks the die's own PACKAGE_SEL against the build's, but
-  no QFN-60 part is on the bench.
+  no suite has run yet on the QFN-60 board of the bench, the WeAct RP2350A.
 - The idle path through the DORMANT hook: its wake list is the dormant's
   own (a GPIO event, the always-on timer's alarm), and a wake already
   latched when the oscillator stops is not shown to end it at once. A

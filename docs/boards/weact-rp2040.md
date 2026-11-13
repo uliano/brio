@@ -8,7 +8,7 @@ rows. The design files are WeAct's own repository
 (WeActStudio.RP2040CoreBoard on GitHub, schematic and pinout). What the
 board offers a brio program beyond a Pico is a flash chip OpenOCD's
 release does not know, a reset button and a user button, and a wired
-partner: it is one half of a two-board pair with a WeAct RP2350B, and
+partner: it is one half of a two-board pair with a WeAct RP2350A, and
 the ten wires between them are listed here.
 
 ## The board
@@ -43,24 +43,30 @@ the ten wires between them are listed here.
   id (`Flash::unique_id()`, 4Bh over the SSI) is the board's. The
   manifest's `id` is empty.
 
-## The wires to the WeAct RP2350B board
+## The wires to the WeAct RP2350A board
 
-This board is wired to a WeAct RP2350B ([weact-rp2350b.md](weact-rp2350b.md))
+This board is wired to a WeAct RP2350A ([weact-rp2350a.md](weact-rp2350a.md))
 by ten signal wires and two grounds, each board on its own USB-C, both
 on one hub, and no 3V3 wire between them:
 
-| wire | here | RP2350B | carries |
+| wire | here | RP2350A | carries |
 |---|---|---|---|
-| 1 | GP10 | GP30 | SPI1 SCK |
-| 2 | GP11 | GP28 | this SPI1 TX to the RP2350B's SPI1 RX |
-| 3 | GP8 | GP31 | the RP2350B's SPI1 TX to this SPI1 RX, 47 Ohm in series at the RP2350B's end (its reason is on that board's page) |
-| 4 | GP29 | GP41 | SPI1 CSn, 4.7 kOhm to this board's 3V3 |
-| 5 | GP2 | GP36 | I2C SDA (I2C1 here), 1.5 kOhm to this board's 3V3 |
-| 6 | GP3 | GP37 | I2C SCL, 1.5 kOhm to this board's 3V3 |
-| 7 | GP4 | GP5 | this UART1 TX to the RP2350B's UART1 RX |
-| 8 | GP5 | GP4 | the RP2350B's UART1 TX to this UART1 RX |
-| 9 | GP21 | GP20 | this GPOUT0 to the RP2350B's GPIN0 |
-| 10 | GP20 | GP21 | the RP2350B's GPOUT0 to this GPIN0 |
+| 1 | GP10 | GP10 | SPI1 SCK |
+| 2 | GP11 | GP8 | this SPI1 TX to the RP2350A's SPI1 RX |
+| 3 | GP8 | GP11 | the RP2350A's SPI1 TX to this SPI1 RX, 47 Ohm in series at the RP2350A's end (its reason is on that board's page) |
+| 4 | GP29 | GP9 | SPI1 CSn, 4.7 kOhm to this board's 3V3 |
+| 5 | GP2 | GP16 | I2C SDA (I2C1 here), 1.5 kOhm to this board's 3V3 |
+| 6 | GP3 | GP17 | I2C SCL, 1.5 kOhm to this board's 3V3 |
+| 7 | GP4 | GP5 | this UART1 TX to the RP2350A's UART1 RX |
+| 8 | GP5 | GP4 | the RP2350A's UART1 TX to this UART1 RX |
+| 9 | GP21 | GP20 | this GPOUT0 to the RP2350A's GPIN0 |
+| 10 | GP20 | GP21 | the RP2350A's GPOUT0 to this GPIN0 |
+
+This end's pads are the same as in the plan of the WeAct RP2350B, which
+stays a board type of its own with its pads on its page
+([weact-rp2350b.md](weact-rp2350b.md)); only the RP2350 end moves, and
+the RP2350 project reads which end it is from its board file
+(`rp2350/src/apps/rp2350_pair.hpp`).
 
 **The three pull-ups hang from this board's 3V3 header pin.** They are a
 load on this board's regulator (6.6 mA at most, the three lines held
@@ -68,8 +74,8 @@ low), not a feed between the boards, so the 3V3 pin still joins
 nothing. They sit on this side because an RP2040 pad is not failsafe
 (datasheet 5.5.3.1: no pad above IOVDD + 0.5 V) where an RP2350's is, so
 a line pulled to the other board's rail would feed this chip whenever it
-is unpowered; the RP2350B reads these pull-ups to know this board is
-powered before it drives a link pad.
+is unpowered; the RP2350 board reads these pull-ups to know this board
+is powered before it drives a link pad.
 
 **One driver per wire.** While one board runs a suite on a link pad the
 other runs a dark image (one that configures none of the link pads and

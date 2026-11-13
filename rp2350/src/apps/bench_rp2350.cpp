@@ -153,8 +153,11 @@
 //        spi.dma  SPI0 as a host on its two engines (DmaTxEngine<4,
 //               uint16_t>, DmaRxEngine<5, uint16_t>), 16 and 256 frames of
 //               8 and of 16 bits at clk_peri / 2 (75 MHz) and clk_peri / 8
-//               (18.75 MHz), on GP18/GP19/GP16 with GP17 as the select and
-//               NOTHING ON THE WIRE: MISO floats and the time is the wire's
+//               (18.75 MHz), on the loop-back host's pads the pair plan
+//               leaves it (rp2350_pair.hpp: GP18/GP19/GP16 with GP17 as
+//               the select on the WeAct RP2350B, GP18/GP19 with no
+//               receive pad and GP26 as the select on the WeAct RP2350A)
+//               and NOTHING ON THE WIRE: MISO floats and the time is the wire's
 //               and the engines', the data unjudged (the suite's loop-back
 //               judges it, test_rp2350_spi letter d). Wall = start() to the
 //               completion on line 0, the core idling between, the best of
@@ -174,7 +177,7 @@
 //               accesses to SSPDR cross too - beside the same block with the
 //               core asleep.
 //   e  THE SPI HOST ABOVE THE WIRE (brio/pl022/spi.hpp over SPI0 on the same
-//      pads, GP17 the select and GP22 the D/C line, MISO floating as in d):
+//      pads and select, GP22 the D/C line, MISO floating as in d):
 //      what the host's own code costs around and between the frames, on a
 //      host WITHOUT engines so the polled loop is what runs.
 //        spi.poll  a polled WRITE (no in buffer: a display's pixel path) of
@@ -246,8 +249,9 @@
 //      (UARTRIS read raw after ten frames of silence), and the copy into
 //      the ring: write_bulk's byte loop against the runtime's memcpy.
 //   i  THE I2C HOST ABOVE THE WIRE (dw_apb_i2c/i2c.hpp over rp2350/i2c.hpp)
-//      against THE DESK PARTNER: I2C0 on GP36 (SDA) / GP37 (SCL), the pair's I2C
-//      wires to the WeAct RP2040, which runs `twi_peer` and is commanded over
+//      against THE DESK PARTNER: I2C0 on the pair plan's pads (GP16 SDA /
+//      GP17 SCL on the A, GP36 / GP37 on the B), the pair's I2C wires to
+//      the WeAct RP2040, which runs `twi_peer` and is commanded over
 //      the same bus (avrxt/src/apps/twi_link.hpp): one `serve` a speed at
 //      twilink's dut_addr (0x2C), every read answered with one fixed byte
 //      given a FIFO ahead, so the far end's own pace is the wire's and
@@ -309,7 +313,7 @@
 // core, the clock, the ruler and the console's rate are one line printed by
 // the banner and again at the head of letter r, so a capture of `z` has it.
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -343,6 +347,7 @@
 #include "../../../avrxt/src/apps/twi_link.hpp"
 
 #include "pair_power.hpp"
+#include "rp2350_pair.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 150'000'000UL>;
 constexpr SysClock clock;
@@ -793,9 +798,9 @@ constexpr uint32_t dma_bytes_per_cycle = 4;   // one 32-bit read and write a clo
 constexpr uint32_t paced_words = 256;
 constexpr uint16_t pace_cycles = 150;         // Y / X: one request a microsecond at 150 MHz
 
-constexpr SpiPins spi_pins{.sck = 18, .tx = 19, .rx = 16};
+constexpr SpiPins spi_pins = rp2350pair::loop_host_pins;
 using Spi = SpiHost<0, spi_pins, DmaTxEngine<4, uint16_t>, DmaRxEngine<5, uint16_t>, HotPath>;
-using SpiSelect = Pin<17>;
+using SpiSelect = Pin<rp2350pair::loop_select>;
 
 alignas(4) uint32_t paced_table[paced_words];
 volatile uint32_t paced_cell = 0;
@@ -1447,10 +1452,7 @@ void te_host() {
 /// line serves the transmitter alone (the receive FIFO fills and overruns,
 /// unread); the RECEIVE ops put the transmitter on its engine, so the
 /// line serves the receiver alone.
-constexpr UartPins loop_pins{
-    .tx = {4, PinFunction::uart},
-    .rx = {5, PinFunction::uart},
-};
+constexpr UartPins loop_pins = rp2350pair::uart_pins;
 using LoopTx = DmaTxEngine<2>;
 using LoopRx = DmaRxEngine<3>;
 using TxPlain = Uart<1, loop_pins, 16, 256, NoDmaEngine, NoDmaEngine, HotPath>;
@@ -1789,7 +1791,7 @@ void tu_uart() {
 // i - the I2C host above the wire (dw_apb_i2c/i2c.hpp over rp2350/i2c.hpp),
 //     against the partner's twi_peer
 // =============================================================================
-constexpr I2cPins i2c_host_pins{.scl = 37, .sda = 36};
+constexpr I2cPins i2c_host_pins = rp2350pair::i2c_pins;
 using I2cPump = I2cHost<0, i2c_host_pins, NoDmaEngine, NoDmaEngine, HotPath>;
 using I2cEngined = I2cHost<0, i2c_host_pins, DmaTxEngine<6, uint16_t>, DmaRxEngine<7>, HotPath>;
 constexpr uint8_t i2c_peer_addr = twilink::dut_addr;
@@ -2156,7 +2158,10 @@ void ti_i2c() {
     // One serve a speed, its lines inside it, the rest of it waited out
     // so the far end's command channel is back for the next.
     constexpr uint16_t serve_ms = 3000;
-    print(serial, "  I2C0 hosts on GP36 (SDA) / GP37 (SCL); the WeAct RP2040's twi_peer serves ", hex(i2c_peer_addr),
+    print(serial,
+          rp2350pair::board_a ? "  I2C0 hosts on GP16 (SDA) / GP17 (SCL); the WeAct RP2040's twi_peer serves "
+                              : "  I2C0 hosts on GP36 (SDA) / GP37 (SCL); the WeAct RP2040's twi_peer serves ",
+          hex(i2c_peer_addr),
           " for ", serve_ms, " ms a speed, every read answered ", hex(i2c_seed), "; ", hex(i2c_nobody),
           " is nobody. init: host=", host_ok, crlf);
     bool ran = host_ok;

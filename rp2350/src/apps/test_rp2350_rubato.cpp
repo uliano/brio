@@ -214,7 +214,7 @@
 //      sampled in the letters before plus what lies below a sample, the
 //      arithmetic beside the verdict.
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -239,6 +239,8 @@
 #include "util/inbox.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+
+#include "board.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 150'000'000UL>;
 constexpr SysClock clock;
@@ -273,7 +275,8 @@ constexpr UartPins console_pins{
 using Serial = Uart<0, console_pins>;
 constexpr Serial serial;
 
-using Led = Pin<25>;   // the board's user LED (docs/boards/weact-rp2350b.md): never driven
+using Led = board::Led;   // the board's user LED (board.hpp, GP25 on both WeAct boards): never driven
+static_assert(Led::number == 25u, "letter i's text names GP25");
 
 TestBench<Serial> bench;
 

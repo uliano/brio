@@ -25,12 +25,12 @@
 // under function 2, crossed. Connect at 115200 8N1 and type:
 //   HELP | LED ON|OFF|TOG | UPTIME | ARCH | ERR
 //
-// The LED is GP25 on the WeAct RP2350B board.
+// The LED is the board's (board.hpp): GP25 on both WeAct boards.
 //
 // Between keystrokes the CPU sleeps, woken by the tick or the UART
 // interrupt. No polling anywhere.
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -50,6 +50,8 @@
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
 
+#include "board.hpp"
+
 using P = brio::Rp2350Platform<>;
 
 // The clock: the 12 MHz crystal through the system PLL to 150 MHz, the
@@ -60,7 +62,8 @@ constexpr SysClock clock;
 
 namespace {
 
-using Led = brio::Pin<25>;
+using Led = board::Led;
+static_assert(board::led_active_high, "LED ON drives the pad high: the board's LED is lit by a high pad");
 
 constexpr brio::UartPins console_pins{
     .tx = {0, brio::PinFunction::uart},
@@ -80,7 +83,7 @@ struct Lamp : brio::Fsm<Lamp, SetLed> {
     static inline brio::EventQueue<Event, 2, P> queue;
 
     static void init() {
-        (void)Led::output();   // low: GP25's LED dark
+        (void)Led::output();   // low: the LED dark
         start(&steady);
     }
 

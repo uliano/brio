@@ -21,12 +21,16 @@
 //  - THE LOOP-BACK (a..h): the PL022's LBM feeds the transmitter into the
 //    receiver with nothing on the wire, which proves the frame sizes, the
 //    four modes, every rate, the engines, the rules of the engine a request
-//    names and the arbiter with no second peripheral. SPI0 hosts on GP18/19/16 with
-//    GP17 as its select; no wire is on those pads.
-//  - THE DESK PARTNER (n, o, p, q, r, m and x): SPI1 on GP30 (SCK), GP31
-//    (TX), GP28 (RX) with GP41 the select - 4.7 kOhm to the RP2040's 3V3 -
+//    names and the arbiter with no second peripheral. SPI0 hosts on the
+//    pads the pair plan leaves it (rp2350_pair.hpp): SCK GP18 and TX GP19
+//    on both boards, with RX GP16 and GP17 its select on the WeAct
+//    RP2350B, and no receive pad and GP26 its select on the WeAct RP2350A,
+//    whose GP16/GP17 are the I2C link; no wire is on those pads.
+//  - THE DESK PARTNER (n, o, p, q, r, m and x): SPI1 on the pair plan's
+//    pads - SCK, TX, RX and the select, 4.7 kOhm to the RP2040's 3V3:
+//    GP10, GP11, GP8, GP9 on the A, GP30, GP31, GP28, GP41 on the B -
 //    wired to the WeAct RP2040's GP10 / GP8 / GP11 / GP29
-//    (docs/boards/weact-rp2350b.md). That board runs `spi_peer`
+//    (docs/boards/weact-rp2350a.md, weact-rp2350b.md). That board runs `spi_peer`
 //    (rp2040/src/apps/spi_peer.cpp: its client a PIO program, its host a
 //    PL022), commanded IN BAND over the bus under test through
 //    avrxt/src/apps/spi_link.hpp; the letters are the ones both Raspberry
@@ -114,7 +118,7 @@
 //      read back from it, the four modes, no recover()
 //   x  (outside z) the slip statistics: each mode ten times, two rates
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -147,6 +151,7 @@
 #include "../../../avrxt/src/apps/spi_link.hpp"
 
 #include "pair_power.hpp"
+#include "rp2350_pair.hpp"
 
 namespace {
 
@@ -166,37 +171,38 @@ constexpr Serial serial;
 
 TestBench<Serial, 21> bench;
 
-// SPI0 hosts on GP18/19/16 with GP17 as the select, on the loop-back:
-// no wire is on those pads.
-constexpr SpiPins host_pins{.sck = 18, .tx = 19, .rx = 16};
+// SPI0 hosts on the pads the pair plan leaves it, on the loop-back: no
+// wire is on those pads (rp2350_pair.hpp, the loop-back host).
+constexpr SpiPins host_pins = rp2350pair::loop_host_pins;
 using Host = SpiHost<0, host_pins>;
 using HostTxEngine = DmaTxEngine<4, uint16_t>;
 using HostRxEngine = DmaRxEngine<5, uint16_t>;
 using DmaHost = SpiHost<0, host_pins, HostTxEngine, HostRxEngine>;
-using CsPin = Pin<17>;
+using CsPin = Pin<rp2350pair::loop_select>;
 using DcPin = Pin<22>;
 using SckPad = Pin<host_pins.sck>;
 
 // SPI1 on the pair's wires (the header): the host with its GPIO select, the
 // same with half-word engines on channels 6 and 7 (DMA_IRQ_1), the client
 // on its select pad.
-constexpr SpiPins link_host_pins{.sck = 30, .tx = 31, .rx = 28};
-constexpr SpiPins link_client_pins{.sck = 30, .tx = 31, .rx = 28, .cs = 41};
+constexpr SpiPins link_host_pins = rp2350pair::spi_host_pins;
+constexpr SpiPins link_client_pins = rp2350pair::spi_client_pins;
 using LinkHost = SpiHost<1, link_host_pins>;
 using LinkDmaHost = SpiHost<1, link_host_pins, DmaTxEngine<6, uint16_t, 1>, DmaRxEngine<7, uint16_t, 1>>;
 using LinkClient = SpiClient<1, link_client_pins>;
-using LinkCsPin = Pin<41>;
-using LinkTxPin = Pin<31>;
+using LinkCsPin = Pin<rp2350pair::spi_cs>;
+using LinkTxPin = Pin<rp2350pair::spi_tx>;
 constexpr uint8_t partner_kind = spilink::peer_rp2040;
 constexpr const char* partner_text = "the WeAct RP2040";
 constexpr uint32_t partner_sys_hz = 125'000'000;
 /// The window counter of letter r: PIO1's machine 0 on the select pad,
-/// the block's window at GPIO16..47 (GPIOBASE 16, 11.1.1).
+/// the block's window where the plan puts it (GPIOBASE, 11.1.1: GPIO16..47
+/// on the B, whose select is GP41; GPIO0..31 on the A).
 using CountBlk = Pio<1>;
 using CountSm = PioSm<1, 0>;
 using GaugeSm = PioSm<1, 1>;
-constexpr uint8_t count_cs_index = 41 - 16;
-void open_count_window() { (void)CountBlk::gpio_base(16); }
+constexpr uint8_t count_cs_index = rp2350pair::spi_cs - rp2350pair::spi_pio_window_base;
+void open_count_window() { (void)CountBlk::gpio_base(rp2350pair::spi_pio_window_base); }
 /// nSSPOE reaches the client's answer pad: measured by letter m.
 constexpr bool client_pad_follows_select = true;
 
@@ -863,8 +869,10 @@ using TxPin = LinkTxPin;
 
 void banner() {
     print(serial, crlf,
-          "test_rp2350_spi - the RP2350 SPI (datasheet 12.3, the PL022): SPI0 hosts on "
-          "GP18/19/16 + GP17, on the loop-back; clk_peri=",
+          rp2350pair::board_a ? "test_rp2350_spi - the RP2350 SPI (datasheet 12.3, the PL022): SPI0 hosts on "
+                                "GP18/19 + GP26, on the loop-back; clk_peri="
+                              : "test_rp2350_spi - the RP2350 SPI (datasheet 12.3, the PL022): SPI0 hosts on "
+                                "GP18/19/16 + GP17, on the loop-back; clk_peri=",
           SysClock::pclk_hz, " Hz, core=",
           core_kind == CoreKind::hazard3 ? "Hazard3" : "Cortex-M33", crlf);
     bench.menu();

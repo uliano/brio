@@ -438,4 +438,5 @@ Implemented but not bench-verified, each with what would measure it:
   sensor on AINSEL 4 and a five-bit round-robin. The stratum compiles
   for that package, refuses the other one's pads and would refuse the
   other one's mask, and the suite's letters are written to walk
-  whichever package they find - but no QFN-60 part is on the bench.
+  whichever package they find - but no suite has run yet on the QFN-60
+  board of the bench, the WeAct RP2350A.

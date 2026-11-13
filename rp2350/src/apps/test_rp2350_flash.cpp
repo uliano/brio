@@ -80,7 +80,7 @@
 //      with no D8h command would ignore it in silence and an already
 //      erased partition would hide that
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>

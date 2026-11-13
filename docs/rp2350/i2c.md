@@ -131,9 +131,13 @@ itself, and the public names `DwApbI2c<n>` (the resource), `I2cHost`
 (the host `I2cBus` drives) and `I2cClient` (the other end), this
 chip's aliases of the three templates there. The reference suite:
 `test_rp2350_i2c`, which runs on both of this chip's architectures from
-one source: the peripheral with nothing on the wire, its pads, and the wire to a second board, the partner - I2C0 on GP36 (SDA) / GP37 (SCL), 1.5 kOhm to the WeAct
+one source: the peripheral with nothing on the wire, its pads, and the
+wire to a second board, the partner - I2C0 on the pair plan's pads
+(`rp2350/src/apps/rp2350_pair.hpp`: GP16 SDA / GP17 SCL on the WeAct
+RP2350A, GP36 / GP37 on the WeAct RP2350B), 1.5 kOhm to the WeAct
 RP2040's 3V3 on each
-([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)), whose test firmware,
+([../boards/weact-rp2350a.md](../boards/weact-rp2350a.md),
+[../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)), whose test firmware,
 the peer, is commanded over the bus under test; that
 board's own suite, `test_rp2040_i2c`, judges this chip's peripheral as that
 peer. A letter of a suite is one command key of its console and the
@@ -953,4 +957,5 @@ Implemented but not bench-verified, each with what would measure it:
 - `rebase()`: this stratum has no dynamic clock; measured when the
   clock chapter grows one, a tenure exact after a switch.
 - The QFN-60's pin table: the stratum compiles for that package and
-  refuses the pads it has not got, but no QFN-60 part is on the bench.
+  refuses the pads it has not got, but no suite has run yet on the
+  QFN-60 board of the bench, the WeAct RP2350A.

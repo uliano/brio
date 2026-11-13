@@ -16,23 +16,28 @@
 //
 // WHAT IS WIRED. The console is a Debug Probe's UART bridge on GP0 (TX)
 // / GP1 (RX) = UART0. The board is wired to its desk partner, the WeAct
-// RP2040 (docs/boards/weact-rp2350b.md): three of those wires carry a
-// REAL PULL-UP to the RP2040's 3V3 at the far end - GP36 and GP37 (the
-// I2C link, 1.5 kOhm), GP41 (the SPI link's select, 4.7 kOhm). Those pull-ups are
-// the only thing on this bench that can hold a pad high without the
-// chip's help, which is what makes them the witness in the pull letter;
-// they are read first through rp2350/src/apps/pair_power.hpp, which is
-// also the proof that the far chip is powered before its pads are
-// driven, and the far board stays dark while this suite runs. GP22 is
-// free and is where the erratum is shown; GP40 is free and is where the
-// high half of the bank is driven.
+// RP2040 (rp2350_pair.hpp's plan; docs/boards/weact-rp2350a.md and
+// weact-rp2350b.md): three of those wires carry a REAL PULL-UP to the
+// RP2040's 3V3 at the far end - the I2C link's SDA and SCL (1.5 kOhm;
+// GP16 and GP17 on the WeAct RP2350A, GP36 and GP37 on the WeAct
+// RP2350B) and the SPI link's select (4.7 kOhm; GP9 on the A, GP41 on the
+// B). Those pull-ups are the only thing on this bench that can hold a pad
+// high without the chip's help, which is what makes them the witness in
+// the pull letter; they are read first through
+// rp2350/src/apps/pair_power.hpp, which is also the proof that the far
+// chip is powered before its pads are driven, and the far board stays
+// dark while this suite runs. GP22 is free on both boards and is where
+// the erratum is shown; on the QFN-80 GP40 is free and is where the high
+// half of the bank is driven - the QFN-60 has no high half.
 //
 // FOUR WIRES BETWEEN THE CHIP'S OWN PADS - GP19 to GP8, GP11 to GP16,
 // GP18 to GP10, GP17 to GP9 - are what letters b and f..j judge a pad
-// by, the far end of each wire the witness; this desk does NOT carry
-// them (every self-link is retired), so those letters run BY NAME ONLY,
-// outside z, and decline with that reason when a wire is missing. No pad
-// of the four is one the pair uses.
+// by, the far end of each wire the witness; no desk carries them (every
+// self-link is retired), so on the WeAct RP2350B those letters run BY
+// NAME ONLY, outside z, and decline with that reason when a wire is
+// missing. On the WeAct RP2350A six of the eight pads are the pair's
+// (SPI1 on GP8..GP11, I2C0 on GP16/GP17), so the letters are not
+// registered there at all: driving them would drive the links.
 //
 // THE RULER is the platform timer (rp2350/mtime.hpp), microseconds off
 // clk_ref: it times the interrupt path. A microsecond is its grain, and
@@ -74,7 +79,7 @@
 //      time, and the HIGH HALF of the bank driven and read through its
 //      own registers
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -92,6 +97,7 @@
 #include "util/testbench.hpp"
 
 #include "pair_power.hpp"
+#include "rp2350_pair.hpp"
 
 namespace {
 
@@ -117,13 +123,29 @@ using DriveC = Pin<18>;
 using ListenC = Pin<10>;
 using DriveD = Pin<17>;
 using ListenD = Pin<9>;
+/// Whether the four wires' pads are clear of the pair's links: on the A
+/// they are not, and the letters that judge a wire are not registered.
+constexpr uint32_t self_wire_pads = (1UL << DriveA::number) | (1UL << ListenA::number) | (1UL << DriveB::number) |
+                                    (1UL << ListenB::number) | (1UL << DriveC::number) | (1UL << ListenC::number) |
+                                    (1UL << DriveD::number) | (1UL << ListenD::number);
+constexpr bool self_wires_served = (self_wire_pads & rp2350pair::link_low) == 0u;
 // The three link nets that carry a real pull-up, to the partner's 3V3.
-using LinkSda = Pin<36>;
-using LinkScl = Pin<37>;
-using LinkCs = Pin<41>;
-// A pad with nothing on it at all, and one in the high half of the bank.
+using LinkSda = Pin<rp2350pair::i2c_sda>;
+using LinkScl = Pin<rp2350pair::i2c_scl>;
+using LinkCs = Pin<rp2350pair::spi_cs>;
+// A pad with nothing on it at all, and one in the high half of the bank -
+// a pad the QFN-60 has not got, so it is named only where the package has
+// a high half.
 using Free = Pin<22>;
 using High = Pin<40>;
+constexpr bool has_high_half = gpio_count > 32u;
+
+/// A pad released when the package bonds it: a template, so that a pad the
+/// package has not got is named in a branch the compiler discards.
+template <typename Pad>
+void release_bonded() {
+    (void)Pad::release();
+}
 
 using IntListen = ExtInt<ListenA>;
 using IntListen2 = ExtInt<ListenC>;
@@ -167,19 +189,23 @@ uint32_t wait_isr(uint32_t before, uint32_t budget = 2000u) {
 /// Every pad this suite drives, back to the reset state - the shape a
 /// letter leaves the bench in.
 void release_all() {
-    (void)DriveA::release();
-    (void)ListenA::release();
-    (void)DriveB::release();
-    (void)ListenB::release();
-    (void)DriveC::release();
-    (void)ListenC::release();
-    (void)DriveD::release();
-    (void)ListenD::release();
+    if constexpr (self_wires_served) {
+        (void)DriveA::release();
+        (void)ListenA::release();
+        (void)DriveB::release();
+        (void)ListenB::release();
+        (void)DriveC::release();
+        (void)ListenC::release();
+        (void)DriveD::release();
+        (void)ListenD::release();
+    }
     (void)LinkSda::release();
     (void)LinkScl::release();
     (void)LinkCs::release();
     (void)Free::release();
-    (void)High::release();
+    if constexpr (has_high_half) {
+        release_bonded<High>();
+    }
 }
 
 /// One wire, judged in one direction: `Out` drives, `In` listens.
@@ -309,9 +335,11 @@ void pulled_net(const char* name) {
 
 void tc_pulls() {
     if (pair::partner_rail_up(clock, [](const char* why) { print(serial, why, crlf); })) {
-        pulled_net<LinkSda>("GP36 (the I2C link's SDA, 1.5 kOhm to the partner's 3V3)");
-        pulled_net<LinkScl>("GP37 (its SCL, the same)");
-        pulled_net<LinkCs>("GP41 (the SPI link's select, the same)");
+        pulled_net<LinkSda>(rp2350pair::board_a ? "GP16 (the I2C link's SDA, 1.5 kOhm to the partner's 3V3)"
+                                                : "GP36 (the I2C link's SDA, 1.5 kOhm to the partner's 3V3)");
+        pulled_net<LinkScl>(rp2350pair::board_a ? "GP17 (its SCL, the same)" : "GP37 (its SCL, the same)");
+        pulled_net<LinkCs>(rp2350pair::board_a ? "GP9 (the SPI link's select, 4.7 kOhm to the partner's 3V3)"
+                                               : "GP41 (the SPI link's select, the same)");
     } else {
         bench.verdict("the link nets' pull-ups are up: the partner board is powered", false);
     }
@@ -327,9 +355,9 @@ void tc_pulls() {
 
 // -----------------------------------------------------------------------------
 void td_erratum_e9() {
-    const uint8_t revision = ChipId::read().revision;
-    const bool leaky = revision <= ChipId::revision_a2;   // A3 removes the path
-    print(serial, "  this die's stepping reads ", hex(revision), " (A2 is 0x2), where the "
+    const Stepping stepping = ChipId::stepping();
+    const bool leaky = stepping == Stepping::a2;   // A3 removes the path (appendix C.2.1)
+    print(serial, "  this die is stepping ", stepping_name(stepping), ", where the "
           "leakage path RP2350-E9 describes is ", leaky ? "LIVE" : "fixed", crlf);
 
     // The pad is driven HIGH and released with its own pull-down on and
@@ -776,6 +804,25 @@ void tj_isolation() {
 }
 
 // -----------------------------------------------------------------------------
+/// Letter k's high half, on a pad above GP31: a template, named only where
+/// the package bonds one.
+template <typename Hi>
+void high_half_driven() {
+    (void)Hi::output(true);
+    (void)delay_us(clock, 5);
+    const bool high_set = Hi::read() && Hi::read_out() && Hi::is_output();
+    Hi::clear();
+    (void)delay_us(clock, 5);
+    const bool high_clear = !Hi::read() && !Hi::read_out();
+    const uint32_t hi_word = Gpio::out_hi();
+    print(serial, "  GP", static_cast<uint32_t>(Hi::number), ", in the high half of the "
+          "bank: driven high it reads back high, driven low it reads low; GPIO_HI_OUT is ",
+          hex(hi_word), ", its bit ", static_cast<uint32_t>(Hi::number - 32u), crlf);
+    bench.verdict("a pad above GP31 is driven and read through the HIGH registers, at its "
+                  "own bit",
+                  high_set && high_clear && Hi::mask == (1UL << (Hi::number - 32u)));
+}
+
 void tk_package() {
     print(serial, "  this build is for ", static_cast<uint32_t>(gpio_count),
           " pins; bonded(29) ", Gpio::bonded(29u) ? 1 : 0, ", bonded(40) ",
@@ -792,19 +839,14 @@ void tk_package() {
 
     // The high half of the bank: its own SIO registers, its own bit
     // positions, on a pad this package brings out and nothing is wired to.
-    (void)High::output(true);
-    (void)delay_us(clock, 5);
-    const bool high_set = High::read() && High::read_out() && High::is_output();
-    High::clear();
-    (void)delay_us(clock, 5);
-    const bool high_clear = !High::read() && !High::read_out();
-    const uint32_t hi_word = Gpio::out_hi();
-    print(serial, "  GP", static_cast<uint32_t>(High::number), ", in the high half of the "
-          "bank: driven high it reads back high, driven low it reads low; GPIO_HI_OUT is ",
-          hex(hi_word), ", its bit ", static_cast<uint32_t>(High::number - 32u), crlf);
-    bench.verdict("a pad above GP31 is driven and read through the HIGH registers, at its "
-                  "own bit",
-                  high_set && high_clear && High::mask == (1UL << (High::number - 32u)));
+    // The QFN-60 brings out no pad above GP29, so there the verdict has no
+    // pad to stand on and is not compiled.
+    if constexpr (has_high_half) {
+        high_half_driven<High>();
+    } else {
+        print(serial, "  this package has no high half (GP32..GP47 are the QFN-80's): nothing above GP31 to drive",
+              crlf);
+    }
     release_all();
 }
 
@@ -859,18 +901,27 @@ int main() {
     const bool tick_ok = brio::Ticker::init(clock);
     brio::enable_interrupts();
 
+    // b and f..j judge a pad by the four wires between the chip's own pads,
+    // which on the WeAct RP2350A would be the pair's link pads: registered
+    // only where they are clear of the links (the file header).
     bench.letter('a', "the bank, the package, a pad's reset state", ta_bank);
-    bench.letter('b', "the four wires, driven and read both ways", tb_wires, false);
+    if constexpr (self_wires_served) {
+        bench.letter('b', "the four wires, driven and read both ways", tb_wires, false);
+    }
     bench.letter('c', "the pulls, against the three link nets that carry a real pull-up", tc_pulls);
     bench.letter('d', "erratum RP2350-E9 on a free pad, keyed on the stepping", td_erratum_e9);
     bench.letter('e', "the bus keeper", te_keeper);
-    bench.letter('f', "the pad's electrical controls, written and read back", tf_pad_controls, false);
-    bench.letter('g', "the function select and the STATUS register", tg_function_and_status, false);
-    bench.letter('h', "the four overrides of the IO multiplexer", th_overrides, false);
-    bench.letter('i', "the pin interrupts: edges, a level, two pads, the summary, a force",
-                 ti_interrupts, false);
-    bench.letter('j', "the isolation latch", tj_isolation, false);
-    bench.letter('k', "the package's edges and the high half of the bank", tk_package);
+    if constexpr (self_wires_served) {
+        bench.letter('f', "the pad's electrical controls, written and read back", tf_pad_controls, false);
+        bench.letter('g', "the function select and the STATUS register", tg_function_and_status, false);
+        bench.letter('h', "the four overrides of the IO multiplexer", th_overrides, false);
+        bench.letter('i', "the pin interrupts: edges, a level, two pads, the summary, a force",
+                     ti_interrupts, false);
+        bench.letter('j', "the isolation latch", tj_isolation, false);
+    }
+    bench.letter('k', has_high_half ? "the package's edges and the high half of the bank"
+                                    : "the package's edges (this package has no high half)",
+                 tk_package);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL150" : "FAILED",

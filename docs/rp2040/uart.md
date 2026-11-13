@@ -102,8 +102,8 @@ formats, the ladder, the FIFOs, a break, an overrun and bulk traffic;
 the desk partner's `uart_peer` on the pair's UART wires; the host at the
 console's other end); a suite's letter is one command key of its
 console and the group of verdicts it runs, and the desk partner is the
-board wired to the WeAct RP2040 the suite runs on, a WeAct RP2350B
-([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md); the wires
+board wired to the WeAct RP2040 the suite runs on, a WeAct RP2350A
+([../boards/weact-rp2350a.md](../boards/weact-rp2350a.md); the wires
 between the two are listed on
 [../boards/weact-rp2040.md](../boards/weact-rp2040.md)).
 

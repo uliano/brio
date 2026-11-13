@@ -57,7 +57,7 @@
 //      cross-checked against SYSINFO and OTP, the partition table's
 //      absence reported as the code the chapter names
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>

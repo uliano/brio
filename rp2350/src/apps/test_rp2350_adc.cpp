@@ -17,12 +17,15 @@
 //
 // NOTHING TO WIRE, and the pads this suite reads are the EIGHT the
 // QFN-80 gives the converter - GP40..GP47, inputs 0..7 - which must be
-// free but one: GP41 (input 1) carries the pair's SPI select, 4.7 kOhm to
-// the desk partner's 3V3 (docs/boards/weact-rp2350b.md), so its pull
-// readings are PRINTED and never judged, and the sampler reads input 2
-// instead; the sensor is input 8. In the QFN-60 the same letters read four
-// pads and a sensor on input 4, and the suite says which package it is
-// running in. GP0/GP1 are the console's, GP25 the LED.
+// free but one: on the WeAct RP2350B GP41 (input 1) carries the pair's SPI
+// select, 4.7 kOhm to the desk partner's 3V3 (rp2350_pair.hpp,
+// docs/boards/weact-rp2350b.md), so its pull readings are PRINTED and
+// never judged, and the sampler reads input 2 instead; the sensor is input
+// 8. In the QFN-60 the same letters read four pads, GP26..GP29, and a
+// sensor on input 4, and the suite says which package it is running in;
+// on the WeAct RP2350A GP29 (input 3) is the board's VSYS sense, a divider
+// behind a transistor (boards/weact2350a/board.hpp), so it is the input
+// printed and not judged there. GP0/GP1 are the console's, GP25 the LED.
 //
 // THE RULERS: TIMER0 (a microsecond counter off the tick generators,
 // independent of clk_sys) for the rates, the clock chapter's frequency
@@ -58,13 +61,14 @@
 //   h  ERRATUM RP2350-E9 IN MILLIVOLTS: the converter is the one
 //      instrument on this chip that can see the leakage as a VOLTAGE -
 //      the same pad, pulled down, read with its digital input buffer on
-//      and then off
+//      and then off; keyed on the stepping (live on A2, the path removed
+//      from A3 on)
 //   i  THE FIFO'S UNDERFLOW AND THE FORCED INTERRUPT: a pop of an empty
 //      FIFO raises the sticky UNDER, cleared by writing one; INTF raises
 //      INTS with INTE clear (status "after masking & forcing") and the
 //      vector is entered once, its body dropping the force
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -82,12 +86,16 @@
 #include "rp2350/dma.hpp"
 #include "rp2350/pin.hpp"
 #include "rp2350/platform.hpp"
+#include "rp2350/sysinfo.hpp"
 #include "rp2350/ticker.hpp"
 #include "rp2350/timer.hpp"
 #include "rp2350/uart.hpp"
 #include "util/analog_sampler.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+
+#include "board.hpp"
+#include "rp2350_pair.hpp"
 
 namespace {
 
@@ -115,10 +123,28 @@ using In0 = AnalogIn<Pin<adc_first_pin>>;
 using In1 = AnalogIn<Pin<adc_first_pin + 1u>>;
 using In2 = AnalogIn<Pin<adc_first_pin + 2u>>;
 
-/// The input whose pad a link wire holds: GP41, the pair's SPI select
-/// with its pull-up to the partner's rail, on the QFN-80. Printed, never
-/// judged. On the QFN-60 the converter's pads (GP26..GP29) carry no link.
-constexpr uint8_t link_input = adc_first_pin == 40u ? 1u : 0xFFu;
+/// Whether something outside the chip holds a pad: a link wire of the pair
+/// (rp2350_pair.hpp) or a circuit of the board (board.hpp).
+constexpr bool pad_held(uint8_t pad) {
+    const uint32_t links = pad > 31u ? rp2350pair::link_high : rp2350pair::link_low;
+    return (links & (1UL << (pad & 31u))) != 0u || (pad == 23u && !board::gp23_free) ||
+           (pad == 24u && !board::gp24_free) || (pad == 29u && !board::gp29_free);
+}
+/// The first converter input whose pad is held, 0xFF when none is.
+constexpr uint8_t first_held_input() {
+    for (uint8_t k = 0; k < adc_pad_inputs; ++k) {
+        if (pad_held(static_cast<uint8_t>(adc_first_pin + k))) {
+            return k;
+        }
+    }
+    return 0xFFu;
+}
+/// The input whose pad something holds: on the WeAct RP2350B GP41, the
+/// pair's SPI select with its pull-up to the partner's rail; on the WeAct
+/// RP2350A GP29, the board's VSYS sense. Printed, never judged.
+constexpr uint8_t link_input = first_held_input();
+static_assert(link_input == (adc_first_pin == 40u ? 1u : 3u),
+              "one converter pad is held, and the texts below name it: GP41 on the B, GP29 on the A");
 constexpr uint8_t judged_inputs = link_input < adc_pad_inputs ? adc_pad_inputs - 1u : adc_pad_inputs;
 
 // The FIFO's one request has one channel (RP2350 12.6.4.2), so the one engine
@@ -355,7 +381,10 @@ void tc_pads() {
               adc_mv(static_cast<uint16_t>(d.mean), adc_steps, vref), " mV), floating ", f.mean, " (",
               adc_mv(static_cast<uint16_t>(f.mean), adc_steps, vref), " mV)", crlf);
         if (k == link_input) {
-            print(serial, "    (GP", adc_first_pin + k, " is the link's select, held by its pull-up: not judged)", crlf);
+            print(serial, "    (GP", adc_first_pin + k,
+                  rp2350pair::board_a ? " is the board's VSYS sense, held by its divider: not judged)"
+                                      : " is the link's select, held by its pull-up: not judged)",
+                  crlf);
             continue;
         }
         if (u.mean > 3000u) { ++up; }
@@ -478,7 +507,7 @@ void te_round_robin() {
         if (slot == adc_temperature_code) {
             good = v > 400u && v < 1400u;              // the sensor's diode
         } else if (slot == link_input) {
-            good = true;                               // the link's pull-up, not judged
+            good = true;                               // the link's pull-up or the board's divider, not judged
         } else if ((slot & 1u) == 0u) {
             good = v > 3000u;                          // a pulled-up pad
         } else {
@@ -777,10 +806,26 @@ void th_leakage() {
           " mV; buffer off ", held.mean, " = ", mv_held, " mV; pulled up ", pulled_up.mean, " = ", mv_up,
           " mV", crlf);
 
-    bench.verdict("ERRATUM RP2350-E9 IS LIVE ON THIS PART: a pad taken to the supply and released with its input "
-                  "buffer enabled STAYS HIGH, and its own pull-down turned on under the leak does NOT bring it "
-                  "down - which is the errata sheet's sentence about the pull being far weaker than the leakage",
-                  dig_floating && dig_pulled);
+    // KEYED ON THE STEPPING, the one thing the erratum is keyed by
+    // (appendix C.2.1: A3 modifies the pad circuit and removes the path).
+    // On A2 the leak holds the pad up against its own pull-down; past it
+    // the same pull-down brings the pad down, and the converter reads it
+    // under the same 300 mV the buffer-off case is judged by below. The
+    // undefined region itself is printed there, not judged: a floating
+    // pad with no pull at all keeps whatever charge it had.
+    const Stepping stepping = ChipId::stepping();
+    print(serial, "  stepping ", stepping_name(stepping), crlf);
+    if (stepping == Stepping::a2) {
+        bench.verdict("ERRATUM RP2350-E9 IS LIVE ON THIS PART: a pad taken to the supply and released with its "
+                      "input buffer enabled STAYS HIGH, and its own pull-down turned on under the leak does NOT "
+                      "bring it down - which is the errata sheet's sentence about the pull being far weaker than "
+                      "the leakage",
+                      dig_floating && dig_pulled);
+    } else {
+        bench.verdict("this stepping is past RP2350-E9: a pad taken to the supply, released with its input buffer "
+                      "enabled and then given its own pull-down comes down to LOW",
+                      !dig_pulled);
+    }
     bench.verdict("... AND IT HAS TO BE ENTERED THROUGH THE UNDEFINED REGION: the same pad with its buffer enabled "
                   "over a pad the reset pull-down is already holding AT GROUND reads LOW and stays there, which is "
                   "the erratum's own first condition and what makes every pulled-down reading of this suite sound",
@@ -788,12 +833,18 @@ void th_leakage() {
     bench.verdict("... and the workaround works: with the input buffer off the same pull-down holds the same pad, "
                   "and a read that pulses the buffer for its own duration sees LOW",
                   !dig_workaround);
-    bench.verdict("... AND IN MILLIVOLTS, ON A CONVERTER PAD TAKEN IN THE SAME WAY: the leak parks the pad well "
-                  "above ground, near the 2.2 V the errata sheet names as its effective source voltage, where an "
-                  "unleaking pad would be at whatever it drifted to",
-                  mv_floating > 1200u && adc_pad_high);
-    bench.verdict("... and the pad's own pull-down cannot bring THAT down either, with the buffer still enabled",
-                  mv_leaking > 1200u);
+    if (stepping == Stepping::a2) {
+        bench.verdict("... AND IN MILLIVOLTS, ON A CONVERTER PAD TAKEN IN THE SAME WAY: the leak parks the pad "
+                      "well above ground, near the 2.2 V the errata sheet names as its effective source voltage, "
+                      "where an unleaking pad would be at whatever it drifted to",
+                      mv_floating > 1200u && adc_pad_high);
+        bench.verdict("... and the pad's own pull-down cannot bring THAT down either, with the buffer still enabled",
+                      mv_leaking > 1200u);
+    } else {
+        bench.verdict("... AND IN MILLIVOLTS, ON A CONVERTER PAD: with the buffer still enabled its own pull-down "
+                      "holds it at ground (under 300 mV), no leak to hold it up",
+                      mv_leaking < 300u);
+    }
     bench.verdict("... while clearing the input buffer - what 12.4 asks for anyway, and what every other letter of "
                   "this suite uses - removes the leak and lets the same pull-down hold the same pad at ground",
                   mv_held < 300u);

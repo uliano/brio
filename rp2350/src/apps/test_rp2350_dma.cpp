@@ -19,8 +19,9 @@
 // keystroke at a time wants no block). The INSTRUMENT is UART1 on GP4/GP5
 // under the PL011's own loop-back (UARTCR.LBE, which ignores the RX pad),
 // with an engine in EACH slot, channels 2 and 3. NOTHING TO WIRE - but
-// GP4 is a link wire to the desk partner, the WeAct RP2040
-// (docs/boards/weact-rp2350b.md), driven high by UART1's idle line: an
+// GP4 is a link wire to the desk partner, the WeAct RP2040, on both WeAct
+// boards (rp2350_pair.hpp; docs/boards/weact-rp2350a.md,
+// weact-rp2350b.md), driven high by UART1's idle line: an
 // RP2040 pad is not failsafe, so every letter that hands GP4 over reads
 // that board's rail first (rp2350/src/apps/pair_power.hpp) and drives
 // nothing when it is down, and the partner runs a dark image (its pads
@@ -135,7 +136,7 @@
 //   m  (by name only) diagnostic: the transmit engine alone on the loop
 //   n  (by name only) diagnostic: the receive engine alone on the loop
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -157,6 +158,7 @@
 #include "util/testbench.hpp"
 
 #include "pair_power.hpp"
+#include "rp2350_pair.hpp"
 
 namespace {
 
@@ -173,10 +175,8 @@ constexpr UartPins console_pins{
 using Serial = Uart<0, console_pins, 128, 512, DmaTxEngine<0>>;
 constexpr Serial serial;
 
-constexpr UartPins instrument_pins{
-    .tx = {4, PinFunction::uart},
-    .rx = {5, PinFunction::uart},
-};
+constexpr UartPins instrument_pins = rp2350pair::uart_pins;
+using LinkTx = Pin<rp2350pair::uart_tx>;
 using InstrumentRx = DmaRxEngine<3>;
 using Instrument = Uart<1, instrument_pins, 1024, 1024, DmaTxEngine<2>, InstrumentRx>;
 
@@ -1086,7 +1086,7 @@ void tt_tx_idle() {
     const bool up = TxOnly::init(clock, 9600);
     spin_us(5000);
     static const uint8_t ones[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-    bool level = Pin<4>::read();
+    bool level = LinkTx::read();
     uint32_t falls = 0;
     uint32_t first_fall = 0;
     uint32_t last_fall = 0;
@@ -1096,7 +1096,7 @@ void tt_tx_idle() {
     const uint32_t t0 = us_now();
     while (us_now() - t0 < 12u * 10u * bit_us) {
         const uint32_t t = us_now();
-        const bool now_level = Pin<4>::read();
+        const bool now_level = LinkTx::read();
         if (level && !now_level) {
             if (falls == 0u) {
                 first_fall = t;

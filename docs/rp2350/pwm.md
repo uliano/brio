@@ -80,7 +80,11 @@ that runs every letter but those that run by name: the wire letters `c`,
 `d`, `e`, `f`, `g`, `h` and `k`, on three wires between the chip's own
 pads that the pair desk does not carry
 ([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)), run when
-they are fitted, and `y`, the instruments' diagnostics).
+they are fitted, and `y`, the instruments' diagnostics). On the WeAct
+RP2350A the second wire's pads, GP17 and GP9, are the pair's links
+([../boards/weact-rp2350a.md](../boards/weact-rp2350a.md)), so `f` and
+`h` are not registered there, and letter `j` judges slices 8..11 as the
+timers they are in the QFN-60, whose pads stop at GP29.
 
 ## What the silicon does
 
@@ -350,4 +354,5 @@ Implemented but not bench-verified, each with what would measure it:
   inputs, sampled in one SIO word - no wire needed, letter i's method.
 - Everything about this chapter in the QFN-60, where slices 8..11 have
   no pad: the stratum compiles for that package and refuses those pads,
-  and no QFN-60 part is on the bench.
+  and no suite has run yet on the QFN-60 board of the bench, the WeAct
+  RP2350A.

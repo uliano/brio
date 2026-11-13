@@ -17,7 +17,8 @@
 // receive timeout, a break and an overrun are measured on the instance
 // alone - the loop-back asked for at the bring-up (UartRx::loopback), so
 // the receiver never samples the pad. GP4/GP5 are the pair's UART wires
-// to the desk partner, the WeAct RP2040 (docs/boards/weact-rp2350b.md),
+// to the desk partner, the WeAct RP2040, on both WeAct boards
+// (rp2350_pair.hpp; docs/boards/weact-rp2350a.md, weact-rp2350b.md),
 // and `z` runs with that board on its `uart_peer` firmware: the letters on
 // the wire, p and s, take it for their far end, choosing its role on GP21
 // - this board's end of the wire into the peer's mode line, low for echo
@@ -110,7 +111,7 @@
 // p and s are the two suites' one body (rp2040/src/apps/rp_uart_pair.hpp),
 // the far end the partner's uart_peer (rp2040/src/apps/rp_uart_peer.hpp).
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -129,6 +130,7 @@
 #include "util/testbench.hpp"
 
 #include "pair_power.hpp"
+#include "rp2350_pair.hpp"
 
 namespace {
 
@@ -145,12 +147,11 @@ constexpr UartPins console_pins{
 using Serial = Uart<0, console_pins, 512, 256>;
 constexpr Serial serial;
 
-// The instrument: UART1 on GP4/GP5, the cross link's pins, under the
-// FIRST function column.
-constexpr UartPins instrument_pins{
-    .tx = {4, PinFunction::uart},
-    .rx = {5, PinFunction::uart},
-};
+// The instrument: UART1 on GP4/GP5, the cross link's pins (rp2350_pair.hpp),
+// under the FIRST function column.
+constexpr UartPins instrument_pins = rp2350pair::uart_pins;
+using LinkTx = Pin<rp2350pair::uart_tx>;
+using LinkRx = Pin<rp2350pair::uart_rx>;
 using Instrument = Uart<1, instrument_pins, 512, 512>;
 using U1 = Instrument::Resource;
 
@@ -163,7 +164,7 @@ constexpr UartPins alt_pins{
 };
 using AltInstrument = Uart<1, alt_pins, 512, 512>;
 
-using ModeLine = Pin<21>;   // into the peer's GP20: low = echo, high = send
+using ModeLine = Pin<rp2350pair::gpout>;   // into the peer's GP20: low = echo, high = send
 
 TestBench<Serial, 16> bench;
 
@@ -401,9 +402,9 @@ void ta_facts() {
                       U1::tx_fifo_level() == UartFifoLevel::eighth);
     bench.verdict("the pads went to the UART under the first column, out of the ISOLATION "
                   "this chip's pads come up in",
-                  Pin<4>::function() == PinFunction::uart &&
-                      Pin<5>::function() == PinFunction::uart && !Pin<4>::isolated() &&
-                      !Pin<5>::isolated());
+                  LinkTx::function() == PinFunction::uart &&
+                      LinkRx::function() == PinFunction::uart && !LinkTx::isolated() &&
+                      !LinkRx::isolated());
     bench.verdict("can_baud: 9375000 yes, 9500000 no, 144 yes, 143 no",
                   Instrument::can_baud(SysClock::pclk_hz, 9'375'000) &&
                       !Instrument::can_baud(SysClock::pclk_hz, 9'500'000) &&
@@ -412,8 +413,8 @@ void ta_facts() {
     Instrument::release();
     bench.verdict("release() puts the block back into reset and the pads back to theirs - "
                   "which on this chip means ISOLATED again",
-                  !U1::released() && Pin<4>::function() == PinFunction::none &&
-                      Pin<4>::isolated());
+                  !U1::released() && LinkTx::function() == PinFunction::none &&
+                      LinkTx::isolated());
 }
 
 // =============================================================================
@@ -764,6 +765,7 @@ void tf_second_column() {
 // p, s - the two-board letters, against the partner's uart_peer
 // =============================================================================
 constexpr const char* mode_line_text = "GP21";
+static_assert(rp2350pair::gpout == 21u, "the mode line's text names the plan's clock output pad");
 
 uint32_t link_round_trip(uint32_t count, UartBits bits, uint32_t budget_us, uint32_t* took) {
     return round_trip<Instrument>(count, bits, budget_us, took);
@@ -964,7 +966,7 @@ void tt_tx_idle() {
     const bool up = instrument_up(9600, {}, false);
     spin_us(5000);
     static const uint8_t ones[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-    bool level = Pin<4>::read();
+    bool level = LinkTx::read();
     uint32_t falls = 0;
     uint32_t first_fall = 0;
     uint32_t last_fall = 0;
@@ -974,7 +976,7 @@ void tt_tx_idle() {
     const uint32_t t0 = us_now();
     while (us_now() - t0 < 12u * 10u * bit_us) {
         const uint32_t t = us_now();
-        const bool now_level = Pin<4>::read();
+        const bool now_level = LinkTx::read();
         if (level && !now_level) {
             if (falls == 0u) {
                 first_fall = t;
@@ -1011,7 +1013,7 @@ void tt_tx_idle() {
 
     // AND UNDER THE LOOP-BACK: does the pad still carry the frames?
     uint32_t looped = 0;
-    const uint32_t lbe_falls = loopback_pad_falls<Pin<4>>(&looped);
+    const uint32_t lbe_falls = loopback_pad_falls<LinkTx>(&looped);
     print(serial, "  the same 8 frames with the loop-back on: ", looped, " looped back, ", lbe_falls,
           " falls on GP4", crlf);
     bench.verdict("UNDER THE LOOP-BACK THE TRANSMIT PAD STILL CARRIES THE FRAMES: all eight looped back "

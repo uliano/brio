@@ -114,12 +114,23 @@ else()
     message(FATAL_ERROR "RP2350_PACKAGE=${RP2350_PACKAGE}: the RP2350 comes in two packages, a (QFN-60) and b (QFN-80)")
 endif()
 
-# THE BOARD TYPES THIS PROJECT SERVES, and why there are two per board:
+# THE BOARD TYPES A CONFIGURE SERVES, and why there are two per board:
 # the architecture is a preset axis and the manifest names a physical
 # board once per architecture (cli/bench/common.py's weact2350b and
 # weact2350b-rv are the same piece of hardware), so an app that runs on
-# the board is built for both and the default names both.
-set(RP2350_BOARDS weact2350b weact2350b-rv)
+# the board is built for both and the default names both. The package
+# picks the board: the WeAct RP2350B is the QFN-80, the WeAct RP2350A
+# the QFN-60, both with a 16 MB flash.
+if(RP2350_PACKAGE STREQUAL "a")
+    set(RP2350_BOARDS weact2350a weact2350a-rv)
+    set(RP2350_BOARD weact2350a)
+else()
+    set(RP2350_BOARDS weact2350b weact2350b-rv)
+    set(RP2350_BOARD weact2350b)
+endif()
+# Its board file, ../boards/<board>/board.hpp: one directory per physical
+# board, which both architectures' board types share.
+set(RP2350_BOARD_DIR "${CMAKE_SOURCE_DIR}/../boards/${RP2350_BOARD}")
 
 set(BRIO_COMMON_FLAGS
     -Wall -Wextra -Werror
@@ -180,6 +191,7 @@ file(GLOB_RECURSE _nvheap_id_sources CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/src/*.cpp" "${CMAKE_SOURCE_DIR}/src/*.hpp"
     "${CMAKE_SOURCE_DIR}/src/*.c"   "${CMAKE_SOURCE_DIR}/src/*.h"
     "${CMAKE_SOURCE_DIR}/src/*.S"
+    "${CMAKE_SOURCE_DIR}/../boards/*.hpp"
 )
 foreach(_f IN LISTS _nvheap_id_sources)
     file(TIMESTAMP "${_f}" _ts "%s")
@@ -197,6 +209,10 @@ function(rp2350_add_app name)
     )
 
     target_include_directories(${name} PRIVATE ${RP2350_INCLUDE_ROOTS})
+    # The board file of the board this configure builds for: an app writes
+    # #include "board.hpp" and reads the facts of that assembly (the LED,
+    # the pads its circuits take), and a pair plan keys on board::is().
+    target_include_directories(${name} PRIVATE ${RP2350_BOARD_DIR})
 
     target_compile_options(${name} PRIVATE
         ${BRIO_COMMON_FLAGS}

@@ -133,7 +133,7 @@
 //      pass through the 16 kB XIP cache, and the code they evict is the
 //      likely reason; not established
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -227,13 +227,13 @@ volatile uint32_t spare_served = 0;
 void ta_boot() {
     const ChipId id = ChipId::read();
     print(serial, "  chip: manufacturer ", hex(id.manufacturer), " part ", hex(id.part),
-          " stepping ", hex(id.revision), " gitref ", hex(ChipId::gitref()), crlf);
+          " revision ", hex(id.revision), " bootrom version ", Bootrom::version(), " - stepping ",
+          stepping_name(ChipId::stepping()), ", gitref ", hex(ChipId::gitref()), crlf);
     bench.verdict("SYSINFO names Raspberry Pi's RP2350",
                   id.manufacturer == ChipId::raspberry_pi && id.part == ChipId::rp2350);
-    bench.verdict("the stepping is one appendix C names (A2, A3 or A4), which is what "
-                  "every erratum of this chip is keyed by",
-                  id.revision == ChipId::revision_a2 || id.revision == ChipId::revision_a3 ||
-                      id.revision == ChipId::revision_a4);
+    bench.verdict("the stepping is one appendix C names (A2, A3 or A4: the revision, and the bootrom's "
+                  "version byte on revision 3), which is what every erratum of this chip is keyed by",
+                  ChipId::stepping() != Stepping::unknown);
     // A TRAP, MEASURED: this chip has TWO registers called PLATFORM, and
     // the one SYSINFO carries (12.15.1, offset 0x08) is the PRE-PRODUCTION
     // indicator - on this silicon the whole register reads zero, ASIC bit
@@ -577,7 +577,7 @@ void tj_lost_wakeup() {
 // k - erratum RP2350-E9 on a free pad
 // =============================================================================
 void tk_erratum_e9() {
-    const ChipId id = ChipId::read();
+    const Stepping stepping = ChipId::stepping();
 
     // Driven LOW, then released to an input with a pull-DOWN: the pad has
     // no charge to leak from and the pull-down holds it.
@@ -614,7 +614,7 @@ void tk_erratum_e9() {
     bench.verdict("the pull-up wins over a pad's history, which is why a program that "
                   "must read a floating pad here uses it and reads a LOW as the signal",
                   up_after_low);
-    if (id.revision == ChipId::revision_a2) {
+    if (stepping == Stepping::a2) {
         bench.verdict("RP2350-E9 IS LIVE on this stepping: a pad driven HIGH and released "
                       "to its own pull-down does not come down - an idle level here is "
                       "HISTORY and not a measurement",

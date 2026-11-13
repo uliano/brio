@@ -24,7 +24,8 @@
 // GP0 (TX) / GP1 (RX) = UART0. The two letters outside `z` use the clock
 // link to a peer board: GPOUT0 (GP21) of one into GPIN0 (GP20) of the
 // other, one wire each way and a common ground - on this desk the WeAct
-// RP2040 (docs/boards/weact-rp2350b.md), whose pads are not failsafe, so
+// RP2040, on the same two pads of both WeAct boards (rp2350_pair.hpp;
+// docs/boards/weact-rp2350a.md, weact-rp2350b.md), whose pads are not failsafe, so
 // letter o reads that board's rail first (rp2350/src/apps/pair_power.hpp)
 // and drives nothing when it is down.
 //
@@ -110,7 +111,7 @@
 //      board's crystal - GPOUT0's 16-bit divider cannot reach 1 Hz - for
 //      40 seconds, then the pad released
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -130,6 +131,7 @@
 #include "util/testbench.hpp"
 
 #include "pair_power.hpp"
+#include "rp2350_pair.hpp"
 
 namespace {
 
@@ -938,17 +940,22 @@ constexpr PioProgram<7> one_hz_program = [] {
 }();
 static_assert(2u * (49'996u + 4u) == 100'000u, "a second of the machine's 100 kHz");
 
+// The letters o, p and u use GPOUT0 and GPIN0, the plan's clock pair.
+static_assert(ClockOut<0>::pin == rp2350pair::gpout && ClockIn<0>::pin == rp2350pair::gpin,
+              "the clock letters drive the pair plan's clock wires");
+
 void tu_one_hz() {
+    using PulsePad = Pin<rp2350pair::gpout>;   // the clock output's link wire, as a PIO pad
     using P0 = Pio<0>;
     using Sm = PioSm<0, 0>;
     (void)P0::reset();
     const auto at = P0::add(one_hz_program);
-    const auto pin = P0::pin_index(21);
+    const auto pin = P0::pin_index(PulsePad::number);
     bool ok = at.has_value() && pin.has_value();
     if (ok) {
         Sm::pin_levels(*pin, 1, false);
         Sm::pin_directions(*pin, 1, true);
-        (void)Pin<21>::function(P0::pin_function);
+        (void)PulsePad::function(P0::pin_function);
         ok = Sm::init(one_hz_program, *at, {.clock = {1500, 0}, .set_base = *pin, .set_count = 1});
         Sm::push(49'996u);
         (void)Sm::exec_wait(pio_pull(false, true));
@@ -958,9 +965,9 @@ void tu_one_hz() {
     print(serial, "  one pulse per second on GP21 for 40 s", crlf);
     const uint32_t t0 = us_now();
     uint32_t rises = 0;
-    bool last = Pin<21>::read();
+    bool last = PulsePad::read();
     while (us_now() - t0 < 40'000'000u) {
-        const bool now = Pin<21>::read();
+        const bool now = PulsePad::read();
         if (now && !last) {
             ++rises;
         }
@@ -968,7 +975,7 @@ void tu_one_hz() {
     }
     Sm::enable(false);
     (void)P0::reset();
-    (void)Pin<21>::release();
+    (void)PulsePad::release();
     print(serial, "  ", rises, " rising edges seen on the pad's own input", crlf);
     bench.verdict("the machine ran 40 s at one pulse a second (40 rising edges on the pad, one either way) and the pad "
                   "is released",

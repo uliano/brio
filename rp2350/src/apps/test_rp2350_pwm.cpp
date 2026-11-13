@@ -13,8 +13,8 @@
 // the block is one, the two interrupt lines are two system lines under
 // one numbering (3.8.4.2), and the handler names are the same on both.
 //
-// THREE WIRES BETWEEN THE CHIP'S OWN PADS, which this desk does NOT
-// carry: the board is wired to its desk partner (docs/boards/
+// THREE WIRES BETWEEN THE CHIP'S OWN PADS, which no desk carries: the
+// board is wired to its desk partner (docs/boards/weact-rp2350a.md,
 // weact-rp2350b.md) and every self-link is retired, so letters c..h and
 // k run BY NAME ONLY, outside z, and decline with that reason when a wire
 // is missing. Fitted, the wires are
@@ -23,7 +23,14 @@
 //   GP17 (slice 0 B, an output)  ->  GP9  (slice 4 B, an INPUT)
 //   GP12 (slice 6 A, an output) <->  GP14 (slice 7 A, no input at all)
 //
-// - no pad the pair uses. Only a B pin is a PWM input (table 1183), which
+// - no pad the WeAct RP2350B's pair uses. On the WeAct RP2350A GP17 and
+// GP9 are the pair's (the I2C link's SCL, the SPI link's select:
+// rp2350_pair.hpp), so the letters on that wire, f and h, are not
+// registered there and no letter touches the two pads. THE PACKAGE: letter
+// j's second half drives the outputs of slices 8..11 on GP32..GP47, pads
+// the QFN-60 has not got; on that package the letter judges the four
+// slices as the timers they are there, and says that their pads are the
+// QFN-80's. Only a B pin is a PWM input (table 1183), which
 // is why the two measuring wires end on an odd GPIO. The measuring slice
 // counts the edges of the wire (the frequency) or the divided clock while
 // the wire is high (the duty) over a window the system timer times. The
@@ -75,7 +82,7 @@
 //      counter read at a growing delay after a nudge, the level written
 //      mid-period followed on the pad
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -92,6 +99,8 @@
 #include "util/print.hpp"
 #include "util/rgb_lamp.hpp"
 #include "util/testbench.hpp"
+
+#include "rp2350_pair.hpp"
 
 namespace {
 
@@ -120,6 +129,9 @@ using Level7 = PwmLevelCounter<15>;    // slice 7 counting while GP15 is high
 using Edges4 = PwmEdgeCounter<9>;      // slice 4 on GP9
 using Level4 = PwmLevelCounter<9>;
 using Pair6 = PwmPair<12, 13, 999>;    // slice 6 A on GP12, B on GP13
+/// Whether the second wire, GP17 -> GP9, is clear of the pair's links: on
+/// the A it is not (the file header).
+constexpr bool second_wire_served = (rp2350pair::link_low & ((1UL << 17) | (1UL << 9))) == 0u;
 
 // The two interrupt lines, one task each.
 using Tick3 = PwmPeriodicTick<3, 0>;
@@ -341,11 +353,15 @@ void all_off() {
     Pwm::interrupts<1>(Pwm::all_slices, false);
     Pwm::stop(Pwm::all_slices);
     Out6B::release();
-    Out0B::release();
+    if constexpr (second_wire_served) {   // on the A, the pair's pads: never touched
+        Out0B::release();
+    }
     (void)Pin<12>::release();
     (void)Pin<14>::release();
     (void)Pin<15>::release();
-    (void)Pin<9>::release();
+    if constexpr (second_wire_served) {
+        (void)Pin<9>::release();
+    }
 }
 
 // =============================================================================
@@ -1067,14 +1083,15 @@ void tj_new_slices() {
 
     // (2) Their PADS - the two each output has - where the package bonds
     // them.
-    if (pwm_slice_has_pads(8)) {
+    if constexpr (pwm_slice_has_pads(8)) {
         high_slice_pads<32, 40, pwm_slice_has_pads(8)>("slice 8's A output");
         high_slice_pads<38, 46, pwm_slice_has_pads(11)>("slice 11's A output");
     } else {
-        bench.verdict("DECLINED: this image is built for the package whose pads stop at GP29, "
-                      "where slices 8..11 reach no output at all and the timers above are all "
-                      "they can be",
-                      false);
+        // The QFN-60: no pad of slices 8..11 is bonded, so the timers
+        // above are all they can be and there is no output to sample.
+        print(serial, "  this package's pads stop at GP29: slices 8..11 reach no output, and the timers above are "
+                      "all they can be",
+              crlf);
     }
 }
 
@@ -1360,9 +1377,11 @@ void tr_released_requester() {
 
 void banner() {
     print(serial, crlf, "test_rp2350_pwm - the PWM block (datasheet 12.5) on ", arch_name(),
-          ": twelve slices, two interrupt lines; slice 6 B on GP13 -> GP15 (slice 7 B), slice 0 B "
-          "on GP17 -> GP9 (slice 4 B), slice 6 A on GP12 -> GP14; clk_sys=", SysClock::hz, " Hz",
-          crlf);
+          second_wire_served ? ": twelve slices, two interrupt lines; slice 6 B on GP13 -> GP15 (slice 7 B), slice 0 B "
+                               "on GP17 -> GP9 (slice 4 B), slice 6 A on GP12 -> GP14; clk_sys="
+                             : ": twelve slices, two interrupt lines; slice 6 B on GP13 -> GP15 (slice 7 B), slice 6 A "
+                               "on GP12 -> GP14; clk_sys=",
+          SysClock::hz, " Hz", crlf);
     bench.menu();
 }
 
@@ -1430,9 +1449,13 @@ int main() {
     bench.letter('c', "the wire: frequency and duty", tc_wire, false);
     bench.letter('d', "phase-correct, inversion, the buffered level", td_modes, false);
     bench.letter('e', "the pair, and its dead time measured", te_pair, false);
-    bench.letter('f', "the second wire, lockstep", tf_second_wire, false);
+    if constexpr (second_wire_served) {   // GP17 -> GP9 is the A's I2C SCL and SPI select (the file header)
+        bench.letter('f', "the second wire, lockstep", tf_second_wire, false);
+    }
     bench.letter('g', "the divider ladder", tg_ladder, false);
-    bench.letter('h', "the lamp over three outputs", th_lamp, false);
+    if constexpr (second_wire_served) {
+        bench.letter('h', "the lamp over three outputs", th_lamp, false);
+    }
     bench.letter('i', "phase-correct at the solved divider, the falling edge (wireless)", ti_solved);
     bench.letter('j', "the four slices this chip added", tj_new_slices);
     bench.letter('k', "the level table streamed into CC, paced by the wrap", tk_stream, false);

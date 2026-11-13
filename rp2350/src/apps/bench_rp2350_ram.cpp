@@ -10,7 +10,7 @@
 // SRAM" in the family's platform.md); the drivers alone or the vectors
 // alone are a define away (the file header of bench_rp2350.cpp).
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #define BENCH_IMAGE "bench_rp2350_ram"

@@ -11,7 +11,8 @@ own repository (WeActStudio.RP2350BCoreBoard on GitHub, schematic and
 pinout). What the board offers a brio program is the one chip of this
 project with two processor architectures, and so the one board with two
 manifest types; it is also one half of a two-board pair with a WeAct
-RP2040, and the ten wires between them are listed here.
+RP2040, and the ten wires between them are listed here. Its facts for
+the compiler are its board file, `boards/weact2350b/board.hpp`.
 
 **Two architectures, one board.** The chip carries a pair of Cortex-M33
 and a pair of Hazard3 RISC-V cores, and the image in the flash decides
@@ -60,7 +61,11 @@ way one board carries two consoles elsewhere on this bench
 
 This board is wired to a WeAct RP2040 ([weact-rp2040.md](weact-rp2040.md))
 by ten signal wires and two grounds, each board on its own USB-C, both
-on one hub, no 3V3 wire between them:
+on one hub, no 3V3 wire between them. The desk's RP2040 is wired to a
+WeAct RP2350A today ([weact-rp2350a.md](weact-rp2350a.md)), on the same
+pads at its end; this plan stays valid and selectable, and the build
+reads it from `rp2350/src/apps/rp2350_pair.hpp`, keyed on the board
+file:
 
 | wire | here | RP2040 | carries |
 |---|---|---|---|

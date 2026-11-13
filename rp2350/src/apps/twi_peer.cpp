@@ -8,22 +8,24 @@
 // BOTH ARCHITECTURES (twi_link.hpp's one kind, 0x09, the label naming the
 // half: "rp2350a" on the Cortex-M33 pair, "rp2350r" on the Hazard3 pair):
 //
-//  - THE BUS IS I2C0 ON GP36 (SDA) / GP37 (SCL) (9.4, function 3), above
-//    GP31, the pair's I2C wires to the WeAct RP2040's GP2/GP3, each line
-//    with 1.5 kOhm to THAT board's 3V3 (docs/boards/weact-rp2350b.md).
+//  - THE BUS IS I2C0 on the pair plan's pads (rp2350_pair.hpp: GP16 SDA /
+//    GP17 SCL on the WeAct RP2350A, GP36 / GP37 above GP31 on the WeAct
+//    RP2350B; 9.4, function 3), the pair's I2C wires to the WeAct RP2040's
+//    GP2/GP3, each line with 1.5 kOhm to THAT board's 3V3
+//    (docs/boards/weact-rp2350a.md, weact-rp2350b.md).
 //  - THE PARTNER'S RAIL FIRST (pair_power.hpp): the client is brought up
-//    only once GP36/GP37 read high through those pull-ups - an RP2040 pad
-//    is not failsafe, and this image's pads carry the driver's pull-up -
+//    only once the two lines read high through those pull-ups - an RP2040
+//    pad is not failsafe, and this image's pads carry the driver's pull-up -
 //    and the rail is asked again once a second while it reads down.
 //  - THE CLOCK is the 12 MHz crystal through the PLL to 150 MHz, so
 //    Ident.xtal is 1 when that came up.
 //  - ONE DRIVER PER WIRE: no other link pad is touched (GP4, GP5, GP20,
-//    GP21, GP28, GP30, GP31, GP41 stay at reset, isolated).
+//    GP21 and the SPI link's four stay at reset, isolated).
 //
 // Console: UART0 on GP0/GP1 at 115200 - observability only.
 //   ? help | i status and counters | 0 back to command mode | 3 trace
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -43,6 +45,7 @@
 #include "../../../avrxt/src/apps/twi_link.hpp"
 
 #include "pair_power.hpp"
+#include "rp2350_pair.hpp"
 
 namespace {
 
@@ -58,20 +61,21 @@ constexpr UartPins console_pins{
 using Console = Uart<0, console_pins>;
 constexpr Console console;
 
-constexpr I2cPins bus_pins{.scl = 37, .sda = 36};
+constexpr I2cPins bus_pins = rp2350pair::i2c_pins;
 using Client = I2cClient<0, bus_pins>;
 using Host = I2cHost<0, bus_pins>;
 using Raw = DwApbI2c<0>;
 using RefusalPlacement = InFlash;   // rp_twi_peer.hpp, refusal_end()
-using SdaPin = Pin<36>;
-using SclPin = Pin<37>;
+using SdaPin = Pin<rp2350pair::i2c_sda>;
+using SclPin = Pin<rp2350pair::i2c_scl>;
 
 uint32_t us_now() { return Timer<0>::now_low(); }
 
 constexpr uint8_t peer_kind = twilink::peer_rp2350;
 constexpr bool hazard3 = core_kind == CoreKind::hazard3;
 constexpr char peer_label[8] = {'r', 'p', '2', '3', '5', '0', hazard3 ? 'r' : 'a', '\0'};
-constexpr const char* bus_text = "I2C0 on GP36 (SDA) / GP37 (SCL)";
+constexpr const char* bus_text =
+    rp2350pair::board_a ? "I2C0 on GP16 (SDA) / GP17 (SCL)" : "I2C0 on GP36 (SDA) / GP37 (SCL)";
 bool xtal_ok = false;
 
 /// The partner's rail through the link's own pull-ups (pair_power.hpp):
@@ -105,8 +109,12 @@ int main() {
           " ruler=", ruler_ok ? "1us" : "FAILED", " console=", console_ok ? "UART0" : "FAILED",
           " partner rail=", rail ? "up" : "DOWN", " client=", client_ok ? "up" : "OFF", crlf);
     if (!rail) {
-        print(console, "THE PARTNER IS UNPOWERED: GP36/GP37 read low through their pull-ups to the RP2040's 3V3 - "
-                       "the client stays off, asked again once a second",
+        print(console,
+              rp2350pair::board_a
+                  ? "THE PARTNER IS UNPOWERED: GP16/GP17 read low through their pull-ups to the RP2040's 3V3 - "
+                    "the client stays off, asked again once a second"
+                  : "THE PARTNER IS UNPOWERED: GP36/GP37 read low through their pull-ups to the RP2040's 3V3 - "
+                    "the client stays off, asked again once a second",
               crlf);
     }
     help();

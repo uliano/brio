@@ -533,5 +533,7 @@ Implemented but not bench-verified, each with what would measure it:
   clk_ref that is not a whole number of megahertz, and only the 12 MHz
   crystal has been on the wire.
 - **The QFN-60 package**: the stratum compiles for it and refuses the
-  pads it has not got, GP23 and GP24 among them - two of the four clock
-  outputs - but no QFN-60 part is on the bench.
+  pads it has not got - none of the four clock outputs, GP21, GP23, GP24
+  and GP25, among them, though on the WeAct RP2350A GP23 and GP24 carry
+  the board's own circuits (boards/weact2350a/board.hpp) - but no suite
+  has run yet on the QFN-60 board of the bench, the WeAct RP2350A.

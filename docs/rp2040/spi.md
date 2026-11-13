@@ -136,7 +136,8 @@ table 279, the `Rp2040Pl022` chip traits over `pin.hpp`, `resets.hpp`,
 drives) and `SpiClient<n, pins>` (the other end), this chip's aliases of
 the three templates there. The reference suite: `test_rp2040_spi`, on
 the loop-back; the wire is the desk partner's, SPI1 on GP10 / GP11 /
-GP8 with GP29 its select, to the WeAct RP2350B
+GP8 with GP29 its select, to the WeAct RP2350A (the RP2350B's plan uses
+the same pads at this end)
 ([../boards/weact-rp2040.md](../boards/weact-rp2040.md)), the board
 wired to this one. A suite's letter is one command key of its console
 and the group of verdicts it runs.

@@ -26,10 +26,10 @@
 //    dropped, and SIO;
 //  - brio_awake_permille in the single digits is idle() really sleeping.
 //
-// The LED is on GP25 and the KEY on GP23 on the WeAct RP2350B board; no
-// wire of the bench is touched.
+// The LED's pad is the board's (board.hpp): GP25 on both WeAct boards,
+// active high. No wire of the bench is touched.
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 
 #include <stdint.h>
 
@@ -46,6 +46,8 @@
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 
+#include "board.hpp"
+
 using namespace brio;
 
 // ---- the board ------------------------------------------------------------
@@ -54,7 +56,7 @@ using SysClock = Clock<ClockSource::pll, 150'000'000UL>;
 constexpr SysClock clock;
 
 using P = Rp2350Platform<>;
-using Led = Pin<25>;
+using Led = board::Led;   // the board's LED (see the header)
 
 // ---- what a debugger reads -------------------------------------------------
 //

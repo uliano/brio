@@ -1,7 +1,7 @@
 # Target: RP2350 (`rp2350/`)
 
 The operational page of brio's RP2350 target, for a programmer who has
-a WeAct RP2350B board on the desk and wants to build, flash and debug a
+a WeAct RP2350A or RP2350B board on the desk and wants to build, flash and debug a
 brio program on it, on either of its two processor architectures, and
 then find the document of the peripheral the program needs. It says
 what the stratum is, what decides which architecture runs, how the two
@@ -37,13 +37,23 @@ identity and the errata this stratum answers are in
 
 ## The board
 
-The board on the bench is a WeAct RP2350B core board
+Two boards, one per package. A WeAct RP2350B core board
 ([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)): an RP2350
 in the QFN-80 package (48 GPIO, eight ADC inputs), stepping A2, behind a
 16 MB Winbond W25Q128 quad-SPI flash, a 12 MHz crystal, USB-C, a user
-LED on GP25 and a user KEY on GP23, at 3.3 V. The Raspberry Pi Debug
-Probe is its probe and its console, and it is wired to a WeAct RP2040
-as its peer; the board's page lists the wires.
+LED on GP25 and a user KEY on GP23, at 3.3 V. And a WeAct RP2350A core
+board V2.1 ([../boards/weact-rp2350a.md](../boards/weact-rp2350a.md)):
+an RP2350 in the QFN-60 package (30 GPIO, four ADC inputs), stepping
+A4, a 16 MB flash, the Pico 2's pinout, a user LED on GP25 and no user
+key, the board's own circuits on GP23, GP24 and GP29. The configure's
+package picks the board and its board file (`boards/weact2350a/`,
+`boards/weact2350b/`): the `rp2350-*` presets build for the B, the
+`rp2350a-*` presets for the A. The Raspberry Pi Debug Probe is each
+board's probe and console, and the RP2350A is wired to a WeAct RP2040
+as its peer; the plan of the RP2350B's wires to the same RP2040 stays
+valid and selectable, and both plans are
+`rp2350/src/apps/rp2350_pair.hpp`'s, keyed on the board file. Each
+board's page lists its wires.
 
 ## The two architectures, and what decides between them
 
@@ -56,9 +66,10 @@ ARCHSEL_STATUS (0x4012015c) reads 0 after an Arm image and 3 after a
 RISC-V one.
 
 That is why the bench manifest names the same physical board twice,
-once per architecture (`weact2350b` and `weact2350b-rv` in
-[../boards/README.md](../boards/README.md)'s board types): `brio flash`
-takes a board type and the board type carries the preset.
+once per architecture (`weact2350b` and `weact2350b-rv`, `weact2350a`
+and `weact2350a-rv` in [../boards/README.md](../boards/README.md)'s
+board types): `brio flash` takes a board type and the board type
+carries the preset.
 
 An app is written once. It names `brio::Rp2350Platform<>`,
 `brio::Ticker` and `brio::Clock<...>` and binds its vectors by the
@@ -116,12 +127,13 @@ not.
 
 `rp2350/` is its own CMake project, the only one whose axis is the
 compiler; the repository root is not a CMake project, so every CMake
-command runs from `rp2350/`. There are four presets and not two,
-`rp2350-arm-release`, `rp2350-arm-debug`, `rp2350-riscv-release` and
-`rp2350-riscv-debug` (CMake Tools shows them as `RP2350 on its
-Cortex-M33 pair, 16 MB flash, QFN-80 (release, -Os)` and the Hazard3
-and debug variants), each naming its toolchain file and setting
-`RP2350_ARCH`:
+command runs from `rp2350/`. There are four presets per package and not
+two, `rp2350-arm-release`, `rp2350-arm-debug`, `rp2350-riscv-release`
+and `rp2350-riscv-debug` for the QFN-80 of the WeAct RP2350B (CMake
+Tools shows them as `RP2350B on its Cortex-M33 pair, 16 MB flash,
+QFN-80 (release, -Os)` and the Hazard3 and debug variants), and the
+same four as `rp2350a-*` for the QFN-60 of the WeAct RP2350A, each
+naming its toolchain file and setting `RP2350_ARCH`:
 
 ```bash
 (cd rp2350 && cmake --preset rp2350-arm-release)                      # configure (once, or after adding an app)
@@ -153,9 +165,12 @@ flash operation is [flash.md](flash.md).
 
 Applications are discovered at every configure from
 `rp2350/src/apps/*.cpp` by the `// build:` lines in each file's header
-comment, with `weact2350b` and `weact2350b-rv` as the board names. Build
-outputs land in `build-cmake/rp2350-{arm,riscv}-{release,debug}` at the
-repository root: `<app>.elf`, `.bin` and `.hex`, `firmware-<app>.map`
+comment, with the configure's two board types as the board names
+(`weact2350b` and `weact2350b-rv` on the QFN-80 presets, `weact2350a`
+and `weact2350a-rv` on the QFN-60 ones), and every app gets the board's
+directory under `boards/` on its include path. Build outputs land in
+`build-cmake/rp2350{,a}-{arm,riscv}-{release,debug}` at the repository
+root: `<app>.elf`, `.bin` and `.hex`, `firmware-<app>.map`
 and `<app>.lst`, the source-interleaved disassembly.
 
 ## Upload (the Raspberry Pi Debug Probe, and the three OpenOCDs)
@@ -242,8 +257,9 @@ unit of `test/family_rp2350/` is built four times, for the Cortex-M33
 and for Hazard3, each for the QFN-80 and for the QFN-60, and every
 `neg/` TU, a program that must be refused, must fail; `util_all.cpp`
 goes through both compilers. The bench proves the QFN-80 on both
-architectures; the QFN-60 has the compile check alone ("Not covered
-yet" below).
+architectures; the QFN-60 has the compile check and every app built and
+linked for the WeAct RP2350A on both, with no suite run there yet ("Not
+covered yet" below).
 
 ## What the silicon does to a program, before any driver
 
@@ -355,8 +371,9 @@ Driver gaps, each with its reason:
   ([otp.md](otp.md)), and the absence is asserted by the family check
   rather than promised.
 - **The QFN-60 package.** The stratum compiles for it and refuses its
-  absent pads, but no QFN-60 part is on the bench: everything below the
-  compile check is untested there.
+  absent pads, and every app builds for the WeAct RP2350A, but no suite
+  has run on that board: everything below the compile check is
+  unmeasured there.
 - **Interrupt priorities.** Both halves have sixteen levels and no
   driver uses them: the kernel's promise is that no interrupt nests over
   another, and here it is kept structurally (every line at the reset
@@ -368,7 +385,8 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The QFN-60's compile-time refusals**, above: a QFN-60 board.
+- **The QFN-60's compile-time refusals**, above: the suites run on the
+  WeAct RP2350A.
 - **A second console for core 1.** Core 1 itself is measured on both
   architectures (the launch, the two tickers, the bridge, the panic and
   the relaunch, [multicore.md](multicore.md)), but it speaks only

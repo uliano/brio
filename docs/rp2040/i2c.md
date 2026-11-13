@@ -116,7 +116,8 @@ itself, and the public names `DwApbI2c<n>` (the resource), `I2cHost`
 chip's aliases of the three templates there. The reference suite:
 `test_rp2040_i2c`, first the peripheral with nothing on the wire and then the
 wire to a second board, the partner: I2C1 on GP2 (SDA) / GP3 (SCL) with 1.5 kOhm to this
-board's 3V3 on each, to the WeAct RP2350B
+board's 3V3 on each, to the WeAct RP2350A (the RP2350B's plan uses the
+same pads at this end)
 ([../boards/weact-rp2040.md](../boards/weact-rp2040.md)), whose test firmware,
 the peer, is commanded over the bus under test; that
 board's own suite, `test_rp2350_i2c`, judges this chip's peripheral as that

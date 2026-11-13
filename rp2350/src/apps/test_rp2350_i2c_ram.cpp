@@ -2,7 +2,7 @@
 // binds in SRAM: the same letters over `InRam` (util/placement.hpp), which proves the STOP
 // entry's cold path from a host placed there, that path in SRAM with it.
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #define I2C_SUITE_IN_RAM 1

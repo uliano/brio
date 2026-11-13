@@ -24,13 +24,16 @@
 // NOTHING TO WIRE for `z`. The console is the Debug Probe's UART bridge
 // on GP0 (TX) / GP1 (RX) = UART0. One by-name letter, o, wants a wire
 // between two of the board's own pads, GP19 -> GP8, to wake itself from
-// a dormant by an edge it drives with its other pad; this desk does NOT
-// carry it (the board is wired to its desk partner and every self-link
-// is retired), and with no wire the letter declines before the dormant
-// it could not leave. Two by-name letters use the pair's clock wires
-// instead (docs/boards/weact-rp2350b.md): w drives GP21 (wire 10) as a
-// wave for the RP2040's dormant letter, x sleeps until the RP2040's wave
-// on GP20 (wire 9) moves.
+// a dormant by an edge it drives with its other pad; no desk carries it
+// (the board is wired to its desk partner and every self-link is
+// retired), and with no wire the letter declines before the dormant it
+// could not leave. On the WeAct RP2350A GP8 is the SPI link's receive
+// pad (rp2350_pair.hpp), driven by the partner, so there the letter is
+// not registered: the partner's idle line would pass for the wire. Two
+// by-name letters use the pair's clock wires instead, the same two pads
+// on both WeAct boards (docs/boards/weact-rp2350a.md, weact-rp2350b.md):
+// w drives GP21 (wire 10) as a wave for the RP2040's dormant letter, x
+// sleeps until the RP2040's wave on GP20 (wire 9) moves.
 //
 // A NOTE ON THE DEBUGGER, which letter a measures and every deep letter
 // re-states: the debug port's CSYSPWRUPREQ powers every domain and
@@ -98,7 +101,7 @@
 //      events on the crystal, a dormant on the ring oscillator ended by
 //      the pad, and pad and alarm armed together, each winning once
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -126,6 +129,7 @@
 #include "util/testbench.hpp"
 
 #include "pair_power.hpp"
+#include "rp2350_pair.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 150'000'000>;
 constexpr SysClock clock;
@@ -156,6 +160,13 @@ constexpr Serial serial;
 using Ruler = Timer<0>;    // the microsecond ruler, which stops with the crystal
 using Waker = Pin<19>;     // the standing wire's driven end
 using Woken = Pin<8>;      // its other end, which a dormant watches
+/// Whether the standing wire's two pads are clear of the pair's links:
+/// letter o is registered only then (the file header).
+constexpr bool standing_wire_served = (rp2350pair::link_low & (Waker::mask | Woken::mask)) == 0u;
+/// The clock wires w and x use as plain lines (rp2350_pair.hpp).
+using WaveOut = Pin<rp2350pair::gpout>;
+using WaveIn = Pin<rp2350pair::gpin>;
+static_assert(WaveOut::number == 21u && WaveIn::number == 20u, "the letters' texts name GP21 and GP20");
 
 using Plain = Rp2350SleepSite<SysClock, DormantSource::xosc>;
 using PlainRing = Rp2350SleepSite<SysClock, DormantSource::rosc>;
@@ -1090,7 +1101,7 @@ void tp_dormant_ring() {
 /// RP2040's GP20 - driven LOW one second, HIGH the next, twenty times,
 /// then given back.
 void tw_wave() {
-    using Out = Pin<21>;
+    using Out = WaveOut;
     print(serial, "  GP21 (into the partner's GP20): one second low, one second high, twenty times", crlf);
     (void)Out::output(false);
     const uint32_t t0 = us_now();
@@ -1113,7 +1124,7 @@ void tw_wave() {
 /// The partner's wave on GP20 (wire 9): a change INTO `to` seen within
 /// `us`.
 bool await_change(bool to, uint32_t us) {
-    using In = Pin<20>;
+    using In = WaveIn;
     const uint32_t t0 = us_now();
     while (In::read() == to) {
         if (us_now() - t0 >= us) {
@@ -1146,7 +1157,7 @@ bool await_change(bool to, uint32_t us) {
 ///        it (300 to 330 ms, the pad still low)
 ///   7    pad and alarm both armed, the alarm 3000 ms out: the pad ends it
 void tx_dormant_partner() {
-    using In = Pin<20>;
+    using In = WaveIn;
     quiesce();
     (void)In::input(PinPull::none);
     struct Leg {
@@ -1474,7 +1485,9 @@ int main() {
     bench.letter('k', "the scratch words and the two domains", tk_scratch);
     bench.letter('m', "the manager over the timed site", tm_manager);
     bench.letter('n', "A DORMANT woken by the alarm", tn_dormant_alarm, false);
-    bench.letter('o', "A DORMANT woken by a pad", to_dormant_gpio, false);
+    if constexpr (standing_wire_served) {   // its listening pad is the A's SPI link (the file header)
+        bench.letter('o', "A DORMANT woken by a pad", to_dormant_gpio, false);
+    }
     bench.letter('p', "A DORMANT on the ring oscillator", tp_dormant_ring, false);
     bench.letter('q', "P1.0: the core powered down (reboots the board)", tq_power_down, false);
     bench.letter('r', "P1.7: the deepest state (reboots the board)", tr_power_down_deepest,

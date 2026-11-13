@@ -155,6 +155,14 @@ BOARD_TYPES = {
     "weact2350b-rv": {"project": "rp2350", "preset": "rp2350-riscv-release",
                       "mcu": "rp2350", "flash": "rp2350_openocd",
                       "target_cfg": "target/rp2350.cfg"},
+    # The WeAct RP2350A core board (the QFN-60, 30 GPIO, a 16 MB flash, a
+    # Pico 2's pinout), the same two architectures and the same verb.
+    "weact2350a": {"project": "rp2350", "preset": "rp2350a-arm-release",
+                   "mcu": "rp2350", "flash": "rp2350_openocd",
+                   "target_cfg": "target/rp2350.cfg"},
+    "weact2350a-rv": {"project": "rp2350", "preset": "rp2350a-riscv-release",
+                      "mcu": "rp2350", "flash": "rp2350_openocd",
+                      "target_cfg": "target/rp2350.cfg"},
 }
 
 

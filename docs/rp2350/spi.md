@@ -156,9 +156,14 @@ holds what this chip owes it - the pin table of table 677, the
 drives) and `SpiClient<n, pins>` (the other end), this chip's aliases of
 the three templates there. The reference suite: `test_rp2350_spi`, which
 runs on both of this chip's architectures from one source, on the
-loop-back; the wire is the desk partner's, SPI1 on GP30 / GP28 / GP31
-with GP41 its select, to the WeAct RP2040
-([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)). A letter of
+loop-back (SPI0 on the pads the pair plan leaves it, SCK GP18 and TX
+GP19 with GP16 its receive pad and GP17 its select on the WeAct RP2350B,
+no receive pad and GP26 its select on the WeAct RP2350A); the wire is
+the desk partner's, SPI1 on the pair plan's pads
+(`rp2350/src/apps/rp2350_pair.hpp`: GP10 / GP8 / GP11 with GP9 its
+select on the A, GP30 / GP28 / GP31 with GP41 on the B), to the WeAct
+RP2040 ([../boards/weact-rp2350a.md](../boards/weact-rp2350a.md),
+[../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)). A letter of
 a suite is one command key of its console and the group of verdicts it
 runs; `z` is the key that runs every letter but `x`, the slip
 statistics, which runs by name.
@@ -977,5 +982,6 @@ Implemented but not bench-verified, each with what would measure it:
   through `start()` and the completion's handler in the same transfer would split it.
 - The QFN-60's pin table and its compile-time refusals: the stratum
   compiles for that package and refuses the pads it has not got, and no
-  QFN-60 part is on the bench. A board carrying one, running the suite's
-  letter a against a pin table of thirty pads.
+  suite has run yet on the QFN-60 board of the bench, the WeAct RP2350A.
+  The suite's letter a on that board, against a pin table of thirty
+  pads.

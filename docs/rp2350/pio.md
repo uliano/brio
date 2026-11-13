@@ -88,7 +88,11 @@ the five wireless letters together) - letters a, b, h, j and m wireless, c,
 d, e, g, i, k and l on two wires between the chip's own pads, and f on
 both; the pair desk does not carry those wires
 ([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)), so the wire
-letters run by name only, outside z, when they are fitted. Two of
+letters run by name only, outside z, when they are fitted. On the WeAct
+RP2350A the PWM wire's pads, GP17 and GP9, are the pair's links
+([../boards/weact-rp2350a.md](../boards/weact-rp2350a.md)), so letter
+e is not registered there, and letter b judges the window at 16 on GP22
+alone, the QFN-60 bonding nothing above GP29. Two of
 those letters put a [dma.md](dma.md) engine on a machine's FIFO, which is
 what the request numbers here are for.
 
@@ -428,5 +432,5 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- The tasks on the QFN-60 package, which the stratum compiles for and no
-  board of this bench carries.
+- The tasks on the QFN-60 package, which the stratum compiles for and
+  no suite has run on yet: the suite on the WeAct RP2350A.

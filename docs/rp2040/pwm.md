@@ -71,7 +71,7 @@ block, `PwmSlice<n>` the resource, the tasks `PwmOutput`, `PwmPair`,
 `PwmEdgeCounter`, `PwmLevelCounter`, `PwmPeriodicTick`) over
 `pin.hpp`, `resets.hpp` and `dma_engine.hpp`. The reference suite:
 `test_rp2040_pwm`, wireless and on two wires between the chip's own
-slices - wires the bench pair (this board wired to the WeAct RP2350B) does not
+slices - wires the bench pair (this board wired to the WeAct RP2350A) does not
 carry ([../boards/weact-rp2040.md](../boards/weact-rp2040.md)), so the
 six wire letters run by name only, outside z, when they are fitted. A
 suite's letter is one command key of its console and the group of

@@ -81,7 +81,7 @@
 //      inbox; and a pin's interrupt aimed at PROC 1 - edges on a free
 //      pad core 0 drives, taken by core 1's vector and never core 0's
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -838,7 +838,7 @@ constexpr uint8_t chore_pins_off = 1;
 constexpr uint8_t chore_mailbox_on = 2;
 constexpr uint8_t chore_mailbox_off = 3;
 constexpr uint8_t chore_ring_self = 4;
-constexpr uint8_t edge_pin = 6;   ///< a free pad of the QFN-80, no wire: core 0 drives it through SIO
+constexpr uint8_t edge_pin = 6;   ///< a free pad of both packages and both boards, no wire: core 0 drives it through SIO
 
 /// Rising edges on edge_pin until `edges` more were seen (or a bound),
 /// each level held 20 us.

@@ -14,8 +14,8 @@
 // meant to keep passing through every later restructuring of the code
 // under it.
 //
-// TWO WIRES BETWEEN THE CHIP'S OWN PADS, which this desk does NOT
-// carry: the board is wired to its desk partner (docs/boards/
+// TWO WIRES BETWEEN THE CHIP'S OWN PADS, which no desk carries: the
+// board is wired to its desk partner (docs/boards/weact-rp2350a.md,
 // weact-rp2350b.md) and every self-link is retired, so letters c..g, i, k
 // and l run BY NAME ONLY, outside z, and decline with that reason when a
 // wire is missing. Fitted, the wires are
@@ -24,9 +24,15 @@
 //                     receives; the square wave and the sampler)
 //   GP17  ->  GP9    (the PIO PWM into a level-counting machine)
 //
-// - no pad the pair uses. With a wire missing its input reads HIGH and
-// not low - erratum RP2350-E9 on this stepping - so the wire check DRIVES
-// both levels.
+// - no pad the WeAct RP2350B's pair uses. On the WeAct RP2350A GP17 and
+// GP9 are the pair's (the I2C link's SCL, the SPI link's select:
+// rp2350_pair.hpp), so letter e, the one on that wire, is not registered
+// there. With a wire missing its input reads HIGH and not low on stepping
+// A2 - erratum RP2350-E9 - so the wire check DRIVES both levels.
+//
+// THE PACKAGE. Letter b shows the GPIO window's top half on GP47, a pad
+// the QFN-60 has not got; on that package its first verdict says what the
+// bonded pads can show, the window at 16 judged on GP22 alone.
 //
 // THE RULERS ARE PIO'S OWN MACHINES. This chapter needs a frequency
 // counter and a duty counter at the far end of each wire, and on this
@@ -84,7 +90,7 @@
 //      index moving with GPIOBASE, two pads sixteen apart driven in
 //      turn
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -100,6 +106,8 @@
 #include "rp2350/uart.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+
+#include "rp2350_pair.hpp"
 
 namespace {
 
@@ -130,6 +138,9 @@ using Probe = PioSm<0, 0>;          ///< the wireless machine of letters a, j, k
 using Pwm17 = PioPwm<1, 0, 17, 999>;
 using Levels = PioSm<1, 1>;         ///< the duty counter on GP9
 using Window = PioSm<2, 0>;         ///< the machine letter b drives GP22 with
+/// Whether letter e's wire, GP17 -> GP9, is clear of the pair's links: on
+/// the A it is not (the file header).
+constexpr bool pwm_wire_served = (rp2350pair::link_low & ((1UL << 17) | (1UL << 9))) == 0u;
 
 // The DMA engines of letters i and l, on three channels of the sixteen
 // and all on line 0 (rp2350/dma.hpp). A FIFO is a request, which is what
@@ -461,10 +472,20 @@ void tb_window() {
     print(serial, "  GPIOBASE 0: GP", window_pin, " is index ", at_zero ? *at_zero : 99u, ", GP40 ",
           past_zero ? "in" : "outside", " the window; GPIOBASE 16: GP", window_pin, " is index ",
           at_sixteen ? *at_sixteen : 99u, ", GP13 ", below ? "in" : "outside", ", GP47 index ", top ? *top : 99u, crlf);
-    bench.verdict("GPIOBASE takes 0 and 16 and refuses every other value; the window is 32 pads wide, so with the "
-                  "window at 0 a pad above GP31 has no index and with it at 16 a pad below GP16 has none",
-                  base_zero && refused && moved && at_zero && *at_zero == window_pin && !past_zero && at_sixteen &&
-                      *at_sixteen == static_cast<uint8_t>(window_pin - 16u) && !below && top && *top == 31u);
+    if constexpr (gpio_count > 32u) {
+        bench.verdict("GPIOBASE takes 0 and 16 and refuses every other value; the window is 32 pads wide, so with the "
+                      "window at 0 a pad above GP31 has no index and with it at 16 a pad below GP16 has none",
+                      base_zero && refused && moved && at_zero && *at_zero == window_pin && !past_zero && at_sixteen &&
+                          *at_sixteen == static_cast<uint8_t>(window_pin - 16u) && !below && top && *top == 31u);
+    } else {
+        // The QFN-60 bonds nothing above GP29: GP40 and GP47 have no index
+        // in either window because the package has not got them, which
+        // shows nothing of the window's width.
+        bench.verdict("GPIOBASE takes 0 and 16 and refuses every other value; with the window at 16 a pad below "
+                      "GP16 has no index and GP22 is index 6 (the window's top half is the QFN-80's)",
+                      base_zero && refused && moved && at_zero && *at_zero == window_pin && at_sixteen &&
+                          *at_sixteen == static_cast<uint8_t>(window_pin - 16u) && !below);
+    }
 
     // One pad driven from the far window: the machine writes index 6 and
     // the level lands on GP22, which only the relocation can explain.
@@ -1586,8 +1607,10 @@ void tl_sampler_dma() {
 
 void banner() {
     print(serial, crlf,
-          "test_rp2350_pio - the RP2350 PIO (datasheet chapter 11), three blocks: GP13 -> GP15 and GP17 -> GP9; "
-          "clk_sys=",
+          pwm_wire_served ? "test_rp2350_pio - the RP2350 PIO (datasheet chapter 11), three blocks: GP13 -> GP15 and "
+                            "GP17 -> GP9; clk_sys="
+                          : "test_rp2350_pio - the RP2350 PIO (datasheet chapter 11), three blocks: GP13 -> GP15; "
+                            "clk_sys=",
           SysClock::hz, " Hz", crlf);
     bench.menu();
 }
@@ -1642,7 +1665,9 @@ int main() {
     bench.letter('b', "the GPIO window", tb_window);
     bench.letter('c', "the square wave, counted on the wire", tc_square_wave, false);
     bench.letter('d', "the serial port at three rates, the frame error", td_serial, false);
-    bench.letter('e', "the PIO PWM as a PwmChannel", te_pwm, false);
+    if constexpr (pwm_wire_served) {   // GP17 -> GP9 is the A's I2C SCL and SPI select (the file header)
+        bench.letter('e', "the PIO PWM as a PwmChannel", te_pwm, false);
+    }
     bench.letter('f', "the interrupts and all eight flags", tf_interrupts, false);
     bench.letter('g', "the sampler at clk_sys", tg_sampler, false);
     bench.letter('h', "the three blocks: the ring and the neighbour masks", th_blocks);

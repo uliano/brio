@@ -1,8 +1,8 @@
 // pair_power.hpp - THE PARTNER'S RAIL, read before a link pad is driven.
 //
-// The WeAct RP2350B is wired to a WeAct RP2040 (docs/boards/
-// weact-rp2350b.md): ten link wires, each board on its own USB-C, no 3V3
-// between them. The asymmetry this file exists for is in the two
+// The WeAct RP2350A or RP2350B is wired to a WeAct RP2040 (docs/boards/
+// weact-rp2350a.md, weact-rp2350b.md): ten link wires, each board on its
+// own USB-C, no 3V3 between them. The asymmetry this file exists for is in the two
 // datasheets: an RP2350 pad is 3.3 V-failsafe while its chip is
 // unpowered (RP2350 datasheet chapter 1), an RP2040 pad is NOT - its
 // input may not rise above IOVDD + 0.5 V (RP2040 datasheet 5.5.3.1). So
@@ -11,15 +11,17 @@
 // feeds that chip through its pad's protection diode. The other way
 // round is safe.
 //
-// THE SENSE. The I2C link's two lines, GP36 (SDA) and GP37 (SCL), carry
+// THE SENSE. The I2C link's two lines (rp2350_pair.hpp's plan: GP16 and
+// GP17 on the WeAct RP2350A, GP36 and GP37 on the WeAct RP2350B) carry
 // 1.5 kOhm pull-ups to the RP2040's 3V3 pin and to nothing else. With
 // that rail up a line reads high; with it down it reads low. Each line is
 // read with the pad's own PULL-DOWN on and its input buffer OFF, enabled
-// for the read alone (`Pin::read_pulsed()`): erratum RP2350-E9 makes a pad
-// whose buffer is on hold history against its pull-down, and the
-// errata sheet's workaround is exactly this pair (rp2350/pin.hpp). The
-// read drives nothing: an unpowered RP2040 is never fed by it, a powered
-// one sees no edge on its bus.
+// for the read alone (`Pin::read_pulsed()`): on stepping A2 erratum
+// RP2350-E9 makes a pad whose buffer is on hold history against its
+// pull-down, and the errata sheet's workaround is exactly this pair
+// (rp2350/pin.hpp); stepping A3 fixed the pad (datasheet C.2.1), where the
+// same read is simply a read. It drives nothing: an unpowered RP2040 is
+// never fed by it, a powered one sees no edge on its bus.
 //
 // THE SETTLE IS DERIVED, NOT GUESSED. The slow case is the rail DOWN: a
 // line pulled to ground only by the pad's pull-down, 113 kOhm at most
@@ -37,7 +39,7 @@
 // reads high: nothing on the net can lift it.
 //
 // THE RULE, for every RP2350 image of this repository that drives a link
-// pad (GP4, GP21, GP28, GP30, GP31, GP36, GP37, GP41): the rail first - a
+// pad (every pad of rp2350_pair.hpp's plan): the rail first - a
 // letter registered through `guarded`, or `partner_rail()` /
 // `partner_rail_up()` called before the pad is handed over - and a rail
 // read down leaves the pad at reset and says so. The sense's own two pads
@@ -50,6 +52,8 @@
 #include "rp2350/delay.hpp"
 #include "rp2350/mtime.hpp"
 #include "rp2350/pin.hpp"
+
+#include "rp2350_pair.hpp"
 
 namespace pair {
 
@@ -66,8 +70,8 @@ struct PartnerRail {
 /// one prerequisite). The two pads are released before it returns.
 template <typename C>
 PartnerRail partner_rail(C clock) {
-    using Sda = brio::Pin<36>;
-    using Scl = brio::Pin<37>;
+    using Sda = brio::Pin<rp2350pair::i2c_sda>;
+    using Scl = brio::Pin<rp2350pair::i2c_scl>;
     if (!brio::Mtime::running()) {
         (void)brio::Mtime::start(clock);
     }
@@ -93,8 +97,11 @@ template <typename C, typename Say>
 bool partner_rail_up(C clock, Say say) {
     const PartnerRail r = partner_rail(clock);
     if (!r.up()) {
-        say("  THE PARTNER IS UNPOWERED: GP36/GP37 read low through their pull-ups to the RP2040's 3V3 "
-            "- no link pad is driven (an RP2040 pad is not failsafe)");
+        say(rp2350pair::board_a
+                ? "  THE PARTNER IS UNPOWERED: GP16/GP17 read low through their pull-ups to the RP2040's 3V3 "
+                  "- no link pad is driven (an RP2040 pad is not failsafe)"
+                : "  THE PARTNER IS UNPOWERED: GP36/GP37 read low through their pull-ups to the RP2040's 3V3 "
+                  "- no link pad is driven (an RP2040 pad is not failsafe)");
     }
     return r.up();
 }
@@ -109,8 +116,11 @@ void guarded() {
         letter();
         return;
     }
-    bench.verdict("THE PARTNER BOARD IS POWERED (GP36/GP37 read high through their pull-ups to its 3V3) "
-                  "- else no link pad is driven, an RP2040 pad not being failsafe",
+    bench.verdict(rp2350pair::board_a
+                      ? "THE PARTNER BOARD IS POWERED (GP16/GP17 read high through their pull-ups to its 3V3) "
+                        "- else no link pad is driven, an RP2040 pad not being failsafe"
+                      : "THE PARTNER BOARD IS POWERED (GP36/GP37 read high through their pull-ups to its 3V3) "
+                        "- else no link pad is driven, an RP2040 pad not being failsafe",
                   false);
 }
 

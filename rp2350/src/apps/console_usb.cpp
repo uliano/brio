@@ -21,7 +21,7 @@
 // THE CLOCK IS PART OF THE CONTRACT: erratum RP2350-E12 wants clk_sys at
 // least ten per cent above clk_usb, and 150 MHz is well clear of it.
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -45,13 +45,16 @@
 #include "util/usb/cdc.hpp"
 #include "util/usb/device.hpp"
 
+#include "board.hpp"
+
 using P = brio::Rp2350Platform<>;
 using SysClock = brio::Clock<brio::ClockSource::pll, 150'000'000UL>;
 constexpr SysClock clock;
 
 namespace {
 
-using Led = brio::Pin<25>;
+using Led = board::Led;   // the board's LED (board.hpp)
+static_assert(board::led_active_high, "LED ON drives the pad high: the board's LED is lit by a high pad");
 
 using Serial = brio::UsbCdcAcm<brio::Usb, P>;   // interface 0, endpoints 1 (notification) and 2 (bulk)
 constexpr Serial serial;
@@ -91,7 +94,7 @@ struct Lamp : brio::Fsm<Lamp, SetLed> {
     static inline brio::EventQueue<Event, 2, P> queue;
 
     static void init() {
-        (void)Led::output();   // low: GP25's LED dark
+        (void)Led::output();   // low: the LED dark
         start(&steady);
     }
 

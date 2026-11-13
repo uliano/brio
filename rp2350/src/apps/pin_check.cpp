@@ -36,23 +36,26 @@
 //                                       alive, the clock tree is not
 //   neither                             a board for the debugger
 //
-// What toggles: every pin of the bank except GP0/GP1 and GP23 - GP2..GP22
-// and GP24..GP29 on the QFN-60, and up to GP47 on the QFN-80, the eight
-// ADC pads among them (GP40..GP47), waved as digital outputs. GP25 is the
-// LED on the WeAct RP2350B board, lit at half brightness by the wave.
+// What toggles: every pin of the bank except the console's and the ones
+// the board's own circuits take (board.hpp) - GP2..GP29 on the QFN-60, up
+// to GP47 on the QFN-80, the ADC pads among them (GP26..GP29 on the
+// QFN-60, GP40..GP47 on the QFN-80), waved as digital outputs. GP25 is
+// the LED on both WeAct boards, lit at half brightness by the wave.
 //
-// Not toggling: GP0/GP1, the console; GP23, that board's user KEY - a
-// button to ground on a driven output would be a short. SWCLK/SWDIO and
-// the six QSPI flash pins are not user GPIOs and are not in this bank.
+// Not toggling: GP0/GP1, the console; on the WeAct RP2350B GP23, its user
+// KEY - a button to ground on a driven output would be a short; on the
+// WeAct RP2350A GP23, GP24 and GP29, the regulator's mode pin and the
+// VBUS and VSYS dividers. SWCLK/SWDIO and the six QSPI flash pins are not
+// user GPIOs and are not in this bank.
 //
 // THE DESK PARTNER. Ten of these pads are wired to the WeAct RP2040
-// (docs/boards/weact-rp2350b.md) - GP4, GP5, GP20, GP21, GP28, GP30,
-// GP31, GP36, GP37, GP41 - and an RP2040 pad is not failsafe, so the
-// rail of that board is read first (rp2350/src/apps/pair_power.hpp, the
-// I2C link's pull-ups): with it down the link pads are left out of the
-// wave and the banner says so. With it up they wave like the rest, which
-// wants the partner DARK (its pads inputs) while this runs - one driver
-// per wire.
+// (rp2350_pair.hpp's plan: GP4, GP5, GP20, GP21 on both boards, then
+// GP8..GP11, GP16, GP17 on the A and GP28, GP30, GP31, GP36, GP37, GP41
+// on the B) - and an RP2040 pad is not failsafe, so the rail of that
+// board is read first (rp2350/src/apps/pair_power.hpp, the I2C link's
+// pull-ups): with it down the link pads are left out of the wave and the
+// banner says so. With it up they wave like the rest, which wants the
+// partner DARK (its pads inputs) while this runs - one driver per wire.
 //
 // PINS WIRED TO EACH OTHER ARE SAFE HERE, which is worth stating because
 // a bench board usually has a few: the whole of a half is toggled by ONE
@@ -74,7 +77,7 @@
 //
 // Wiring: a scope probe on the pin under check, moved from pin to pin.
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -87,7 +90,9 @@
 #include "rp2350/uart.hpp"
 #include "util/print.hpp"
 
+#include "board.hpp"
 #include "pair_power.hpp"
+#include "rp2350_pair.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 150'000'000UL>;
 constexpr SysClock clock;
@@ -117,11 +122,13 @@ constexpr uint32_t high_half_pins() {
 }
 
 constexpr uint32_t console_mask = bit(0) | bit(1);
-constexpr uint32_t key_mask = bit(23);
-/// The pads wired to the desk partner, by half.
-constexpr uint32_t link_low = bit(4) | bit(5) | bit(20) | bit(21) | bit(28) | bit(30) | bit(31);
-constexpr uint32_t link_high = high_half_pins() & (bit(36 - 32) | bit(37 - 32) | bit(41 - 32));
-uint32_t wave_low = low_half_pins() & ~console_mask & ~key_mask;
+/// The pads the board's own circuits take (board.hpp), all in the low half.
+constexpr uint32_t board_mask =
+    (board::gp23_free ? 0u : bit(23)) | (board::gp24_free ? 0u : bit(24)) | (board::gp29_free ? 0u : bit(29));
+/// The pads wired to the desk partner, by half (rp2350_pair.hpp).
+constexpr uint32_t link_low = rp2350pair::link_low;
+constexpr uint32_t link_high = high_half_pins() & rp2350pair::link_high;
+uint32_t wave_low = low_half_pins() & ~console_mask & ~board_mask;
 uint32_t wave_high = high_half_pins();
 bool partner_up = false;
 
@@ -133,7 +140,8 @@ constexpr uint32_t half_period_us = 5000;
 void banner() {
     const ChipId id = ChipId::read();
     print(serial, crlf, "pin_check - chip ", hex(id.manufacturer), "/", hex(id.part),
-          " stepping ", hex(id.revision), " (A2 = 0x2, A3 = 0x3, A4 = 0x8)", crlf);
+          " revision ", hex(id.revision), " bootrom ", Bootrom::version(), ": stepping ",
+          stepping_name(ChipId::stepping()), crlf);
     print(serial, "package: the die reports ",
           ChipId::package_sel() == Package::qfn60 ? "QFN-60" : "QFN-80",
           ", this image is built for ", gpio_count, " GPIO", crlf);
@@ -150,7 +158,11 @@ void banner() {
           " Hz (the chip's own counter)", crlf);
     print(serial, "wave 100 Hz, bit = pin: low half ", hex(wave_low), ", high half ",
           hex(wave_high), " (bit 0 = GP32)", crlf);
-    print(serial, "not driven: GP0/GP1 (this console), GP23 (the KEY)", crlf);
+    print(serial,
+          board::is("weact2350a")
+              ? "not driven: GP0/GP1 (this console), GP23/GP24/GP29 (the regulator's mode, the VBUS and VSYS sense)"
+              : "not driven: GP0/GP1 (this console), GP23 (the KEY)",
+          crlf);
     print(serial, partner_up ? "the partner's rail is up: the link pads wave too (the partner must be dark)"
                              : "THE PARTNER IS UNPOWERED: the link pads are not driven (an RP2040 pad is not "
                                "failsafe)",

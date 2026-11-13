@@ -8,30 +8,32 @@
 // ARCHITECTURES (spi_link's one kind, 0x09, the label naming the half:
 // "rp2350a" on the Cortex-M33 pair, "rp2350r" on the Hazard3 pair):
 //
-//  - THE BUS IS SPI1's PADS: GP30 SCK, GP28 this chip's receive pad (the
-//    host's MOSI), GP31 its transmit pad (the answer line), GP41 the select
-//    (4.7 kOhm to the RP2040's 3V3), the pair's SPI wires to the WeAct
-//    RP2040's GP10 / GP11 / GP8 / GP29 (docs/boards/weact-rp2350b.md). As
-//    the client they belong to PIO0's machine 0 (function 6) with the
-//    block's window at GPIO16..47 (GPIOBASE 16, 11.1.1: GP41 is out of the
-//    first window); for host_burst to the PL022 (function 1), the select its
-//    frame signal.
+//  - THE BUS IS SPI1's PADS, the pair plan's (rp2350_pair.hpp): SCK, this
+//    chip's receive pad (the host's MOSI), its transmit pad (the answer
+//    line) and the select (4.7 kOhm to the RP2040's 3V3) - GP10 / GP8 /
+//    GP11 / GP9 on the WeAct RP2350A, GP30 / GP28 / GP31 / GP41 on the
+//    WeAct RP2350B - the pair's SPI wires to the WeAct RP2040's GP10 /
+//    GP11 / GP8 / GP29 (docs/boards/weact-rp2350a.md, weact-rp2350b.md).
+//    As the client they belong to PIO0's machine 0 (function 6) with the
+//    block's window where the plan puts it (GPIOBASE, 11.1.1: at 0 on the
+//    A, at 16 on the B, where GP41 is out of the first window); for
+//    host_burst to the PL022 (function 1), the select its frame signal.
 //  - THE PARTNER'S RAIL FIRST (pair_power.hpp): nothing is handed over until
-//    GP36/GP37 read high through their pull-ups - an RP2040 pad is not
-//    failsafe - and the rail is asked again once a second while it reads
-//    down.
+//    the I2C link's lines read high through their pull-ups - an RP2040 pad
+//    is not failsafe - and the rail is asked again once a second while it
+//    reads down.
 //  - THE EXCHANGE'S ENGINES are DMA channels 0 and 1, bound per window to
 //    the machine's FIFOs; they report a bus error alone, on DMA_IRQ_0.
 //  - THE CLOCK is the 12 MHz crystal through the PLL to 150 MHz: the
 //    machine runs at that clk_sys, and Ident.xtal is 1 when it came up.
 //  - ONE DRIVER PER WIRE: no other link pad is touched (GP4, GP5, GP20,
-//    GP21, GP36, GP37 stay at reset, isolated).
+//    GP21 and the I2C link's two stay at reset, isolated).
 //
 // Console: UART0 on GP0/GP1 at 115200 - observability only.
 //   ? help | i status and counters | 0 back to the dark client | 3 trace
 //   | b the input synchronizers bypassed or not
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -55,6 +57,7 @@
 #include "../../../avrxt/src/apps/spi_link.hpp"
 
 #include "pair_power.hpp"
+#include "rp2350_pair.hpp"
 
 namespace {
 
@@ -70,10 +73,10 @@ constexpr UartPins console_pins{
 using Console = Uart<0, console_pins>;
 constexpr Console console;
 
-constexpr uint8_t sck_gpio = 30;
-constexpr uint8_t rx_gpio = 28;
-constexpr uint8_t tx_gpio = 31;
-constexpr uint8_t cs_gpio = 41;
+constexpr uint8_t sck_gpio = rp2350pair::spi_sck;
+constexpr uint8_t rx_gpio = rp2350pair::spi_rx;
+constexpr uint8_t tx_gpio = rp2350pair::spi_tx;
+constexpr uint8_t cs_gpio = rp2350pair::spi_cs;
 using SckPin = Pin<sck_gpio>;
 using RxPin = Pin<rx_gpio>;
 using TxPin = Pin<tx_gpio>;
@@ -82,9 +85,9 @@ using CsPin = Pin<cs_gpio>;
 using Blk = Pio<0>;
 using Sm = PioSm<0, 0>;
 constexpr PinFunction pio_function = PinFunction::pio0;
-/// The block's window at GPIO16..47 (GPIOBASE 16): every pin field and WAIT
-/// GPIO index is the system GPIO less sixteen.
-constexpr uint8_t pio_window_base = 16;
+/// The block's window over the link's pads (the plan's GPIOBASE, 0 or 16):
+/// every pin field and WAIT GPIO index is the system GPIO less the base.
+constexpr uint8_t pio_window_base = rp2350pair::spi_pio_window_base;
 constexpr uint8_t pio_index(uint8_t gpio) { return static_cast<uint8_t>(gpio - pio_window_base); }
 void open_pio_window() { (void)Blk::gpio_base(pio_window_base); }
 
@@ -103,7 +106,9 @@ uint32_t us_now() { return Timer<0>::now_low(); }
 constexpr uint8_t peer_kind = spilink::peer_rp2350;
 constexpr bool hazard3 = core_kind == CoreKind::hazard3;
 constexpr char peer_label[8] = {'r', 'p', '2', '3', '5', '0', hazard3 ? 'r' : 'a', '\0'};
-constexpr const char* link_text = "SPI1's pads GP30 (SCK) / GP28 (in) / GP31 (out) / GP41 (CS)";
+constexpr const char* link_text = rp2350pair::board_a
+                                      ? "SPI1's pads GP10 (SCK) / GP8 (in) / GP11 (out) / GP9 (CS)"
+                                      : "SPI1's pads GP30 (SCK) / GP28 (in) / GP31 (out) / GP41 (CS)";
 bool xtal_ok = false;
 
 /// The partner's rail through the I2C link's pull-ups (pair_power.hpp).
@@ -140,8 +145,12 @@ int main() {
           " console=", console_ok ? "UART0" : "FAILED", " partner rail=", rail ? "up" : "DOWN",
           " client=", client_ok ? "up" : "OFF", crlf);
     if (!rail) {
-        print(console, "THE PARTNER IS UNPOWERED: GP36/GP37 read low through their pull-ups to the RP2040's 3V3 - "
-                       "the client stays off, asked again once a second",
+        print(console,
+              rp2350pair::board_a
+                  ? "THE PARTNER IS UNPOWERED: GP16/GP17 read low through their pull-ups to the RP2040's 3V3 - "
+                    "the client stays off, asked again once a second"
+                  : "THE PARTNER IS UNPOWERED: GP36/GP37 read low through their pull-ups to the RP2040's 3V3 - "
+                    "the client stays off, asked again once a second",
               crlf);
     }
     help();

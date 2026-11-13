@@ -7,8 +7,7 @@
  * keys a workaround to an erratum. The smallest use, in the shape the
  * apps use it:
  *
- *     const brio::ChipId id = brio::ChipId::read();
- *     if (id.revision == brio::ChipId::revision_a2) { ... RP2350-E9 is live ... }
+ *     if (brio::ChipId::stepping() == brio::Stepping::a2) { ... RP2350-E9 is live ... }
  *     const brio::Package pkg = brio::ChipId::package_sel();
  *
  * Which context calls what. Every verb is a register read after a
@@ -21,11 +20,12 @@
  * Three facts, and one of them is load-bearing for every later chapter:
  *
  *  - CHIP_ID, the JEDEC JEP-106 identifier: a manufacturer, a part
- *    number and the silicon revision the errata are keyed by. The
- *    datasheet names three steppings and the value each reports (A2 =
- *    0x2, A3 = 0x3, A4 = 0x8 - appendix C), and the numbering is not
- *    contiguous, so the raw field is what this file offers and the three
- *    documented values are constants beside it.
+ *    number and the silicon revision. The revision alone does not name
+ *    the stepping the errata are keyed by: appendix C gives A2 the value
+ *    0x2 and BOTH A3 and A4 the value 0x3, the two told apart by the
+ *    bootrom's version byte at 0x13 (3 on A3, 4 on A4; bootrom.hpp).
+ *    So the raw field is what read() offers, and stepping() is the
+ *    answer to "which stepping", from the two together.
  *  - PACKAGE_SEL, which says which package the die is in: 0 = QFN-80
  *    (48 GPIO, eight ADC inputs), 1 = QFN-60 (30 and four). Since the
  *    die is one, every pin's registers exist either way and only the
@@ -53,10 +53,21 @@
 
 #include <stdint.h>
 
+#include "rp2350/bootrom.hpp"
 #include "rp2350/device.hpp"
 #include "rp2350/resets.hpp"
 
 namespace brio {
+
+/// The steppings appendix C names; `unknown` for any other pair of a
+/// revision and a bootrom version, which a program states rather than
+/// guesses at.
+enum class Stepping : uint8_t { a2, a3, a4, unknown };
+
+/// The stepping's name as the datasheet writes it, for a banner.
+constexpr const char* stepping_name(Stepping s) {
+    return s == Stepping::a2 ? "A2" : s == Stepping::a3 ? "A3" : s == Stepping::a4 ? "A4" : "unknown";
+}
 
 struct ChipId {
     uint16_t manufacturer;   ///< JEP-106 manufacturer, 0x493 for Raspberry Pi
@@ -71,10 +82,10 @@ struct ChipId {
     static constexpr uint16_t raspberry_pi = 0x493;
     static constexpr uint16_t rp2350 = 0x0004;
 
-    /// The steppings appendix C names, by the value CHIP_ID reports.
+    /// The revision values appendix C names: 0x2 on A2, 0x3 on A3 and
+    /// on A4 alike (stepping() tells those two apart).
     static constexpr uint8_t revision_a2 = 0x2;
-    static constexpr uint8_t revision_a3 = 0x3;
-    static constexpr uint8_t revision_a4 = 0x8;
+    static constexpr uint8_t revision_a3_a4 = 0x3;
 
     /// Read CHIP_ID (releasing SYSINFO from reset if it still is).
     static ChipId read() {
@@ -88,6 +99,21 @@ struct ChipId {
             .revision = static_cast<uint8_t>((id & SYSINFO_CHIP_ID_REVISION_BITS) >>
                                              SYSINFO_CHIP_ID_REVISION_LSB),
         };
+    }
+
+    /// Which stepping this die is (appendix C): CHIP_ID's revision, and
+    /// on revision 0x3 the bootrom's version byte, 3 for A3 and 4 for A4.
+    /// Two reads after SYSINFO's release; any context read() may run in.
+    static Stepping stepping() {
+        const uint8_t revision = read().revision;
+        if (revision == revision_a2) {
+            return Stepping::a2;
+        }
+        if (revision == revision_a3_a4) {
+            const uint8_t rom = Bootrom::version();
+            return rom == 3u ? Stepping::a3 : rom == 4u ? Stepping::a4 : Stepping::unknown;
+        }
+        return Stepping::unknown;
     }
 
     /// Which package the die is in, as the chip reports it. What a

@@ -469,7 +469,8 @@ Implemented but not bench-verified, each with what would measure it:
   console on every image of this target, so its alternate pads want a
   program that gives the console up.
 - The QFN-60's pin table: the stratum compiles for that package and
-  refuses the pads it has not got, but no QFN-60 part is on the bench.
+  refuses the pads it has not got, but no suite has run yet on the
+  QFN-60 board of the bench, the WeAct RP2350A.
 - `rebase` under a dynamic clock: this target has no dynamic clock,
   so the verb is exercised by moving clk_peri (letter r, above), never
   by a clk_sys that changes under a running port.

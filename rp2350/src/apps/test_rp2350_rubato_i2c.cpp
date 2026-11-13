@@ -1,7 +1,7 @@
 // test_rp2350_rubato_i2c - the bench suite of the RP2350 stratum's I2C stack
 // under Rubato, the preemptive kernel (kernel/rubato.hpp), ONE SOURCE FOR
 // BOTH PROCESSOR PAIRS: util/i2c_bus.hpp's arbiter over rp2350/i2c.hpp's
-// I2cHost<0> and its DMA engines, run on the WeAct RP2350B - its Cortex-M33
+// I2cHost<0> and its DMA engines, run on the WeAct RP2350A or RP2350B - its Cortex-M33
 // half and its Hazard3 half, one image each - against the desk partner, the
 // WeAct RP2040, and its unchanged instrument (rp2040/src/apps/twi_peer.cpp)
 // while an object of the highest priority preempts it at moments the traffic
@@ -22,13 +22,14 @@
 //   scheduler's vectors (BRIO_RP2350_SCHEDULER_VECTORS) and the kernel's
 //   timebase behind the one name isr_systick (rp2350/ticker.hpp).
 //   THE CLOCK. The PLL at 150 MHz on the crystal, static: ic_clk is clk_sys.
-//   THE HOST. I2cHost<0> on GP37 (SCL) and GP36 (SDA) with its engines on
+//   THE HOST. I2cHost<0> on the pair plan's pads (rp2350_pair.hpp: GP17
+//   SCL and GP16 SDA on the A, GP37 and GP36 on the B) with its engines on
 //   DMA channels 4 (the command words) and 5 (the bytes), both on DMA_IRQ_0
 //   (test_rp2350_i2c's engined host).
 //   THE PARTNER'S RAIL FIRST (pair_power.hpp): an RP2040 pad is not
 //   failsafe, and the host's pads carry this chip's own pull-ups, so the
 //   host is NOT brought up at boot. Every pass's bring-up (the shared body's
-//   I2cTraits::bring_up) reads the RP2040's rail on GP36/GP37 first and
+//   I2cTraits::bring_up) reads the RP2040's rail on those two pads first and
 //   brings the host up only when it reads up - at each pass's opening,
 //   which falls between two of letter h's holds and never inside one, the
 //   sense taking both pads from the block for its 70 us - and every letter
@@ -45,10 +46,11 @@
 //   The pressure's count is exact. No core-1 letters: the extra pass with
 //   Pressure fed by core 1 is the RP2040's (its suite).
 //
-// THE WIRES, fixed on the desk (docs/boards/weact-rp2350b.md, wires 5 and
-// 6): GP36 (SDA) to the RP2040's GP2 and GP37 (SCL) to its GP3, each line
-// pulled up to the RP2040's 3V3. The RP2040 runs `twi_peer`. NOTHING LIT: the
-// LED's pad GP25 is never driven (letter i checks it).
+// THE WIRES, fixed on the desk (docs/boards/weact-rp2350a.md and
+// weact-rp2350b.md, wires 5 and 6): SDA to the RP2040's GP2 and SCL to its
+// GP3, each line pulled up to the RP2040's 3V3. The RP2040 runs
+// `twi_peer`. NOTHING LIT: the board's LED (GP25 on both) is never driven
+// (letter i checks it).
 //
 // The letters (z: n o p q w h i; x and s outside it), each of n o p q w h
 // run as seven passes (the shared body's control and six pressures):
@@ -72,7 +74,7 @@
 //   s  (outside z) start()'s fill measured, and the stretch by its
 //      arithmetic at 400 kHz and 1 MHz.
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -108,7 +110,9 @@
 // file.
 #include "../../../avrxt/src/apps/twi_link_client.hpp"
 
+#include "board.hpp"
 #include "pair_power.hpp"
+#include "rp2350_pair.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 150'000'000UL>;
 constexpr SysClock clock;
@@ -143,8 +147,8 @@ TestBench<Serial, 16> bench;
 
 // ---- the I2C host --------------------------------------------------------------------
 
-/// I2C0 on the pair's wires: GP37 (SCL), GP36 (SDA).
-constexpr I2cPins link_pins{.scl = 37, .sda = 36};
+/// I2C0 on the pair's wires (rp2350_pair.hpp).
+constexpr I2cPins link_pins = rp2350pair::i2c_pins;
 using TxEngine = DmaTxEngine<4, uint16_t>;
 using RxEngine = DmaRxEngine<5>;
 using LinkHost = I2cHost<0, link_pins, TxEngine, RxEngine>;
@@ -152,8 +156,8 @@ using LinkHost = I2cHost<0, link_pins, TxEngine, RxEngine>;
 /// (rp_rubato_i2c.hpp).
 constexpr bool pure_write_on_engine = true;
 static_assert(pure_write_on_engine == LinkHost::dma_carries_writes);
-using SdaPin = Pin<36>;
-using SclPin = Pin<37>;
+using SdaPin = Pin<rp2350pair::i2c_sda>;
+using SclPin = Pin<rp2350pair::i2c_scl>;
 
 constexpr uint8_t peer_kind = twilink::peer_rp2040;
 constexpr const char* pressure_name = "TIMER1's alarm 0";
@@ -170,8 +174,11 @@ bool host_up = false;
 
 bool rp_bring_up() {
     if (!pair::partner_rail(clock).up()) {
-        print(serial, "  THE PARTNER IS UNPOWERED: GP36/GP37 read low through their pull-ups to the RP2040's 3V3 - "
-                      "the host is not brought up (an RP2040 pad is not failsafe)",
+        print(serial,
+              rp2350pair::board_a ? "  THE PARTNER IS UNPOWERED: GP16/GP17 read low through their pull-ups to the RP2040's 3V3 - "
+                                  "the host is not brought up (an RP2040 pad is not failsafe)"
+                                : "  THE PARTNER IS UNPOWERED: GP36/GP37 read low through their pull-ups to the RP2040's 3V3 - "
+                                  "the host is not brought up (an RP2040 pad is not failsafe)",
               crlf);
         host_up = false;
         return false;
@@ -246,7 +253,8 @@ const char* binding_dark() {
     if (!rail.sda || !rail.scl) {
         return "a line reads low through its pull-up to the RP2040's 3V3";
     }
-    if (Pin<25>::is_output()) {
+    static_assert(board::Led::number == 25u, "the text below names GP25");
+    if (board::Led::is_output()) {
         return "the LED's pad GP25 is an output";
     }
     return nullptr;

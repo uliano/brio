@@ -3,7 +3,7 @@
 // ONE SOURCE FOR BOTH PROCESSOR PAIRS: util/spi_bus.hpp's arbiter over
 // rp2350/spi.hpp's SpiHost<1> and its DMA engines, and util/line_reader.hpp's
 // LineReader over rp2350/uart.hpp's Uart<1> and its interrupt receiver, run
-// on the WeAct RP2350B - its Cortex-M33 half and its Hazard3 half, one image
+// on the WeAct RP2350A or RP2350B - its Cortex-M33 half and its Hazard3 half, one image
 // each - against the desk partner, the WeAct RP2040, and its unchanged
 // instruments (rp2040/src/apps/spi_peer.cpp and uart_peer.cpp) while an
 // object of the highest priority preempts them at moments the traffic does
@@ -27,8 +27,10 @@
 //   the platform timer's comparator on the other, rp2350/ticker.hpp).
 //   THE CLOCK. The PLL at 150 MHz on the crystal, static: clk_peri is
 //   clk_sys, so a frame at divisor d is 8 or 16 x d core cycles.
-//   THE SPI HOST. SpiHost<1> on GP30 (SCK), GP31 (TX, 47 Ohm on its way to
-//   the partner), GP28 (RX), GP41 the select as a GPIO; half-word engines
+//   THE SPI HOST. SpiHost<1> on the pair plan's pads (rp2350_pair.hpp):
+//   SCK, TX (47 Ohm on its way to the partner), RX, and the select as a
+//   GPIO - GP10, GP11, GP8, GP9 on the A, GP30, GP31, GP28, GP41 on the
+//   B; half-word engines
 //   on DMA channels 6 and 7 reporting on DMA_IRQ_1 (test_rp2350_spi's
 //   LinkDmaHost): a request naming dma rides them at any length, and SPI1's
 //   own line is nobody's.
@@ -51,14 +53,16 @@
 //   guard, and boot drives none of them. No core-1 pass: the extra pass
 //   with Pressure fed by core 1 is the RP2040's (its suite).
 //
-// THE WIRES, fixed on the desk (docs/boards/weact-rp2350b.md, the pair's ten
-// and two grounds): SPI1 GP30 -> RP2040 GP10 (SCK), GP31 -> GP8 (this end's
-// TX), GP28 <- GP11 (the peer's TX), GP41 -> GP29 (the select, 4.7 kOhm to
-// the RP2040's 3V3); UART1 GP4 -> GP5, GP5 <- GP4; the mode line GP21 -> the
-// peer's GP20; GP36/GP37, the I2C pair, the rail's sense. Key z wants the
-// RP2040 running `spi_peer`, key y `uart_peer`. NOTHING LIT: the LED's pad
-// GP25 is never driven (letter i checks it), and the peer's LED follows the
-// mode line, which key y holds low.
+// THE WIRES, fixed on the desk (docs/boards/weact-rp2350a.md and
+// weact-rp2350b.md, the pair's ten and two grounds; the A's pad first,
+// the B's after the slash): SPI1 GP10/GP30 -> RP2040 GP10 (SCK),
+// GP11/GP31 -> GP8 (this end's TX), GP8/GP28 <- GP11 (the peer's TX),
+// GP9/GP41 -> GP29 (the select, 4.7 kOhm to the RP2040's 3V3); UART1 GP4
+// -> GP5, GP5 <- GP4; the mode line GP21 -> the peer's GP20; the I2C pair
+// (GP16/GP17 on the A, GP36/GP37 on the B), the rail's sense. Key z wants
+// the RP2040 running `spi_peer`, key y `uart_peer`. NOTHING LIT: the LED's
+// pad GP25 is never driven (letter i checks it), and the peer's LED
+// follows the mode line, which key y holds low.
 //
 // The letters (z: n o p w i; y: t v), each run as seven passes (the shared
 // body's control and six pressures):
@@ -105,7 +109,7 @@
 //      alone, the two buffers strictly alternating (the arithmetic in
 //      rp_rubato_link.hpp).
 //
-// build: boards = weact2350b,weact2350b-rv
+// build: boards = weact2350b,weact2350b-rv,weact2350a,weact2350a-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -141,6 +145,7 @@
 #include "../../../avrxt/src/apps/usart_link.hpp"
 
 #include "pair_power.hpp"
+#include "rp2350_pair.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 150'000'000UL>;
 constexpr SysClock clock;
@@ -181,13 +186,13 @@ TwoKeyTestBench<Serial, 'y'> bench;
 
 // ---- the links ---------------------------------------------------------------------
 
-constexpr SpiPins link_host_pins{.sck = 30, .tx = 31, .rx = 28};
+constexpr SpiPins link_host_pins = rp2350pair::spi_host_pins;
 using Host = SpiHost<1, link_host_pins, DmaTxEngine<6, uint16_t, 1>, DmaRxEngine<7, uint16_t, 1>>;
-using CsPin = Pin<41>;
-using SckPin = Pin<30>;
-using TxPin = Pin<31>;
-using ModeLine = Pin<21>;
-constexpr UartPins uart_link_pins{.tx = {4, PinFunction::uart}, .rx = {5, PinFunction::uart}};
+using CsPin = Pin<rp2350pair::spi_cs>;
+using SckPin = Pin<rp2350pair::spi_sck>;
+using TxPin = Pin<rp2350pair::spi_tx>;
+using ModeLine = Pin<rp2350pair::gpout>;
+constexpr UartPins uart_link_pins = rp2350pair::uart_pins;
 
 constexpr const char* pressure_name = "TIMER1's alarm 0";
 constexpr const char* peer_name = "the WeAct RP2040";

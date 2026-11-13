@@ -245,8 +245,9 @@ struct Bootrom {
     /// says is what makes the other fixed words trustworthy.
     static bool present() { return (word_at(BootromAddress::magic) & 0x00FFFFFFu) == bootrom_magic; }
 
-    /// The ROM's version byte (5.4.1): 2 on A2 silicon. Informational,
-    /// and explicitly not a way to infer where anything lives.
+    /// The ROM's version byte (5.4.1): 2 on A2 silicon, 3 on A3, 4 on A4
+    /// (appendix C, which tells A3 from A4 by it - sysinfo.hpp's
+    /// ChipId::stepping()). Not a way to infer where anything lives.
     static uint8_t version() {
         return *reinterpret_cast<const volatile uint8_t*>(rom_address(BootromAddress::version));
     }
