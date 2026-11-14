@@ -161,6 +161,7 @@
 #include "rp2040/uart.hpp"
 #include "util/inbox.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 125'000'000>;
@@ -174,10 +175,13 @@ using P = Rp2040RubatoPlatform<0>;
 using P1 = Rp2040RubatoPlatform<1>;   // core 1 under Rubato (letter k)
 using P1T = Rp2040Platform<1>;        // core 1 under Tenuto (letter j)
 
-/// Core 0's SysTick composed with its tick count: a count a cycle.
+/// Core 0's SysTick composed with its tick count: a count a cycle, of
+/// clk_sys - the ruler of the stamps and of the waits (util/test_wait.hpp).
 struct Ruler {
     [[gnu::always_inline]] static uint32_t now() { return CoreTicker<0>::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
+static_assert(CycleRuler<Ruler>);
 
 /// The alarm of the system timer core 0's road-1 letters land.
 constexpr uint8_t edge_alarm = 0;
@@ -281,6 +285,11 @@ volatile uint32_t sp1_low_isr = 0xFFFF'FFFFu;
     }
 }
 
+/// A fixed span in clk_sys cycles, the body of a dispatch an edge lands
+/// in. Not util/test_wait.hpp's spin_us: the span is the preempted code
+/// itself, so it is written into the handler that spins (always_inline,
+/// no call whose frame the preemption would land in), and the scenarios'
+/// spans are counts of cycles the edges are placed against.
 [[gnu::always_inline]] inline void spin(uint32_t cycles) {
     const uint32_t t0 = Ruler::now();
     while (Ruler::now() - t0 < cycles) {
@@ -428,7 +437,9 @@ using K1T = Tenuto<P1T, Relay>;
 /// Core 1's ruler, its own SysTick's.
 struct Ruler1 {
     [[gnu::always_inline]] static uint32_t now() { return CoreTicker<1>::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
+static_assert(CycleRuler<Ruler1>);
 
 /// Core 1's three under Rubato, the shape of core 0's Node with core 1's
 /// trace and stack samples.
@@ -487,16 +498,10 @@ void reset_scenario() {
     tracing = true;
 }
 
-/// Wait until `runs` moves past `before`, at most `cycles`: true when it
-/// did.
-bool wait_runs(const volatile uint32_t& runs, uint32_t before, uint32_t cycles) {
-    const uint32_t t0 = Ruler::now();
-    while (runs == before) {
-        if (Ruler::now() - t0 >= cycles) {
-            return false;
-        }
-    }
-    return true;
+/// Wait until `runs` moves past `before`, at most `us` microseconds on
+/// the ruler: true when it did. One out-of-line poll for every caller.
+bool wait_runs(const volatile uint32_t& runs, uint32_t before, uint32_t us) {
+    return brio::wait_until<Ruler>([&runs, before] { return runs != before; }, us);
 }
 
 /// A post from the Console to Low with nothing to do and nothing traced:
@@ -505,13 +510,22 @@ void flush() {
     post<Low>(Hit{0});
 }
 
-/// Let the console's transmitter fall silent (at most 50 ms, 6.25 M
-/// cycles; 230 bytes at 115200 are 20 ms): its interrupt, landing in a
-/// measured path, would be measured.
-void console_drain() {
-    const uint32_t t0 = Ruler::now();
-    while (!Serial::tx_idle() && Ruler::now() - t0 < 50u * one_ms) {
+/// Let the console's transmitter fall silent (at most 50 ms; 230 bytes
+/// at 115200 are 20 ms): its interrupt, landing in a measured path, would
+/// be measured. True when it did.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(50'000u); }
+
+/// The drain a timed window opens with. False when the console did not
+/// fall silent: this suite's witnesses count the kernel tick and the XIP
+/// cache's refills, not the UART's interrupt, so the letter skips rather
+/// than judge a window its bound does not describe.
+bool window_quiet() {
+    if (console_drain()) {
+        return true;
     }
+    bench.skip("the console did not fall silent within 50 ms: the timed window would carry "
+               "its transmit interrupt, which no bound here allows for");
+    return false;
 }
 
 uint32_t ruler_cost() {
@@ -615,13 +629,7 @@ bool core1_launch(void (*entry)(), uint32_t stage) {
     SioDoorbell<0>::pop_all();
     Nvic::clear_pending(SioDoorbell<0>::irq());
     SioDoorbell<0>::enable();
-    const uint32_t t0 = Ruler::now();
-    while (ok && core1_stage != stage) {
-        if (Ruler::now() - t0 >= 10u * one_ms) {
-            return false;
-        }
-    }
-    return ok;
+    return ok && brio::wait_until<Ruler>([stage] { return core1_stage == stage; }, 10'000u);
 }
 
 // =============================================================================
@@ -831,7 +839,7 @@ Slow latency_run(Place place, Stamp stamp, uint32_t warm_count) {
         const uint32_t t0 = CoreTicker<0>::ticks();
         const uint32_t m0 = xip_misses();
         place();
-        if (!wait_runs(High::runs, r, one_ms)) {
+        if (!wait_runs(High::runs, r, 1000u)) {
             ++s.missed;
             flush();
         }
@@ -854,7 +862,10 @@ Slow latency_run(Place place, Stamp stamp, uint32_t warm_count) {
 void tc_latency() {
     reset_scenario();
     tracing = false;
-    console_drain();
+    if (!window_quiet()) {
+        reset_scenario();
+        return;
+    }
     const Slow s = latency_run([] { edge_to = 1; edge_in(4u); }, [] { return edge_last; },
                                latency_count);
     sort(latency, latency_events);
@@ -884,7 +895,10 @@ volatile uint32_t post_road2 = 0;
 void td_scan() {
     reset_scenario();
     tracing = false;
-    console_drain();
+    if (!window_quiet()) {
+        reset_scenario();
+        return;
+    }
     const uint32_t ruler = ruler_cost();
     // The ruler against the system timer over about a millisecond,
     // crossing a reload: the cycles' delta against the microseconds'
@@ -1085,7 +1099,10 @@ void td_scan() {
 void te_depth2() {
     const char* const want = "Hs1 Hm1 Ts0 Te0 Hr1 He1";
     for (int road = 2; road >= 1; --road) {
-        console_drain();
+        if (!window_quiet()) {
+            reset_scenario();
+            return;
+        }
         uint8_t alike = 0;
         uint32_t least = 0xFFFF'FFFFu;
         uint32_t most = 0;
@@ -1104,7 +1121,7 @@ void te_depth2() {
             } else {
                 edge_to = 1;     // the first edge starts High over the Console
                 edge_in(4u);
-                if (!wait_runs(High::runs, r, one_ms)) {
+                if (!wait_runs(High::runs, r, 1000u)) {
                     flush();
                 }
             }
@@ -1163,12 +1180,6 @@ void base_turn() {
     (void)activate_here();
 }
 
-/// Wait until core 0's kernel tick has moved `ticks` on.
-void wait_ticks(uint32_t ticks) {
-    const uint32_t t0 = CoreTicker<0>::ticks();
-    while (CoreTicker<0>::ticks() - t0 < ticks) {
-    }
-}
 
 void tf_timers() {
     reset_scenario();
@@ -1243,7 +1254,11 @@ void tf_timers() {
     Low::action = [](uint8_t n) { ++fired[n]; };
     base_turn();                           // te_c and te_d: due at once
     const bool turn1 = fired[51] == 0u && fired[52] == 0u && fired[53] == 1u && fired[54] == 1u;
-    wait_ticks(4u);                        // te_a's three ticks, and one more
+    // te_a's three ticks, and one more, on core 0's kernel tick; bounded
+    // on the ruler at six periods, a time-out failing the verdict below.
+    const uint32_t k0 = CoreTicker<0>::ticks();
+    const bool ticked = brio::wait_until<Ruler>(
+        [k0] { return CoreTicker<0>::ticks() - k0 >= 4u; }, 6u * (1'000'000u / P::ticks_per_second));
     base_turn();
     const bool turn2 = fired[51] == 1u && fired[52] == 0u && fired[53] == 1u && fired[54] == 1u;
     base_turn();
@@ -1283,7 +1298,7 @@ void tf_timers() {
                   turn1);
     bench.verdict("three ticks on: the re-armed one fired once; a turn more: nothing "
                   "twice, the list empty",
-                  turn2 && turn3 && empty);
+                  ticked && turn2 && turn3 && empty);
     // arm() over a list of one node (itself, re-armed), by the release
     // listing: the arguments and the call (9); the frame, the guard's mrs
     // and cpsid and the call of the out-of-line unlink (14); the unlink -
@@ -1328,7 +1343,9 @@ template <class Receiver>
 }
 
 void tg_primask() {
-    console_drain();
+    if (!window_quiet()) {
+        return;
+    }
     pend_inside = true;
     ran_inside = false;
     // From the Console's dispatch (ceiling 4) to Mid, then from Low's (3)
@@ -1444,7 +1461,7 @@ void tj_across() {
         const uint32_t h0 = High::runs;
         const uint32_t d0 = Relay::misposted;
         send<Relay>(Fire{1, true});
-        const bool done = wait_runs(Relay::misposted, d0, one_ms);
+        const bool done = wait_runs(Relay::misposted, d0, 1000u);
         print(serial, "  a post from core 1 to High: misposts ", m0, " -> ", High::queue.misposts(),
               "; core 1's PendSV ", Relay::pended ? "PENDED" : "not pended", crlf);
         bench.verdict("a post from core 1 to core 0's object is refused and counted, pends no PendSV "
@@ -1512,7 +1529,11 @@ void tj_across() {
     constexpr uint32_t bell_count = latency_count + 75u;
     constexpr uint32_t bell_bound = latency_bound + 75u;
     tracing = false;
-    console_drain();
+    if (!window_quiet()) {
+        reset_scenario();
+        bench.verdict("core 1 back in the bootrom", core1_park());
+        return;
+    }
     const Slow s = latency_run([] { send<Relay>(Fire{0, false}); }, [] { return bell_last; },
                                bell_count);
     sort(latency, latency_events);
@@ -1611,12 +1632,8 @@ void tk_both_cores() {
         // read is not taken again: core 1's loop then turns once more with
         // the ceiling at 0 (its base turn, kernel/rubato.hpp's run()) before
         // its idle puts 255 back, and a second read can land in that turn.
-        const bool done = wait_runs(k1_done, d0, 2u * one_ms);
-        const uint32_t t0 = Ruler::now();
-        bool back1 = core1_ceiling() == 255u;
-        while (!back1 && Ruler::now() - t0 < one_ms) {
-            back1 = core1_ceiling() == 255u;
-        }
+        const bool done = wait_runs(k1_done, d0, 2000u);
+        const bool back1 = brio::wait_until<Ruler>([] { return core1_ceiling() == 255u; }, 1000u);
         settled = settled && done && back1 && P::ceiling == console_index;
         if (run == 0) {
             continue;

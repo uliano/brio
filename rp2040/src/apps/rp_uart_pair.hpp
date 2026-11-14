@@ -16,13 +16,19 @@
 //   link_round_trip(count, bits, budget_us, took)   the suite's round
 //                               trip of `count` pattern bytes, masked to
 //                               `bits`, on Instrument
-//   Lfsr, us_now(), spin_us()   the pattern, the ruler, its wait
+//   Lfsr                        the pattern
+//   Ruler                       the ruler every wait here is read on, in
+//                               util/test_wait.hpp's shape (now(), hz()),
+//                               counting microseconds
 //
-// and <bit> included at its top (std::popcount below).
+// and <bit> and util/test_wait.hpp included at its top.
 //
 // THE RATE IS 115200 8N1 at both ends, each from its own crystal: 115207
 // baud on both chips' dividers (RP2040 67 + 52/64 at 125 MHz, RP2350
 // 81 + 24/64 at 150 MHz), a frame of ten bit periods 86.80 us long.
+
+static_assert(Ruler::hz() == 1'000'000u,
+              "rp_uart_pair.hpp reads its spans and budgets in microseconds");
 
 constexpr uint32_t pair_baud = 115200;
 constexpr uint32_t pair_real_baud = 115207;   // both dividers' (header)
@@ -39,7 +45,7 @@ constexpr uint32_t pair_frames_us(uint32_t frames) {
 /// taken here.
 void peer_echo() {
     ModeLine::output(false);
-    spin_us(20'000);
+    brio::spin_us<Ruler>(20'000);
 }
 
 // -----------------------------------------------------------------------------
@@ -136,16 +142,17 @@ void ts_wire_errors() {
     print(serial, "  listening at 7E1; the peer is asked on ", mode_line_text,
           " for its 64 frames at 8N1 ...", crlf);
     ModeLine::set();   // the rising edge is the peer's cue to send
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     uint32_t accepted = 0;
     uint32_t in_order = 0;
     // 64 frames are 5.6 ms on the wire and the peer starts within a turn of
-    // its loop; a second is only the time-out of a peer that is not there.
-    // Once every parity error and every expected byte is in, two more
-    // milliseconds - a level's 1.39 ms and the receive timeout's 0.28 -
-    // give anything else the chance to show.
+    // its loop; a second is only the time-out of a peer that is not there,
+    // and a run that reaches it fails both verdicts below. Once every parity
+    // error and every expected byte is in, two more milliseconds - a level's
+    // 1.39 ms and the receive timeout's 0.28 - give anything else the chance
+    // to show. The loop moves bytes as it waits, so it is written out.
     uint32_t done_at = 0;
-    while (us_now() - t0 < 1'000'000u) {
+    while (Ruler::now() - t0 < 1'000'000u) {
         uint8_t in[64];
         const uint32_t n = Instrument::read_bulk(in);
         for (uint32_t i = 0; i < n; ++i) {
@@ -155,26 +162,28 @@ void ts_wire_errors() {
         }
         accepted += n;
         if (done_at == 0u && Instrument::parity_errors() >= odd && accepted >= wanted) {
-            done_at = us_now();
+            done_at = Ruler::now();
         }
-        if (done_at != 0u && us_now() - done_at >= 2000u) {
+        if (done_at != 0u && Ruler::now() - done_at >= 2000u) {
             break;
         }
     }
-    const uint32_t took = (done_at != 0u ? done_at : us_now()) - t0;
+    const bool finished = done_at != 0u;
+    const uint32_t took = (finished ? done_at : Ruler::now()) - t0;
     const uint32_t skips = (Instrument::rx_skips() - skips0) & 0xFFu;
     ModeLine::clear();
     print(serial, "  PE ", Instrument::parity_errors(), " FE ", Instrument::frame_errors(), " BE ",
           Instrument::break_errors(), " (the pattern has ", odd, " bytes of odd weight); ", accepted,
           " bytes delivered, ", in_order, " as the pattern's, ", skips, " skips (", skipped_runs,
-          " of the 4 runs of 16 hold an odd byte); the last in ", took, " us from the cue", crlf);
+          " of the 4 runs of 16 hold an odd byte); the last in ", took, " us from the cue",
+          finished ? "" : " (NOT FINISHED: the second ran out)", crlf);
     bench.verdict("THE PEER'S EIGHTH DATA BIT IS READ AS PARITY: a parity error counted and the frame "
                   "dropped exactly where the byte has an odd number of ones, and no frame error",
-                  Instrument::parity_errors() == odd && Instrument::frame_errors() == 0u &&
+                  finished && Instrument::parity_errors() == odd && Instrument::frame_errors() == 0u &&
                       Instrument::break_errors() == 0u);
     bench.verdict("and nothing is handed out joined across a drop: a run of sixteen with an odd byte "
                   "skipped whole, one skip, a run without delivered as its low seven bits",
-                  accepted == wanted && in_order == wanted && skips == skipped_runs);
+                  finished && accepted == wanted && in_order == wanted && skips == skipped_runs);
 
     // THE OTHER WAY ROUND, which delivers: a 7E1 frame IS an 8N1 frame whose
     // eighth data bit is the parity bit, so the peer's echo (8N1) returns
@@ -209,13 +218,13 @@ uint32_t loopback_pad_falls(uint32_t* looped) {
         *looped = 0;
         return 0xFFFFFFFFu;
     }
-    spin_us(5000);
+    brio::spin_us<Ruler>(5000);
     static const uint8_t ones[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     bool level = TxPad::read();
     uint32_t falls = 0;
     (void)Instrument::write_bulk(ones);
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < 12u * 10u * 1'000'000u / baud) {
+    const uint32_t t0 = Ruler::now();
+    while (Ruler::now() - t0 < 12u * 10u * 1'000'000u / baud) {
         const bool now_level = TxPad::read();
         falls += (level && !now_level) ? 1u : 0u;
         level = now_level;

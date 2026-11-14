@@ -115,6 +115,7 @@
 #include "rp2040/timer.hpp"
 #include "rp2040/uart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 namespace {
@@ -145,19 +146,20 @@ TestBench<Serial, 16> bench;
 
 volatile uint32_t u1_interrupts = 0;
 
-uint32_t us_now() { return Timer::now_low(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// the system timer's microsecond count (rp2040/timer.hpp): one bus read,
+/// legal in any context, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Timer::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 
-void spin_us(uint32_t us) {
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < us) {
-    }
-}
-
-void console_drain() {
-    const uint32_t t0 = us_now();
-    while (!Serial::tx_idle() && us_now() - t0 < 500'000u) {
-    }
-}
+/// Let the console's last byte leave the wire before its rate or its clock
+/// moves (util/test_wait.hpp). The answer is dropped: a console still busy
+/// after 200 ms is wedged, and what that costs is the console's own lines -
+/// no window this suite judges is open while it drains.
+void console_drain() { (void)brio::console_drain<Ruler, Serial>(); }
 
 /// The pattern both ends of every stream generate: a 32-bit xorshift,
 /// low byte per step, seeded 0x12345678 - the same as brio stress's.
@@ -189,9 +191,9 @@ uint32_t round_trip(uint32_t count, UartBits bits, uint32_t budget_us, uint32_t*
     uint32_t sent = 0;
     uint32_t good = 0;
     bool wrong = false;
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     uint32_t t_last = t0;
-    while (good < count && !wrong && us_now() - t0 < budget_us) {
+    while (good < count && !wrong && Ruler::now() - t0 < budget_us) {
         while (sent < count) {
             uint8_t chunk[64];
             uint32_t n = 0;
@@ -216,7 +218,7 @@ uint32_t round_trip(uint32_t count, UartBits bits, uint32_t budget_us, uint32_t*
                 wrong = true;
             } else {
                 ++good;
-                t_last = us_now();
+                t_last = Ruler::now();
             }
         }
     }
@@ -242,19 +244,19 @@ uint32_t wire_permille(uint32_t baud, uint32_t bits = 10u, uint32_t frames = 102
     const uint64_t wire_us = static_cast<uint64_t>(frames) * bits * 1'000'000u / baud;
     const uint32_t budget = static_cast<uint32_t>(wire_us * 2u) + 20'000u;
     uint32_t queued = 0;
-    const uint32_t t0 = us_now();
-    while (queued < frames && us_now() - t0 < budget) {
+    const uint32_t t0 = Ruler::now();
+    while (queued < frames && Ruler::now() - t0 < budget) {
         const uint32_t want = frames - queued;
         queued += Instrument::write_bulk(std::span<const uint8_t>(out, want < sizeof out ? want : sizeof out));
         while (Instrument::read_bulk(sink) != 0u) {
         }
     }
-    while (!Instrument::tx_idle() && us_now() - t0 < budget) {
+    while (!Instrument::tx_idle() && Ruler::now() - t0 < budget) {
         while (Instrument::read_bulk(sink) != 0u) {
         }
     }
-    const uint32_t took = us_now() - t0;
-    spin_us(static_cast<uint32_t>(64ull * bits * 1'000'000u / baud) + 1000u);
+    const uint32_t took = Ruler::now() - t0;
+    brio::spin_us<Ruler>(static_cast<uint32_t>(64ull * bits * 1'000'000u / baud) + 1000u);
     while (Instrument::read_bulk(sink) != 0u) {
     }
     Instrument::clear_errors();
@@ -355,7 +357,7 @@ void tb_loopback_formats() {
     bench.verdict("UARTCR.LBE reads set", U1::loopback());
     const uint8_t hello[4] = {'b', 'r', 'i', 'o'};
     (void)Instrument::write_bulk(hello);
-    spin_us(2000);
+    brio::spin_us<Ruler>(2000);
     uint8_t back[8] = {};
     const uint32_t n = Instrument::read_bulk(back);
     print(serial, "  4 bytes in, ", n, " back: ", static_cast<char>(back[0]), static_cast<char>(back[1]),
@@ -461,22 +463,22 @@ void tc_ladder() {
             const uint32_t bit_ns = static_cast<uint32_t>(1'000'000'000ull / actual);
             const uint32_t want_us = static_cast<uint32_t>(83ull * 1'000'000u / (2ull * actual));
             Nvic::disable(U1::irq());
-            const uint32_t t0 = us_now();
+            const uint32_t t0 = Ruler::now();
             (void)Instrument::write_byte(0x5A);
-            while ((U1::raw_pending() & UartInterrupt::rx_timeout) == 0u && us_now() - t0 < want_us * 2u + 10'000u) {
-            }
-            const uint32_t lone = us_now() - t0;
+            const bool raised = brio::wait_until<Ruler>(
+                [] { return (U1::raw_pending() & UartInterrupt::rx_timeout) != 0u; }, want_us * 2u + 10'000u);
+            const uint32_t lone = Ruler::now() - t0;
             Nvic::enable(U1::irq());
-            const uint32_t t1 = us_now();
-            while (!Instrument::read_byte(lb) && us_now() - t1 < 10'000u) {
-            }
-            const uint32_t handed = us_now() - t1;
+            const uint32_t t1 = Ruler::now();
+            const bool delivered = brio::wait_until<Ruler>([&lb] { return Instrument::read_byte(lb); }, 10'000u);
+            const uint32_t handed = Ruler::now() - t1;
             const uint32_t slack = (bit_ns + 999u) / 1000u + 2u;
             print(serial, "    a lone byte: RTRIS ", lone, " us after its write (41.5 bit periods: ", want_us,
                   " us), the byte handed over ", handed, " us after the line was unmasked", crlf);
             bench.verdict("a lone byte at this rung raises the receive timeout 41.5 bit periods after its write - a frame "
                           "to the stop bit's middle and 32 bit periods - within a bit period and 2 us, and is delivered",
-                          set && lb == 0x5Au && lone + slack >= want_us && lone <= want_us + slack);
+                          set && raised && delivered && lb == 0x5Au && lone + slack >= want_us &&
+                              lone <= want_us + slack);
         }
     }
     bench.verdict("set_baud refuses 119 and 8000000",
@@ -499,34 +501,33 @@ void td_fifos() {
     // periods, 277.8 us, after the last frame.
     constexpr uint32_t frame_us = 87;
     uint8_t b = 0;
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     (void)Instrument::write_byte(0xA5);
-    while (!Instrument::read_byte(b) && us_now() - t0 < 10'000u) {
-    }
-    const uint32_t single = us_now() - t0;
+    const bool single_in = brio::wait_until<Ruler>([&b] { return Instrument::read_byte(b); }, 10'000u);
+    const uint32_t single = Ruler::now() - t0;
     print(serial, "  one byte: delivered ", single, " us after the write (a frame ", frame_us,
           " us + the 32-bit receive timeout 278 us)", crlf);
     bench.verdict("a lone byte arrives by the receive timeout: after one frame plus 32 bit "
                   "periods, within 100 us",
-                  b == 0xA5u && single >= frame_us + 278u - 20u && single <= frame_us + 278u + 100u);
+                  single_in && b == 0xA5u && single >= frame_us + 278u - 20u &&
+                      single <= frame_us + 278u + 100u);
 
     uint8_t burst[16];
     for (uint8_t i = 0; i < 16u; ++i) {
         burst[i] = static_cast<uint8_t>(0x30u + i);
     }
-    const uint32_t t1 = us_now();
+    const uint32_t t1 = Ruler::now();
     (void)Instrument::write_bulk(burst);
-    while (!Instrument::read_byte(b) && us_now() - t1 < 20'000u) {
-    }
-    const uint32_t first = us_now() - t1;
-    uint32_t got = 1;
-    while (got < 16u && us_now() - t1 < 20'000u) {
+    const bool first_in = brio::wait_until<Ruler>([&b] { return Instrument::read_byte(b); }, 20'000u);
+    const uint32_t first = Ruler::now() - t1;
+    uint32_t got = first_in ? 1u : 0u;
+    while (got < 16u && Ruler::now() - t1 < 20'000u) {
         if (Instrument::read_byte(b)) {
             ++got;
         }
     }
     print(serial, "  a burst of 16: the first byte delivered ", first, " us after the write, all ",
-          got, " within ", us_now() - t1, " us", crlf);
+          got, " within ", Ruler::now() - t1, " us", crlf);
     bench.verdict("a burst of the level's size is delivered by the LEVEL: the first byte only "
                   "when the sixteenth has landed (after 15 frames at least), no timeout waited",
                   got == 16u && first >= 15u * frame_us && first <= 17u * frame_us + 20u);
@@ -534,9 +535,9 @@ void td_fifos() {
     // THE BREAK: TX low for well over a frame, looped into the receiver.
     Instrument::clear_errors();
     U1::break_send(true);
-    spin_us(1000);
+    brio::spin_us<Ruler>(1000);
     U1::break_send(false);
-    spin_us(1000);
+    brio::spin_us<Ruler>(1000);
     uint8_t junk[8];
     const uint32_t after_break = Instrument::read_bulk(junk);
     print(serial, "  a 1 ms break: BE counted ", Instrument::break_errors(), " time(s), FE ",
@@ -552,14 +553,14 @@ void td_fifos() {
     for (uint8_t i = 0; i < 32u; ++i) {
         U1::write_data(i);
     }
-    spin_us(400);   // 32 frames at 921600 = 347 us
+    brio::spin_us<Ruler>(400);   // 32 frames at 921600 = 347 us
     for (uint8_t i = 32; i < 48u; ++i) {
         U1::write_data(i);
     }
-    spin_us(400);
+    brio::spin_us<Ruler>(400);
     Nvic::enable(U1::irq());
     Nvic::set_pending(U1::irq());
-    spin_us(200);
+    brio::spin_us<Ruler>(200);
     uint8_t drained[64];
     const uint32_t skips0 = Instrument::rx_skips();
     const uint32_t delivered = Instrument::read_bulk(drained);
@@ -568,7 +569,7 @@ void td_fifos() {
     for (uint8_t i = 0; i < 4u; ++i) {
         U1::write_data(static_cast<uint8_t>(0x60u + i));
     }
-    spin_us(200);
+    brio::spin_us<Ruler>(200);
     const uint32_t after = Instrument::read_bulk(drained);
     bool in_order = after == 4u;
     for (uint32_t i = 0; i < after && in_order; ++i) {
@@ -640,16 +641,18 @@ void host_announce(const char* op, uint32_t baud, const char* fmt, uint32_t wind
                    uint32_t count) {
     print(serial, "HOST ", op, " 0 ", baud, " ", fmt, " ", window_ms, " ", count, crlf);
     console_drain();
-    host_window_t0 = us_now();
+    host_window_t0 = Ruler::now();
     host_window_ms = window_ms;
-    spin_us(50'000);
+    brio::spin_us<Ruler>(50'000);
 }
 
 void host_settle() {
-    spin_us(20'000);
+    brio::spin_us<Ruler>(20'000);
     (void)Serial::set_baud(SysClock::pclk_hz, 115200);
     const uint32_t due = (host_window_ms + 900u) * 1000u;
-    while (us_now() - host_window_t0 < due) {
+    const uint32_t spent = Ruler::now() - host_window_t0;
+    if (spent < due) {
+        brio::spin_us<Ruler>(due - spent);
     }
     uint8_t junk[64];
     while (Serial::read_bulk(junk) != 0u) {
@@ -667,7 +670,7 @@ uint32_t host_sink(uint32_t baud, uint32_t window_ms, uint32_t* received, bool* 
     uint32_t got = 0;
     uint32_t good = 0;
     *wrong = false;
-    while (us_now() - host_window_t0 < window_ms * 1000u) {
+    while (Ruler::now() - host_window_t0 < window_ms * 1000u) {
         uint8_t buf[64];
         const uint32_t n = Serial::read_bulk(buf);
         for (uint32_t i = 0; i < n; ++i) {
@@ -690,10 +693,10 @@ uint32_t host_sink(uint32_t baud, uint32_t window_ms, uint32_t* received, bool* 
 uint32_t host_source(uint32_t baud, uint32_t window_ms, uint32_t count) {
     host_announce("source", baud, "8N1", window_ms, count);
     (void)Serial::set_baud(SysClock::pclk_hz, baud);
-    spin_us(200'000);
+    brio::spin_us<Ruler>(200'000);
     Lfsr tx;
     uint32_t sent = 0;
-    while (sent < count && us_now() - host_window_t0 < (window_ms - 400u) * 1000u) {
+    while (sent < count && Ruler::now() - host_window_t0 < (window_ms - 400u) * 1000u) {
         uint8_t chunk[64];
         uint32_t n = 0;
         Lfsr probe{tx.state};
@@ -739,7 +742,7 @@ void tw_console_errors() {
     host_announce("burst", 115200, "8E1", 1000, 0);
     Serial::clear_errors();
     uint32_t got = 0;
-    while (us_now() - host_window_t0 < 1'000'000u) {
+    while (Ruler::now() - host_window_t0 < 1'000'000u) {
         uint8_t buf[64];
         got += Serial::read_bulk(buf);
     }
@@ -813,7 +816,7 @@ void tt_tx_idle() {
     constexpr uint32_t baud = 9600;
     constexpr uint32_t bit_ns = 1'000'000'000u / baud;
     const bool up = instrument_up(baud, {}, false);
-    spin_us(5000);
+    brio::spin_us<Ruler>(5000);
     static const uint8_t ones[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     bool level = Pin<4>::read();
     uint32_t falls = 0;
@@ -822,9 +825,9 @@ void tt_tx_idle() {
     uint32_t idle_at = 0;
     bool idle_seen = false;
     (void)Instrument::write_bulk(ones);
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < 12u * 10u * bit_ns / 1000u) {
-        const uint32_t t = us_now();
+    const uint32_t t0 = Ruler::now();
+    while (Ruler::now() - t0 < 12u * 10u * bit_ns / 1000u) {
+        const uint32_t t = Ruler::now();
         const bool now_level = Pin<4>::read();
         if (level && !now_level) {
             if (falls == 0u) {

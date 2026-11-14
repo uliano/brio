@@ -92,6 +92,7 @@
 #include "rp2350/uart.hpp"
 #include "util/analog_sampler.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #include "board.hpp"
@@ -112,7 +113,7 @@ constexpr UartPins console_pins{
 using Serial = Uart<0, console_pins>;
 constexpr Serial serial;
 
-using Ruler = Timer<0>;
+using Micros = Timer<0>;
 
 TestBench<Serial> bench;
 
@@ -170,12 +171,14 @@ volatile FifoOwner fifo_owner = FifoOwner::none;
 uint16_t block[256];
 uint8_t byte_block[256];
 
-uint32_t us_now() { return Ruler::now_low(); }
-void spin_us(uint32_t us) {
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < us) {
-    }
-}
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// TIMER0's microsecond count (rp2350/timer.hpp): one bus read, legal in
+/// any context, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Micros::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 bool within(uint32_t got, uint32_t want, uint32_t per_mille) {
     const uint32_t tol = static_cast<uint32_t>(static_cast<uint64_t>(want) * per_mille / 1000u);
     return got + tol >= want && got <= want + tol;
@@ -216,16 +219,18 @@ uint32_t run_block(uint16_t count, uint32_t wait_us) {
     block_done = false;
     Block::arm(Adc::fifo_address(), Adc::dreq);
     (void)Block::start(block, count);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     Adc::start_many(true);
     // The wait keeps OFF the bus while the DMA pops the FIFO through it:
-    // the ruler is read once in a thousand turns.
+    // the ruler is read once in a thousand turns. So this one wait is not
+    // brio::wait_until, whose every turn reads the ruler: its pace is part
+    // of the instrument. Its time-out acts below (0, abandoned).
     for (uint32_t turn = 0; !block_done; ++turn) {
-        if ((turn & 1023u) == 0u && us_now() - t0 >= wait_us) {
+        if ((turn & 1023u) == 0u && Ruler::now() - t0 >= wait_us) {
             break;
         }
     }
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     (void)Adc::stop_many();
     if (!block_done) {
         (void)Block::abandon();
@@ -238,7 +243,7 @@ bool adc_up(AdcClock src = AdcClock::pll_usb) {
     fifo_owner = FifoOwner::none;
     const bool ok = Adc::init(clock, src);
     Adc::temperature_sensor(true);
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     return ok;
 }
 
@@ -347,7 +352,7 @@ void tb_temperature() {
                   "pace and not its result",
                   xo.mean + 8u >= pll.mean && xo.mean <= pll.mean + 8u);
     Adc::temperature_sensor(false);
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     const Stat off = sample(16);
     print(serial, "  the sensor's bias off: mean ", off.mean, " counts", crlf);
     bench.verdict("with the bias off the input is not the diode: the reading differs from the sensor's by 100 counts "
@@ -367,13 +372,13 @@ void tc_pads() {
     for (uint8_t k = 0; k < adc_pad_inputs; ++k) {
         (void)claim_input(k, PinPull::up);
         Adc::select_input(k);
-        spin_us(500);
+        brio::spin_us<Ruler>(500);
         const Stat u = sample(8);
         (void)claim_input(k, PinPull::down);
-        spin_us(500);
+        brio::spin_us<Ruler>(500);
         const Stat d = sample(8);
         (void)claim_input(k, PinPull::none);
-        spin_us(500);
+        brio::spin_us<Ruler>(500);
         const Stat f = sample(8);
         (void)release_input(k);
         print(serial, "  GP", adc_first_pin + k, " (input ", k, "): up ", u.mean, " (",
@@ -452,7 +457,7 @@ void td_rate() {
         Block::arm(Adc::fifo_address(), Adc::dreq);
         (void)Block::start(block, 256);
         Adc::start_many(true);
-        spin_us(pr.us);
+        brio::spin_us<Ruler>(pr.us);
         const uint32_t got = Block::take();
         (void)Block::abandon();
         Adc::start_many(false);
@@ -492,7 +497,7 @@ void te_round_robin() {
     for (uint8_t k = 0; k < adc_pad_inputs; ++k) {
         (void)claim_input(k, (k & 1u) == 0u ? PinPull::up : PinPull::down);
     }
-    spin_us(1000);
+    brio::spin_us<Ruler>(1000);
     Adc::select_input(0);
     Adc::round_robin<adc_round_robin_mask>();
     Adc::divider(*adc_divider_for(48'000'000, 100'000));
@@ -554,7 +559,7 @@ void tf_fifo() {
     Adc::interrupt(true);
     Irq::enable(Adc::irq());
     Adc::start_many(true);
-    spin_us(20'000);
+    brio::spin_us<Ruler>(20'000);
     (void)Adc::stop_many();
     Adc::interrupt(false);
     fifo_owner = FifoOwner::none;
@@ -573,7 +578,7 @@ void tf_fifo() {
     Adc::drain();
     Adc::divider({});
     Adc::start_many(true);
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     Adc::start_many(false);
     (void)Adc::wait_ready();
     const uint8_t level = Adc::fifo_level();
@@ -602,9 +607,13 @@ void tf_fifo() {
     block_done = false;
     Block::arm(Adc::fifo_address(), Adc::dreq);
     (void)Block::start(byte_block, 64);
-    const uint32_t t0 = us_now();
     Adc::start_many(true);
-    while (!block_done && us_now() - t0 < 100'000u) {
+    // 64 conversions at 100 ksps take 640 us; the budget is 100 ms. The
+    // answer is not dropped: the verdict below judges block_done, and a
+    // block that never finished is abandoned here so that the next one
+    // starts from an idle channel.
+    if (!brio::wait_until<Ruler>([] { return block_done; }, 100'000u)) {
+        (void)Block::abandon();
     }
     (void)Adc::stop_many();
     uint32_t sum_b = 0;
@@ -681,7 +690,7 @@ void tg_sampler() {
     (void)adc_up();
     (void)In0::claim(PinPull::up);
     (void)In2::claim(PinPull::down);
-    spin_us(1000);
+    brio::spin_us<Ruler>(1000);
     (void)Adc::fifo({.enable = true, .dreq = false, .error_flag = true, .shift = false, .threshold = 1});
     Adc::drain();
     sm::SamplerKernel::init_all();
@@ -689,10 +698,17 @@ void tg_sampler() {
     Adc::interrupt(true);
     Irq::enable(Adc::irq());
     sm::Sampler::start_every(ticks_from_ms<P>(5));
+    // 200 ticks of the kernel's 1 kHz tick, the kernel pumped all along;
+    // bounded on the ruler at twice the window, since a tick that never
+    // started would hold the window open for ever. The answer is dropped:
+    // a window cut short counts too few samples, which the verdict judges.
     const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() - t0 < 200u) {
-        sm::pump();
-    }
+    (void)brio::wait_until<Ruler>(
+        [t0] {
+            sm::pump();
+            return Ticker::ticks() - t0 >= 200u;
+        },
+        400'000u);
     sm::Sampler::stop();
     sm::pump();
     Adc::interrupt(false);
@@ -749,18 +765,18 @@ void th_leakage() {
     //
     // First the digital pad, read by its own buffer.
     (void)Digital::input({.pull = PinPull::none, .input_enable = true});
-    spin_us(5000);
+    brio::spin_us<Ruler>(5000);
     const bool dig_from_ground = Digital::read();
     Digital::pull(PinPull::up);
-    spin_us(5000);
+    brio::spin_us<Ruler>(5000);
     Digital::pull(PinPull::none);
-    spin_us(5000);
+    brio::spin_us<Ruler>(5000);
     const bool dig_floating = Digital::read();
     Digital::pull(PinPull::down);
-    spin_us(5000);
+    brio::spin_us<Ruler>(5000);
     const bool dig_pulled = Digital::read();
     (void)Digital::input({.pull = PinPull::down, .input_enable = false});
-    spin_us(5000);
+    brio::spin_us<Ruler>(5000);
     const bool dig_workaround = Digital::read_pulsed();
     (void)Digital::release();
 
@@ -770,27 +786,27 @@ void th_leakage() {
     // and a load - is not part of the pad's state when it is judged.
     Adc::select(AdcInput::temperature);
     (void)Pad::input({.pull = PinPull::up, .input_enable = true});
-    spin_us(5000);
+    brio::spin_us<Ruler>(5000);
     Pad::pull(PinPull::none);
-    spin_us(5000);
+    brio::spin_us<Ruler>(5000);
     const bool adc_pad_high = Pad::read();
     Adc::select(In2{});
-    spin_us(5000);
+    brio::spin_us<Ruler>(5000);
     const Stat floating = sample(16);
     const uint16_t mv_floating = adc_mv(static_cast<uint16_t>(floating.mean), adc_steps, vref);
     // The pull-down turned on with the buffer still enabled.
     Pad::pull(PinPull::down);
-    spin_us(5000);
+    brio::spin_us<Ruler>(5000);
     const Stat leaking = sample(16);
     const uint16_t mv_leaking = adc_mv(static_cast<uint16_t>(leaking.mean), adc_steps, vref);
     // The buffer cleared - 12.4's own instruction for an ADC pad, IE low,
     // which is the erratum's workaround by the same store.
     (void)Pad::analog(PinPull::down);
-    spin_us(5000);
+    brio::spin_us<Ruler>(5000);
     const Stat held = sample(16);
     const uint16_t mv_held = adc_mv(static_cast<uint16_t>(held.mean), adc_steps, vref);
     (void)Pad::analog(PinPull::up);
-    spin_us(2000);
+    brio::spin_us<Ruler>(2000);
     const Stat pulled_up = sample(16);
     const uint16_t mv_up = adc_mv(static_cast<uint16_t>(pulled_up.mean), adc_steps, vref);
     (void)Pad::release();
@@ -886,7 +902,7 @@ void ti_under_force() {
     const bool raw = Adc::raw_pending();
     const bool forced = Adc::pending();
     Irq::enable(Adc::irq());
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     const bool pending_after = Adc::pending();
     fifo_owner = FifoOwner::none;
     print(serial, "  INTF with INTE clear and the FIFO empty: INTS before ", pending_before, ", INTR ", raw, ", INTS ", forced,
@@ -920,7 +936,7 @@ void adc_hold_a_request() {
     Adc::fifo({.enable = true, .dreq = true, .threshold = 1});
     Adc::drain();
     (void)Adc::read();
-    spin_us(5);
+    brio::spin_us<Ruler>(5);
     Adc::enable(false);
 }
 
@@ -928,7 +944,7 @@ void adc_hold_a_request() {
 uint32_t adc_moved_idle(uint16_t* run) {
     Block::arm(Adc::fifo_address(), Adc::dreq, true, DmaReport::errors);
     (void)Block::start(run, 8u);
-    spin_us(20);
+    brio::spin_us<Ruler>(20);
     return 8u - DmaChannel<Block::channel>::count();
 }
 
@@ -944,9 +960,10 @@ void tr_released_requester() {
         Adc::fifo({.enable = true, .dreq = true, .threshold = 1});
         const uint32_t moved_after_reset = adc_moved_idle(run);
         Adc::start_many(true);
-        const uint32_t t0 = us_now();
-        while (!Block::idle() && us_now() - t0 < 2000u) {
-        }
+        // Eight conversions at 500 ksps take 16 us; the budget is 2 ms.
+        // The answer is dropped: a run that timed out leaves fewer than
+        // eight moved, which the contract count below judges.
+        (void)brio::wait_until<Ruler>([] { return Block::idle(); }, 2000u);
         (void)Adc::stop_many();
         const uint32_t moved_after_block = 8u - DmaChannel<Block::channel>::count();
         Block::stop();

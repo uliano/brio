@@ -59,6 +59,7 @@
 #include "rp2040/timer.hpp"
 #include "rp2040/uart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 namespace {
@@ -81,12 +82,14 @@ volatile uint32_t rtc_isr_entries = 0;
 volatile uint32_t rtc_fired_at = 0;
 volatile bool rtc_leave_armed = false;   // the storm probe: the handler does not disarm
 
-uint32_t us_now() { return Timer::now_low(); }
-void spin_us(uint32_t us) {
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < us) {
-    }
-}
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// the system timer's microsecond count (rp2040/timer.hpp): one bus read,
+/// legal in any context, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Timer::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 bool within(uint32_t got, uint32_t want, uint32_t per_mille) {
     const uint32_t tol = static_cast<uint32_t>(static_cast<uint64_t>(want) * per_mille / 1000u);
     return got + tol >= want && got <= want + tol;
@@ -103,17 +106,19 @@ uint32_t next_second(RtcDateTime& out, uint32_t us = 1'500'000u) {
     if (!first) {
         return 0;
     }
-    const uint32_t t0 = us_now();
-    for (;;) {
+    // The stamp is taken inside the condition, on the turn that saw the
+    // change - as close to it as the poll allows.
+    uint32_t stamp = 0;
+    const bool changed = brio::wait_until<Ruler>([&] {
         const auto now = Rtc::read();
         if (now && now->second != first->second) {
             out = *now;
-            return us_now();
+            stamp = Ruler::now();
+            return true;
         }
-        if (us_now() - t0 > us) {
-            return 0;
-        }
-    }
+        return false;
+    }, us);
+    return changed ? stamp : 0u;
 }
 
 bool rtc_up() {
@@ -162,9 +167,9 @@ void ta_block() {
 void tb_set_read() {
     (void)rtc_up();
     const RtcDateTime d{.year = 2026, .month = 9, .day = 13, .weekday = rtc_weekday_of(2026, 9, 13), .hour = 12, .minute = 30, .second = 0};
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool set = Rtc::set(d);
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     const auto back = Rtc::read();
     print(serial, "  set ");
     print_dt(d);
@@ -193,8 +198,8 @@ void tb_set_read() {
     for (uint32_t dly : delays_ms) {
         RtcDateTime r{};
         (void)next_second(r);
-        spin_us(dly * 1000u);
-        const uint32_t t_set = us_now();
+        brio::spin_us<Ruler>(dly * 1000u);
+        const uint32_t t_set = Ruler::now();
         (void)Rtc::set(d);
         RtcDateTime f{};
         const uint32_t e = next_second(f);
@@ -210,11 +215,11 @@ void tb_set_read() {
                   "set (the enable's tick waited for, the value loaded after it)",
                   whole == 3u);
     const auto a = Rtc::read();
-    spin_us(3'000'000);
+    brio::spin_us<Ruler>(3'000'000);
     const auto b = Rtc::read();
     const int32_t elapsed = a && b ? static_cast<int32_t>(b->second) - static_cast<int32_t>(a->second) : -1;
     bench.verdict("three seconds of the timer are three seconds of the calendar", elapsed == 3);
-    bench.verdict("read() answers nothing while the calendar is stopped", (Rtc::enable(false), spin_us(100), !Rtc::read().has_value()));
+    bench.verdict("read() answers nothing while the calendar is stopped", (Rtc::enable(false), brio::spin_us<Ruler>(100), !Rtc::read().has_value()));
     Rtc::enable(true);
 }
 
@@ -281,7 +286,7 @@ void td_alarm() {
     for (uint8_t i = 0; i < 4u && !(seen.second == 3u); ++i) {
         rolled = next_second(seen);
     }
-    spin_us(2000);
+    brio::spin_us<Ruler>(2000);
     const uint32_t fired = rtc_fired_at;
     const int32_t latency = static_cast<int32_t>(fired - rolled);
     print(serial, "  alarm on second 3: the calendar rolled into :", seen.second, ", the interrupt ", fired != 0u ? "fired " : "NEVER FIRED",
@@ -298,7 +303,7 @@ void td_alarm() {
     rtc_leave_armed = true;
     Rtc::arm_alarm();
     Rtc::interrupt(true);   // the ISR body masked it
-    spin_us(4'500'000);
+    brio::spin_us<Ruler>(4'500'000);
     rtc_leave_armed = false;
     Rtc::disarm_alarm();
     const uint32_t storm = rtc_isr_entries;
@@ -312,9 +317,9 @@ void td_alarm() {
     rtc_isr_entries = 0;
     rtc_fired_at = 0;
     const bool rearmed = Rtc::rearm_after();
-    const uint32_t t0 = us_now();
-    while (rtc_fired_at == 0u && us_now() - t0 < 7'000'000u) {
-    }
+    const uint32_t t0 = Ruler::now();
+    // The answer is in the verdict as `rtc_fired_at != 0u`.
+    (void)brio::wait_until<Ruler>([] { return rtc_fired_at != 0u; }, 7'000'000u);
     const uint32_t waited = rtc_fired_at - t0;
     const auto when = Rtc::read();
     print(serial, "  re-armed from :58: fired after ", waited / 1000u, " ms at ");
@@ -332,7 +337,7 @@ void td_alarm() {
     (void)Rtc::alarm({.at = {2026, 9, 13, 0, 12, 0, 2}, .match_year = true, .match_month = true, .match_day = true,
                       .match_weekday = true, .match_hour = true, .match_minute = true, .match_second = true});
     Rtc::interrupt(true);
-    spin_us(3'500'000);
+    brio::spin_us<Ruler>(3'500'000);
     const uint32_t once = rtc_isr_entries;
     const bool repeats = rtc_alarm_repeats(Rtc::alarm());
     bench.verdict("a fully matched alarm is a one-shot: it fires once at 12:00:02 and reads as non-repeating",
@@ -342,7 +347,7 @@ void td_alarm() {
     rtc_isr_entries = 0;
     (void)Rtc::alarm({.at = {.weekday = 3, .second = 2}, .match_weekday = true, .match_second = true});
     Rtc::interrupt(true);
-    spin_us(3'500'000);
+    brio::spin_us<Ruler>(3'500'000);
     Rtc::disarm_alarm();
     bench.verdict("an alarm on the wrong weekday and second 2 never fires on a Sunday", rtc_isr_entries == 0u);
     Rtc::interrupt(false);
@@ -355,9 +360,9 @@ void td_alarm() {
 void te_adjust() {
     (void)rtc_up();
     (void)Rtc::set({2026, 9, 13, 0, 10, 0, 0});
-    spin_us(200'000);
+    brio::spin_us<Ruler>(200'000);
     const bool adjusted = Rtc::adjust({2026, 9, 13, 0, 11, 0, 0});
-    spin_us(200);
+    brio::spin_us<Ruler>(200);
     const auto after = Rtc::read();
     print(serial, "  adjusted while running from 10:00:00 to 11:00:00: ");
     if (after) {
@@ -367,15 +372,16 @@ void te_adjust() {
     bench.verdict("a calendar adjusted while running takes the new value (LOAD, two clk_rtc periods later)",
                   adjusted && after && after->hour == 11u && after->minute == 0u && after->second == 0u);
     Rtc::enable(false);
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     const bool stopped = !Rtc::running();
+    const bool declined = !Rtc::read().has_value();
     Rtc::enable(true);
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     const auto r1 = Rtc::read();
-    spin_us(1'200'000);
+    brio::spin_us<Ruler>(1'200'000);
     const auto r2 = Rtc::read();
     bench.verdict("stopped, the block reports not running and read() declines; restarted, it counts on",
-                  stopped && r1 && r2 && r2->second != r1->second);
+                  stopped && declined && r1 && r2 && r2->second != r1->second);
     Nvic::disable(Rtc::irq());
     Rtc::interrupt(false);
     Rtc::force(true);
@@ -424,9 +430,9 @@ void tf_coherence() {
             bool wrong = false;
             bool crossed = false;
             disable_interrupts();
-            const uint32_t t0 = us_now();
+            const uint32_t t0 = Ruler::now();
             uint32_t changed_at = 0;
-            while (us_now() - t0 < 20'000u) {
+            while (Ruler::now() - t0 < 20'000u) {
                 uint32_t tw = 0;
                 uint32_t dw = 0;
                 if (shape == 0u) {
@@ -442,10 +448,10 @@ void tf_coherence() {
                 }
                 wrong = wrong || !coherent_at_rollover(tw, dw);
                 if (changed_at == 0u && rtc_datetime_of(dw, tw).second == 0u) {
-                    changed_at = us_now();
+                    changed_at = Ruler::now();
                     crossed = true;
                 }
-                if (changed_at != 0u && us_now() - changed_at > 60u) {
+                if (changed_at != 0u && Ruler::now() - changed_at > 60u) {
                     break;
                 }
             }
@@ -540,16 +546,14 @@ void tg_centuries() {
     rtc_fired_at = 0;
     const bool armed = Rtc::alarm({.at = {.minute = 0, .second = 1}, .match_minute = true, .match_second = true});
     Rtc::interrupt(true);
-    uint32_t t0 = us_now();
-    while (rtc_fired_at == 0u && us_now() - t0 < 1'000'000u) {
-    }
+    // Each answer below is judged through the stamp it waited for
+    // (`first != 0u`, `second != 0u`, fired_d1, fired_d2).
+    (void)brio::wait_until<Ruler>([] { return rtc_fired_at != 0u; }, 1'000'000u);
     const uint32_t first = rtc_fired_at;
     const auto at_first = Rtc::read();
     const bool rearmed = Rtc::rearm_after();
     rtc_fired_at = 0;
-    t0 = us_now();
-    while (rtc_fired_at == 0u && us_now() - t0 < 40'000'000u) {
-    }
+    (void)brio::wait_until<Ruler>([] { return rtc_fired_at != 0u; }, 40'000'000u);
     const uint32_t second = rtc_fired_at;
     const auto at_second = Rtc::read();
     const uint32_t entries = rtc_isr_entries;
@@ -565,19 +569,13 @@ void tg_centuries() {
     const bool armed_d = Rtc::alarm({.at = {.hour = 13, .minute = 0, .second = 0}, .match_hour = true,
                                      .match_minute = true, .match_second = true});
     Rtc::interrupt(true);
-    t0 = us_now();
-    while (rtc_fired_at == 0u && us_now() - t0 < 1'000'000u) {
-    }
-    const bool fired_d1 = rtc_fired_at != 0u;
+    const bool fired_d1 = brio::wait_until<Ruler>([] { return rtc_fired_at != 0u; }, 1'000'000u);
     const bool rearmed_d = Rtc::rearm_after();
-    spin_us(2'000'000);
+    brio::spin_us<Ruler>(2'000'000);
     const uint32_t between = rtc_isr_entries;
     const bool moved = Rtc::adjust({2026, 9, 14, 1, 12, 59, 59});
     rtc_fired_at = 0;
-    t0 = us_now();
-    while (rtc_fired_at == 0u && us_now() - t0 < 1'000'000u) {
-    }
-    const bool fired_d2 = rtc_fired_at != 0u;
+    const bool fired_d2 = brio::wait_until<Ruler>([] { return rtc_fired_at != 0u; }, 1'000'000u);
     const auto at_d2 = Rtc::read();
     Rtc::disarm_alarm();
     Rtc::interrupt(false);
@@ -615,18 +613,20 @@ void tg_centuries() {
 /// The pad's rising edges: the timer's stamp of the next one, 0 when
 /// none came within `us`.
 uint32_t next_rise(uint32_t us) {
-    const uint32_t t0 = us_now();
+    // The stamp is taken inside the condition, on the turn that saw the
+    // rise, as before.
     bool last = Pin<20>::read();
-    for (;;) {
+    uint32_t stamp = 0;
+    const bool rose = brio::wait_until<Ruler>([&] {
         const bool now = Pin<20>::read();
         if (now && !last) {
-            return us_now();
+            stamp = Ruler::now();
+            return true;
         }
         last = now;
-        if (us_now() - t0 > us) {
-            return 0;
-        }
-    }
+        return false;
+    }, us);
+    return rose ? stamp : 0u;
 }
 
 void th_gpin_1hz() {
@@ -638,7 +638,7 @@ void th_gpin_1hz() {
     const uint32_t r0 = next_rise(2'500'000u);
     const uint32_t r1 = r0 != 0u ? next_rise(1'500'000u) : 0u;
     if (r0 == 0u || r1 == 0u) {
-        bench.verdict("DECLINED: no pulse on GP20 - run the partner's letter u (the RP2350B's clock suite) first", false);
+        bench.skip("no pulse on GP20 - run the partner's letter u (the RP2350B's clock suite) first");
         ClockIn<0>::release();
         (void)rtc_up();
         return;
@@ -650,9 +650,9 @@ void th_gpin_1hz() {
     const bool up = Rtc::init(clock, RtcClock::gpin0_1hz);
     const RtcDateTime start{.year = 2026, .month = 10, .day = 16, .weekday = rtc_weekday_of(2026, 10, 16),
                             .hour = 3, .minute = 4, .second = 5};
-    const uint32_t ts = us_now();
+    const uint32_t ts = Ruler::now();
     const bool set_ok = Rtc::set(start, 200'000'000u);
-    const uint32_t set_us = us_now() - ts;
+    const uint32_t set_us = Ruler::now() - ts;
     if (!set_ok) {
         if (const auto now = Rtc::read()) {
             print(serial, "  set() refused; the calendar reads ");
@@ -711,7 +711,7 @@ extern "C" void isr_rtc() {
     }
     if (brio::Rtc::isr()) {
         if (rtc_fired_at == 0u) {
-            rtc_fired_at = us_now();
+            rtc_fired_at = Ruler::now();
         }
     }
 }

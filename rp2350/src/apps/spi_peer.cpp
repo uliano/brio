@@ -52,6 +52,7 @@
 #include "rp2350/uart.hpp"
 #include "kernel/borrowed.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED (rp_spi_peer.hpp's header).
 #include "../../../avrxt/src/apps/spi_link.hpp"
@@ -101,7 +102,14 @@ using PeerRx = DmaRxEngine<1, uint16_t>;
 static_assert(dma_claim<DmaSlotId<0, 0>, DmaOwner<DmaPeriph::pio, 0, DmaSignal::tx>>);
 static_assert(dma_claim<DmaSlotId<0, 1>, DmaOwner<DmaPeriph::pio, 0, DmaSignal::rx>>);
 
-uint32_t us_now() { return Timer<0>::now_low(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// TIMER0's microsecond count (rp2350/timer.hpp): one bus read, legal in
+/// any context, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Timer<0>::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 
 constexpr uint8_t peer_kind = spilink::peer_rp2350;
 constexpr bool hazard3 = core_kind == CoreKind::hazard3;

@@ -29,6 +29,7 @@
 #include "rp2040/clock.hpp"
 #include "rp2040/pin.hpp"
 #include "rp2040/timer.hpp"
+#include "util/test_wait.hpp"
 
 namespace {
 
@@ -36,6 +37,14 @@ using namespace brio;
 
 using SysClock = Clock<ClockSource::pll, 125'000'000>;
 constexpr SysClock clock;
+
+/// The ruler the lap's pause is read on (util/test_wait.hpp): the system
+/// timer's microsecond count (rp2040/timer.hpp).
+struct Ruler {
+    static uint32_t now() { return Timer::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 
 }  // namespace
 
@@ -60,8 +69,6 @@ int main() {
         const std::optional<uint32_t> hz = SysClock::count_hz(ClockIn<0>::count_source);
         peer_gpin_hz = hz ? *hz : 0u;
         peer_laps = ++laps;
-        const uint32_t t0 = Timer::now_low();
-        while (Timer::now_low() - t0 < 200'000u) {
-        }
+        brio::spin_us<Ruler>(200'000);
     }
 }

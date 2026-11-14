@@ -80,6 +80,7 @@
 #include "rp2350/uart.hpp"
 #include "util/print.hpp"
 #include "util/sha256.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 150'000'000>;
@@ -104,7 +105,11 @@ TestBench<Serial> bench;
 /// SIO's platform timer, which both architectures share and which rides
 /// clk_ref and not clk_sys - so a throughput measured with it is not
 /// measured with the clock it is measuring.
-uint32_t us_now() { return Mtime::micros(); }
+struct Ruler {
+    static uint32_t now() { return Mtime::micros(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 
 const char* arch_name() { return core_kind == CoreKind::hazard3 ? "Hazard3" : "Cortex-M33"; }
 
@@ -145,7 +150,7 @@ void collect_entropy() {
     if (!was_running) {
         Trng::start();
     }
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     entropy_got = 0;
     for (uint8_t i = 0; i < entropy_blocks; ++i) {
         const auto e = Trng::read_blocking();
@@ -157,7 +162,7 @@ void collect_entropy() {
         }
         ++entropy_got;
     }
-    entropy_us = us_now() - t0;
+    entropy_us = Ruler::now() - t0;
     entropy_discarded = Trng::recoverable_failures() - before;
     if (!was_running) {
         Trng::stop();
@@ -334,11 +339,16 @@ void tc_throughput() {
     }
     const std::span<const uint8_t> block{bulk};
 
-    const uint32_t t0 = us_now();
+    // The two spans open with the console quiet, so that its transmit
+    // handler is not inside the printed figures; a console that did not
+    // drain is said beside them (the verdict compares the two spans, by
+    // a margin one handler cannot close).
+    const bool quiet = brio::console_drain<Ruler, Serial>();
+    const uint32_t t0 = Ruler::now();
     const auto hw = Sha256::hash(block);
-    const uint32_t t1 = us_now();
+    const uint32_t t1 = Ruler::now();
     const Sha256Digest sw = sha256(block);
-    const uint32_t t2 = us_now();
+    const uint32_t t2 = Ruler::now();
 
     const uint32_t hw_us = t1 - t0;
     const uint32_t sw_us = t2 - t1;
@@ -351,7 +361,8 @@ void tc_throughput() {
 
     print(serial, "  4096 bytes: accelerator ", hw_us, " us (", hw_kbs, " kB/s, ",
           hw_cpb100 / 100u, ".", (hw_cpb100 / 10u) % 10u, (hw_cpb100 % 10u),
-          " clk_sys cycles a byte); software twin ", sw_us, " us (", sw_kbs, " kB/s)", crlf);
+          " clk_sys cycles a byte); software twin ", sw_us, " us (", sw_kbs, " kB/s)",
+          quiet ? "" : " - the console was still sending: both figures carry its handler", crlf);
     print(serial, "  digest ");
     if (hw) {
         print_digest(*hw);
@@ -700,9 +711,9 @@ void tg_recovery() {
                   Trng::chain() == before_chain && Trng::sample_cycles() == before_sample);
 
     Trng::start();
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const auto e = Trng::read_blocking();
-    const uint32_t span = us_now() - t0;
+    const uint32_t span = Ruler::now() - t0;
     print(serial, "  first collection after the recovery: ", span, " us", crlf);
     bench.verdict("the source collects again after a soft reset", e.has_value());
     Trng::stop();

@@ -126,6 +126,7 @@
 #include "rp2350/watchdog.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #include "pair_power.hpp"
@@ -157,7 +158,7 @@ constexpr UartPins console_pins{
 using Serial = Uart<0, console_pins>;
 constexpr Serial serial;
 
-using Ruler = Timer<0>;    // the microsecond ruler, which stops with the crystal
+using Micros = Timer<0>;    // the microsecond ruler, which stops with the crystal
 using Waker = Pin<19>;     // the standing wire's driven end
 using Woken = Pin<8>;      // its other end, which a dormant watches
 /// Whether the standing wire's two pads are clear of the pair's links:
@@ -209,29 +210,41 @@ volatile uint32_t alarm_entry_us = 0;
 volatile uint32_t alarm_entry_ms = 0;
 volatile uint8_t alarm_fires = 0;
 
-uint32_t us_now() { return Ruler::now_low(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// TIMER0's microsecond count (rp2350/timer.hpp): one bus read, legal in
+/// any context, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Micros::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 uint32_t ms_now() { return AonTimer::now_low(); }
 
 const char* arch_name() { return core_kind == CoreKind::hazard3 ? "Hazard3" : "Cortex-M33"; }
 
 /// Let the console's transmitter fall silent: its interrupt would
 /// otherwise end every sleep below, and a state that stops the clocks
-/// must not cut a line in half.
+/// must not cut a line in half. Called awake, on the program's own tree,
+/// where TIMER0 counts microseconds (the sleep site moves clk_ref only
+/// inside the dormant itself and puts it back before the caller runs).
+/// A console still busy after the shared budget (200 ms) is a failed
+/// verdict: the stop after it is not the one judged.
 void console_drain() {
-    const uint32_t t0 = ms_now();
-    while (!Serial::tx_idle() && ms_now() - t0 < 300u) {
+    if (!brio::console_drain<Ruler, Serial>()) {
+        bench.verdict("the console fell silent before the stop", false);
     }
 }
 
-/// Spin on the microsecond ruler.
-void wait_us(uint32_t us) {
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < us) {
-    }
-}
+/// The same before a power-down leg, whose tally is banked already: a
+/// verdict printed here would not cross the boot, so the answer is
+/// dropped and the leg's own verdicts after the boot judge it.
+void drain_before_power_down() { (void)brio::console_drain<Ruler, Serial>(); }
 
 /// idle() until `flag` or `max_turns`: the kernel loop's own shape, one
-/// sleep a turn.
+/// sleep a turn. THE BOUND IS A COUNT OF WAKES, NOT A TIME: a turn is a
+/// sleep, not a spin, and the microsecond ruler stands through a dormant,
+/// so a budget on it would never run out there. Every caller judges the
+/// flag or the turns.
 uint16_t idle_until(volatile bool& flag, uint16_t max_turns = 20000) {
     uint16_t turns = 0;
     while (!flag && turns < max_turns) {
@@ -465,11 +478,14 @@ void tc_timer() {
     // Two seconds by the always-on timer against two seconds by the
     // microsecond ruler, which counts the crystal.
     const uint32_t m0 = ms_now();
-    const uint32_t u0 = us_now();
-    while (ms_now() - m0 < 2000u) {
-    }
-    const uint32_t du = us_now() - u0;
+    const uint32_t u0 = Ruler::now();
+    const bool counted = brio::wait_until<Ruler>([m0] { return ms_now() - m0 >= 2000u; }, 4'000'000u);
+    const uint32_t du = Ruler::now() - u0;
     const uint32_t dm = ms_now() - m0;
+    if (!counted) {
+        bench.verdict("the always-on timer counted 2000 ms within 4 s of the crystal", false);
+        return;
+    }
     print(serial, "  ", dm, " ms of the always-on timer took ", du,
           " us of the crystal's ruler", crlf);
     bench.verdict("two seconds of the always-on timer are two seconds of the crystal to "
@@ -490,7 +506,7 @@ void tc_timer() {
 
     const uint32_t before_clear = AonTimer::now_low();
     AonTimer::clear();
-    wait_us(20'000u);
+    brio::spin_us<Ruler>(20'000u);
     const uint32_t after_clear = AonTimer::now_low();
     print(serial, "  CLEAR at ", before_clear, " ms: the counter reads ", after_clear,
           " ms 20 ms later, still running", crlf);
@@ -501,7 +517,7 @@ void tc_timer() {
     AonTimer::run(false);
     const bool set_ok = AonTimer::set(1000u);
     AonTimer::run(true);
-    wait_us(10'000u);
+    brio::spin_us<Ruler>(10'000u);
     bench.verdict("and taken with the counter stopped, after which it counts on from there",
                   set_ok && AonTimer::now_low() >= 1000u && AonTimer::now_low() < 1060u);
 }
@@ -518,9 +534,7 @@ void td_alarm() {
     const uint64_t at = AonTimer::alarm_in(300u);
     const bool armed = AonTimer::alarm_enabled();
     const bool reads_back = AonTimer::alarm_time() == at;
-    const uint32_t t0 = us_now();
-    while (alarm_fires == 0u && us_now() - t0 < 500'000u) {
-    }
+    const bool fired = brio::wait_until<Ruler>([] { return alarm_fires != 0u; }, 500'000u);
     const uint32_t entry_ms = alarm_entry_ms;
     print(serial, "  alarm at ", static_cast<uint32_t>(at), " ms: fired ",
           static_cast<int>(alarm_fires), " time(s), the handler entered at ", entry_ms,
@@ -528,7 +542,7 @@ void td_alarm() {
     bench.verdict("the alarm reads back as written and arms", armed && reads_back);
     bench.verdict("it fires ONCE and the handler enters in the same millisecond as the "
                   "match - which is the timer's whole resolution",
-                  alarm_fires == 1u && entry_ms - static_cast<uint32_t>(at) <= 1u);
+                  fired && alarm_fires == 1u && entry_ms - static_cast<uint32_t>(at) <= 1u);
     bench.verdict("the ISR body disarmed it as well as acknowledging it: the match goes on "
                   "being true after the event, so an armed alarm whose flag is merely "
                   "cleared raises it again on the next tick",
@@ -538,7 +552,7 @@ void td_alarm() {
     alarm_fires = 0;
     (void)AonTimer::alarm_in(200u);
     AonTimer::alarm_enable(false);
-    wait_us(400'000u);
+    brio::spin_us<Ruler>(400'000u);
     bench.verdict("an alarm disarmed before its match never fires",
                   alarm_fires == 0u && !AonTimer::alarm_fired());
 
@@ -568,10 +582,9 @@ void te_source() {
 
     const bool moved = AonTimer::use_xosc();
     const uint32_t m0 = ms_now();
-    const uint32_t u0 = us_now();
-    while (ms_now() - m0 < 1000u) {
-    }
-    const uint32_t du_x = us_now() - u0;
+    const uint32_t u0 = Ruler::now();
+    const bool counted = brio::wait_until<Ruler>([m0] { return ms_now() - m0 >= 1000u; }, 2'000'000u);
+    const uint32_t du_x = Ruler::now() - u0;
     const bool back = AonTimer::use_lposc();
     print(serial, "  on the crystal: 1000 ms took ", du_x, " us; the source reads ",
           AonTimer::source() == AonSource::lposc ? "lposc again" : "NOT lposc", crlf);
@@ -579,7 +592,7 @@ void te_source() {
                   "the change has been made", moved);
     bench.verdict("and on the crystal a second is a second to a part in a thousand - the "
                   "divisor being a whole 12000 kHz against a crystal that is exactly that",
-                  du_x > 999'000u && du_x < 1'001'000u);
+                  counted && du_x > 999'000u && du_x < 1'001'000u);
     bench.verdict("and it moves back onto the low-power oscillator, which is the only "
                   "source that survives a power-down of the switched core",
                   back && AonTimer::source() == AonSource::lposc);
@@ -697,9 +710,9 @@ void tg_light() {
 
     site_alarm_fired = false;
     const uint64_t at = AonTimer::alarm_in(300u);
-    const uint32_t u0 = us_now();
+    const uint32_t u0 = Ruler::now();
     const uint16_t turns = idle_until(site_alarm_fired);
-    const uint32_t du = us_now() - u0;
+    const uint32_t du = Ruler::now() - u0;
     const uint32_t latency_ms = alarm_entry_ms - static_cast<uint32_t>(at);
     print(serial, "  light sleep: back after ", turns, " idle() turn(s) and ", du,
           " us; the handler entered ", latency_ms, " ms after the match", crlf);
@@ -723,7 +736,7 @@ void th_sleep_state() {
     Instrument::counter(0);
     Instrument::enable(true);
     (void)block_ok;
-    wait_us(20'000u);
+    brio::spin_us<Ruler>(20'000u);
     const uint16_t awake_20ms = Instrument::counter();
     print(serial, "  awake, the instrument counts ", awake_20ms,
           " in 20 ms at clk_sys / 256", crlf);
@@ -745,13 +758,13 @@ void th_sleep_state() {
         (void)Plain::arm(d);
         site_alarm_fired = false;
         Instrument::counter(0);
-        const uint32_t u0 = us_now();
+        const uint32_t u0 = Ruler::now();
         const uint32_t m0 = ms_now();
         const uint32_t k0 = Ticker::ticks();
         (void)AonTimer::alarm_in(500u);
         const uint16_t turns = idle_until(site_alarm_fired);
         const uint16_t counted = Instrument::counter();
-        const uint32_t u1 = us_now();
+        const uint32_t u1 = Ruler::now();
         const uint32_t m1 = ms_now();
         const uint32_t k1 = Ticker::ticks();
         Plain::disarm();
@@ -985,7 +998,7 @@ DormantSpan dormant_leg(const char* what, bool ring, uint32_t wake_ms) {
     console_drain();
 
     const uint32_t m0 = ms_now();
-    const uint32_t u0 = us_now();
+    const uint32_t u0 = Ruler::now();
     const uint32_t before = ring ? PlainRing::dormants() : Plain::dormants();
     {
         P::CriticalSection cs;
@@ -993,7 +1006,7 @@ DormantSpan dormant_leg(const char* what, bool ring, uint32_t wake_ms) {
     }
     DormantSpan span{};
     span.ms = ms_now() - m0;
-    span.us = us_now() - u0;
+    span.us = Ruler::now() - u0;
     span.since_arm = ms_now() - armed_at;
     const uint32_t after = ring ? PlainRing::dormants() : Plain::dormants();
     span.returned = after == before + 1u;
@@ -1046,22 +1059,24 @@ void to_dormant_gpio() {
           "wake path that needs no clock at all, and it is the one proven first.", crlf);
     (void)Woken::input(PinPull::down);
     (void)Waker::output(true);
-    wait_us(1000u);
+    brio::spin_us<Ruler>(1000u);
     const bool pad_high = Woken::read();
-    (void)DormantWake::enable(Woken::number, pin_events(PinEvent::level_high));
-    bench.verdict("a GPIO wake armed on the pad is a way back the site accepts, and the "
-                  "wire carries the level",
-                  pad_high && DormantWake::any_enabled() && Plain::dormant_wake_ready());
     if (!pad_high) {
-        // No wire, no wake: a dormant with no alarm would never end.
-        print(serial, "  DECLINED: GP19 -> GP8 is not wired - the pair desk carries no self-link "
-              "(fit the jumper to run this letter); the dormant is not entered", crlf);
+        // No wire, no wake: a dormant with no alarm would never end. The
+        // premise is the desk's, so the letter skips before its first
+        // verdict rather than failing one.
+        bench.skip("GP19 -> GP8 is not wired - the pair desk carries no self-link (fit the "
+                   "jumper to run this letter); the dormant is not entered");
         (void)Waker::output(false);
         (void)Waker::release();
         (void)Woken::release();
         quiesce();
         return;
     }
+    (void)DormantWake::enable(Woken::number, pin_events(PinEvent::level_high));
+    bench.verdict("a GPIO wake armed on the pad is a way back the site accepts, and the "
+                  "wire carries the level",
+                  DormantWake::any_enabled() && Plain::dormant_wake_ready());
 
     const DormantSpan roused = dormant_leg("dormant/pad high", false, 0u);
     print(serial, "  the wake logic's raw flags on the pad: ",
@@ -1104,11 +1119,18 @@ void tw_wave() {
     using Out = WaveOut;
     print(serial, "  GP21 (into the partner's GP20): one second low, one second high, twenty times", crlf);
     (void)Out::output(false);
-    const uint32_t t0 = us_now();
+    // Each half ends on a deadline from the wave's start, so the halves do
+    // not drift by the loop's own turns; each one reads the pad back just
+    // before it ends - the level it drove, unless something on the wire
+    // fights it.
+    const uint32_t t0 = Ruler::now();
     uint8_t halves = 0;
+    uint8_t followed = 0;
     while (halves < 40u) {
-        while (us_now() - t0 < (static_cast<uint32_t>(halves) + 1u) * 1'000'000u) {
+        while (Ruler::now() - t0 < (static_cast<uint32_t>(halves) + 1u) * 1'000'000u) {
         }
+        const bool driven_high = (halves & 1u) != 0u;
+        followed = static_cast<uint8_t>(followed + (Out::read() == driven_high ? 1u : 0u));
         ++halves;
         if ((halves & 1u) != 0u) {
             Out::set();
@@ -1118,25 +1140,21 @@ void tw_wave() {
     }
     Out::clear();
     (void)Out::release();
-    bench.verdict("the wave ran its forty seconds and the pad is given back", true);
+    print(serial, "  the pad read back the level driven in ", followed, " of 40 halves", crlf);
+    bench.verdict("the pad followed the wave in all forty halves (nothing on the wire fought it)",
+                  followed == 40u);
 }
 
 /// The partner's wave on GP20 (wire 9): a change INTO `to` seen within
 /// `us`.
 bool await_change(bool to, uint32_t us) {
     using In = WaveIn;
-    const uint32_t t0 = us_now();
-    while (In::read() == to) {
-        if (us_now() - t0 >= us) {
-            return false;
-        }
+    const uint32_t t0 = Ruler::now();
+    if (!brio::wait_until<Ruler>([to] { return In::read() != to; }, us)) {
+        return false;
     }
-    while (In::read() != to) {
-        if (us_now() - t0 >= us) {
-            return false;
-        }
-    }
-    return true;
+    const uint32_t spent = Ruler::now() - t0;
+    return spent < us && brio::wait_until<Ruler>([to] { return In::read() == to; }, us - spent);
 }
 
 /// THE DORMANT WAKES ON A PAD THE PARTNER DRIVES (by name, the RP2040
@@ -1182,7 +1200,16 @@ void tx_dormant_partner() {
     for (uint8_t k = 0; k < 7u; ++k) {
         const Leg& l = legs[k];
         if (!await_change(l.before, 3'000'000u)) {
-            print(serial, "  NO WAVE on GP20 - the partner must be running its sleep suite's w", crlf);
+            if (k == 0u) {
+                // No wave at all: the partner is not running its w, a
+                // premise this board cannot give itself.
+                (void)In::release();
+                bench.skip("no wave on GP20 within 3 s: the partner must be running its sleep "
+                           "suite's w");
+                quiesce();
+                return;
+            }
+            print(serial, "  THE WAVE STOPPED on GP20", crlf);
             waved = false;
             break;
         }
@@ -1213,7 +1240,7 @@ void tx_dormant_partner() {
         good = static_cast<uint8_t>(good + (ok ? 1u : 0u));
     }
     if (!waved) {
-        bench.verdict("the partner's wave arrives on GP20", false);
+        bench.verdict("the partner's wave went on arriving on GP20 for every leg", false);
     }
     (void)In::release();
     print(serial, "  ", good, " of 7 legs as derived", crlf);
@@ -1256,7 +1283,10 @@ void token_clear() {
 /// from here: what comes back is a BOOT. A bounded wait and a diagnosis
 /// are what this does when it DOES come back.
 [[noreturn]] void await_wake(const char* what) {
-    console_drain();
+    drain_before_power_down();
+    // Bounded on the always-on timer, not on the shared waits: their
+    // ruler must count whole megahertz (this one counts milliseconds), and
+    // it is the one clock a power-down sequence half done cannot stop.
     const uint32_t t0 = ms_now();
     while (ms_now() - t0 < 20'000u) {
         P::CriticalSection cs;
@@ -1293,7 +1323,7 @@ void token_clear() {
     const bool clear = clear_debug_block();
     print(serial, "  the debug port ", clear ? "is out of the way" : "STILL BLOCKS THIS",
           crlf);
-    console_drain();
+    drain_before_power_down();
 
     AonTimer::interrupt(false);
     Irq::disable(AonTimer::irq());
@@ -1413,7 +1443,7 @@ void tv_rescue_power_down() {
     token_set(9);
     const bool clear = clear_debug_block();
     print(serial, "  the debug port ", clear ? "is out of the way" : "STILL BLOCKS THIS", crlf);
-    console_drain();
+    drain_before_power_down();
     AonTimer::interrupt(false);
     Irq::disable(AonTimer::irq());
     (void)AonTimer::alarm_in(60'000u);

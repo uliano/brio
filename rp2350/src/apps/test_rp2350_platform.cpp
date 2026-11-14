@@ -100,13 +100,16 @@
 //      line already pending (the sleep falls through, the unmask takes
 //      the line), and a quiet turn entered masked whose idle() finds one
 //
-//   r  (by name only) THE BREADCRUMB ACROSS A PROCESSOR RESET. The reset
-//      chapter of this target is not written yet, so nothing in the image
-//      can reboot it: this letter ARMS a .noinit canary and a panic
-//      record and prints that it has, and the SAME letter run after a
-//      processor reset from the debug port judges what survived. Not in
-//      `z`, because `z` has to be one console session a tool can judge
-//      from a single capture.
+//   r  (by name only) THE BREADCRUMB ACROSS A PROCESSOR RESET, in two
+//      runs of the same letter with a processor reset from the debug port
+//      between them. The first ARMS a .noinit canary and a panic record
+//      and notes that it has in the watchdog's SCRATCH0, which a
+//      processor reset keeps and a rescue clears; the second, finding
+//      the note, judges what survived - and fails when the canary or the
+//      record is gone. A second run in the boot that armed (no reset
+//      came between) is a skip, never a pass. Not in `z`, because `z`
+//      has to be one console session a tool can judge from a single
+//      capture.
 //   x  (by name only) break_here(), which halts under a probe and faults
 //      without one - either way the console stops, so it is nobody's `z`
 //   t  the runtime's seven functions (rt/rt.cpp) over every alignment,
@@ -157,7 +160,9 @@
 #include "rp2350/ticker.hpp"
 #include "rp2350/timer.hpp"
 #include "rp2350/uart.hpp"
+#include "rp2350/watchdog.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 #include "rt/selftest.hpp"
 
@@ -193,20 +198,55 @@ TestBench<Serial, 18> bench;
 std::optional<PanicRecord> boot_record;
 bool boot_canary_alive = false;
 
-uint32_t us_now() { return Mtime::micros(); }
+// LETTER r'S NOTE THAT IT ARMED lives in the watchdog's SCRATCH0, a word
+// with the reset domain the letter needs. A processor reset keeps it: the
+// Arm core's SYSRESETREQ "resets only the core on which SYSRESETREQ is
+// asserted, and not the wider system" (datasheet 3.7.5, the AIRCR
+// register), and the RISC-V debug module's hartreset and ndmreset reset
+// the harts alone (3.5.3). A rescue clears it: the rescue is a chip-level
+// reset (3.5.8; 7.3.1's DEBUGGER RESCUE row), and "all chip-level reset
+// sources ... also reset the system watchdog peripheral. This includes
+// watchdog scratch registers SCRATCH0 -> SCRATCH7" (7.3.1). The bench's
+// flash verb starts with a rescue, so a fresh image starts unarmed. The
+// SRAM is not that word: nothing in chapter 7 says a rescue clears it.
+inline constexpr uint32_t r_armed_note = 0x5243'A5A5u;
+/// Whether this boot's own run of r armed it: .bss, so every boot starts
+/// it false - a note found with this set means no reset came between.
+bool r_armed_this_boot = false;
 
-void spin_us(uint32_t us) {
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < us) {
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// the platform timer's microsecond count (rp2350/mtime.hpp): one bus
+/// read, the same on both architectures, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Mtime::micros(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
+
+/// Let the console's own transmitter fall silent before a timed window:
+/// its interrupt would otherwise wake an idle() or lengthen a span. A
+/// console still busy after the shared budget (200 ms, util/test_wait.hpp)
+/// is a failed verdict, and the caller skips the window it guarded.
+bool console_drain() {
+    if (brio::console_drain<Ruler, Serial>()) {
+        return true;
     }
+    bench.verdict("the console fell silent before the timed window", false);
+    return false;
 }
 
-/// Let the console's own transmitter fall silent: its interrupt would
-/// otherwise wake every idle() below.
-void console_drain() {
-    const uint32_t t0 = us_now();
-    while (!Serial::tx_idle() && us_now() - t0 < 500'000u) {
-    }
+/// Wait for the kernel tick to move on from `from`: true at the first
+/// tick after it, false when five tick periods pass without one - a
+/// stopped timebase reported, never hung on. One poll turn is a read of
+/// the tick count and one of the ruler.
+[[gnu::always_inline]] inline bool tick_after(uint32_t from) {
+    return brio::wait_until<Ruler>([from] { return Ticker::ticks() != from; }, 5'000u);
+}
+
+/// Wait until `n` kernel ticks have passed since `from`: false when twice
+/// their nominal length passes first.
+[[gnu::always_inline]] inline bool ticks_since(uint32_t from, uint32_t n) {
+    return brio::wait_until<Ruler>([from, n] { return Ticker::ticks() - from >= n; }, n * 2'000u);
 }
 
 const char* arch_name() {
@@ -314,14 +354,12 @@ void tb_critical() {
     // the read after the unmask is served - a span of 5000 us and under
     // 6000 (the window measured 5000 to 5008) holds 5 or 6 of them.
     const uint32_t t0 = Ticker::ticks();
-    const uint32_t u0 = us_now();
+    const uint32_t u0 = Ruler::now();
     {
         P::CriticalSection cs;
-        const uint32_t s = us_now();
-        while (us_now() - s < 5000u) {
-        }
+        brio::spin_us<Ruler>(5000);
     }
-    const uint32_t window_us = us_now() - u0;
+    const uint32_t window_us = Ruler::now() - u0;
     const uint32_t through_mask = Ticker::ticks() - t0;
     print(serial, "  ", window_us, " us with interrupts masked advanced the tick by ",
           through_mask, " ms", crlf);
@@ -366,14 +404,18 @@ void tc_ticker() {
     // the comparator's arithmetic rather than a ratio, and cannot be off
     // by more than the handler's own latency.
     const uint32_t target = 200;
-    uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() == t0) {
+    if (!tick_after(Ticker::ticks())) {
+        bench.verdict("the kernel tick advances (five periods waited)", false);
+        return;
     }
-    t0 = Ticker::ticks();
-    const uint32_t u0 = us_now();
-    while (Ticker::ticks() - t0 < target) {
+    const uint32_t t0 = Ticker::ticks();
+    const uint32_t u0 = Ruler::now();
+    const bool counted = ticks_since(t0, target);
+    const uint32_t span = Ruler::now() - u0;
+    if (!counted) {
+        bench.verdict("200 ticks came within 400 ms of the ruler", false);
+        return;
     }
-    const uint32_t span = us_now() - u0;
     const uint32_t expected_us = target * 1000u;
     const uint32_t err = span > expected_us ? span - expected_us : expected_us - span;
     print(serial, "  200 ticks = ", span, " us on the ruler, error ", err, " us (",
@@ -416,14 +458,18 @@ void td_ruler() {
 
     // A millisecond of kernel tick against the ruler: the two clocks are
     // the same crystal, so this is the tick's arithmetic and nothing else.
-    const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() == t0) {
+    if (!tick_after(Ticker::ticks())) {
+        bench.verdict("the kernel tick advances (five periods waited)", false);
+        return;
     }
-    const uint32_t u0 = us_now();
+    const uint32_t u0 = Ruler::now();
     const uint32_t t1 = Ticker::ticks();
-    while (Ticker::ticks() - t1 < 20u) {
+    const bool counted = ticks_since(t1, 20u);
+    const uint32_t span = Ruler::now() - u0;
+    if (!counted) {
+        bench.verdict("20 ticks came within 40 ms of the ruler", false);
+        return;
     }
-    const uint32_t span = us_now() - u0;
     print(serial, "  20 ticks = ", span, " us of ruler", crlf);
     bench.verdict("a microsecond of the ruler is a thousandth of a kernel tick, within "
                   "one per cent over twenty ticks",
@@ -443,9 +489,9 @@ void te_resets() {
     bench.verdict("hold(): the block's RESET bit is set and its RESET_DONE clears",
                   Resets::held(ResetBlock::pwm) && !Resets::released(ResetBlock::pwm));
 
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool released = Resets::release(ResetBlock::pwm);
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     print(serial, "  release(): RESET_DONE within ", took, " us", crlf);
     bench.verdict("release() reports the block ready, and quickly", released && took <= 20u);
     bench.verdict("RESET_DONE stands and RESET is clear",
@@ -511,19 +557,33 @@ void tg_breadcrumb() {
 // h - the idle path over 200 ticks
 // =============================================================================
 void th_idle() {
-    console_drain();
+    if (!console_drain()) {
+        return;
+    }
     const uint32_t t0 = Ticker::ticks();
-    const uint32_t u0 = us_now();
+    const uint32_t u0 = Ruler::now();
     uint32_t slept = 0;
     uint32_t calls = 0;
+    // A loop that does work (it idles), bounded on the ruler as well as on
+    // the tick: 400 ms, twice the window, read from the stamp each turn
+    // already takes, so the bound adds no read to the figure. A stopped
+    // tick that leaves nothing else to wake idle() is not caught here; the
+    // console's line is the only other interrupt.
     while (Ticker::ticks() - t0 < 200u) {
-        const uint32_t a = us_now();
+        const uint32_t a = Ruler::now();
+        if (a - u0 >= 400'000u) {
+            break;
+        }
         P::idle();
-        slept += us_now() - a;
+        slept += Ruler::now() - a;
         ++calls;
     }
-    const uint32_t span = us_now() - u0;
+    const uint32_t span = Ruler::now() - u0;
     const uint32_t awake = span - slept;
+    if (Ticker::ticks() - t0 < 200u) {
+        bench.verdict("200 ticks came within 400 ms of the ruler", false);
+        return;
+    }
     print(serial, "  200 ticks: ", calls, " idle() calls, ", span, " us span, ", awake,
           " us awake (", awake * 1000u / span, " permille)", crlf);
     bench.verdict("one idle() per tick, give or take the console's last byte",
@@ -539,15 +599,19 @@ void th_idle() {
 // j - the lost-wakeup window this platform promises not to have
 // =============================================================================
 void tj_lost_wakeup() {
-    console_drain();
+    if (!console_drain()) {
+        return;
+    }
     Irq::clear_pending(spare_line);
     Irq::enable(spare_line);
     spare_served = 0;
 
     // Land just after a tick, so the tick is a full period away and
     // cannot be what brings idle() back.
-    const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() == t0) {
+    if (!tick_after(Ticker::ticks())) {
+        Irq::disable(spare_line);
+        bench.verdict("the kernel tick advances (five periods waited)", false);
+        return;
     }
 
     // THE WINDOW: the line is made pending with interrupts MASKED, which
@@ -555,11 +619,11 @@ void tj_lost_wakeup() {
     // and sleeping. The sleep must not happen - or must end at once.
     disable_interrupts();
     Irq::set_pending(spare_line);
-    const uint32_t a = us_now();
+    const uint32_t a = Ruler::now();
     P::idle();
-    const uint32_t took = us_now() - a;
+    const uint32_t took = Ruler::now() - a;
 
-    spin_us(200);
+    brio::spin_us<Ruler>(200);
     print(serial, "  a line pended with interrupts masked, then idle(): back in ", took,
           " us, the handler ran ", spare_served, " time(s) - ",
           core_kind == CoreKind::hazard3
@@ -582,27 +646,27 @@ void tk_erratum_e9() {
     // Driven LOW, then released to an input with a pull-DOWN: the pad has
     // no charge to leak from and the pull-down holds it.
     (void)Free::output(false);
-    spin_us(1000);
+    brio::spin_us<Ruler>(1000);
     (void)Free::input(PinPull::down);
-    spin_us(5000);
+    brio::spin_us<Ruler>(5000);
     const bool low_after_low = Free::read();
 
     // Driven HIGH, then released to the SAME pull-down. On a part where
     // E9 is live the input stage leaks enough to hold the pad high
     // against its own pull-down; where it is fixed, the pull-down wins.
     (void)Free::output(true);
-    spin_us(1000);
+    brio::spin_us<Ruler>(1000);
     (void)Free::input(PinPull::down);
-    spin_us(5000);
+    brio::spin_us<Ruler>(5000);
     const bool high_after_high = Free::read();
 
     // And through the pull-UP, which wins either way - which is why a
     // program that must read a floating pad on this silicon uses the
     // pull-up and reads a LOW as its signal.
     (void)Free::output(false);
-    spin_us(1000);
+    brio::spin_us<Ruler>(1000);
     (void)Free::input(PinPull::up);
-    spin_us(5000);
+    brio::spin_us<Ruler>(5000);
     const bool up_after_low = Free::read();
 
     print(serial, "  GP", Free::number, " driven low then pulled down reads ",
@@ -643,7 +707,7 @@ void tm_interrupt_path() {
     bench.verdict("enable() is read back by the controller", Irq::enabled(spare_line));
 
     Irq::set_pending(spare_line);
-    spin_us(200);
+    brio::spin_us<Ruler>(200);
     print(serial, "  a spare line (one that reaches no hardware) raised in software: the "
           "handler ran ", spare_served, " time(s), bound by the name isr_spare_0 through ",
           core_kind == CoreKind::hazard3 ? "Hazard3's own dispatch" : "the vector table",
@@ -657,7 +721,7 @@ void tm_interrupt_path() {
     Irq::disable(spare_line);
     bench.verdict("disable() is read back too", !Irq::enabled(spare_line));
     Irq::set_pending(spare_line);
-    spin_us(200);
+    brio::spin_us<Ruler>(200);
     bench.verdict("a DISABLED line still latches its pending bit and does not run",
                   Irq::pending(spare_line) && spare_served == 1u);
     Irq::clear_pending(spare_line);
@@ -698,13 +762,22 @@ void tn_time_events() {
     TimeEvents<P>::process();
     bench.verdict("nothing has fired yet", !Probe::queue.pop().has_value() && one.armed());
 
+    // The kernel loop's work as the wait's condition: process() and the
+    // queue's drain each turn, until 120 ticks have passed - bounded at
+    // 240 ms of the ruler, twice the window.
     uint32_t fired = 0;
     const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() - t0 < 120u) {
+    const bool ran = brio::wait_until<Ruler>([&] {
         TimeEvents<P>::process();
         while (Probe::queue.pop()) {
             ++fired;
         }
+        return Ticker::ticks() - t0 >= 120u;
+    }, 240'000u);
+    if (!ran) {
+        one.disarm();
+        bench.verdict("120 ticks came within 240 ms of the ruler", false);
+        return;
     }
     print(serial, "  120 ms later the one-shot had fired ", fired, " time(s) and is ",
           one.armed() ? "still armed" : "disarmed", crlf);
@@ -715,13 +788,19 @@ void tn_time_events() {
     many.arm_every(ticks_from_ms<P>(10));
     fired = 0;
     const uint32_t t1 = Ticker::ticks();
-    while (Ticker::ticks() - t1 < 105u) {
+    const bool ran_many = brio::wait_until<Ruler>([&] {
         TimeEvents<P>::process();
         while (Probe::queue.pop()) {
             ++fired;
         }
-    }
+        return Ticker::ticks() - t1 >= 105u;
+    }, 210'000u);
     const uint32_t span = Ticker::ticks() - t1;
+    if (!ran_many) {
+        many.disarm();
+        bench.verdict("105 ticks came within 210 ms of the ruler", false);
+        return;
+    }
     print(serial, "  a 10 ms periodic fired ", fired, " time(s) in ", span, " ms", crlf);
     bench.verdict("a periodic fires once per period, drift-free: ten firings in 105 ms",
                   fired >= 9u && fired <= 11u);
@@ -745,13 +824,30 @@ volatile uint32_t rescue_fires = 0;
 
 [[gnu::always_inline]] inline uint32_t cycles_now() { return Cycles::now_low(); }
 
-/// Let the console's transmitter fall silent, timed on TIMER0 - the
-/// platform timer is not a microsecond ruler while letter w runs it at
-/// full speed.
-void drain_on_clockwork() {
-    const uint32_t t0 = Clockwork::now_low();
-    while (!Serial::tx_idle() && Clockwork::now_low() - t0 < 500'000u) {
-    }
+/// Letter w's ruler for its waits: TIMER0's microseconds. The suite's own
+/// Ruler, the platform timer, is not a microsecond ruler while letter w
+/// runs it at full speed (MtimeEdge below).
+struct ClockworkRuler {
+    static uint32_t now() { return Clockwork::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<ClockworkRuler>);
+
+/// Let the console's transmitter fall silent between two sweeps, timed on
+/// TIMER0; false when it is still busy after the shared budget (200 ms).
+bool drain_on_clockwork() { return brio::console_drain<ClockworkRuler, Serial>(); }
+
+/// A sweep's sync: wait for the edge source's count to move on, at most
+/// 5 ms of TIMER0 - every source here is periodic within a millisecond
+/// (a tick, a comparator moved a millisecond or a thousand cycles on, a
+/// wrap of 65536 cycles). False when it did not move: the try is then
+/// counted as a lost wake. Not inside the timed part of a try - the edge
+/// is placed by an absolute write after it - so the poll's turn (one
+/// count read, one TIMER0 read) moves no figure.
+template <typename F>
+[[gnu::always_inline]] inline bool count_moves(F count) {
+    const uint32_t s = count();
+    return brio::wait_until<ClockworkRuler>([&] { return count() != s; }, 5'000u);
 }
 
 // The platform timer's edge: what the comparator's handler read of the
@@ -825,11 +921,7 @@ struct MtimeEdge {
         Ticker::resume();
     }
     static uint32_t count() { return core_kind == CoreKind::hazard3 ? Ticker::ticks() : mtime_hits; }
-    static void sync() {
-        const uint32_t s = count();
-        while (count() == s) {
-        }
-    }
+    static bool sync() { return count_moves(count); }
     [[gnu::always_inline]] static void place(uint32_t d) {
         const uint32_t c = SIO->MTIMECMP;
         mtime_edge_at = c;
@@ -871,11 +963,7 @@ struct LineEdge {
         Irq::clear_pending(Pwm::irq<0>());
     }
     static uint32_t count() { return line_hits; }
-    static void sync() {
-        const uint32_t s = line_hits;
-        while (line_hits == s) {
-        }
-    }
+    static bool sync() { return count_moves(count); }
     [[gnu::always_inline]] static void place(uint32_t d) { EdgeSlice::ctr() = 0xFFFFu - d; }
     static uint32_t since_edge() { return EdgeSlice::ctr(); }
     static uint32_t entry() { return line_entry; }
@@ -897,11 +985,7 @@ struct SysTickEdge {
     static void end() {}
     static uint32_t count() { return Ticker::ticks(); }
     /// Just after a tick: a whole period before the next natural edge.
-    static void sync() {
-        const uint32_t s = Ticker::ticks();
-        while (Ticker::ticks() == s) {
-        }
-    }
+    static bool sync() { return count_moves(count); }
     [[gnu::always_inline]] static void place(uint32_t d) {
         SysTick->LOAD = d;
         SysTick->VAL = 0;
@@ -924,8 +1008,11 @@ struct TryResult {
 /// TIMER1's cycles, with TIMER0's rescue armed.
 template <typename Edge>
 TryResult walk_try(uint32_t d, uint32_t edges) {
-    Edge::sync();
     TryResult r{};
+    if (!Edge::sync()) {
+        r.rescued = true;   // no edge to sync on: the source is silent
+        return r;
+    }
     P::CriticalSection cs;
     const uint32_t r0 = rescue_fires;
     Clockwork::alarm<0>(Clockwork::now_low() + rescue_us);
@@ -1061,7 +1148,9 @@ void walk_edge() {
             }
             clean = clean && s.lost == 0u && s.late == 0u;
         }
-        drain_on_clockwork();
+        // The answer is dropped: the next rung is printed and not timed;
+        // tw_edge() drains, and acts on the answer, before every sweep.
+        (void)drain_on_clockwork();
     }
     bench.verdict("no edge position loses the wake or defers it a period, one edge or two, light or "
                   "standby",
@@ -1069,7 +1158,9 @@ void walk_edge() {
 }
 
 void tw_edge() {
-    console_drain();
+    if (!console_drain()) {
+        return;
+    }
     rescue_fires = 0;
     Clockwork::clear<0>();
     Clockwork::interrupt<0>(true);
@@ -1077,12 +1168,19 @@ void tw_edge() {
     Irq::enable(Clockwork::irq<0>());
 
     walk_edge<MtimeEdge>();
-    drain_on_clockwork();
-    walk_edge<LineEdge>();
+    bool quiet = drain_on_clockwork();
+    if (quiet) {
+        walk_edge<LineEdge>();
+    }
 #if defined(BRIO_RP2350_CORE_M33)
-    drain_on_clockwork();
-    walk_edge<SysTickEdge>();
+    quiet = quiet && drain_on_clockwork();
+    if (quiet) {
+        walk_edge<SysTickEdge>();
+    }
 #endif
+    if (!quiet) {
+        bench.verdict("the console fell silent between the sweeps", false);
+    }
 
     Clockwork::interrupt<0>(false);
     Irq::disable(Clockwork::irq<0>());
@@ -1118,7 +1216,9 @@ using QuietKernel = Tenuto<P, Quiet<1>, Quiet<2>, Quiet<0>>;
 }
 
 void to_turns() {
-    console_drain();
+    if (!console_drain()) {
+        return;
+    }
     spare_served = 0;
     QuietKernel::init_all();
 
@@ -1181,7 +1281,21 @@ void to_turns() {
 // r - the breadcrumb across a processor reset (by name)
 // =============================================================================
 void tr_across_reset() {
-    if (boot_canary_alive) {
+    if (Scratch<0>::read() == r_armed_note) {
+        if (r_armed_this_boot) {
+            // The note is this boot's own: the second run came without a
+            // reset (on the Hazard3 half, a processor reset the probe
+            // refused), so there is nothing to judge. Left armed.
+            bench.skip("no processor reset came between the two runs of r: the note is "
+                       "this boot's own - reset the board from the debug port and run r "
+                       "again");
+            return;
+        }
+        // Armed by an earlier boot, and a reset that keeps the watchdog
+        // came between: the leg that judges, and it fails when either
+        // survivor is gone.
+        print(serial, "  the note in SCRATCH0 survived the reset; the .noinit canary ",
+              boot_canary_alive ? "SURVIVED" : "is GONE", crlf);
         bench.verdict("the .noinit word survived the reset: SRAM keeps its contents "
                       "through a processor reset, which resets the cores and leaves the "
                       "memories, the clock tree and the peripherals alone",
@@ -1190,6 +1304,7 @@ void tr_across_reset() {
                       boot_record &&
                           boot_record->code == static_cast<uint8_t>(PanicCode::queue_overflow) &&
                           boot_record->context == 0x33);
+        Scratch<0>::write(0);
         noinit_canary = 0;
         boot_record.reset();
         boot_canary_alive = false;
@@ -1199,10 +1314,13 @@ void tr_across_reset() {
     noinit_canary = canary_value;
     P::panic_record() =
         PanicRecord{panic_magic, static_cast<uint8_t>(PanicCode::queue_overflow), 0x33};
-    print(serial, "  armed: a .noinit canary and a panic record are in SRAM. Reset the "
-          "board with a PROCESSOR reset from the debug port (not a rescue, which clears "
-          "the memories) and run r again.", crlf);
-    bench.verdict("the canary and the record are in place", noinit_canary == canary_value);
+    Scratch<0>::write(r_armed_note);
+    r_armed_this_boot = true;
+    print(serial, "  armed: a .noinit canary and a panic record are in SRAM, the note in the "
+          "watchdog's SCRATCH0. Reset the board with a PROCESSOR reset from the debug port "
+          "(not a rescue, which clears the note) and run r again.", crlf);
+    bench.verdict("the canary, the record and the note are in place",
+                  noinit_canary == canary_value && Scratch<0>::read() == r_armed_note);
 }
 
 // =============================================================================
@@ -1211,7 +1329,7 @@ void tr_across_reset() {
 void tx_break() {
     print(serial, "  break_here(): this halts under a probe with halting debug on, and "
           "faults without one. Either way the console stops here.", crlf);
-    console_drain();
+    (void)console_drain();   // only so the line above leaves; nothing is timed after it
     P::break_here();
     print(serial, "  ... and it came back, which means neither happened", crlf);
     bench.verdict("break_here() returned instead of halting or faulting", false);
@@ -1776,7 +1894,9 @@ struct CostLeast {
 }
 
 [[COST_PLACED]] void ti_cost() {
-    console_drain();
+    if (!console_drain()) {
+        return;
+    }
 #if defined(BRIO_RP2350_CORE_M33)
     const uint32_t actlr = SCnSCB->ACTLR;
     print(serial, "  ACTLR ", hex(actlr), ", CONTROL ", hex(__get_CONTROL()),

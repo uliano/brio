@@ -105,6 +105,7 @@
 #include "rp2350/ticker.hpp"
 #include "rp2350/uart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #include "rp2350_pair.hpp"
@@ -177,12 +178,14 @@ uint8_t rx_buf[256];
 uint32_t words[8];
 uint32_t dma_words[256];   ///< letter l's capture, a kilobyte a DMA engine fills
 
-uint32_t us_now() { return Mtime::micros(); }
-void spin_us(uint32_t us) {
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < us) {
-    }
-}
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// the platform timer's microsecond count (rp2350/mtime.hpp): one bus
+/// read, the same on both architectures, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Mtime::micros(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 bool within(uint32_t got, uint32_t want, uint32_t per_mille) {
     const uint32_t tol = static_cast<uint32_t>(static_cast<uint64_t>(want) * per_mille / 1000u);
     return got + tol >= want && got <= want + tol;
@@ -208,10 +211,10 @@ template <uint8_t out_pin, uint8_t in_pin>
 bool wire_present() {
     (void)Pin<in_pin>::input(PinPull::none);
     (void)Pin<out_pin>::output(false);
-    spin_us(20);
+    brio::spin_us<Ruler>(20);
     const bool low = !Pin<in_pin>::read();
     Pin<out_pin>::set();
-    spin_us(20);
+    brio::spin_us<Ruler>(20);
     const bool high = Pin<in_pin>::read();
     (void)Pin<out_pin>::release();
     (void)Pin<in_pin>::release();
@@ -221,14 +224,14 @@ bool wire_13_15() {
     if (wire_present<13, 15>()) {
         return true;
     }
-    bench.verdict("DECLINED: GP13 -> GP15 is not wired - the pair desk carries no self-link (fit the jumper to run this letter)", false);
+    bench.skip("GP13 -> GP15 is not wired - the pair desk carries no self-link (fit the jumper to run this letter)");
     return false;
 }
 bool wire_17_9() {
     if (wire_present<17, 9>()) {
         return true;
     }
-    bench.verdict("DECLINED: GP17 -> GP9 is not wired - the pair desk carries no self-link (fit the jumper to run this letter)", false);
+    bench.skip("GP17 -> GP9 is not wired - the pair desk carries no self-link (fit the jumper to run this letter)");
     return false;
 }
 
@@ -407,7 +410,7 @@ void ta_block() {
     const auto at = P0::add(probe_program);
     const bool up = at && Probe::init(probe_program, *at, {.clock = {1, 0}});
     Probe::enable(true);
-    spin_us(50);
+    brio::spin_us<Ruler>(50);
     Probe::enable(false);
     const uint8_t level = Probe::rx_level();
     const uint32_t w0 = level >= 4u ? Probe::pop() : 0xDEADu;
@@ -492,10 +495,10 @@ void tb_window() {
     (void)Pin<window_pin>::function(PinFunction::pio2);
     Window::pin_directions(static_cast<uint8_t>(window_pin - 16u), 1, true);
     Window::pin_levels(static_cast<uint8_t>(window_pin - 16u), 1, false);
-    spin_us(5);
+    brio::spin_us<Ruler>(5);
     const bool low_far = !Pin<window_pin>::read();
     Window::pin_levels(static_cast<uint8_t>(window_pin - 16u), 1, true);
-    spin_us(5);
+    brio::spin_us<Ruler>(5);
     const bool high_far = Pin<window_pin>::read();
     const uint32_t padoe_far = P2::pad_oe();
     bench.verdict("with the window at 16, a SET on the block's index 6 drives GP22 low and high - the pad the same "
@@ -507,10 +510,10 @@ void tb_window() {
     (void)Pin<window_pin>::function(PinFunction::pio2);
     Window::pin_directions(window_pin, 1, true);
     Window::pin_levels(window_pin, 1, false);
-    spin_us(5);
+    brio::spin_us<Ruler>(5);
     const bool low_near = !Pin<window_pin>::read();
     Window::pin_levels(window_pin, 1, true);
-    spin_us(5);
+    brio::spin_us<Ruler>(5);
     const bool high_near = Pin<window_pin>::read();
     const uint32_t padoe_near = P2::pad_oe();
     print(serial, "  DBG_PADOE reads ", hex(padoe_far), " with the window at 16 and ", hex(padoe_near), " at 0", crlf);
@@ -543,7 +546,7 @@ std::optional<uint32_t> count_periods(uint8_t gpio, uint32_t window_us) {
     }
     (void)Periods::exec_wait(pio_set(PioSetTo::y, 0));
     Periods::enable(true);
-    spin_us(window_us);
+    brio::spin_us<Ruler>(window_us);
     Periods::enable(false);
     // The machine is stopped inside a WAIT; SM_RESTART drops that and
     // leaves X and Y, which are the measurement.
@@ -634,10 +637,10 @@ void td_serial() {
         for (uint16_t i = 0; i < 64; ++i) {
             rx_buf[i] = 0xEE;
         }
-        const uint32_t t0 = us_now();
+        const uint32_t t0 = Ruler::now();
         uint16_t got = 0;
         uint16_t sent = 0;
-        while (got < 64u && us_now() - t0 < 100'000u) {
+        while (got < 64u && Ruler::now() - t0 < 100'000u) {
             if (sent < 64u && Tx::writable()) {
                 Tx::write(tx_buf[sent++]);
             }
@@ -645,7 +648,7 @@ void td_serial() {
                 rx_buf[got++] = Rx::read();
             }
         }
-        const uint32_t took = us_now() - t0;
+        const uint32_t took = Ruler::now() - t0;
         const bool exact = got == 64u && same(tx_buf, rx_buf, 64);
         const bool frame = Rx::frame_error();
         const uint32_t want_us = static_cast<uint32_t>(64ULL * 10u * 1'000'000u / baud);
@@ -667,9 +670,9 @@ void td_serial() {
     (void)Rx::frame_error();
     Tx::Sm::enable(false);
     Tx::Sm::pin_levels(13, 1, false);   // the line held low: a break
-    spin_us(200);
+    brio::spin_us<Ruler>(200);
     Tx::Sm::pin_levels(13, 1, true);
-    spin_us(200);
+    brio::spin_us<Ruler>(200);
     const bool flagged = Rx::frame_error();
     const bool nothing = !Rx::readable();
     Tx::Sm::enable(true);
@@ -699,7 +702,7 @@ void te_pwm() {
     uint8_t ok = 0;
     for (uint16_t lv : levels) {
         Pwm17::duty(lv);
-        spin_us(500);
+        brio::spin_us<Ruler>(500);
         const auto pm = count_high(9u, samples);
         const bool good = pm && within(*pm, lv, 20);
         print(serial, "  level ", lv, " of 999: ", pm ? *pm : 0u, " per mille high on GP9", good ? "" : "  OUT", crlf);
@@ -725,12 +728,12 @@ void tf_interrupts() {
     P0::interrupts_only(0, PioInterrupt::all_flags);
     Irq::enable(P0::irq(0));
     P0::raise_flags(0x80);
-    spin_us(50);
+    brio::spin_us<Ruler>(50);
     const uint32_t after_seven = line0_last;
     const uint32_t entries_seven = line0_entries;
     line0_entries = 0;
     P0::raise_flags(0xFF);
-    spin_us(50);
+    brio::spin_us<Ruler>(50);
     const uint32_t after_all = line0_last;
     const bool cleared = P0::flags() == 0u;
     Irq::disable(P0::irq(0));
@@ -751,7 +754,7 @@ void tf_interrupts() {
     P0::interrupts_only(1, PioInterrupt::flag(6));
     Irq::enable(P0::irq(1));
     PioSm<0, 2>::enable(true);
-    spin_us(50);
+    brio::spin_us<Ruler>(50);
     PioSm<0, 2>::enable(false);
     Irq::disable(P0::irq(1));
     P0::interrupts_only(1, 0);
@@ -766,12 +769,12 @@ void tf_interrupts() {
     const bool upw = at0 && PioSm<0, 2>::init(flag_wait_program, *at0, {});
     P0::clear_flags(0xFF);
     PioSm<0, 2>::enable(true);
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     const bool flag_up = P0::flag(0);
     const bool nothing = PioSm<0, 2>::rx_empty();
     const uint8_t held_at = PioSm<0, 2>::address();
     P0::clear_flags(0x01);
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     const bool went = !PioSm<0, 2>::rx_empty() && PioSm<0, 2>::pop() == 1u;
     PioSm<0, 2>::enable(false);
     print(serial, "  IRQ 0 WAIT at ", at0 ? *at0 : 99u, ": flag up=", flag_up, ", nothing pushed=", nothing,
@@ -798,7 +801,7 @@ void tf_interrupts() {
     for (uint8_t i = 0; i < 32u; ++i) {
         (void)Tx::write_wait(tx_buf[i]);
     }
-    spin_us(2000);
+    brio::spin_us<Ruler>(2000);
     Irq::disable(P0::irq(0));
     P0::interrupts_only(0, 0);
     rx_to_buffer = false;
@@ -833,7 +836,7 @@ void tg_sampler() {
         words[i] = 0;
     }
     Sampler::enable(true);
-    spin_us(50);                   // 256 samples take 1.7 us; the machine then stalls
+    brio::spin_us<Ruler>(50);                   // 256 samples take 1.7 us; the machine then stalls
     Sampler::enable(false);
     uint8_t got = 0;
     while (got < 8u && !Sampler::rx_empty()) {
@@ -890,7 +893,7 @@ void tg_sampler() {
         words[i] = 0;
     }
     Sampler::enable(true);
-    spin_us(50);
+    brio::spin_us<Ruler>(50);
     Sampler::enable(false);
     uint8_t slow_got = 0;
     while (slow_got < 8u && !Sampler::rx_empty()) {
@@ -924,7 +927,7 @@ void th_blocks() {
     P0::clear_flags(0xFF);
     P1::clear_flags(0xFF);
     PioSm<0, 0>::enable(true);
-    spin_us(50);
+    brio::spin_us<Ruler>(50);
     PioSm<0, 0>::enable(false);
     const bool landed_next = P1::flag(3) && !P0::flag(3);
     if (at_next) {
@@ -937,7 +940,7 @@ void th_blocks() {
     P0::clear_flags(0xFF);
     P2::clear_flags(0xFF);
     PioSm<2, 0>::enable(true);
-    spin_us(50);
+    brio::spin_us<Ruler>(50);
     PioSm<2, 0>::enable(false);
     const bool landed_wrap = P0::flag(3) && !P2::flag(3);
     if (at_wrap) {
@@ -950,7 +953,7 @@ void th_blocks() {
     P0::clear_flags(0xFF);
     P1::clear_flags(0xFF);
     PioSm<1, 0>::enable(true);
-    spin_us(50);
+    brio::spin_us<Ruler>(50);
     PioSm<1, 0>::enable(false);
     const bool landed_prev = P0::flag(5) && !P1::flag(5);
     if (at_prev) {
@@ -1020,11 +1023,13 @@ void ti_serial_dma() {
     RxEngine::arm(Rx::rx_top_byte_address(), Rx::Sm::dreq_rx);
     TxEngine::arm(Tx::tx_address(), Tx::Sm::dreq_tx);
     (void)RxEngine::start(rx_buf, 256);
-    const uint32_t t0 = us_now();
+    // The span opens before start() and closes at the read after the wait,
+    // as it did around the hand-written loop; a time-out leaves
+    // dma_rx_done false, which the verdict judges.
+    const uint32_t t0 = Ruler::now();
     (void)TxEngine::start(tx_buf, 256);
-    while (!dma_rx_done && us_now() - t0 < 100'000u) {
-    }
-    const uint32_t took = us_now() - t0;
+    (void)brio::wait_until<Ruler>([] { return dma_rx_done; }, 100'000u);
+    const uint32_t took = Ruler::now() - t0;
     const bool exact = same(tx_buf, rx_buf, 256);
     TxEngine::stop();
     RxEngine::stop();
@@ -1096,7 +1101,7 @@ void tk_pins() {
     // IN_COUNT: MOV X, PINS masked to one pin, and unmasked.
     (void)Pin<13>::output(true);
     (void)Pin<15>::input(PinPull::none);
-    spin_us(20);
+    brio::spin_us<Ruler>(20);
     PioSmConfig c{};
     c.in_base = 13;
     c.in_count = 1;
@@ -1112,7 +1117,7 @@ void tk_pins() {
     (void)Probe::exec_wait(pio_push());
     const auto three_high = Probe::pop_wait(10'000);
     Pin<13>::clear();
-    spin_us(20);
+    brio::spin_us<Ruler>(20);
     c.in_count = 1;
     (void)Probe::configure(c);
     (void)Probe::exec_wait(pio_mov(PioMovTo::x, PioMovFrom::pins));
@@ -1152,7 +1157,7 @@ void tk_pins() {
     pio_fresh();
     (void)Pin<13>::output(false);
     (void)Pin<15>::function(PinFunction::pio0);
-    spin_us(20);
+    brio::spin_us<Ruler>(20);
     const auto at = P0::add(jmppin_wait_program);
     PioSmConfig w{};
     w.clock = PioClockDiv{1, 0};
@@ -1160,10 +1165,10 @@ void tk_pins() {
     w.in_base = 15;
     const bool up = at && Probe::init(jmppin_wait_program, *at, w);
     Probe::enable(true);
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     const bool waiting = Probe::rx_empty();
     Pin<13>::set();
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     const auto seven = Probe::pop_wait(10'000);
     Probe::enable(false);
     if (at) {
@@ -1258,18 +1263,18 @@ uint8_t wait_gpio_released_by(uint8_t base) {
     }
     (void)Pin<6>::output(false);
     (void)Pin<22>::output(false);
-    spin_us(5);
+    brio::spin_us<Ruler>(5);
     M::enable(true);
-    spin_us(10);
+    brio::spin_us<Ruler>(10);
     uint8_t by = M::rx_level() != 0u ? 0xFFu : 0u;   // released by nothing raised: a fault
     if (by == 0u) {
         Pin<6>::set();
-        spin_us(10);
+        brio::spin_us<Ruler>(10);
         if (M::rx_level() != 0u) {
             by = 6;
         } else {
             Pin<22>::set();
-            spin_us(10);
+            brio::spin_us<Ruler>(10);
             if (M::rx_level() != 0u) {
                 by = 22;
             }
@@ -1296,14 +1301,14 @@ void tm_corners() {
         if (m == 1u) { ok = at0 && PioSm<0, 1>::init(irq_rel0_program, *at0, {}); PioSm<0, 1>::enable(true); }
         if (m == 2u) { ok = at0 && PioSm<0, 2>::init(irq_rel0_program, *at0, {}); PioSm<0, 2>::enable(true); }
         if (m == 3u) { ok = at0 && PioSm<0, 3>::init(irq_rel0_program, *at0, {}); PioSm<0, 3>::enable(true); }
-        spin_us(10);
+        brio::spin_us<Ruler>(10);
         P0::disable(0x0F);
         raised[m] = ok ? P0::flags() : 0xEEu;
     }
     P0::clear_flags(0xFF);
     const bool ok3 = at1 && PioSm<0, 3>::init(irq_rel1_program, *at1, {});
     PioSm<0, 3>::enable(true);
-    spin_us(10);
+    brio::spin_us<Ruler>(10);
     P0::disable(0x0F);
     const uint8_t wrapped = ok3 ? P0::flags() : 0xEEu;
     P0::clear_flags(0xFF);
@@ -1317,13 +1322,13 @@ void tm_corners() {
     const auto atw = P0::add(wait_rel_program);
     const bool okw = atw && W::init(wait_rel_program, *atw, {});
     W::enable(true);
-    spin_us(10);
+    brio::spin_us<Ruler>(10);
     P0::raise_flags(0x0B);   // 0, 1 and 3
-    spin_us(10);
+    brio::spin_us<Ruler>(10);
     const uint8_t held = W::rx_level();
     P0::clear_flags(0x0B);
     P0::raise_flags(0x04);   // 2: this machine's own
-    spin_us(10);
+    brio::spin_us<Ruler>(10);
     const uint8_t freed = W::rx_level();
     const uint32_t word = freed != 0u ? W::pop() : 0u;
     const bool cleared = !P0::flag(2);
@@ -1345,7 +1350,7 @@ void tm_corners() {
         St::push(i);
     }
     St::enable(true);
-    spin_us(20);
+    brio::spin_us<Ruler>(20);
     St::enable(false);
     const uint8_t taken = St::rx_level();
     const uint8_t left = St::tx_level();
@@ -1401,9 +1406,9 @@ void tm_corners() {
     okl = okl && A::init(pio_square_wave_program, *atq, {.clock = {1000, 0}, .set_base = 6, .set_count = 1});
     okl = okl && B::init(pio_square_wave_program, *atq, {.clock = {1000, 0}, .set_base = 7, .set_count = 1});
     A::enable(true);
-    spin_us(10);
+    brio::spin_us<Ruler>(10);
     B::enable(true);
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     const uint32_t apart = disagreements(6, 7, 100'000);
     P0::disable(A::bit | B::bit);
     A::pin_levels(6, 1, false);
@@ -1413,7 +1418,7 @@ void tm_corners() {
     P0::restart(A::bit | B::bit);
     P0::restart_clocks(A::bit | B::bit);
     P0::enable(A::bit | B::bit);
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     const uint32_t together = disagreements(6, 7, 100'000);
     const uint32_t together_high = b_high;
     P0::disable(A::bit | B::bit);
@@ -1431,7 +1436,7 @@ void tm_corners() {
     P0::restart(A::bit);
     P0::restart_clocks_across(A::bit, {.next = X::bit});
     P0::enable_across(A::bit, {.next = X::bit});
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     const uint32_t across = disagreements(6, 7, 100'000);
     const uint32_t across_high = b_high;
     P0::disable_across(A::bit, {.next = X::bit});
@@ -1479,7 +1484,7 @@ void tm_corners() {
     for (uint8_t r = 0; r < 2u; ++r) {
         inits = LRx::init(clock, rates[r]) && inits;
         inits = LTx::init(clock, rates[r]) && inits;
-        spin_us(100);
+        brio::spin_us<Ruler>(100);
         fill_pattern(tx_buf, 64, static_cast<uint8_t>(0x41u + r));
         for (uint16_t i = 0; i < 64u; ++i) {
             (void)LTx::write_wait(tx_buf[i]);
@@ -1578,11 +1583,11 @@ void tl_sampler_dma() {
     dma_rx_done = false;
     WordEngine::arm(Sampler::rx_address(), Sampler::dreq_rx);
     (void)WordEngine::start(dma_words, 256);
-    const uint32_t t0 = us_now();
+    // A time-out leaves dma_rx_done false, which the verdict judges.
+    const uint32_t t0 = Ruler::now();
     Sampler::enable(true);
-    while (!dma_rx_done && us_now() - t0 < 100'000u) {
-    }
-    const uint32_t took = us_now() - t0;
+    (void)brio::wait_until<Ruler>([] { return dma_rx_done; }, 100'000u);
+    const uint32_t took = Ruler::now() - t0;
     Sampler::enable(false);
     uint32_t ones = 0;
     for (uint16_t i = 0; i < 256u; ++i) {

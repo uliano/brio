@@ -38,6 +38,7 @@
 #include "rp2350/pin.hpp"
 #include "rp2350/platform.hpp"
 #include "rp2350/uart.hpp"
+#include "util/test_wait.hpp"
 
 #include "board.hpp"
 #include "pair_power.hpp"
@@ -58,7 +59,15 @@ using Led = board::Led;
 
 void mode_line_up() { (void)ModeLine::input({.pull = PinPull::down, .input_enable = false}); }
 bool mode_high() { return ModeLine::read_pulsed(); }
-uint32_t us_now() { return Mtime::micros(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// the platform timer's microsecond count (rp2350/mtime.hpp): one bus
+/// read, the same on both architectures, which a clk_sys change does not
+/// move.
+struct Ruler {
+    static uint32_t now() { return Mtime::micros(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 /// The partner's rail through the I2C link's pull-ups (pair_power.hpp);
 /// the two sense pads released whatever it read.
 bool link_pads_free() { return pair::partner_rail(clock).up(); }

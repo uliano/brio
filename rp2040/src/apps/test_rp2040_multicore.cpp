@@ -90,6 +90,7 @@
 #include "rp2040/uart.hpp"
 #include "util/inbox.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 namespace {
@@ -110,7 +111,14 @@ constexpr Serial serial;
 
 TestBench<Serial> bench;
 
-uint32_t us_now() { return Timer::now_low(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// the system timer's microsecond count (rp2040/timer.hpp): one bus read,
+/// legal in any context, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Timer::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 
 // ---- the events that cross ----------------------------------------------------
 struct Ping { uint16_t n; };
@@ -185,7 +193,7 @@ struct Origin : Fsm<Origin, Pong, Tick, Copied, Folded, Raced> {
                 }
                 last_pong = p.n;
                 ++pongs;
-                last_pong_us = us_now();
+                last_pong_us = Ruler::now();
                 return handled();
             },
             [](Tick) { ++ticks_seen; return handled(); },
@@ -281,7 +289,7 @@ bool launch_ok = false;
 
 [[noreturn]] void core1_entry() {
     core1_cpuid = P1::core_id();
-    core1_started_us = us_now();
+    core1_started_us = Ruler::now();
     core1_runs = core1_runs + 1u;
     (void)CoreTicker<1>::init(clock);   // core 1's own SysTick
     Drain1::enable();                   // core 1's doorbell, in ITS NVIC
@@ -315,16 +323,18 @@ struct Counts {
 };
 
 /// Serve core 0's kernel until `pongs` reaches `target` or `budget_us`
-/// runs out.
+/// runs out (brio::wait_until on the ruler, a kernel step in each turn):
+/// false on the time-out, which every caller judges or states.
 bool serve_until(uint32_t target, uint32_t budget_us) {
-    const uint32_t t0 = us_now();
-    while (Origin::pongs < target) {
-        (void)K0::step();
-        if (us_now() - t0 > budget_us) {
+    return brio::wait_until<Ruler>(
+        [target] {
+            if (Origin::pongs >= target) {
+                return true;
+            }
+            (void)K0::step();
             return false;
-        }
-    }
-    return true;
+        },
+        budget_us);
 }
 
 void relaunch_core1() {
@@ -338,9 +348,9 @@ void relaunch_core1() {
     while (Beat::queue.pop()) {
     }
     core1_cpuid = 0xFFu;
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     launch_ok = Core1::launch(&core1_entry);
-    launch_us = us_now() - t0;
+    launch_us = Ruler::now() - t0;
     SioDoorbell<0>::pop_all();
     SioDoorbell<0>::enable();
 }
@@ -362,9 +372,9 @@ void ta_launch() {
     const uint32_t runs_before = core1_runs;
     SioDoorbell<0>::disable();
     const uint32_t started_before = core1_started_us;
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool again = Core1::protocol(&core1_entry);   // the protocol alone, no reset
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     SioDoorbell<0>::pop_all();
     SioDoorbell<0>::enable();
     print(serial, "  the protocol alone at the running core 1: ", again ? "ACCEPTED" : "refused",
@@ -382,11 +392,9 @@ void ta_launch() {
 
 // -----------------------------------------------------------------------------
 void tb_tickers() {
-    const uint32_t t0 = us_now();
     const uint32_t c0 = CoreTicker<0>::ticks();
     const uint32_t c1 = CoreTicker<1>::ticks();
-    while (us_now() - t0 < 500'000u) {
-    }
+    brio::spin_us<Ruler>(500'000u);
     const uint32_t d0 = CoreTicker<0>::ticks() - c0;
     const uint32_t d1 = CoreTicker<1>::ticks() - c1;
     print(serial, "  over 500 ms of the timer: core 0's ticker +", d0, ", core 1's +", d1, crlf);
@@ -408,7 +416,7 @@ void tc_round_trip() {
     uint32_t sum = 0;
     bool all = true;
     for (uint16_t n = 1; n <= 64u; ++n) {
-        const uint32_t t0 = us_now();
+        const uint32_t t0 = Ruler::now();
         send<Echo>(Ping{n});
         if (!serve_until(n, 20'000u)) {
             all = false;
@@ -452,10 +460,13 @@ void ti_dma_on_core1() {
     const uint32_t c1 = line1_on_core1;
     const Counts k0 = Counts::now();
     send<Echo>(CopyOn1{1024});
-    const uint32_t t0 = us_now();
-    while (Origin::copies == 0u && us_now() - t0 < 100'000u) {
-        (void)K0::step();
-    }
+    // The answer is dropped: the verdict below judges the one report back.
+    (void)brio::wait_until<Ruler>(
+        [] {
+            (void)K0::step();
+            return Origin::copies != 0u;
+        },
+        100'000u);
     uint32_t wrong = 0;
     for (uint32_t i = 0; i < 1024u; ++i) {
         if (copy_dst[i] != copy_src[i]) {
@@ -497,12 +508,13 @@ void tj_loan_and_timer() {
         }
         const uint32_t before = Origin::folds;
         send<Echo>(Fold{lend<Lease::reply>(lent), 256, send_reply_to<Origin, Folded>()});
-        const uint32_t t0 = us_now();
-        while (Origin::folds == before && us_now() - t0 < 20'000u) {
-            (void)K0::step();
-        }
-        if (Origin::folds == before) {
-            break;
+        if (!brio::wait_until<Ruler>(
+                [before] {
+                    (void)K0::step();
+                    return Origin::folds != before;
+                },
+                20'000u)) {
+            break;   // the verdict below counts the rounds that came back
         }
         uint32_t bad = 0;
         for (uint16_t i = 0; i < 256u; ++i) {
@@ -537,10 +549,13 @@ void tj_loan_and_timer() {
         }
         last = t;
     }
-    const uint32_t t1 = us_now();
-    while (Origin::races == r0 && us_now() - t1 < 100'000u) {
-        (void)K0::step();
-    }
+    // The answer is dropped: the verdict below judges the one race back.
+    (void)brio::wait_until<Ruler>(
+        [r0] {
+            (void)K0::step();
+            return Origin::races != r0;
+        },
+        100'000u);
     print(serial, "  the raw pair read 20000 times on each core at once: core 0 backwards ", back0, ", core 1 ",
           Origin::races != r0 ? Origin::last_race.reads : 0u, " reads, backwards ", Origin::last_race.backwards, crlf);
     bench.verdict("the system timer's raw pair read from both cores at once never goes backwards on either",
@@ -551,8 +566,15 @@ void tj_loan_and_timer() {
     // - the count stands (the reads around it, a microsecond or two) -
     // then five more running (5000 us, one tick of SysTick phase either
     // way).
+    // The first wait, for a tick edge, is on the ruler and acts: a tick
+    // that does not move skips the pause legs. The paused wait cannot be
+    // on the ruler (the system timer is the thing paused, and no other
+    // free-running counter is on this core but the SysTick the wait reads)
+    // so it waits on the tick the first wait has just seen move.
     const uint32_t tk0 = CoreTicker<0>::ticks();
-    while (CoreTicker<0>::ticks() == tk0) {
+    if (!brio::wait_until<Ruler>([tk0] { return CoreTicker<0>::ticks() != tk0; }, 5'000u)) {
+        bench.skip("core 0's SysTick did not move in 5 ms: the pause is timed on it");
+        return;
     }
     const uint32_t tk1 = CoreTicker<0>::ticks();
     const uint32_t a = Timer::now_low();
@@ -563,8 +585,9 @@ void tj_loan_and_timer() {
     const uint32_t b = Timer::now_low();
     Timer::pause(false);
     const uint32_t tk2 = CoreTicker<0>::ticks();
-    while (CoreTicker<0>::ticks() - tk2 < 5u) {
-    }
+    // Five ticks run 5 ms; the budget is 20 ms. The answer is dropped:
+    // a cut window reads short, which the 4000..6000 us bound judges.
+    (void)brio::wait_until<Ruler>([tk2] { return CoreTicker<0>::ticks() - tk2 >= 5u; }, 20'000u);
     const uint32_t c = Timer::now_low();
     print(serial, "  the timer paused for 5 SysTick ms: it moved ", b - a, " us (PAUSE read ", flag, "); running for 5 more: ",
           c - b, " us", crlf);
@@ -604,10 +627,10 @@ struct TickEdge {
     static constexpr uint32_t period_us = 1000;
     static void begin() {}
     static void end() {}
-    static void sync() {
+    /// The next tick edge, at most 5 ms (five periods): false when none.
+    static bool sync() {
         const uint32_t s = CoreTicker<1>::ticks();
-        while (CoreTicker<1>::ticks() == s) {
-        }
+        return brio::wait_until<Ruler>([s] { return CoreTicker<1>::ticks() != s; }, 5'000u);
     }
     static uint32_t count() { return CoreTicker<1>::ticks(); }
     [[gnu::always_inline]] static void place(uint32_t d) {
@@ -640,10 +663,10 @@ struct LineEdge {
         Pwm::clear_pending(EdgeSlice::bit);
         Nvic::clear_pending(Pwm::irq());
     }
-    static void sync() {
+    /// The next wrap, at most 5 ms (about ten periods): false when none.
+    static bool sync() {
         const uint32_t s = line_hits;
-        while (line_hits == s) {
-        }
+        return brio::wait_until<Ruler>([s] { return line_hits != s; }, 5'000u);
     }
     static uint32_t count() { return line_hits; }
     [[gnu::always_inline]] static void place(uint32_t d) { EdgeSlice::ctr() = 0xFFFFu - d; }
@@ -659,9 +682,10 @@ struct BellEdge {
     static constexpr uint32_t period_us = 1000;   // no period: a lost bell is the rescue's
     static void begin() { CoreTicker<1>::pause(); }
     static void end() { CoreTicker<1>::resume(); }
-    static void sync() {
-        while (bell_served != bell_go) {
-        }
+    /// Core 0 has served the last request, at most 5 ms (it answers
+    /// within one period of its SysTick): false when it did not.
+    static bool sync() {
+        return brio::wait_until<Ruler>([] { return bell_served == bell_go; }, 5'000u);
     }
     static uint32_t count() { return bells; }
     [[gnu::always_inline]] static void place(uint32_t d) {
@@ -686,16 +710,21 @@ volatile bool walked = false;
 
 template <typename Edge>
 bool one_try(uint32_t d, uint32_t edges, Sweep& s) {
-    Edge::sync();
+    // An edge that never came to sync on is a lost try: counted, and the
+    // verdict's "no lost wake" fails on it.
+    if (!Edge::sync()) {
+        ++s.lost;
+        return false;
+    }
     P1::CriticalSection cs;
     const uint32_t r0 = rescue_fires;
     Timer::alarm_in(rescue_alarm, rescue_us);
     Edge::place(d);
     for (uint8_t k = 0; k < 12u; ++k) {
-        (void)us_now();
+        (void)Ruler::now();
     }
     const uint32_t n0 = Edge::count();
-    const uint32_t u0 = us_now();
+    const uint32_t u0 = Ruler::now();
     for (;;) {
         P1::CriticalSection turn;
         if (Edge::count() - n0 >= edges) {
@@ -705,7 +734,7 @@ bool one_try(uint32_t d, uint32_t edges, Sweep& s) {
     }
     const uint32_t to_loop = Edge::since_edge();
     const uint32_t entry = Edge::entry();
-    const uint32_t took = us_now() - u0;
+    const uint32_t took = Ruler::now() - u0;
     Timer::disarm(rescue_alarm);
     Timer::clear(rescue_alarm);
     Nvic::clear_pending(Timer::irq(rescue_alarm));
@@ -773,9 +802,14 @@ void run_on_core1() {
     // THE KERNEL'S TURN on core 1: a quiet pack turned as run() turns it
     // over 100 of core 1's ticks.
     QuietKernel::init_all();
+    // A loop that turns the kernel, so not a brio::wait_until; bounded on
+    // the ruler at twice its 100 ms, since a tick that stopped would hold
+    // core 1 here for ever. A cut window counts too few turns, which the
+    // verdict judges.
     const uint32_t t = CoreTicker<1>::ticks();
+    const uint32_t t0 = Ruler::now();
     uint32_t n = 0;
-    while (CoreTicker<1>::ticks() - t < 100u) {
+    while (CoreTicker<1>::ticks() - t < 100u && Ruler::now() - t0 < 200'000u) {
         TimeEvents<P1>::process();
         if (!QuietKernel::step()) {
             QuietKernel::idle_if_empty();
@@ -798,14 +832,17 @@ void tk_idle_on_core1() {
     // Core 0 serves the bell edge meanwhile: each request answered after
     // `bell_d` cycles of its own SysTick (a 125 000-cycle period, read
     // down), then the ring.
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     uint32_t served = 0;
-    while (!c1::walked && us_now() - t0 < 120'000'000u) {
+    while (!c1::walked && Ruler::now() - t0 < 120'000'000u) {
         const uint32_t go = c1::bell_go;
         if (go != served) {
             const uint32_t d = c1::bell_d;
             const uint32_t v0 = SysTick->VAL;
             constexpr uint32_t period = SysClock::hz / CoreTicker<0>::ticks_per_second;
+            // The pace of the ring, d cycles of core 0's own SysTick (d is
+            // under 410 of a 125 000-cycle period): part of the instrument,
+            // so a bare read of VAL and not a ruler's turn.
             while (((v0 + period - SysTick->VAL) % period) < d) {
             }
             SioDoorbell<1>::ring();
@@ -851,8 +888,8 @@ void td_burst() {
         }
     }
     (void)serve_until(accepted, 50'000u);
-    const uint32_t t1 = us_now();
-    while (us_now() - t1 < 5'000u) {
+    const uint32_t t1 = Ruler::now();
+    while (Ruler::now() - t1 < 5'000u) {
         (void)K0::step();
     }
     const Counts d = Counts::now().since(c0);
@@ -885,12 +922,12 @@ void te_both_ways() {
     const Counts c0 = Counts::now();
     const uint32_t beat_before = Beat::sent;
     send<Beat>(Beating{true});
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     uint32_t sent = 0;
     uint16_t n = 0;
     uint32_t next_at = t0;
-    while (us_now() - t0 < 1'000'000u) {
-        if (static_cast<int32_t>(us_now() - next_at) >= 0) {
+    while (Ruler::now() - t0 < 1'000'000u) {
+        if (static_cast<int32_t>(Ruler::now() - next_at) >= 0) {
             next_at += 20u;
             if (Inbox<Echo>::send(Ping{static_cast<uint16_t>(n + 1u)})) {
                 ++n;
@@ -901,8 +938,8 @@ void te_both_ways() {
     }
     send<Beat>(Beating{false});
     (void)serve_until(sent, 50'000u);
-    const uint32_t t1 = us_now();
-    while (us_now() - t1 < 20'000u) {
+    const uint32_t t1 = Ruler::now();
+    while (Ruler::now() - t1 < 20'000u) {
         (void)K0::step();
     }
     const Counts d = Counts::now().since(c0);
@@ -935,10 +972,10 @@ void th_saturation() {
     const Counts c0 = Counts::now();
     const uint32_t beat_before = Beat::sent;
     send<Beat>(Beating{true});
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     uint32_t sent = 0;
     uint16_t n = 0;
-    while (us_now() - t0 < 100'000u) {
+    while (Ruler::now() - t0 < 100'000u) {
         if (Inbox<Echo>::send(Ping{static_cast<uint16_t>(n + 1u)})) {
             ++n;
             ++sent;
@@ -947,8 +984,8 @@ void th_saturation() {
     }
     send<Beat>(Beating{false});
     (void)serve_until(sent, 50'000u);
-    const uint32_t t1 = us_now();
-    while (us_now() - t1 < 20'000u) {
+    const uint32_t t1 = Ruler::now();
+    while (Ruler::now() - t1 < 20'000u) {
         (void)K0::step();
     }
     const Counts d = Counts::now().since(c0);
@@ -991,9 +1028,7 @@ void tg_panic_and_relaunch() {
     (void)take_panic_record<P1>();
     print(serial, "  sending Halt ...", crlf);
     send<Echo>(Halt{0x11});
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < 10'000u) {
-    }
+    brio::spin_us<Ruler>(10'000u);   // core 1's panic is its next dispatch
     const auto record = take_panic_record<P1>();
     print(serial, "  record read", crlf);
     print(serial, "  a Halt sent: core 1's breadcrumb ", record ? "code " : "NONE",
@@ -1009,9 +1044,9 @@ void tg_panic_and_relaunch() {
 
     print(serial, "  resetting core 1 ...", crlf);
     SioDoorbell<0>::disable();
-    const uint32_t r0 = us_now();
+    const uint32_t r0 = Ruler::now();
     const bool reset_ok = Core1::reset();
-    const uint32_t reset_us = us_now() - r0;
+    const uint32_t reset_us = Ruler::now() - r0;
     print(serial, "  core 1 into the bootrom through the power-on state machine: ",
           reset_ok ? "drained and waiting" : "NO ANSWER", " after ", reset_us, " us", crlf);
     bench.verdict("Core1::reset() puts core 1 back into the bootrom's wait loop", reset_ok);

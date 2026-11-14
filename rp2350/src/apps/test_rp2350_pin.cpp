@@ -34,7 +34,7 @@
 // GP18 to GP10, GP17 to GP9 - are what letters b and f..j judge a pad
 // by, the far end of each wire the witness; no desk carries them (every
 // self-link is retired), so on the WeAct RP2350B those letters run BY
-// NAME ONLY, outside z, and decline with that reason when a wire is
+// NAME ONLY, outside z, and skip with that reason when a wire is
 // missing. On the WeAct RP2350A six of the eight pads are the pair's
 // (SPI1 on GP8..GP11, I2C0 on GP16/GP17), so the letters are not
 // registered there at all: driving them would drive the links.
@@ -94,6 +94,7 @@
 #include "rp2350/ticker.hpp"
 #include "rp2350/uart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #include "pair_power.hpp"
@@ -152,7 +153,14 @@ using IntListen2 = ExtInt<ListenC>;
 
 TestBench<Serial> bench;
 
-uint32_t us_now() { return Mtime::micros(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// the platform timer's microsecond count (rp2350/mtime.hpp): one bus
+/// read, the same on both architectures, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Mtime::micros(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 
 // What the interrupt handler leaves behind. Volatile: the loop is the
 // only reader and the handler the only writer.
@@ -178,11 +186,10 @@ void isr_clear() {
 }
 
 /// Wait for the handler to have run at least once since `before`, up to
-/// `budget` microseconds. The count it ended at.
+/// `budget` microseconds (brio::wait_until on the ruler). The count it
+/// ended at, which every caller judges: a time-out leaves it at `before`.
 uint32_t wait_isr(uint32_t before, uint32_t budget = 2000u) {
-    const uint32_t t0 = us_now();
-    while (isr_count == before && us_now() - t0 < budget) {
-    }
+    (void)brio::wait_until<Ruler>([before] { return isr_count != before; }, budget);
     return isr_count;
 }
 
@@ -239,15 +246,14 @@ bool wire_fitted() {
     return high && !low;
 }
 
-/// The four wires between the chip's own pads, or the letter declines.
+/// The four wires between the chip's own pads, or the letter skips.
 bool self_wires_or_decline() {
     const bool ok = wire_fitted<DriveA, ListenA>() && wire_fitted<DriveB, ListenB>() &&
                     wire_fitted<DriveC, ListenC>() && wire_fitted<DriveD, ListenD>();
     release_all();
     if (!ok) {
-        bench.verdict("DECLINED: GP19-GP8, GP11-GP16, GP18-GP10 and GP17-GP9 are not all wired - the pair "
-                      "desk carries no self-link (fit the jumpers to run this letter)",
-                      false);
+        bench.skip("GP19-GP8, GP11-GP16, GP18-GP10 and GP17-GP9 are not all wired - the pair "
+                   "desk carries no self-link (fit the jumpers to run this letter)");
     }
     return ok;
 }
@@ -630,7 +636,7 @@ void ti_interrupts() {
         (void)delay_us(clock, 20);
         isr_clear();
         (void)IntListen::arm(pin_events(PinEvent::edge_high));
-        const uint32_t t0 = us_now();
+        const uint32_t t0 = Ruler::now();
         DriveA::set();
         if (wait_isr(0) == 1u) {
             ++edges;
@@ -656,6 +662,7 @@ void ti_interrupts() {
 
     // Both edges: two more interrupts for two more transitions.
     (void)IntListen::arm(pin_edges);
+    // The counts are dropped here: the verdict below judges the total.
     DriveA::set();
     (void)wait_isr(1);
     DriveA::clear();
@@ -875,7 +882,7 @@ extern "C" void isr_systick() { brio::Ticker::tick(); }
 extern "C" void isr_io_bank0() {
     const brio::PinEvents a = IntListen::served();
     if (!a.none()) {
-        isr_us = us_now();
+        isr_us = Ruler::now();
         isr_events = a.bits;
         isr_count = isr_count + 1u;
         const brio::PinEvents forced = IntListen::forced();

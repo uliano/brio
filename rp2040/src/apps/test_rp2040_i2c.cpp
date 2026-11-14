@@ -95,6 +95,7 @@
 #include "util/i2c_bus.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: one file for every board
@@ -118,7 +119,14 @@ constexpr Serial serial;
 
 TestBench<Serial, 16> bench;
 
-uint32_t us_now() { return Timer::now_low(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// the system timer's microsecond count (rp2040/timer.hpp): one bus read,
+/// legal in any context, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Timer::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 /// Every line of the XIP cache dropped: letter g's cold read.
 void xip_empty() { Xip::flush(); }
 
@@ -237,9 +245,9 @@ void ta_block() {
     bench.verdict("enabled: IC_ENABLE_STATUS reports it, and the configuration, the timing, the target "
                   "and the own address are refused",
                   running && refused && S::target() == 0x42u);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool off = S::disable();
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     print(serial, "  disable on an idle bus: ", off ? "reported" : "NOT reported", " in ", took, " us", crlf);
     bench.verdict("the disable of an idle block is reported by IC_ENABLE_STATUS within a few microseconds",
                   off && took < 20u);

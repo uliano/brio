@@ -17,7 +17,9 @@
 //   Client, Host, Raw        I2cClient<n, pins>, I2cHost<n, pins>,
 //                            DwApbI2c<n> on the link's pads
 //   SdaPin, SclPin           the two link pads as Pin types
-//   us_now()                 the microsecond ruler (the system timer)
+//   Ruler                    the microsecond ruler (the system timer) in
+//                            util/test_wait.hpp's shape: now(), and hz()
+//                            at 1 MHz, which every time here assumes
 //   RefusalPlacement         util/placement.hpp's tag for the end of a refusal
 //                            (refusal_end(), below)
 //   peer_kind, peer_label    twi_link's kind byte and the eight-character
@@ -150,19 +152,20 @@ volatile uint32_t stray_vectors = 0;
 
 // ---- waits ----------------------------------------------------------------------
 
-/// A hold of any length on the system timer, read once a turn.
-void hold_us(uint32_t us) {
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < us) {
-    }
-}
+static_assert(Ruler::hz() == 1'000'000u,
+              "rp_twi_peer.hpp reads its deadlines and its holds in microseconds of the ruler");
 
-bool expired(uint32_t t0, uint32_t ms) { return us_now() - t0 >= ms * 1000u; }
+/// Whether `ms` milliseconds have passed since `t0`: the deadline every
+/// action's loop reads. A deadline counted from the action's start, not a
+/// budget from the call, so the loops that read it stay written out.
+bool expired(uint32_t t0, uint32_t ms) { return Ruler::now() - t0 >= ms * 1000u; }
 
 /// The DUT's window, on the pads (SIO reads the pad whoever owns it):
 /// `stop` false waits for SDA LOW under a high SCL - the START it makes by
 /// hand -, `stop` true for SDA HIGH under a high SCL - the STOP that closes
-/// it. The deadline is read once every 256 polls.
+/// it. The deadline is read once every 256 polls: an edge of a window
+/// that lasts tens of microseconds is caught on the pads' two reads alone,
+/// the pace part of the instrument, so this wait keeps its turn count.
 bool wait_wire(uint32_t t0, uint32_t ms, bool stop) {
     uint8_t guard = 0;
     for (;;) {
@@ -180,14 +183,14 @@ bool wait_wire(uint32_t t0, uint32_t ms, bool stop) {
 /// `ms` of `t0` - longer than any SCL high half on this bus (5 us at
 /// 100 kHz), so a tenure in flight never passes for an idle bus.
 bool wait_wire_quiet(uint32_t t0, uint32_t ms, uint32_t quiet_us) {
-    uint32_t since = us_now();
+    uint32_t since = Ruler::now();
     while (!expired(t0, ms)) {
         if (SclPin::read() && SdaPin::read()) {
-            if (us_now() - since >= quiet_us) {
+            if (Ruler::now() - since >= quiet_us) {
                 return true;
             }
         } else {
-            since = us_now();
+            since = Ruler::now();
         }
     }
     return false;
@@ -368,7 +371,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
     // A STOP counted and no byte moved since: the counted serve's one
     // moment to end (the header).
     bool at_stop = false;
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     for (;;) {
         if (expired(t0, a.ms)) {
             r.flags |= twilink::report_timed_out;
@@ -428,7 +431,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
         }
         if ((raw & I2cInterrupt::rd_req) != 0u) {
             if (a.hold_us != 0u) {
-                hold_us(a.hold_us);
+                brio::spin_us<Ruler>(a.hold_us);
                 Client::give(fixed_byte ? a.seed : twilink::pattern_value(a.pattern, a.seed, tx));
                 ++tx;
                 at_stop = false;
@@ -515,7 +518,7 @@ twilink::Report run_host(const twilink::Params& a, bool read) {
     }
     // THE WIRE AT REST FIRST: this action starts at the closing NACK of the
     // read that collected its ack, a bit time before the DUT's STOP.
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool window = wait_wire_quiet(t0, a.ms, 40u) && wait_wire(t0, a.ms, false);
     if (!window) {
         r.flags |= twilink::report_timed_out;
@@ -525,7 +528,7 @@ twilink::Report run_host(const twilink::Params& a, bool read) {
         return r;
     }
     if (a.aux16 != 0u) {
-        hold_us(a.aux16);
+        brio::spin_us<Ruler>(a.aux16);
     }
     r.flags |= twilink::report_host_ran;
     const auto tenure = [&]() -> bool {
@@ -603,7 +606,7 @@ twilink::Report run_hold_sda(const twilink::Params& a) {
     client_up = false;
     SclPin::input(PinPull::none);
     SdaPin::input(PinPull::none);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     (void)wait_wire_quiet(t0, a.ms, 40u);
     SdaPin::output(false);
     r.flags |= twilink::report_host_ran;
@@ -626,7 +629,7 @@ twilink::Report run_hold_sda(const twilink::Params& a) {
         }
     }
     SdaPin::input(PinPull::none);
-    hold_us(5);
+    brio::spin_us<Ruler>(5);
     r.count = falls;
     r.aux0 = static_cast<uint8_t>(falls);
     r.aux1 = SdaPin::read() ? 1u : 0u;
@@ -638,7 +641,7 @@ twilink::Report run_quiet(const twilink::Params& a) {
     twilink::Report r{};
     Client::release();
     client_up = false;
-    hold_us(static_cast<uint32_t>(a.ms) * 1000u);
+    brio::spin_us<Ruler>(static_cast<uint32_t>(a.ms) * 1000u);
     r.count = 1;
     return r;
 }
@@ -681,7 +684,7 @@ void run_pending() {
     }
     ++actions;
     const twilink::Params a = pending_params_;
-    const uint32_t started = us_now();
+    const uint32_t started = Ruler::now();
     last_drops = 0;
     twilink::Report r{};
     switch (op) {
@@ -694,7 +697,7 @@ void run_pending() {
         default: break;
     }
     r.flags |= twilink::report_ran;
-    const uint32_t took = (us_now() - started) / 1000u;
+    const uint32_t took = (Ruler::now() - started) / 1000u;
     r.ms = took > 255u ? uint8_t{255} : static_cast<uint8_t>(took);
     r.op = twilink::byte_of(op);
     last_report = r;
@@ -739,7 +742,7 @@ void status() {
 /// channel and the pending action. With them not free (the RP2350's
 /// partner rail down) the client stays off, asked again once a second.
 [[noreturn]] void peer_loop() {
-    uint32_t asked = us_now();
+    uint32_t asked = Ruler::now();
     for (;;) {
         uint8_t c = 0;
         if (Console::read_byte(c) && c != '\r' && c != '\n') {
@@ -763,8 +766,8 @@ void status() {
             print(console, "> ");
         }
         if (!client_up) {
-            if (us_now() - asked >= 1'000'000u) {
-                asked = us_now();
+            if (Ruler::now() - asked >= 1'000'000u) {
+                asked = Ruler::now();
                 if (link_pads_free()) {
                     (void)go_command();
                     print(console, crlf, "  the link pads are free: command-mode client up", crlf, "> ");

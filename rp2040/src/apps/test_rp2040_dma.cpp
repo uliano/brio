@@ -114,6 +114,7 @@
 #include "rp2040/uart.hpp"
 #include "util/crc.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 namespace {
@@ -146,19 +147,21 @@ volatile uint32_t ch4_on_line0 = 0;
 volatile uint32_t ch4_on_line1 = 0;
 volatile uint32_t serial_blocks = 0;
 
-uint32_t us_now() { return Timer::now_low(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// the system timer's microsecond count (rp2040/timer.hpp): one bus read,
+/// legal in any context, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Timer::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 
-void spin_us(uint32_t us) {
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < us) {
-    }
-}
-
-void console_drain() {
-    const uint32_t t0 = us_now();
-    while (!Serial::tx_idle() && us_now() - t0 < 500'000u) {
-    }
-}
+/// The console's last byte off the wire, at most 500 ms: its 64-byte ring
+/// and the engine's block leave in under 10 ms at 115200. The answer is
+/// dropped: no window here is judged by a bound a console line would
+/// break (letter j reads tx_idle() itself after the drain, sink_leg hands
+/// the pads over after it and a wedged console shows as a cut line).
+void console_drain() { (void)brio::console_drain<Ruler, Serial>(500'000u); }
 
 /// THE RATE ON THE WIRE, which a loop alone cannot tell: both ends share
 /// one divisor, so a wrong one is a slower or a faster loop and nothing
@@ -177,21 +180,21 @@ uint32_t wire_permille(uint32_t baud, uint32_t bits = 10u, uint32_t frames = 102
     const uint64_t wire_us = static_cast<uint64_t>(frames) * bits * 1'000'000u / baud;
     const uint32_t budget = static_cast<uint32_t>(wire_us * 2u) + 20'000u;
     uint32_t queued = 0;
-    const uint32_t t0 = us_now();
-    while (queued < frames && us_now() - t0 < budget) {
+    const uint32_t t0 = Ruler::now();
+    while (queued < frames && Ruler::now() - t0 < budget) {
         const uint32_t want = frames - queued;
         queued += Port::write_bulk(std::span<const uint8_t>(out, want < sizeof out ? want : sizeof out));
         (void)Port::harvest();
         while (Port::read_bulk(sink) != 0u) {
         }
     }
-    while (!Port::tx_idle() && us_now() - t0 < budget) {
+    while (!Port::tx_idle() && Ruler::now() - t0 < budget) {
         (void)Port::harvest();
         while (Port::read_bulk(sink) != 0u) {
         }
     }
-    const uint32_t took = us_now() - t0;
-    spin_us(static_cast<uint32_t>(64ull * bits * 1'000'000u / baud) + 1000u);
+    const uint32_t took = Ruler::now() - t0;
+    brio::spin_us<Ruler>(static_cast<uint32_t>(64ull * bits * 1'000'000u / baud) + 1000u);
     (void)Port::harvest();
     while (Port::read_bulk(sink) != 0u) {
     }
@@ -241,10 +244,7 @@ bool run_c4(const DmaTransfer& t, uint32_t budget_us = 100'000u) {
     if (!C4::load(t)) {
         return false;
     }
-    const uint32_t t0 = us_now();
-    while (C4::busy() && us_now() - t0 < budget_us) {
-    }
-    return !C4::busy();
+    return brio::wait_until<Ruler>([] { return !C4::busy(); }, budget_us);
 }
 
 // -----------------------------------------------------------------------------
@@ -266,7 +266,7 @@ void ta_as_found() {
     DmaTimer<0>::set(0, 1);
     C4::route(0, true);
     const bool started = C4::load({.read = src, .write = dst, .count = 16, .config = {.treq = DmaTimer<0>::dreq()}});
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     const bool stalled = C4::busy() && C4::count() == 16u;
     const bool refused = !C4::configure({}) && !C4::set_count(8) && !C4::load({.read = src, .write = dst, .count = 8});
     print(serial, "  stalled on a silent pacing timer: busy=", C4::busy(), " count=", C4::count(),
@@ -276,7 +276,7 @@ void ta_as_found() {
                   started && stalled && refused);
     const uint32_t irqs_before = ch4_on_line0;
     const bool aborted = C4::abort();
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     print(serial, "  aborted: busy=", C4::busy(), " raised=", C4::raised(), " pending0=", C4::pending(0),
           " routed0=", C4::routed(0), " line-0 handler runs +", ch4_on_line0 - irqs_before, crlf);
     bench.verdict("abort() (E13's way) brings BUSY down, leaves nothing raised or pending, "
@@ -306,9 +306,9 @@ void tb_memory() {
     }
     fill(src, 4096, 0x5A5Au);
     fill(dst, 4096, 0);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool done = run_c4({.read = src, .write = dst, .count = 1024, .config = {.size = DmaSize::word}});
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     C4::clear_raised();
     print(serial, "  4096 bytes as 1024 words in ", took, " us (8.2 us would be one transfer a cycle at "
           "125 MHz; the read and the write masters share the SRAM with this core's polling)", crlf);
@@ -321,8 +321,10 @@ void tc_lines() {
     const uint32_t l0 = ch4_on_line0;
     const uint32_t l1 = ch4_on_line1;
     C4::route(0, true);
+    // Each block's answer is dropped: a block that did not end raises no
+    // completion, and the handler counts each verdict judges fail.
     (void)run_c4({.read = src, .write = dst, .count = 64});
-    spin_us(50);
+    brio::spin_us<Ruler>(50);
     print(serial, "  routed to line 0: line-0 handler +", ch4_on_line0 - l0, ", line-1 handler +",
           ch4_on_line1 - l1, crlf);
     bench.verdict("a completion routed to line 0 is served on line 0 alone, once",
@@ -330,7 +332,7 @@ void tc_lines() {
     C4::route(0, false);
     C4::route(1, true);
     (void)run_c4({.read = src, .write = dst, .count = 64});
-    spin_us(50);
+    brio::spin_us<Ruler>(50);
     print(serial, "  routed to line 1: line-0 handler +", ch4_on_line0 - l0 - 1u, ", line-1 handler +",
           ch4_on_line1 - l1, crlf);
     bench.verdict("the same channel routed to line 1 is served on line 1 alone, once",
@@ -339,10 +341,10 @@ void tc_lines() {
     C4::route(0, true);
     const uint32_t q0 = ch4_on_line0;
     (void)run_c4({.read = src, .write = dst, .count = 64, .config = {.irq_quiet = true}});
-    spin_us(50);
+    brio::spin_us<Ruler>(50);
     const bool quiet_silent = ch4_on_line0 == q0 && !C4::raised();
     C4::null_trigger();
-    spin_us(50);
+    brio::spin_us<Ruler>(50);
     print(serial, "  IRQ_QUIET: the completion raised ", ch4_on_line0 - q0, " interrupt(s), the null trigger after it ",
           ch4_on_line0 - q0, " in all", crlf);
     bench.verdict("under IRQ_QUIET a completion is silent and a null trigger raises exactly one",
@@ -357,14 +359,13 @@ void td_chain() {
     C5::stop();
     const bool prepared = C5::prepare({.read = src + 256, .write = dst + 256, .count = 256});
     const bool started = C4::load({.read = src, .write = dst, .count = 256, .config = {.chain_to = 5}});
-    const uint32_t t0 = us_now();
-    while ((C4::busy() || C5::busy() || C5::count() != 0u) && us_now() - t0 < 10'000u) {
-    }
-    print(serial, "  channel 4 chained to 5: 4 raised=", C4::raised(), " 5 raised=", C5::raised(),
+    const bool ended =
+        brio::wait_until<Ruler>([] { return !C4::busy() && !C5::busy() && C5::count() == 0u; }, 10'000u);
+    print(serial, "  channel 4 chained to 5: ", ended ? "" : "NOT ENDED in 10 ms, ", "4 raised=", C4::raised(), " 5 raised=", C5::raised(),
           ", 5's count ", C5::count(), ", both halves ", same(src, dst, 512) ? "exact" : "WRONG", crlf);
     bench.verdict("the chained channel, prepared and waiting, ran at the first one's completion: both "
                   "halves exact, both raised",
-                  prepared && started && C4::raised() && C5::raised() && same(src, dst, 512));
+                  prepared && started && ended && C4::raised() && C5::raised() && same(src, dst, 512));
     C4::stop();
     C5::stop();
 }
@@ -388,9 +389,9 @@ void te_ring() {
 void tf_pacing() {
     fill(src, 1000, 0x11u);
     DmaTimer<0>::set(1, 125);   // clk_sys / 125 = 1 MHz
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool done = run_c4({.read = src, .write = dst, .count = 1000, .config = {.treq = DmaTimer<0>::dreq()}});
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     DmaTimer<0>::stop();
     print(serial, "  a thousand bytes at one request a microsecond: ", took, " us", crlf);
     bench.verdict("the pacing timer at X/Y = 1/125 moves one byte a microsecond, within 10 %",
@@ -424,6 +425,8 @@ void tg_sniffer() {
         sum += src[i];
     }
     DmaSniffer::start(4, {.calc = DmaSniffCalc::sum}, 0);
+    // Each block's answer is dropped: a block that did not end leaves the
+    // sniffer short of the bytes, and the result each verdict judges wrong.
     (void)run_c4({.read = src, .write = dst, .count = 256, .config = {.sniff = true}});
     const uint32_t got_sum = DmaSniffer::result();
     DmaSniffer::start(4, {.calc = DmaSniffCalc::crc16}, 0xFFFFu);
@@ -457,16 +460,14 @@ void th_bus_error() {
     const uint32_t l0 = ch4_on_line0;
     const auto* hole = reinterpret_cast<const volatile void*>(0x40100000u);   // no peripheral answers here
     const bool started = C4::load({.read = hole, .write = dst, .count = 16, .config = {.size = DmaSize::word}});
-    const uint32_t t0 = us_now();
-    while (C4::busy() && us_now() - t0 < 10'000u) {
-    }
-    spin_us(50);
+    const bool ended = brio::wait_until<Ruler>([] { return !C4::busy(); }, 10'000u);
+    brio::spin_us<Ruler>(50);
     const uint32_t errors = C4::errors();
     print(serial, "  a word block reading 0x40100000: busy=", C4::busy(), " count=", C4::count(),
           " errors=", hex(errors), " (AHB ", (errors & DmaError::ahb) != 0u, ", read ",
           (errors & DmaError::read) != 0u, ", write ", (errors & DmaError::write) != 0u,
           "), line-0 handler +", ch4_on_line0 - l0, ", dst[0]=", hex(dst[0]), crlf);
-    bench.verdict("the block ended one way or the other and the channel came back", started && !C4::busy());
+    bench.verdict("the block ended one way or the other and the channel came back", started && ended);
     C4::clear_errors();
     bench.verdict("the error bits clear by writing one", C4::errors() == 0u);
     fill(src, 64, 0x42u);
@@ -479,17 +480,15 @@ void th_bus_error() {
     const uint32_t l1 = ch4_on_line0;
     auto* const hole_w = reinterpret_cast<volatile void*>(0x40100000u);
     const bool started_w = C4::load({.read = src, .write = hole_w, .count = 16, .config = {.size = DmaSize::word}});
-    const uint32_t tw = us_now();
-    while (C4::busy() && us_now() - tw < 10'000u) {
-    }
-    spin_us(50);
+    const bool ended_w = brio::wait_until<Ruler>([] { return !C4::busy(); }, 10'000u);
+    brio::spin_us<Ruler>(50);
     const uint32_t werr = C4::errors();
     print(serial, "  a word block writing 0x40100000: busy=", C4::busy(), " count=", C4::count(), " errors=", hex(werr),
           " (AHB ", (werr & DmaError::ahb) != 0u, ", read ", (werr & DmaError::read) != 0u, ", write ",
           (werr & DmaError::write) != 0u, "), line-0 handler +", ch4_on_line0 - l1, crlf);
     bench.verdict("A WRITE INTO THE HOLE is a WRITE_ERROR: the channel halts with AHB_ERROR and WRITE_ERROR set, READ_ERROR "
                   "clear, and raises its line once",
-                  started_w && !C4::busy() && (werr & DmaError::ahb) != 0u && (werr & DmaError::write) != 0u &&
+                  started_w && ended_w && (werr & DmaError::ahb) != 0u && (werr & DmaError::write) != 0u &&
                       (werr & DmaError::read) == 0u && ch4_on_line0 == l1 + 1u);
     C4::clear_errors();
 
@@ -500,16 +499,14 @@ void th_bus_error() {
     const uint32_t l2 = ch4_on_line0;
     const bool started_q =
         C4::load({.read = hole, .write = dst, .count = 16, .config = {.size = DmaSize::word, .irq_quiet = true}});
-    const uint32_t tq = us_now();
-    while (C4::busy() && us_now() - tq < 10'000u) {
-    }
-    spin_us(50);
+    const bool ended_q = brio::wait_until<Ruler>([] { return !C4::busy(); }, 10'000u);
+    brio::spin_us<Ruler>(50);
     const uint32_t qerr = C4::errors();
     print(serial, "  the same read error with IRQ_QUIET: errors=", hex(qerr), ", line-0 handler +", ch4_on_line0 - l2,
           crlf);
     bench.verdict("A BUS ERROR UNDER IRQ_QUIET STILL RAISES THE LINE: the read error halts the quiet channel and its "
                   "handler runs once",
-                  started_q && !C4::busy() && (qerr & DmaError::read) != 0u && ch4_on_line0 == l2 + 1u);
+                  started_q && ended_q && (qerr & DmaError::read) != 0u && ch4_on_line0 == l2 + 1u);
     C4::clear_errors();
     const bool again2 = run_c4({.read = src, .write = dst, .count = 64});
     bench.verdict("and the channel copies again after both", again2 && same(src, dst, 64) && C4::errors() == 0u);
@@ -532,8 +529,8 @@ void ti_instrument() {
     uint32_t sent = 0;
     uint32_t good = 0;
     bool wrong = false;
-    const uint32_t t0 = us_now();
-    while (good < 4096u && !wrong && us_now() - t0 < 500'000u) {
+    const uint32_t t0 = Ruler::now();
+    while (good < 4096u && !wrong && Ruler::now() - t0 < 500'000u) {
         while (sent < 4096u) {
             uint8_t chunk[128];
             uint32_t n = 0;
@@ -561,7 +558,7 @@ void ti_instrument() {
             }
         }
     }
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     const uint32_t irqs = dma0_irqs - irqs0;
     if (wrong) {
         uint8_t got[8] = {};
@@ -602,8 +599,7 @@ void tj_console_engine() {
         }
         print(serial, crlf);
     }
-    console_drain();
-    const bool idle = Serial::tx_idle();
+    const bool idle = brio::console_drain<Ruler, Serial>(500'000u);
     const uint32_t used = serial_blocks - b0;
     print(serial, "  2064 bytes of burst went out in ", used, " block(s) of the console's engine (", blocks,
           " before this letter), faults ", Serial::dma_faults(), ", idle after the drain: ", idle, crlf);
@@ -629,13 +625,13 @@ void half_loop(const char* name) {
     fill(out, 512, 0x3131u);
     uint8_t in[512] = {};
     uint32_t got = 0;
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     (void)T::write_bulk(out);
-    while (got < 512u && us_now() - t0 < 100'000u) {
+    while (got < 512u && Ruler::now() - t0 < 100'000u) {
         (void)T::harvest();
         got += T::read_bulk(std::span<uint8_t>(in + got, 512u - got));
     }
-    print(serial, "  ", name, ": up=", up, " got ", got, " in ", us_now() - t0, " us, exact=", same(out, in, got),
+    print(serial, "  ", name, ": up=", up, " got ", got, " in ", Ruler::now() - t0, " us, exact=", same(out, in, got),
           "; first ", hex(in[0]), " ", hex(in[1]), " ", hex(in[2]), " (", hex(out[0]), " ", hex(out[1]), " ",
           hex(out[2]), "); rx ch3 count ", DmaChannel<3>::count(), " busy ", DmaChannel<3>::busy(),
           " credits ", DmaChannel<3>::debug_credits(), " raw ", DmaChannel<3>::raised(), "; tx ch2 count ",
@@ -660,7 +656,7 @@ void tt_tx_idle_engine() {
     constexpr uint32_t bit_us = 1'000'000u / 9600u;
     uart1_isr = &TxOnly::isr;
     const bool up = TxOnly::init(clock, 9600);
-    spin_us(5000);
+    brio::spin_us<Ruler>(5000);
     static const uint8_t ones[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     bool level = Pin<4>::read();
     uint32_t falls = 0;
@@ -669,9 +665,9 @@ void tt_tx_idle_engine() {
     uint32_t idle_at = 0;
     bool idle_seen = false;
     (void)TxOnly::write_bulk(ones);
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < 12u * 10u * bit_us) {
-        const uint32_t t = us_now();
+    const uint32_t t0 = Ruler::now();
+    while (Ruler::now() - t0 < 12u * 10u * bit_us) {
+        const uint32_t t = Ruler::now();
         const bool now_level = Pin<4>::read();
         if (level && !now_level) {
             if (falls == 0u) {
@@ -716,17 +712,11 @@ volatile uint32_t beat_blocks = 0;
 
 /// The copy engine's block waited out, bounded.
 bool copier_done() {
-    const uint32_t t0 = us_now();
-    while (Copier::busy() && us_now() - t0 < 10'000u) {
-    }
-    return !Copier::busy() && Copier::errors() == 0u;
+    return brio::wait_until<Ruler>([] { return !Copier::busy(); }, 10'000u) && Copier::errors() == 0u;
 }
 /// One block of the beat engine waited out on its completion count.
 bool beat_done(uint32_t before) {
-    const uint32_t t0 = us_now();
-    while (beat_blocks == before && us_now() - t0 < 10'000u) {
-    }
-    return beat_blocks != before;
+    return brio::wait_until<Ruler>([before] { return beat_blocks != before; }, 10'000u);
 }
 /// The beat engine's channel's DATA_SIZE field, read back.
 uint32_t beat_size() {
@@ -814,7 +804,7 @@ uint32_t breaks_through(uint8_t* got, uint32_t room, uint32_t& kept) {
     constexpr uint32_t frame_us = 10u * 1'000'000u / 115200u + 1u;
     const bool up = T::init(clock, 115200, {}, UartRx::loopback);
     breaks_wire = wire_permille<T>(115200, 10u, 256u);
-    spin_us(20 * frame_us);
+    brio::spin_us<Ruler>(20 * frame_us);
     uint8_t junk[32];
     (void)T::harvest();
     while (T::read_bulk(junk) != 0u) {
@@ -822,36 +812,38 @@ uint32_t breaks_through(uint8_t* got, uint32_t room, uint32_t& kept) {
     T::clear_errors();
     kept = 0;
     uint32_t n = 0;
+    // A wait that runs out (a transmitter not idle, or a ring with no room,
+    // after a hundred frame times) means the slots were not the ones
+    // judged: the leg answers zero bytes and its verdicts fail.
+    bool on_time = true;
     for (uint32_t i = 0; i < 64u; ++i) {
         if (i == 9u || i == 24u || i == 41u || i == 58u) {
-            const uint32_t t0 = us_now();
-            while (!T::tx_idle() && us_now() - t0 < 100u * frame_us) {
-            }
+            on_time = brio::wait_until<Ruler>([] { return T::tx_idle(); }, 100u * frame_us) && on_time;
             T::Resource::break_send(true);
-            spin_us(2u * frame_us);
+            brio::spin_us<Ruler>(2u * frame_us);
             T::Resource::break_send(false);
             // The break's entry waited out and LOOKED AT before the next
             // byte lands: the look skips the drop with nothing clean queued
             // behind it.
-            spin_us(5u * frame_us);
+            brio::spin_us<Ruler>(5u * frame_us);
             (void)T::harvest();
             n += T::read_bulk({got + n, room - n});
             continue;
         }
         const uint8_t b = static_cast<uint8_t>(0x40u + i);
-        while (T::write_bulk({&b, 1}) == 0u) {
-        }
+        on_time = brio::wait_until<Ruler>([&b] { return T::write_bulk({&b, 1}) != 0u; }, 100u * frame_us) &&
+                  on_time;
         ++kept;
         // THE CONSUMER KEEPS UP, a look a slot: the receive ring skips
         // what it holds at the look after a drop (util/ring.hpp's
         // SkipRing), so a stream read once at its end would lose every
         // clean byte queued before the last break - the slot is waited
         // out (its frame and the receive time-out) and taken.
-        spin_us(5u * frame_us);
+        brio::spin_us<Ruler>(5u * frame_us);
         (void)T::harvest();
         n += T::read_bulk({got + n, room - n});
     }
-    spin_us(80u * frame_us);
+    brio::spin_us<Ruler>(80u * frame_us);
     (void)T::harvest();
     while (n < room) {
         const uint32_t k = T::read_bulk({got + n, room - n});
@@ -860,7 +852,7 @@ uint32_t breaks_through(uint8_t* got, uint32_t room, uint32_t& kept) {
         }
         n += k;
     }
-    return up ? n : 0u;
+    return up && on_time ? n : 0u;
 }
 
 void tv_breaks() {
@@ -952,20 +944,22 @@ volatile uint32_t uart1_entries = 0;
 /// One overrun episode: 5120 frames at 3 Mbaud into the ring with nobody
 /// reading it - the ring fills, its engine finds no room to re-arm, the
 /// FIFO fills behind the idle channel and the rest lands on it. Returns
-/// the UART1 entries the episode cost.
+/// the UART1 entries the episode cost, and clears `episodes_whole` when the
+/// 5120 frames were not all queued and sent within 100 ms (17 ms of wire).
+bool episodes_whole = true;
 uint32_t overrun_episode() {
     static uint8_t out[1024];
     fill(out, sizeof out, 0x5151u);
     const uint32_t e0 = uart1_entries;
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     uint32_t queued = 0;
-    while (queued < 5120u && us_now() - t0 < 100'000u) {
+    while (queued < 5120u && Ruler::now() - t0 < 100'000u) {
         const uint32_t want = 5120u - queued;
         queued += Instrument::write_bulk(std::span<const uint8_t>(out, want < sizeof out ? want : sizeof out));
     }
-    while (!Instrument::tx_idle() && us_now() - t0 < 100'000u) {
-    }
-    spin_us(200);
+    const bool sent = brio::wait_until<Ruler>([] { return Instrument::tx_idle(); }, 100'000u);
+    episodes_whole = episodes_whole && queued == 5120u && sent;
+    brio::spin_us<Ruler>(200);
     return uart1_entries - e0;
 }
 
@@ -973,13 +967,14 @@ void to_stalled_overrun() {
     uart1_isr = &Instrument::isr;
     const bool up = Instrument::init(clock, 3'000'000, {}, UartRx::loopback);
     Instrument::clear_errors();
+    episodes_whole = true;
     uint32_t during[3] = {0, 0, 0};
     uint32_t after = 0;
     uint8_t oe[3] = {0, 0, 0};
     for (uint8_t k = 0; k < 3u; ++k) {
         during[k] = overrun_episode();
         const uint32_t e1 = uart1_entries;
-        spin_us(10'000);
+        brio::spin_us<Ruler>(10'000);
         after += uart1_entries - e1;
         oe[k] = Instrument::hw_overruns();
         // The consumer comes back: the ring read empty and the engine
@@ -990,16 +985,18 @@ void to_stalled_overrun() {
             (void)Instrument::harvest();
             while (Instrument::read_bulk(sink) != 0u) {
             }
-            spin_us(500);
+            brio::spin_us<Ruler>(500);
         }
     }
     const uint8_t ring = Instrument::rx_overruns();
     print(serial, "  three episodes of 5120 frames at 3 Mbaud into a 1024-byte ring nobody reads: ",
           during[0], ", ", during[1], " and ", during[2], " UART1 entries, ", after,
           " in the silences after them; OE counted ", oe[0], ", ", oe[1], ", ", oe[2],
-          " after each; ring overruns ", ring, ", faults ", Instrument::dma_faults(), crlf);
-    bench.verdict("the ring filled and the engine found no room to re-arm: the ring overruns counted",
-                  up && ring >= 3u);
+          " after each; ring overruns ", ring, ", faults ", Instrument::dma_faults(),
+          episodes_whole ? "" : "; AN EPISODE WAS NOT SENT WHOLE in 100 ms", crlf);
+    bench.verdict("every episode's 5120 frames went out, the ring filled and the engine found no room "
+                  "to re-arm: the ring overruns counted",
+                  up && episodes_whole && ring >= 3u);
     bench.verdict("EVERY OVERRUN IS COUNTED AND REPORTED: one OE an episode, three in three - the "
                   "entry clears the sticky status (UARTRSR) the next onset rises from, and the "
                   "publish after it wakes the source",
@@ -1074,6 +1071,7 @@ struct SinkLeg {
     uint32_t lost = 0;       ///< positions skipped there, in all
     uint32_t bad = 0;        ///< bytes matching no position near the expected one
     uint32_t blocks = 0;     ///< copy blocks run beside the leg
+    bool ended = false;      ///< the last copies ended within 10 ms of the window's end
     bool high = false;       ///< the ring channel's HIGH_PRIORITY bit, read back
     uint8_t rx_overruns = 0;
     uint8_t hw_overruns = 0;
@@ -1118,8 +1116,8 @@ template <typename Port>
 SinkLeg sink_leg(uint8_t who, uint32_t baud, uint32_t window_ms, uint8_t copies, bool copies_high) {
     SinkLeg leg{};
     print(serial, "HOST sink 3 ", baud, " 8N1 ", window_ms, " 0", crlf);
-    const uint32_t t_line = us_now();
-    console_drain();
+    const uint32_t t_line = Ruler::now();
+    console_drain();   // a line cut by a wedged console is the host's to notice
     Serial::release();
     uart0_owner = who;
     leg.up = Port::init(clock, baud);
@@ -1129,8 +1127,9 @@ SinkLeg sink_leg(uint8_t who, uint32_t baud, uint32_t window_ms, uint8_t copies,
     load_blocks = 0;
     if (leg.up) {
         // The host settles 140 ms before it pumps: what comes before that
-        // is the switch's, not the stream's.
-        while (us_now() - t_line < 100'000u) {
+        // is the switch's, not the stream's. A deadline from the command
+        // line, not a span from here, hence the loop on the ruler.
+        while (Ruler::now() - t_line < 100'000u) {
         }
         uint8_t junk[64];
         (void)Port::harvest();
@@ -1140,7 +1139,7 @@ SinkLeg sink_leg(uint8_t who, uint32_t baud, uint32_t window_ms, uint8_t copies,
         const uint32_t skips0 = Port::rx_skips();
         lfsr_state = 0x12345678u;
         uint8_t chunk[64];
-        while (us_now() - t_line < window_ms * 1000u) {
+        while (Ruler::now() - t_line < window_ms * 1000u) {
             if (copies >= 1u) {
                 keep_loaded<LoadA>(0);
             }
@@ -1163,8 +1162,9 @@ SinkLeg sink_leg(uint8_t who, uint32_t baud, uint32_t window_ms, uint8_t copies,
         leg.faults = Port::dma_faults();
         leg.skips = (Port::rx_skips() - skips0) & 0xFFu;   // the ring's skip count is a byte
     }
-    while (LoadA::busy() || LoadB::busy()) {
-    }
+    // A 16 KB byte copy takes about 0.4 ms unpaced; 10 ms is the budget,
+    // and a copy still running then fails the letter's "loaded" verdict.
+    leg.ended = brio::wait_until<Ruler>([] { return !LoadA::busy() && !LoadB::busy(); }, 10'000u);
     leg.blocks = load_blocks;
     LoadA::stop();
     LoadB::stop();
@@ -1173,7 +1173,7 @@ SinkLeg sink_leg(uint8_t who, uint32_t baud, uint32_t window_ms, uint8_t copies,
     (void)Serial::init(clock, 115200);
     // A SILENCE BEFORE THE REPORT, the script's contract: whatever it
     // still had in flight lands in the console's ring and is no letter.
-    spin_us(500'000);
+    brio::spin_us<Ruler>(500'000);
     uint8_t c = 0;
     while (Serial::read_byte(c)) {
     }
@@ -1220,14 +1220,15 @@ void tp_ring_beside_copies() {
             const SinkLeg leg = g.who == 1u ? sink_leg<SinkHigh>(g.who, baud, window_ms, g.copies, g.copies_high)
                                             : sink_leg<SinkNormal>(g.who, baud, window_ms, g.copies, g.copies_high);
             print(serial, "  sink at ", baud, ", the ring ", leg.high ? "HIGH" : "normal", " beside ", g.copies,
-                  g.copies_high ? " HIGH_PRIORITY" : " normal", " 16 KB copies (", leg.blocks, " blocks): ",
+                  g.copies_high ? " HIGH_PRIORITY" : " normal", " 16 KB copies (", leg.blocks, " blocks",
+                  leg.ended ? "" : ", NOT ENDED", "): ",
                   leg.in, " byte(s) in, ", leg.gaps, " gap(s) of ", leg.lost, " lost, ", leg.bad,
                   " bad; ring overruns ", leg.rx_overruns, ", OE ", leg.hw_overruns, ", skips ",
                   leg.skips, ", line errors ", leg.line_errors, ", faults ", leg.faults, crlf);
             if (!leg.up || leg.in + leg.lost < baud / 10u / 2u) {
                 fed = false;
             }
-            if (leg.blocks < 10u) {
+            if (leg.blocks < 10u || !leg.ended) {
                 loaded = false;
             }
             if (leg.high != (g.who == 1u)) {
@@ -1242,7 +1243,7 @@ void tp_ring_beside_copies() {
         }
     }
     bench.verdict("the host fed every leg (brio stress on the other end)", fed);
-    bench.verdict("the copies ran the whole window, block after block", loaded);
+    bench.verdict("the copies ran the whole window, block after block, and ended after it", loaded);
     bench.verdict("the ring's channel carried the level asked: HIGH from the transport, normal "
                   "through the engine that ignores it", levels);
     bench.verdict("THE RING AT ITS DEFAULT LEVEL LOSES NOTHING, every byte in order at 115200, 1 Mbaud "
@@ -1308,7 +1309,7 @@ void hold_a_request() {
     for (uint8_t i = 0; i < stale_frames; ++i) {
         U1::regs().UARTDR = static_cast<uint32_t>(0xE0u + i);
     }
-    spin_us(60);
+    brio::spin_us<Ruler>(60);
 }
 
 /// The contract: released with the enables left set, the gate closed, init().
@@ -1321,15 +1322,15 @@ bool reinit_exact() {
     U1::hold();
     uart1_isr = &Instrument::isr;
     const bool up = Instrument::init(clock, 1'000'000, {}, UartRx::loopback);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     (void)Instrument::write_bulk(std::span<const uint8_t>(out, held_block));
     uint32_t got = 0;
-    while (got < held_block && us_now() - t0 < 2000u) {
+    while (got < held_block && Ruler::now() - t0 < 2000u) {
         (void)Instrument::harvest();
         got += Instrument::read_bulk(std::span<uint8_t>(in + got, held_block + 1u - got));
     }
-    const uint32_t took = us_now() - t0;
-    spin_us(100);   // ten frame times: a seventeenth would have landed by now
+    const uint32_t took = Ruler::now() - t0;
+    brio::spin_us<Ruler>(100);   // ten frame times: a seventeenth would have landed by now
     (void)Instrument::harvest();
     got += Instrument::read_bulk(std::span<uint8_t>(in + got, held_block + 1u - got));
     const bool exact = up && got == held_block && same(out, in, held_block) && Instrument::dma_faults() == 0u;
@@ -1353,13 +1354,14 @@ uint8_t reinit_without_reset() {
     InstrumentRxEngine::arm(&U1::regs().UARTDR, Dreq::uart1_rx, true, DmaReport::errors);
     (void)InstrumentRxEngine::start(in, held_block);
     InstrumentTxEngine::arm(&U1::regs().UARTDR, Dreq::uart1_tx, false, DmaReport::errors);
-    spin_us(20);
+    brio::spin_us<Ruler>(20);
     disabled_moved = held_block - DmaChannel<3>::count();
     U1::enable(true);
     (void)InstrumentTxEngine::start(out, held_block);
-    const uint32_t t0 = us_now();
-    while (!InstrumentRxEngine::idle() && us_now() - t0 < 2000u) {
-    }
+    // The bound of the letter's comment: 2000 us, the block's wire time
+    // twelve times over. A channel still running then is a stall, and the
+    // round does not count as the control's.
+    const bool idle = brio::wait_until<Ruler>([] { return InstrumentRxEngine::idle(); }, 2000u);
     uint8_t stale = 0;
     while (stale < stale_frames && in[stale] == static_cast<uint8_t>(0xE0u + stale)) {
         ++stale;
@@ -1367,14 +1369,14 @@ uint8_t reinit_without_reset() {
     const uint32_t moved = held_block - DmaChannel<3>::count();
     print(serial, "  the control: disabled, the receive channel moved ", disabled_moved, "; enabled, ", moved, " of ", held_block, ", its first ", hex(in[0]), " ",
           hex(in[1]), " ", hex(in[2]), " ", hex(in[3]), " (the stale frames are E0 E1 E2 E3, the block starts ",
-          hex(out[0]), "): ", stale, " stale", crlf);
+          hex(out[0]), "): ", stale, " stale", idle ? "" : ", THE CHANNEL STALLED", crlf);
     (void)InstrumentTxEngine::complete();
     InstrumentTxEngine::stop();
     InstrumentRxEngine::stop();
     U1::dma_requests(false, false);
     U1::enable(false);
     U1::hold();
-    return stale;
+    return idle ? stale : 0u;
 }
 
 void tr_released_requester() {

@@ -93,6 +93,7 @@
 #include "rp2350/uart.hpp"
 #include "rp2350/watchdog.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 150'000'000>;
@@ -100,9 +101,9 @@ constexpr SysClock clock;
 using P = brio::Rp2350Platform<>;
 
 // The token letter i resumes from, carried in SRAM the crt never
-// touches. Inline, for the reason the other strata's suites give: gcc
-// gives an inline variable with a section attribute a COMDAT group like
-// the platform's own panic_record_, and a plain one would clash.
+// touches. Inline, because gcc gives an inline variable with a section
+// attribute a COMDAT group like the platform's own panic_record_, and a
+// plain one would clash.
 struct NoinitToken {
     uint32_t magic;
     uint32_t leg;
@@ -124,7 +125,7 @@ constexpr UartPins console_pins{
 using Serial = Uart<0, console_pins>;
 constexpr Serial serial;
 
-using Ruler = Timer<0>;       // the microsecond ruler every letter is judged by
+using Micros = Timer<0>;       // the microsecond ruler every letter is judged by
 using Spare = Timer<1>;       // the instance a destructive letter may disturb
 
 TestBench<Serial> bench;
@@ -136,24 +137,21 @@ std::optional<PanicRecord> boot_record;
 bool boot_scratch_alive = false;
 bool boot_noinit_alive = false;
 
-uint32_t us_now() { return Ruler::now_low(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// TIMER0's microsecond count (rp2350/timer.hpp): one bus read, legal in
+/// any context, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Micros::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 
-/// Let the console's own transmitter fall silent: its interrupt would
-/// otherwise wake every idle() below, and a reboot must not cut a line
-/// in half.
-void console_drain() {
-    const uint32_t t0 = us_now();
-    while (!Serial::tx_idle() && us_now() - t0 < 200'000u) {
-    }
-}
-
-/// Spin on the ruler. Every wait in this suite is bounded by it and not
-/// by the kernel tick, which is a different counter on each half.
-void wait_us(uint32_t us) {
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < us) {
-    }
-}
+/// Let a reset leg's line leave before its reboot: a reboot must not cut
+/// a line in half. The answer is dropped: the leg's tally is banked
+/// already, nothing is timed, and a verdict printed here would not cross
+/// the reset. Every wait in this suite is on the ruler and not on the
+/// kernel tick, which is a different counter on each half.
+void drain_before_reset() { (void)brio::console_drain<Ruler, Serial>(); }
 
 // ---- the token letter i lives in ------------------------------------------
 //
@@ -271,7 +269,7 @@ void ta_boot() {
     show(TickGenerator<TickConsumer::proc1>::running(),
          TickGenerator<TickConsumer::proc1>::cycles());
     print(serial, "timer0 ");
-    show(Ruler::Tick::running(), Ruler::Tick::cycles());
+    show(Micros::Tick::running(), Micros::Tick::cycles());
     print(serial, "timer1 ");
     show(Spare::Tick::running(), Spare::Tick::cycles());
     print(serial, "watchdog ");
@@ -282,7 +280,7 @@ void ta_boot() {
     print(serial, crlf);
     bench.verdict("every generator this suite started divides clk_ref by the crystal's "
                   "megahertz",
-                  Ruler::Tick::running() && Ruler::Tick::cycles() == expect_cycles &&
+                  Micros::Tick::running() && Micros::Tick::cycles() == expect_cycles &&
                       Spare::Tick::running() && Spare::Tick::cycles() == expect_cycles &&
                       Watchdog::Tick::running() && Watchdog::Tick::cycles() == expect_cycles);
     bench.verdict("no breadcrumb is pending on a clean start", !boot_record);
@@ -292,11 +290,11 @@ void ta_boot() {
 // b - three microsecond counters against each other
 // =============================================================================
 void tb_rulers() {
-    const uint32_t t0 = Ruler::now_low();
+    const uint32_t t0 = Micros::now_low();
     const uint32_t s0 = Spare::now_low();
     const uint32_t m0 = Mtime::micros();
-    wait_us(200'000u);
-    const uint32_t t1 = Ruler::now_low();
+    brio::spin_us<Ruler>(200'000u);
+    const uint32_t t1 = Micros::now_low();
     const uint32_t s1 = Spare::now_low();
     const uint32_t m1 = Mtime::micros();
     const uint32_t dt = t1 - t0;
@@ -318,9 +316,9 @@ void tb_rulers() {
 // c - the 64-bit read, both instances
 // =============================================================================
 void tc_reads() {
-    const uint64_t a = Ruler::now();
-    const uint64_t b = Ruler::now_latched();
-    const uint64_t c = Ruler::now();
+    const uint64_t a = Micros::now();
+    const uint64_t b = Micros::now_latched();
+    const uint64_t c = Micros::now();
     print(serial, "  TIMER0 now() ", static_cast<uint32_t>(a), " latched ",
           static_cast<uint32_t>(b), " now() ", static_cast<uint32_t>(c), " us; high half ",
           static_cast<uint32_t>(a >> 32), crlf);
@@ -328,9 +326,9 @@ void tc_reads() {
                   b >= a && b - a <= 50u && c >= b && c - b <= 50u);
 
     bool monotonic = true;
-    uint64_t last = Ruler::now();
+    uint64_t last = Micros::now();
     for (uint16_t k = 0; k < 2000; ++k) {
-        const uint64_t n = Ruler::now();
+        const uint64_t n = Micros::now();
         if (n < last) { monotonic = false; }
         last = n;
     }
@@ -348,7 +346,7 @@ void tc_reads() {
     // honest across a wrap of the low word, so how long the counters have
     // run since boot is printed and not judged (a verdict on it would fail
     // after 71.6 minutes of uptime with nothing wrong).
-    print(serial, "  high halves now: TIMER0 ", static_cast<uint32_t>(Ruler::now() >> 32), ", TIMER1 ",
+    print(serial, "  high halves now: TIMER0 ", static_cast<uint32_t>(Micros::now() >> 32), ", TIMER1 ",
           static_cast<uint32_t>(Spare::now() >> 32), crlf);
 }
 
@@ -384,9 +382,7 @@ void one_alarm() {
     Timer<t>::template alarm<a>(target);
     const bool was_armed = Timer<t>::template armed<a>();
     const uint32_t read_back = Timer<t>::template alarm_at<a>();
-    const uint32_t wait0 = us_now();
-    while (alarm_fires[slot] == 0u && us_now() - wait0 < 10'000u) {
-    }
+    const bool fired = brio::wait_until<Ruler>([] { return alarm_fires[slot] != 0u; }, 10'000u);
     const uint32_t latency = alarm_entry_us[slot] - target;
     print(serial, "  TIMER", t, " alarm ", a, " (line ",
           static_cast<int>(Timer<t>::template irq<a>()), ") at +2000 us: fired ",
@@ -395,7 +391,7 @@ void one_alarm() {
     bench.verdict("writing the alarm register arms it and reads back as written",
                   was_armed && read_back == target);
     bench.verdict("it fires once and the handler enters within 20 us of the match",
-                  alarm_fires[slot] == 1u && latency <= 20u);
+                  fired && alarm_fires[slot] == 1u && latency <= 20u);
     bench.verdict("ARMED clears when it fires", !Timer<t>::template armed<a>());
     bench.verdict("the handler's write-one cleared the raised flag",
                   !Timer<t>::template raised<a>());
@@ -411,7 +407,7 @@ void alarm_extras() {
     constexpr uint8_t slot = 4u * t;
     Timer<t>::template alarm_in<0>(2000u);
     Timer<t>::template disarm<0>();
-    wait_us(4000u);
+    brio::spin_us<Ruler>(4000u);
     bench.verdict("an alarm disarmed before its time never fires", alarm_fires[slot] == 1u);
     bench.verdict("and the raw flag stayed down with it", !Timer<t>::template raised<0>());
 
@@ -453,7 +449,7 @@ void te_timer1_alarms() {
 void tf_pause() {
     bench.verdict("init() cleared both DBGPAUSE bits: a core halted in a debugger no "
                   "longer freezes the ruler of the other core",
-                  !Ruler::debug_paused(0) && !Ruler::debug_paused(1) &&
+                  !Micros::debug_paused(0) && !Micros::debug_paused(1) &&
                       !Spare::debug_paused(0) && !Spare::debug_paused(1));
     Spare::debug_pause(true, true);
     const bool set_back = Spare::debug_paused(0) && Spare::debug_paused(1);
@@ -465,15 +461,15 @@ void tf_pause() {
     Spare::pause(true);
     const bool paused = Spare::paused();
     const uint32_t at_pause = Spare::now_low();
-    wait_us(5000u);
+    brio::spin_us<Ruler>(5000u);
     const uint32_t during = Spare::now_low();
     Spare::pause(false);
-    const uint32_t t0 = us_now();
-    wait_us(5000u);
+    const uint32_t t0 = Ruler::now();
+    brio::spin_us<Ruler>(5000u);
     const uint32_t after = Spare::now_low();
     print(serial, "  TIMER1 paused: ", during - at_pause, " us counted over a 5 ms wait; "
           "resumed: ", after - during, " us over the next 5 ms (the ruler saw ",
-          us_now() - t0, " us)", crlf);
+          Ruler::now() - t0, " us)", crlf);
     bench.verdict("PAUSE reads back", paused && !Spare::paused());
     bench.verdict("a paused counter does not move", during - at_pause <= 2u);
     bench.verdict("it takes up from where it stopped, with nothing caught up",
@@ -487,14 +483,14 @@ void tf_pause() {
 // =============================================================================
 void tg_source() {
     bench.verdict("init() leaves both counters on the microsecond tick",
-                  Ruler::source() == TimerSource::tick && Spare::source() == TimerSource::tick);
+                  Micros::source() == TimerSource::tick && Spare::source() == TimerSource::tick);
     Spare::source(TimerSource::sysclk);
     const bool took = Spare::source() == TimerSource::sysclk;
     const uint32_t s0 = Spare::now_low();
-    const uint32_t t0 = us_now();
-    wait_us(20'000u);
+    const uint32_t t0 = Ruler::now();
+    brio::spin_us<Ruler>(20'000u);
     const uint32_t ds = Spare::now_low() - s0;
-    const uint32_t dt = us_now() - t0;
+    const uint32_t dt = Ruler::now() - t0;
     Spare::source(TimerSource::tick);
     // Per MILLISECOND, not per microsecond: the ratio is 150 here and a
     // truncating division of the raw counts would hide a whole per cent
@@ -517,7 +513,7 @@ void tg_source() {
     bench.verdict("and the tick is one write away again",
                   Spare::source() == TimerSource::tick);
     const uint32_t back0 = Spare::now_low();
-    wait_us(5000u);
+    brio::spin_us<Ruler>(5000u);
     bench.verdict("back on the tick it counts microseconds again",
                   Spare::now_low() - back0 >= 4990u && Spare::now_low() - back0 < 5200u);
 }
@@ -536,11 +532,11 @@ void th_ticks() {
     Spare::Tick::stop();
     const bool stopped = !Spare::Tick::running();
     const uint32_t at_stop = Spare::now_low();
-    wait_us(5000u);
+    brio::spin_us<Ruler>(5000u);
     const uint32_t frozen = Spare::now_low() - at_stop;
     const bool restarted = Spare::Tick::start(divider);
     const uint32_t r0 = Spare::now_low();
-    wait_us(5000u);
+    brio::spin_us<Ruler>(5000u);
     const uint32_t moving = Spare::now_low() - r0;
     print(serial, "  TIMER1's generator stopped: ", frozen,
           " us counted over 5 ms; restarted at ", Spare::Tick::cycles(), " cycles: ",
@@ -574,10 +570,10 @@ void tj_watchdog() {
     Watchdog::start(8'000'000u, false);
     const bool started = Watchdog::running();
     const uint32_t r0 = Watchdog::remaining_us();
-    const uint32_t t0 = us_now();
-    wait_us(200'000u);
+    const uint32_t t0 = Ruler::now();
+    brio::spin_us<Ruler>(200'000u);
     const uint32_t r1 = Watchdog::remaining_us();
-    const uint32_t dt = us_now() - t0;
+    const uint32_t dt = Ruler::now() - t0;
     const uint32_t decrements = r0 - r1;
     const uint32_t rate_permille = dt != 0u ? decrements * 1000u / dt : 0u;
 
@@ -586,7 +582,7 @@ void tj_watchdog() {
     const uint32_t divider = Watchdog::Tick::cycles();
     Watchdog::Tick::stop();
     const uint32_t f0 = Watchdog::remaining_us();
-    wait_us(5000u);
+    brio::spin_us<Ruler>(5000u);
     const uint32_t frozen = f0 - Watchdog::remaining_us();
     (void)Watchdog::Tick::start(divider);
 
@@ -649,7 +645,7 @@ void tk_lock() {
     Spare::source(TimerSource::tick);
     Spare::pause(false);
     const uint32_t c0 = Spare::now_low();
-    wait_us(5000u);
+    brio::spin_us<Ruler>(5000u);
     const uint32_t still_counting = Spare::now_low() - c0;
     print(serial, "  TIMER1 locked: LOCKED reads ", locked ? 1 : 0,
           "; ALARM0 ", refused_alarm ? "refused" : "TOOK the write",
@@ -674,7 +670,7 @@ void tk_lock() {
                   "instead of merely releasing it - which is what takes LOCKED down",
                   back && !Spare::locked());
     const uint32_t d0 = Spare::now_low();
-    wait_us(5000u);
+    brio::spin_us<Ruler>(5000u);
     bench.verdict("and the counter starts again from zero on its microsecond tick",
                   Spare::now_low() - d0 >= 4990u && Spare::source() == TimerSource::tick);
 }
@@ -729,12 +725,17 @@ void tn_breadcrumb() {
 // =============================================================================
 void bank(uint8_t leg, uint8_t code = 0, uint8_t context = 0) { token_set(leg, code, context); }
 
-[[noreturn]] void await_reset(const char* what) {
-    console_drain();
-    wait_us(3'000'000u);
+/// A leg whose reset did not come: after 3 s, the watchdog stopped, the
+/// token cleared (no later boot resumes this run), a failed verdict and
+/// the letter closed - the console back at its prompt, never a hang.
+void await_reset(const char* what) {
+    drain_before_reset();
+    brio::spin_us<Ruler>(3'000'000u);
+    Watchdog::stop();
+    token_clear();
     print(serial, "  ...3 s and still running ", what, crlf);
-    for (;;) {
-    }
+    bench.verdict("the leg's reset came within 3 s", false);
+    bench.end_letter();
 }
 
 /// The processor's own reset request, called only where it exists: the
@@ -754,13 +755,13 @@ template <CoreKind k>
     bank(1);
     print(serial, "  leg 1: Reset::software() - the watchdog's trigger under the "
           "power-on state machine ...", crlf);
-    console_drain();
+    drain_before_reset();
     Reset::software();
 }
-[[noreturn]] void leg_timeout() {
+void leg_timeout() {
     bank(2);
     print(serial, "  leg 2: the watchdog started at 100 ms and never kicked ...", crlf);
-    console_drain();
+    drain_before_reset();
     (void)Watchdog::init(clock);
     Watchdog::start(100'000u);
     await_reset("(the watchdog did not fire)");
@@ -768,21 +769,21 @@ template <CoreKind k>
 [[noreturn]] void leg_panic() {
     bank(3, static_cast<uint8_t>(PanicCode::queue_overflow), 0x33);
     print(serial, "  leg 3: panic<P, ResetReporter>(queue_overflow, 0x33) ...", crlf);
-    console_drain();
+    drain_before_reset();
     panic<P, ResetReporter>(PanicCode::queue_overflow, 0x33);
 }
-[[noreturn]] void leg_fault() {
+void leg_fault() {
     bank(4, static_cast<uint8_t>(PanicCode::kernel_fault), 0x77);
     print(serial, "  leg 4: a breakpoint instruction with no debugger attached - a "
           "HardFault on one half, the crt's exception trap on the other ...", crlf);
-    console_drain();
+    drain_before_reset();
     P::break_here();
     await_reset("(the breakpoint did not fault: a probe has left halting debug enabled)");
 }
 [[noreturn]] void leg_core() {
     bank(5);
     print(serial, "  leg 5: Reset::core() - this processor's own reset request ...", crlf);
-    console_drain();
+    drain_before_reset();
     request_core_reset<core_kind>();
 }
 
@@ -800,7 +801,8 @@ void ti_resets() {
 }
 
 /// Everything after a reset: called from main() instead of the banner,
-/// it either starts the next leg (never returning) or closes the letter.
+/// it either starts the next leg (a leg whose reset never comes closes
+/// the letter itself and returns) or closes the letter.
 void ti_resume() {
     const uint8_t leg = boot_scratch_alive ? scratch_leg() : noinit_leg();
     const uint32_t tally = boot_scratch_alive ? Scratch<1>::read() : noinit_token.tally;
@@ -884,11 +886,13 @@ void ti_resume() {
         if constexpr (core_kind == CoreKind::cortex_m33) {
             leg_core();
         } else {
-            bench.verdict("THE HAZARD3 HALF HAS FOUR LEGS AND THE ARM HALF FIVE: a hart "
-                          "cannot reset itself, its hartreset and ndmreset being the "
-                          "Debug Module's, so Reset::core() is refused at compile time "
-                          "here and the reboot both halves share is the watchdog's",
-                          core_kind == CoreKind::hazard3);
+            // A fact of the build, not a measurement: this branch is the
+            // Hazard3 half's by `if constexpr`, so it is printed and not
+            // judged (a verdict here could not fail).
+            print(serial, "  THE HAZARD3 HALF HAS FOUR LEGS AND THE ARM HALF FIVE: a hart "
+                  "cannot reset itself, its hartreset and ndmreset being the Debug "
+                  "Module's, so Reset::core() is refused at compile time here and the "
+                  "reboot both halves share is the watchdog's", crlf);
             finish();
         }
     }

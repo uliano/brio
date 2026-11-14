@@ -96,6 +96,7 @@
 #include "rp2040/timer.hpp"
 #include "rp2040/uart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 namespace {
@@ -122,13 +123,18 @@ constexpr Serial serial;
 
 TestBench<Serial> bench;
 
-uint32_t us_now() { return Timer::now_low(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// the system timer's microsecond count (rp2040/timer.hpp): one bus read,
+/// legal in any context, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Timer::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 
-void console_drain() {
-    const uint32_t t0 = us_now();
-    while (!Serial::tx_idle() && us_now() - t0 < 200'000u) {
-    }
-}
+/// Let the console's last byte leave the wire (util/test_wait.hpp), within
+/// 200 ms; false when it did not - a wedged console.
+[[nodiscard]] bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 
 /// Within `permille` per mille of `expected`.
 bool near(uint32_t value, uint32_t expected, uint32_t permille) {
@@ -178,9 +184,9 @@ bool count(const char* label, CountSource what, uint32_t expected, uint32_t perm
 template <typename C>
 bool switch_to(C, const char* name, uint32_t* took_us = nullptr) {
     Serial::rebase(C::pclk_hz);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool ok = C::init();
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     if (!ok) {
         Serial::rebase(Boot::pclk_hz);
         (void)Boot::init();
@@ -295,11 +301,14 @@ void td_peri() {
     count("clk_peri on the crystal", CountSource::clk_peri, X125::pclk_hz);
     count("clk_sys meanwhile", CountSource::clk_sys, X125::hz);
 
-    // clk_sys moves; the UART is NOT touched (pclk_hz is the same).
-    console_drain();
-    const uint32_t t0 = us_now();
+    // clk_sys moves; the UART is NOT touched (pclk_hz is the same). The
+    // drain keeps a line whole across the switch; its answer is dropped,
+    // since a wedged console costs only its own lines and the switch's
+    // time is printed, not judged.
+    (void)console_drain();
+    const uint32_t t0 = Ruler::now();
     const bool ok = X48::init();
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     Ticker::rebase(X48::hz);
     print(serial, "  clk_sys moved to 48 MHz in ", took, " us with the UART untouched - this "
           "line is the proof", crlf);
@@ -307,7 +316,7 @@ void td_peri() {
     count("clk_peri, unchanged", CountSource::clk_peri, X48::pclk_hz);
     count("clk_sys at 48", CountSource::clk_sys, X48::hz);
 
-    console_drain();
+    (void)console_drain();   // as above
     const bool back = X125::init();
     Ticker::rebase(X125::hz);
     print(serial, "  and back to 125 MHz, the UART still untouched", crlf);
@@ -329,12 +338,12 @@ void delay_at(C c, const char* name) {
         return;
     }
     (void)delay_us(c, 5);   // the cold call, spent
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool long_ok = delay_us(c, 900);
-    const uint32_t took = us_now() - t0;
-    const uint32_t s0 = us_now();
+    const uint32_t took = Ruler::now() - t0;
+    const uint32_t s0 = Ruler::now();
     const bool short_ok = delay_us(c, 100);
-    const uint32_t short_took = us_now() - s0;
+    const uint32_t short_took = Ruler::now() - s0;
     // The bracket's overhead: two timer reads and the calls, about 500
     // CPU cycles, at this rate's price plus the timer's 1 us grain.
     const uint32_t overhead_us = 500'000'000u / C::hz + 1u;
@@ -365,18 +374,25 @@ void ticker_at(C c, const char* name) {
         bench.verdict(name, false);
         return;
     }
-    console_drain();
+    // The window opens on a quiet console: a transmit interrupt inside it
+    // would move the tick handler's entry at either edge.
+    if (!console_drain()) {
+        bench.verdict(name, ": the console fell quiet before the window", false);
+        return;
+    }
+    // Both edges are waited on the timer, which this rate does not move: a
+    // tick within 2 ms (a period is 1 ms), the hundredth within 200 ms. A
+    // ticker that stopped is a time-out and a failed verdict, not a hang.
     const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() == t0) {
-    }
-    const uint32_t u0 = us_now();
+    const bool edge = brio::wait_until<Ruler>([t0] { return Ticker::ticks() != t0; }, 2'000u);
+    const uint32_t u0 = Ruler::now();
     const uint32_t t1 = Ticker::ticks();
-    while (Ticker::ticks() - t1 < 100u) {
-    }
-    const uint32_t span = us_now() - u0;
-    print(serial, "  at ", name, ": 100 ticks spanned ", span, " us", crlf);
+    const bool hundred = brio::wait_until<Ruler>([t1] { return Ticker::ticks() - t1 >= 100u; }, 200'000u);
+    const uint32_t span = Ruler::now() - u0;
+    print(serial, "  at ", name, ": 100 ticks spanned ", span, " us", edge && hundred ? "" : " (the ticker STOPPED)",
+          crlf);
     bench.verdict(name, ": the rebased ticker keeps 1 ms per tick within 0.1 %",
-                  near(span, 100'000u, 1));
+                  edge && hundred && near(span, 100'000u, 1));
 }
 
 void tf_ticker() {
@@ -420,7 +436,7 @@ void th_divider_and_refusal() {
         bench.verdict("PeriSource::crystal", false);
         return;
     }
-    console_drain();
+    (void)console_drain();   // a wedged console costs only its own lines
     Clocks::sys_divider(2);
     Ticker::rebase(X125::hz / 2u);
     print(serial, "  clk_sys divided by 2 under a crystal-fed console: this line is the proof",
@@ -433,14 +449,14 @@ void th_divider_and_refusal() {
 
     // The PLL asked for the impossible, with clk_sys parked on clk_ref
     // (the crystal, 12 MHz) so nothing runs on the PLL meanwhile.
-    console_drain();
+    (void)console_drain();   // as above
     const bool parked = Clocks::sys_from_ref();
     Ticker::rebase(X125::xtal_hz);
     bench.verdict("clk_sys parks on clk_ref", parked);
     const PllConfig low_vco{.refdiv = 1, .fbdiv = 16, .postdiv1 = 7, .postdiv2 = 7};   // 192 MHz VCO
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool locked = PllSys::init(low_vco);
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     print(serial, "  the PLL at a 192 MHz VCO (below the 750 MHz floor): LOCK ",
           locked ? "ROSE" : "did not rise", " in ", took, " us (printed, not judged: the "
           "datasheet promises nothing outside the range)", crlf);
@@ -524,8 +540,8 @@ uint32_t measure_duty() {
     Sampler::restart();
     Sampler::enable(true);
     uint32_t n = 0;
-    const uint32_t t0 = us_now();
-    while (n < 2048u && us_now() - t0 < 20'000u) {
+    const uint32_t t0 = Ruler::now();
+    while (n < 2048u && Ruler::now() - t0 < 20'000u) {
         if (!Sampler::rx_empty()) {
             sample_words[n++] = Sampler::pop();
         }
@@ -586,8 +602,8 @@ void tr_partner_output() {
     print(serial, "  sixteen seconds of GP20 (start the partner's s now)", crlf);
     uint16_t unknown = 0;
     uint16_t dead = 0;
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < 16'000'000u) {
+    const uint32_t t0 = Ruler::now();
+    while (Ruler::now() - t0 < 16'000'000u) {
         // The duty sampled on both sides of the count: a reading is filed
         // only when the two agree within a point - a setting changed (or
         // the output stopped) inside the 32 ms of the count otherwise

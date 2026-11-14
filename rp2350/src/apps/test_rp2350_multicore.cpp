@@ -101,6 +101,7 @@
 #include "rp2350/uart.hpp"
 #include "util/inbox.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 namespace {
@@ -121,7 +122,14 @@ constexpr Serial serial;
 
 TestBench<Serial> bench;
 
-uint32_t us_now() { return Mtime::micros(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// the platform timer's microsecond count (rp2350/mtime.hpp): one bus
+/// read, the same on both architectures, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Mtime::micros(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 
 const char* arch_name() {
     return core_kind == CoreKind::hazard3 ? "RISC-V Hazard3" : "Arm Cortex-M33";
@@ -190,7 +198,7 @@ struct Origin : Fsm<Origin, Pong, Tick, Chored> {
                 }
                 last_pong = p.n;
                 ++pongs;
-                last_pong_us = us_now();
+                last_pong_us = Ruler::now();
                 return handled();
             },
             [](Tick) {
@@ -259,8 +267,9 @@ struct Echo : Fsm<Echo, Ping, Halt, Chore> {
                 case 4: {   // this core's own bell, rung by this core
                     const uint32_t b = bells_on_core1;
                     SioDoorbell<1>::ring();
-                    for (uint32_t spins = 0; spins < 10'000u && bells_on_core1 == b; ++spins) {
-                    }
+                    // The answer is dropped: the count goes back to core
+                    // 0, whose verdict judges it (one entry).
+                    (void)brio::wait_until<Ruler>([b] { return bells_on_core1 != b; }, 1'000u);
                     value = bells_on_core1 - b;
                     break;
                 }
@@ -324,7 +333,7 @@ uint32_t probe_stack_top() {
 
 [[noreturn]] void core1_entry() {
     core1_cpuid = P1::core_id();
-    core1_started_us = us_now();
+    core1_started_us = Ruler::now();
     core1_runs = core1_runs + 1u;
     core1_vectors = core_vector_base();   // what the shim adopted, read on core 1
     // Core 1's own timebase. On the Hazard3 half this restarts the tick
@@ -363,16 +372,18 @@ struct Counts {
 };
 
 /// Serve core 0's kernel until `pongs` reaches `target` or `budget_us`
-/// runs out.
+/// runs out (brio::wait_until on the ruler, a kernel step in each turn):
+/// false on the time-out, which every caller judges or states.
 bool serve_until(uint32_t target, uint32_t budget_us) {
-    const uint32_t t0 = us_now();
-    while (Origin::pongs < target) {
-        (void)K0::step();
-        if (us_now() - t0 > budget_us) {
+    return brio::wait_until<Ruler>(
+        [target] {
+            if (Origin::pongs >= target) {
+                return true;
+            }
+            (void)K0::step();
             return false;
-        }
-    }
-    return true;
+        },
+        budget_us);
 }
 
 /// Core 1 reset and launched again, WITH CORE 0'S BELL LEFT ENABLED: the
@@ -389,9 +400,9 @@ void relaunch_core1() {
     while (Beat::queue.pop()) {
     }
     core1_cpuid = 0xFFu;
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     launch_ok = Core1::launch(&core1_entry);
-    launch_us = us_now() - t0;
+    launch_us = Ruler::now() - t0;
 }
 
 // =============================================================================
@@ -416,11 +427,11 @@ void ta_launch() {
                   serve_until(1, 20'000u));
     const uint32_t runs_before = core1_runs;
     const uint32_t started_before = core1_started_us;
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     // The protocol alone, no reset - and onto a stack of this suite's,
     // because core 1 is standing on its own.
     const bool again = Core1::protocol(&core1_entry, probe_stack_top());
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     print(serial, "  the protocol alone at the running core 1: ", again ? "ACCEPTED" : "refused",
           " after ", took, " us; core 1's entry stamp ", started_before, " -> ", core1_started_us,
           " (", core1_started_us == started_before ? "not re-run" : "RE-RUN", ", entry runs ",
@@ -438,11 +449,9 @@ void ta_launch() {
 // b - two tickers
 // =============================================================================
 void tb_tickers() {
-    const uint32_t t0 = us_now();
     const uint32_t c0 = CoreTicker<0>::ticks();
     const uint32_t c1 = CoreTicker<1>::ticks();
-    while (us_now() - t0 < 500'000u) {
-    }
+    brio::spin_us<Ruler>(500'000u);
     const uint32_t d0 = CoreTicker<0>::ticks() - c0;
     const uint32_t d1 = CoreTicker<1>::ticks() - c1;
     print(serial, "  over 500 ms of the ruler: core 0's ticker +", d0, ", core 1's +", d1,
@@ -464,16 +473,12 @@ void tb_tickers() {
     const uint32_t p0 = CoreTicker<0>::ticks();
     const uint32_t p1 = CoreTicker<1>::ticks();
     CoreTicker<0>::pause();
-    const uint32_t t1 = us_now();
-    while (us_now() - t1 < 100'000u) {
-    }
+    brio::spin_us<Ruler>(100'000u);
     const uint32_t frozen = CoreTicker<0>::ticks() - p0;
     const uint32_t ran = CoreTicker<1>::ticks() - p1;
     CoreTicker<0>::resume();
     const uint32_t p2 = CoreTicker<0>::ticks();
-    const uint32_t t2 = us_now();
-    while (us_now() - t2 < 20'000u) {
-    }
+    brio::spin_us<Ruler>(20'000u);
     const uint32_t again = CoreTicker<0>::ticks() - p2;
     print(serial, "  core 0's ticker paused for 100 ms of the ruler: it advanced ", frozen,
           " ticks, core 1's ", ran, "; after the resume core 0's advanced ", again,
@@ -495,7 +500,7 @@ void tc_round_trip() {
     uint32_t sum = 0;
     bool all = true;
     for (uint16_t n = 1; n <= 64u; ++n) {
-        const uint32_t t0 = us_now();
+        const uint32_t t0 = Ruler::now();
         send<Echo>(Ping{n});
         if (!serve_until(n, 20'000u)) {
             all = false;
@@ -533,8 +538,8 @@ void td_burst() {
         }
     }
     (void)serve_until(accepted, 50'000u);
-    const uint32_t t1 = us_now();
-    while (us_now() - t1 < 5'000u) {
+    const uint32_t t1 = Ruler::now();
+    while (Ruler::now() - t1 < 5'000u) {
         (void)K0::step();
     }
     const Counts d = Counts::now().since(c0);
@@ -569,12 +574,12 @@ void te_both_ways() {
     const Counts c0 = Counts::now();
     const uint32_t beat_before = Beat::sent;
     send<Beat>(Beating{true});
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     uint32_t sent = 0;
     uint16_t n = 0;
     uint32_t next_at = t0;
-    while (us_now() - t0 < 1'000'000u) {
-        if (static_cast<int32_t>(us_now() - next_at) >= 0) {
+    while (Ruler::now() - t0 < 1'000'000u) {
+        if (static_cast<int32_t>(Ruler::now() - next_at) >= 0) {
             next_at += 20u;
             if (Inbox<Echo>::send(Ping{static_cast<uint16_t>(n + 1u)})) {
                 ++n;
@@ -585,8 +590,8 @@ void te_both_ways() {
     }
     send<Beat>(Beating{false});
     (void)serve_until(sent, 50'000u);
-    const uint32_t t1 = us_now();
-    while (us_now() - t1 < 20'000u) {
+    const uint32_t t1 = Ruler::now();
+    while (Ruler::now() - t1 < 20'000u) {
         (void)K0::step();
     }
     const Counts d = Counts::now().since(c0);
@@ -632,9 +637,7 @@ void tg_panic_and_relaunch() {
     (void)take_panic_record<P1>();
     print(serial, "  sending Halt ...", crlf);
     send<Echo>(Halt{0x11});
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < 10'000u) {
-    }
+    brio::spin_us<Ruler>(10'000u);   // core 1's panic is its next dispatch
     const auto record = take_panic_record<P1>();
     print(serial, "  a Halt sent: core 1's breadcrumb ", record ? "code " : "NONE",
           record ? record->code : 0u, " context ", record ? hex(record->context) : hex(0u),
@@ -648,9 +651,9 @@ void tg_panic_and_relaunch() {
     bench.verdict("a halted core 1 answers nothing", dead);
 
     print(serial, "  resetting core 1 ...", crlf);
-    const uint32_t r0 = us_now();
+    const uint32_t r0 = Ruler::now();
     const bool reset_ok = Core1::reset();
-    const uint32_t reset_us = us_now() - r0;
+    const uint32_t reset_us = Ruler::now() - r0;
     print(serial, "  core 1 into the ROM through the power-on state machine: ",
           reset_ok ? "drained and waiting" : "NO ANSWER", " after ", reset_us, " us; FRCE_OFF now ",
           hex(Psm::held()), crlf);
@@ -693,21 +696,21 @@ void th_saturation() {
     const Counts c0 = Counts::now();
     const uint32_t beat_before = Beat::sent;
     send<Beat>(Beating{true});
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     uint32_t sent = 0;
     uint16_t n = 0;
-    while (sent < offered && us_now() - t0 < 500'000u) {
+    while (sent < offered && Ruler::now() - t0 < 500'000u) {
         if (Inbox<Echo>::send(Ping{static_cast<uint16_t>(n + 1u)})) {
             ++n;
             ++sent;
         }
         (void)K0::step();
     }
-    const uint32_t flat_out_us = us_now() - t0;
+    const uint32_t flat_out_us = Ruler::now() - t0;
     send<Beat>(Beating{false});
     (void)serve_until(sent, 50'000u);
-    const uint32_t t1 = us_now();
-    while (us_now() - t1 < 20'000u) {
+    const uint32_t t1 = Ruler::now();
+    while (Ruler::now() - t1 < 20'000u) {
         (void)K0::step();
     }
     const Counts d = Counts::now().since(c0);
@@ -845,28 +848,27 @@ constexpr uint8_t edge_pin = 6;   ///< a free pad of both packages and both boar
 void walk_pin(uint32_t edges) {
     for (uint32_t i = 0; i < edges; ++i) {
         Pin<edge_pin>::set();
-        const uint32_t t0 = us_now();
-        while (us_now() - t0 < 20u) {
-        }
+        brio::spin_us<Ruler>(20u);
         Pin<edge_pin>::clear();
-        const uint32_t t1 = us_now();
-        while (us_now() - t1 < 20u) {
-        }
+        brio::spin_us<Ruler>(20u);
     }
 }
 
-/// Send a chore to core 1 and serve core 0's kernel until it reports.
+/// Send a chore to core 1 and serve core 0's kernel until it reports, at
+/// most 20 ms: false on the time-out or a report of another chore.
 bool chore(uint8_t what) {
     const uint32_t before = Origin::chores;
     send<Echo>(Chore{what});
-    const uint32_t t0 = us_now();
-    while (Origin::chores == before) {
-        (void)K0::step();
-        if (us_now() - t0 > 20'000u) {
+    const bool reported = brio::wait_until<Ruler>(
+        [before] {
+            if (Origin::chores != before) {
+                return true;
+            }
+            (void)K0::step();
             return false;
-        }
-    }
-    return Origin::last_chore.what == what;
+        },
+        20'000u);
+    return reported && Origin::last_chore.what == what;
 }
 
 void tk_core1_channels() {
@@ -894,10 +896,10 @@ void tk_core1_channels() {
     const uint32_t carried = Origin::last_chore.value;
     uint32_t pushed = 0;
     uint16_t pings = 0;
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     uint32_t next_at = t0;
-    while (pushed < 4096u && us_now() - t0 < 500'000u) {
-        if (us_now() - next_at < 0x8000'0000u && SioMailbox::push(pushed)) {
+    while (pushed < 4096u && Ruler::now() - t0 < 500'000u) {
+        if (Ruler::now() - next_at < 0x8000'0000u && SioMailbox::push(pushed)) {
             ++pushed;
             next_at += 2u;
             if ((pushed & 63u) == 0u) {
@@ -906,10 +908,8 @@ void tk_core1_channels() {
         }
         (void)K0::step();
     }
-    const uint32_t t1 = us_now();
-    while (Origin::pongs < pings && us_now() - t1 < 100'000u) {
-        (void)K0::step();
-    }
+    // The answer is dropped: the verdict below judges pongs == pings.
+    (void)serve_until(pings, 100'000u);
     const bool wof = SioMailbox::write_on_full();
     const bool mb_off = chore(chore_mailbox_off);
     const uint32_t got = Origin::last_chore.value;
@@ -938,9 +938,7 @@ void tk_core1_channels() {
     Irq::enable(PinIrq::irq());
     const bool pins_on = chore(chore_pins_on);
     walk_pin(25);
-    const uint32_t t2 = us_now();
-    while (us_now() - t2 < 1000u) {
-    }
+    brio::spin_us<Ruler>(1000u);   // the last edge's entry, well inside
     const uint32_t on1 = pin_edges_on_core1;
     const uint32_t on0 = pin_edges_on_core0;
     const bool pins_off = chore(chore_pins_off);

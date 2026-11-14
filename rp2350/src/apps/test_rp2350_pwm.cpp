@@ -98,6 +98,7 @@
 #include "rp2350/uart.hpp"
 #include "util/print.hpp"
 #include "util/rgb_lamp.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #include "rp2350_pair.hpp"
@@ -117,7 +118,7 @@ constexpr UartPins console_pins{
 using Serial = Uart<0, console_pins>;
 constexpr Serial serial;
 
-using Ruler = Timer<0>;
+using Micros = Timer<0>;
 
 TestBench<Serial> bench;
 
@@ -163,12 +164,14 @@ volatile uint32_t wraps1[pwm_slice_count];
 volatile uint32_t entries0 = 0;
 volatile uint32_t entries1 = 0;
 
-uint32_t us_now() { return Ruler::now_low(); }
-void spin_us(uint32_t us) {
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < us) {
-    }
-}
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// TIMER0's microsecond count (rp2350/timer.hpp): one bus read, legal in
+/// any context, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Micros::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 void clear_wraps() {
     for (uint8_t i = 0; i < pwm_slice_count; ++i) {
         wraps0[i] = 0;
@@ -202,7 +205,7 @@ template <typename Counter>
 uint32_t measure_hz(uint32_t us) {
     Counter::restart();
     Counter::run(true);
-    spin_us(us);
+    brio::spin_us<Ruler>(us);
     Counter::run(false);
     return static_cast<uint32_t>(static_cast<uint64_t>(Counter::count()) * 1'000'000u / us);
 }
@@ -211,7 +214,7 @@ template <typename Counter>
 uint32_t measure_duty_pm() {
     Counter::restart();
     Counter::run(true);
-    spin_us(level_window_us);
+    brio::spin_us<Ruler>(level_window_us);
     Counter::run(false);
     return static_cast<uint32_t>(static_cast<uint64_t>(Counter::count()) * 1000u / level_full);
 }
@@ -245,8 +248,8 @@ TwoPads sample_pair_hi(uint8_t pin_a, uint8_t pin_b, uint32_t us) {
     uint32_t high_b = 0;
     uint32_t differed = 0;
     uint32_t samples = 0;
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < us) {
+    const uint32_t t0 = Ruler::now();
+    while (Ruler::now() - t0 < us) {
         const uint32_t w = Gpio::in_hi();
         const bool a = (w & mask_a) != 0u;
         const bool b = (w & mask_b) != 0u;
@@ -269,8 +272,8 @@ uint32_t sample_pad_pm(uint8_t pin, uint32_t us) {
     const uint32_t mask = 1UL << pin;
     uint32_t high = 0;
     uint32_t samples = 0;
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < us) {
+    const uint32_t t0 = Ruler::now();
+    while (Ruler::now() - t0 < us) {
         if ((Gpio::in() & mask) != 0u) { ++high; }
         ++samples;
     }
@@ -292,8 +295,8 @@ PairOverlap sample_overlap(uint8_t pin_a, uint8_t pin_b, uint32_t us) {
     uint32_t both_low = 0;
     uint32_t high_a = 0;
     uint32_t samples = 0;
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < us) {
+    const uint32_t t0 = Ruler::now();
+    while (Ruler::now() - t0 < us) {
         const uint32_t w = Gpio::in();
         const bool a = (w & mask_a) != 0u;
         const bool b = (w & mask_b) != 0u;
@@ -317,10 +320,10 @@ template <uint8_t out_pin, uint8_t in_pin>
 bool wire_present() {
     (void)Pin<in_pin>::input(PinPull::none);
     (void)Pin<out_pin>::output(false);
-    spin_us(20);
+    brio::spin_us<Ruler>(20);
     const bool low = !Pin<in_pin>::read();
     Pin<out_pin>::set();
-    spin_us(20);
+    brio::spin_us<Ruler>(20);
     const bool high = Pin<in_pin>::read();
     (void)Pin<out_pin>::release();
     (void)Pin<in_pin>::release();
@@ -330,21 +333,21 @@ bool wire_6b_7b() {
     if (wire_present<13, 15>()) {
         return true;
     }
-    bench.verdict("DECLINED: GP13 -> GP15 is not wired - the pair desk carries no self-link (fit the jumper to run this letter)", false);
+    bench.skip("GP13 -> GP15 is not wired - the pair desk carries no self-link (fit the jumper to run this letter)");
     return false;
 }
 bool wire_0b_4b() {
     if (wire_present<17, 9>()) {
         return true;
     }
-    bench.verdict("DECLINED: GP17 -> GP9 is not wired - the pair desk carries no self-link (fit the jumper to run this letter)", false);
+    bench.skip("GP17 -> GP9 is not wired - the pair desk carries no self-link (fit the jumper to run this letter)");
     return false;
 }
 bool wire_6a_7a() {
     if (wire_present<12, 14>()) {
         return true;
     }
-    bench.verdict("DECLINED: GP12 -> GP14 is not wired - the pair desk carries no self-link (fit the jumper to run this letter)", false);
+    bench.skip("GP12 -> GP14 is not wired - the pair desk carries no self-link (fit the jumper to run this letter)");
     return false;
 }
 
@@ -373,8 +376,8 @@ using OutPc = PwmOutput<12, 999>;   // slice 6 A on GP12, no wire: its own pad r
 uint32_t pad_rises(uint32_t us) {
     uint32_t rises = 0;
     bool last = Pin<12>::read();
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < us) {
+    const uint32_t t0 = Ruler::now();
+    while (Ruler::now() - t0 < us) {
         const bool now = Pin<12>::read();
         if (now && !last) {
             ++rises;
@@ -393,17 +396,17 @@ uint16_t walk_edges(bool falling, uint16_t pulses) {
     (void)Edges7::setup(falling);
     Gpio::out_override(15, PinOverride::low);
     Gpio::oe_override(15, PinOeOverride::enable);
-    spin_us(5);
+    brio::spin_us<Ruler>(5);
     Edges7::restart();
     Edges7::run(true);
     for (uint16_t i = 0; i < pulses; ++i) {
         Gpio::out_override(15, PinOverride::high);
-        spin_us(2);
+        brio::spin_us<Ruler>(2);
         Gpio::out_override(15, PinOverride::low);
-        spin_us(2);
+        brio::spin_us<Ruler>(2);
     }
     Gpio::out_override(15, PinOverride::high);
-    spin_us(5);
+    brio::spin_us<Ruler>(5);
     Edges7::run(false);
     const uint16_t n = Edges7::count();
     Gpio::oe_override(15, PinOeOverride::pass);
@@ -503,11 +506,11 @@ void ta_block() {
     (void)S::configure({.divider = {2, 0}, .top = 0xFFFF});
     S::counter(0);
     S::enable(true);
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     const uint16_t c1 = S::counter();
     S::enable(false);
     const uint16_t c2 = S::counter();
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     const uint16_t c3 = S::counter();
     print(serial, "  the counter at divider 2: ", c1, " after 100 us running, then ", c2, " and ",
           c3, " stopped", crlf);
@@ -551,7 +554,7 @@ void ta_block() {
     // run once here, over the stopped counters, and measured only after.
     (void)lag_now();
     Pwm::start(S::bit | T::bit);
-    spin_us(50);
+    brio::spin_us<Ruler>(50);
     const int32_t lag = lag_now();
     print(serial, "  slices 3 and 5 started together: lag ", lag, " counts after 50 us", crlf);
     bench.verdict("two slices started by the global enable run in lockstep: their counters agree "
@@ -560,13 +563,13 @@ void ta_block() {
 
     (void)S::advance_phase();
     (void)S::retard_phase();
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     const int32_t lag0 = lag_now();
     const bool adv = S::advance_phase();
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     const int32_t lag1 = lag_now();
     const bool ret = S::retard_phase();
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     const int32_t lag2 = lag_now();
     print(serial, "  lag ", lag0, "; after one advance ", lag1, "; after one retard ", lag2, crlf);
     bench.verdict("a phase advance puts slice 3 one count ahead of slice 5, a retard brings it "
@@ -586,11 +589,11 @@ void tb_lines() {
     // One slice on each line, at an exact kilohertz, counted together.
     (void)Tick3::setup(khz1_div, khz1_top);
     (void)Tick4::setup(khz1_div, khz1_top);
-    const uint32_t t0 = us_now();
-    spin_us(200'000);
+    const uint32_t t0 = Ruler::now();
+    brio::spin_us<Ruler>(200'000);
     const uint32_t n3 = wraps0[3];
     const uint32_t n4 = wraps1[4];
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     const uint32_t e0 = entries0;
     const uint32_t e1 = entries1;
     Tick3::stop();
@@ -610,7 +613,7 @@ void tb_lines() {
     // The faster rate, on line 1 alone.
     clear_wraps();
     (void)Tick4::setup(khz100_div, khz100_top);
-    spin_us(10'000);
+    brio::spin_us<Ruler>(10'000);
     const uint32_t n5 = wraps1[4];
     Tick4::stop();
     print(serial, "  100 kHz wrap on IRQ1: ", n5, " interrupts in 10 ms", crlf);
@@ -649,7 +652,7 @@ void tb_lines() {
     Irq::enable(Pwm::irq<1>());
     clear_wraps();
     (void)PwmPeriodicTick<3, 1>::setup(khz1_div, khz1_top);
-    spin_us(50'000);
+    brio::spin_us<Ruler>(50'000);
     PwmPeriodicTick<3, 1>::stop();
     const uint32_t moved0 = wraps0[3];
     const uint32_t moved1 = wraps1[3];
@@ -700,7 +703,7 @@ void tc_wire() {
     uint8_t exact = 0;
     for (uint8_t k = 0; k < 5u; ++k) {
         Out6B::duty(levels[k]);
-        spin_us(300);
+        brio::spin_us<Ruler>(300);
         const uint32_t pm = measure_duty_pm<Level7>();
         const uint32_t want = levels[k];   // per mille of 1000
         const bool good = (want == 0u && pm == 0u) || (want == 1000u && pm >= 999u) ||
@@ -739,13 +742,13 @@ void td_modes() {
 
     (void)Level7::setup(level_div);
     Out6B::duty(250);
-    spin_us(300);
+    brio::spin_us<Ruler>(300);
     const uint32_t pm_pc = measure_duty_pm<Level7>();
     bench.verdict("... and its duty is the level's fraction still: 25 %", within(pm_pc, 250, 10));
 
     (void)Out6B::setup_hz(clock, 10'000, false, true);
     Out6B::duty(250);
-    spin_us(300);
+    brio::spin_us<Ruler>(300);
     const uint32_t pm_inv = measure_duty_pm<Level7>();
     print(serial, "  inverted at level 250: ", pm_inv, " per mille high", crlf);
     bench.verdict("the inverted output complements the duty: level 250 reads 75 % high",
@@ -759,32 +762,38 @@ void td_modes() {
     uint8_t buffered = 0;
     for (uint8_t trial = 0; trial < 8u; ++trial) {
         Out6B::duty(100);
-        spin_us(5'000);
+        brio::spin_us<Ruler>(5'000);
         const uint16_t soft = S::level(1);
         // ONE read per iteration: two reads straddling the wrap (999,
-        // then 0) would satisfy a two-read condition at once.
+        // then 0) would satisfy a two-read condition at once. Each wait
+        // has 5 ms, two and a half periods; a wait that runs out (a slice
+        // not counting) fails the trial. A poll turn - a counter read and
+        // a timer read - is far under one count.
         uint16_t at = 0;
-        do {
-            at = S::counter();
-        } while (at < 200u || at > 300u);
+        const bool in_window = brio::wait_until<Ruler>(
+            [&at] {
+                at = S::counter();
+                return at >= 200u && at <= 300u;
+            },
+            5'000u);
         const bool pre = Pin<15>::read();
         Out6B::duty(900);
         const bool post = Pin<15>::read();
-        while (S::counter() < 400u) {
-        }
+        const bool reached = brio::wait_until<Ruler>([] { return S::counter() >= 400u; }, 5'000u);
         const bool mid = Pin<15>::read();
-        while (S::counter() > 100u) {   // the wrap
-        }
-        spin_us(180);   // count ~105, inside the new level
+        const bool wrapped = brio::wait_until<Ruler>([] { return S::counter() <= 100u; }, 5'000u);   // the wrap
+        brio::spin_us<Ruler>(180);   // count ~105, inside the new level
         const bool after = Pin<15>::read();
-        const bool ok = !pre && !post && !mid && after;
+        const bool counted = in_window && reached && wrapped;
+        const bool ok = counted && !pre && !post && !mid && after;
         if (ok) {
             ++buffered;
         } else {
             print(serial, "  trial ", trial, ": software copy ", soft, ", at count ", at,
                   " the pad ", pre ? "HIGH" : "low", " before the write and ",
                   post ? "HIGH" : "low", " after, ", mid ? "HIGH" : "low", " at 400, ",
-                  after ? "high" : "LOW", " past the wrap", crlf);
+                  after ? "high" : "LOW", " past the wrap",
+                  counted ? "" : " (A WAIT ON THE COUNTER RAN OUT)", crlf);
         }
     }
     print(serial, "  a level written mid-period (old 100, new 900): ", buffered,
@@ -808,7 +817,7 @@ void te_pair() {
     bool ok = cfg && Pair6::setup(cfg->divider, 100);
     Pair6::duty(400);
     (void)Level7::setup(level_div);
-    spin_us(300);
+    brio::spin_us<Ruler>(300);
     const uint32_t pm_b = measure_duty_pm<Level7>();
     const uint16_t lb = Pair6::Slice::level(1);
     print(serial, "  the pair at level 400 with 100 counts of dead time: B's level ", lb,
@@ -818,13 +827,13 @@ void te_pair() {
                   ok && lb == 500u && within(pm_b, 500, 10));
 
     Pair6::duty(1000);
-    spin_us(300);
+    brio::spin_us<Ruler>(300);
     const uint32_t pm_full = measure_duty_pm<Level7>();
     bench.verdict("at the full level B never rises (its level clamped at TOP + 1)", pm_full == 0u);
 
     ok = cfg && Pair6::setup(cfg->divider, 100, true);
     Pair6::duty(400);
-    spin_us(300);
+    brio::spin_us<Ruler>(300);
     const uint32_t pm_pc = measure_duty_pm<Level7>();
     print(serial, "  phase-correct: B high ", pm_pc, " per mille", crlf);
     bench.verdict("phase-correct: the same fractions, the dead time now at both transitions",
@@ -845,7 +854,7 @@ void te_pair() {
     Pair6::duty(400);
     (void)Pin<14>::input(PinPull::none);
     (void)Pin<15>::input(PinPull::none);
-    spin_us(5000);
+    brio::spin_us<Ruler>(5000);
     const PairOverlap o = sample_overlap(14, 15, 100'000);
     print(serial, "  A on GP12->GP14 and B on GP13->GP15 sampled together, ", o.samples,
           " samples: A high ", o.a_pm, " per mille, both high ", o.both_high_pm, ", both low ",
@@ -891,7 +900,7 @@ void tf_second_wire() {
         Pwm::start(PwmSlice<6>::bit | PwmSlice<0>::bit);
         int32_t lags[3];
         for (uint8_t k = 0; k < 3u; ++k) {
-            spin_us(100'000);
+            brio::spin_us<Ruler>(100'000);
             // Read in both orders: the read's own delay cancels.
             const uint16_t a1 = PwmSlice<6>::counter();
             const uint16_t b1 = PwmSlice<0>::counter();
@@ -970,7 +979,7 @@ void th_lamp() {
     (void)Level7::setup(level_div);
     (void)Level4::setup(level_div);
     (void)Pin<14>::input(PinPull::none);   // R reaches this pad over the third wire
-    spin_us(300);
+    brio::spin_us<Ruler>(300);
     const uint32_t g_pm = measure_duty_pm<Level7>();
     const uint32_t b_pm = measure_duty_pm<Level4>();
     const uint32_t r_pm = sample_pad_pm(14, 50'000);
@@ -983,7 +992,7 @@ void th_lamp() {
                   within(g_pm, 502, 10) && within(b_pm, 251, 12) && R::duty() == 1000u &&
                       r_pm >= 995u);
     Lamp::off();
-    spin_us(300);
+    brio::spin_us<Ruler>(300);
     const uint32_t r_off = sample_pad_pm(14, 50'000);
     bench.verdict("... and off() is 0 % on all three: two counted on their wires, the third "
                   "sampled on its own",
@@ -1021,7 +1030,7 @@ void high_slice_pads(const char* what) {
         uint32_t samples = 0;
         for (uint8_t k = 0; k < 3u; ++k) {
             Out::duty(levels[k]);
-            spin_us(5000);
+            brio::spin_us<Ruler>(5000);
             const TwoPads s = sample_pair_hi(pin, pin_alt, 60'000);
             differed += s.differed;
             samples += s.samples;
@@ -1060,9 +1069,9 @@ void tj_new_slices() {
     (void)Tick9::setup(khz1_div, khz1_top);
     (void)Tick10::setup(khz1_div, khz1_top);
     (void)Tick11::setup(khz1_div, khz1_top);
-    const uint32_t t0 = us_now();
-    spin_us(200'000);
-    const uint32_t took = us_now() - t0;
+    const uint32_t t0 = Ruler::now();
+    brio::spin_us<Ruler>(200'000);
+    const uint32_t took = Ruler::now() - t0;
     const uint32_t n8 = wraps0[8];
     const uint32_t n9 = wraps1[9];
     const uint32_t n10 = wraps0[10];
@@ -1115,16 +1124,18 @@ void tk_stream() {
     Stream::arm(S::cc_address(), S::dreq);
     stream_done = false;
     const bool started = Stream::start(level_table, stream_levels);
-    spin_us(2000);
+    brio::spin_us<Ruler>(2000);
     const bool silent_while_stopped = !stream_done && S::level(0) == 0u;
 
     // (2) The run: one word a period at 10 kHz, the slice started.
     S::interrupt<0>(true);
-    const uint32_t t0 = us_now();
+    // The span opens before the slice starts and closes at the read after
+    // the wait, as around the hand-written loop; a time-out leaves
+    // stream_done false, which the verdicts judge.
+    const uint32_t t0 = Ruler::now();
     S::enable(true);
-    while (!stream_done && us_now() - t0 < 40'000u) {
-    }
-    const uint32_t took = us_now() - t0;
+    (void)brio::wait_until<Ruler>([] { return stream_done; }, 40'000u);
+    const uint32_t took = Ruler::now() - t0;
     // COUNTED BEFORE THE SLICE IS STOPPED AND WITH NO SETTLE IN BETWEEN:
     // the wraps are the pace itself, and every microsecond spent here is
     // another hundredth of one.
@@ -1169,11 +1180,10 @@ void tk_stream() {
     WireStream::arm(W::cc_address(), W::dreq);
     stream_done = false;
     const bool started_wire = WireStream::start(level_table, stream_levels);
-    const uint32_t t1 = us_now();
+    const uint32_t t1 = Ruler::now();
     W::enable(true);
-    while (!stream_done && us_now() - t1 < 40'000u) {
-    }
-    const uint32_t took_wire = us_now() - t1;
+    (void)brio::wait_until<Ruler>([] { return stream_done; }, 40'000u);   // judged by the verdict
+    const uint32_t took_wire = Ruler::now() - t1;
     const uint32_t duty_pm = measure_duty_pm<Level7>();
     const uint16_t held_b = W::level(1);
     W::enable(false);
@@ -1209,12 +1219,16 @@ void ty_probe() {
         (void)Out6B::setup(PwmDivider{0, 0}, false, c.invert);
         Out6B::duty(c.level);
         (void)Pin<15>::input(PinPull::none);
-        spin_us(5000);
+        brio::spin_us<Ruler>(5000);
         uint32_t high = 0;
         uint32_t total = 0;
         uint16_t first_low_at = 0xFFFF;
         uint16_t first_high_at = 0xFFFF;
-        while (S6::counter() != 0u) {
+        // The period's start; a slice not counting is printed and the case
+        // left (a diagnostic, no verdict).
+        if (!brio::wait_until<Ruler>([] { return S6::counter() == 0u; }, 5'000u)) {
+            print(serial, "  ", c.name, ": the counter never read 0 in 5 ms", crlf);
+            continue;
         }
         for (;;) {
             const uint16_t ctr = S6::counter();
@@ -1245,17 +1259,17 @@ void ty_probe() {
     S::counter(0);
     T::counter(0);
     Pwm::start(S::bit | T::bit);
-    spin_us(2000);
+    brio::spin_us<Ruler>(2000);
     const uint32_t delays[] = {0, 1, 2, 5, 10, 50, 100, 1000};
     print(serial, "  one read after an advance, at +us: ");
     for (uint32_t d : delays) {
         (void)S::advance_phase();
         (void)S::retard_phase();   // net zero
-        spin_us(d);
+        brio::spin_us<Ruler>(d);
         const uint16_t a = S::counter();
         const uint16_t b = T::counter();
         print(serial, d, ":", static_cast<int32_t>(b) - static_cast<int32_t>(a), " ");
-        spin_us(2000);
+        brio::spin_us<Ruler>(2000);
     }
     print(serial, crlf, "  one read after a start, at +us: ");
     for (uint32_t d : delays) {
@@ -1263,7 +1277,7 @@ void ty_probe() {
         S::counter(0);
         T::counter(0);
         Pwm::start(S::bit | T::bit);
-        spin_us(d);
+        brio::spin_us<Ruler>(d);
         const uint16_t a = S::counter();
         const uint16_t b = T::counter();
         print(serial, d, ":", static_cast<int32_t>(b) - static_cast<int32_t>(a), " ");
@@ -1275,8 +1289,14 @@ void ty_probe() {
     (void)Out6B::setup(PwmDivider{0, 0});
     Out6B::duty(100);
     (void)Pin<15>::input(PinPull::none);
-    spin_us(5000);
-    while (S6::counter() < 200u || S6::counter() > 300u) {
+    brio::spin_us<Ruler>(5000);
+    if (!brio::wait_until<Ruler>(
+            [] {
+                const uint16_t c = S6::counter();
+                return c >= 200u && c <= 300u;
+            },
+            5'000u)) {
+        print(serial, "  the counter never stood in 200..300 in 5 ms", crlf);
     }
     const uint16_t at_write = S6::counter();
     const bool before = Pin<15>::read();
@@ -1285,8 +1305,8 @@ void ty_probe() {
     uint16_t rose_at = 0xFFFF;
     uint16_t fell_at = 0xFFFF;
     bool last = after;
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < 4000u) {
+    const uint32_t t0 = Ruler::now();
+    while (Ruler::now() - t0 < 4000u) {
         const uint16_t ctr = S6::counter();
         const bool h = Pin<15>::read();
         if (h && !last && rose_at == 0xFFFFu) { rose_at = ctr; }
@@ -1336,26 +1356,28 @@ void tr_released_requester() {
         S::counter(0);
         S::enable(true);
         Stream::arm(S::cc_address(), S::dreq, false, DmaReport::errors);
-        spin_us(100);
+        brio::spin_us<Ruler>(100);
         const uint32_t banked = DmaChannel<Stream::channel>::debug_credits();
         Stream::stop();
         S::enable(false);
         Stream::arm(S::cc_address(), S::dreq, false, DmaReport::errors);
         (void)Stream::start(run, 8u);
-        spin_us(20);
+        brio::spin_us<Ruler>(20);
         const uint32_t moved_stopped = 8u - DmaChannel<Stream::channel>::count();
-        const uint32_t t0 = us_now();
+        // The span opens before the slice starts and closes at the read
+        // after the wait, as around the hand-written loop; a time-out
+        // leaves the run short of eight, which the round judges.
+        const uint32_t t0 = Ruler::now();
         S::enable(true);
-        while (DmaChannel<Stream::channel>::busy() && us_now() - t0 < 2000u) {
-        }
-        const uint32_t took = us_now() - t0;
+        (void)brio::wait_until<Ruler>([] { return !DmaChannel<Stream::channel>::busy(); }, 2000u);
+        const uint32_t took = Ruler::now() - t0;
         const uint32_t moved_running = 8u - DmaChannel<Stream::channel>::count();
         (void)Stream::complete();
         Stream::stop();
         // The control: the slice still running under a fresh bind.
         Stream::arm(S::cc_address(), S::dreq, false, DmaReport::errors);
         (void)Stream::start(run, 8u);
-        spin_us(20);
+        brio::spin_us<Ruler>(20);
         const uint32_t moved_live = 8u - DmaChannel<Stream::channel>::count();
         (void)Stream::complete();
         Stream::stop();

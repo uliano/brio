@@ -171,7 +171,7 @@ On an RP2350 in the QFN-80 package, **stepping A2**, clk_ref on the
 board's 12 MHz crystal, and on BOTH architectures: the letters below are
 part of `test_rp2350_timer`'s **93 pass, 0 fail** on the Cortex-M33 pair
 and **93 pass, 0 fail** on the Hazard3 pair, with the reboot letter run
-by name at **28 pass, 0 fail** on the Arm half and **24 pass, 0 fail** on
+by name at **28 pass, 0 fail** on the Arm half and **23 pass, 0 fail** on
 the RISC-V one (four legs there against five, for the reason
 [reset.md](reset.md) gives).
 

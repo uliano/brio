@@ -15,7 +15,7 @@
 //   Led                  the board's LED as a Pin type
 //   mode_line_up()       the mode line made an input, pulled down
 //   mode_high()          the mode line read
-//   us_now()             the microsecond ruler
+//   Ruler                the microsecond ruler, util/test_wait.hpp's shape
 //   link_pads_free()     may a link pad be driven now (the RP2350's
 //                        partner-rail guard; true on the RP2040)
 //
@@ -65,6 +65,8 @@ struct Lfsr {
     }
 };
 
+static_assert(Ruler::hz() == 1'000'000u, "rp_uart_peer.hpp asks its guard again once a second");
+
 constexpr uint32_t link_baud = 115200;
 
 void send_burst() {
@@ -86,14 +88,14 @@ bool link_up() { return link_pads_free() && Link::init(clock, link_baud); }
     // init() takes its own line down first.
     bool link_ok = link_up();
     enable_interrupts();
-    uint32_t asked = us_now();
+    uint32_t asked = Ruler::now();
     bool sending = false;
     for (;;) {
         const bool want_send = mode_high();
         Led::duty(want_send ? 1u : 0u);
         if (!link_ok) {
-            if (us_now() - asked >= 1'000'000u) {
-                asked = us_now();
+            if (Ruler::now() - asked >= 1'000'000u) {
+                asked = Ruler::now();
                 link_ok = link_up();
             }
             continue;

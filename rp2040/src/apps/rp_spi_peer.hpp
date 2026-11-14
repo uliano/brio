@@ -27,7 +27,9 @@
 //                            on the same four pads, the select its own
 //                            frame signal (THE ROLES INVERT below)
 //   PeerTx, PeerRx           half-word DMA engines for the exchange
-//   us_now()                 the microsecond ruler (the system timer)
+//   Ruler                    the microsecond ruler (the system timer), in
+//                            util/test_wait.hpp's shape: every wait and
+//                            deadline below is read on it
 //   peer_kind, peer_label    spi_link's kind byte and the Ident label
 //   link_text                the pads, for the banner
 //   xtal_ok                  the crystal came up (Ident.xtal)
@@ -182,30 +184,24 @@ uint32_t last_byte_us = 0;
 uint32_t engaged_until_us = 0;
 bool is_engaged = false;
 
-bool engaged() { return is_engaged && static_cast<int32_t>(engaged_until_us - us_now()) > 0; }
+bool engaged() { return is_engaged && static_cast<int32_t>(engaged_until_us - Ruler::now()) > 0; }
 void engage() {
     is_engaged = true;
-    engaged_until_us = us_now() + static_cast<uint32_t>(spilink::engage_ms) * 1000u;
+    engaged_until_us = Ruler::now() + static_cast<uint32_t>(spilink::engage_ms) * 1000u;
 }
 
 // ---- waits ------------------------------------------------------------------------
 
-void hold_us(uint32_t us) {
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < us) {
-    }
-}
-bool expired(uint32_t t0_us, uint32_t ms) { return us_now() - t0_us >= ms * 1000u; }
+static_assert(Ruler::hz() == 1'000'000u,
+              "rp_spi_peer.hpp: the includer's Ruler counts microseconds (the deadlines are us)");
+
+/// The deadline of a loop that does work every turn - feeding or draining a
+/// FIFO while it watches the select - and so is no plain wait.
+bool expired(uint32_t t0_us, uint32_t ms) { return Ruler::now() - t0_us >= ms * 1000u; }
 
 /// The select is high (the host has closed its window), within `ms`.
 bool wait_cs_high(uint32_t ms) {
-    const uint32_t t0 = us_now();
-    while (!CsPin::read()) {
-        if (expired(t0, ms)) {
-            return false;
-        }
-    }
-    return true;
+    return brio::wait_until<Ruler>([] { return CsPin::read(); }, ms * 1000u);
 }
 
 // ---- the programs ---------------------------------------------------------------------
@@ -356,20 +352,18 @@ bool go_dark() {
     return ok;
 }
 
-/// The select's window, from the arming: true once it has been low and is
-/// high again, false at the deadline. `saw_low` says whether it ever fell.
-bool window_closed(uint32_t t0, uint32_t ms, bool& saw_low) {
-    for (;;) {
-        const bool low = !CsPin::read();
-        if (low) {
-            saw_low = true;
-        } else if (saw_low) {
-            return true;
-        }
-        if (expired(t0, ms)) {
-            return false;
-        }
-    }
+/// The select's window, from now: true once it has been low and is high
+/// again, false after `ms`. `saw_low` says whether it ever fell.
+bool window_closed(uint32_t ms, bool& saw_low) {
+    return brio::wait_until<Ruler>(
+        [&saw_low] {
+            if (!CsPin::read()) {
+                saw_low = true;
+                return false;
+            }
+            return saw_low;
+        },
+        ms * 1000u);
 }
 
 /// A frame as the transmit FIFO wants it pushed by the core: replicated,
@@ -412,7 +406,7 @@ void serve(const uint8_t* buf, uint8_t n) {
         Sm::push(replicated(padded[sent++], 8));
     }
     Sm::enable(true);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     bool saw_low = false;
     for (;;) {
         while (sent < spilink::answer_bytes && !Sm::tx_full()) {
@@ -496,11 +490,11 @@ uint16_t dma_serve(const Window& w, uint16_t n, uint32_t ms, bool& closed) {
         (void)PeerTx::start(std::span<const T>(reinterpret_cast<const T*>(x_out), n));
     }
     // The transmit FIFO full before the machine runs: the preload.
-    const uint32_t t_fill = us_now();
-    while (w.answer && Sm::tx_level() < (n < 4u ? n : 4u) && us_now() - t_fill < 100u) {
-    }
+    // A preload short after 100 us shows as the host's first frames wrong,
+    // which the host judges.
+    (void)brio::wait_until<Ruler>([&] { return !w.answer || Sm::tx_level() >= (n < 4u ? n : 4u); }, 100u);
     Sm::enable(true);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     bool saw_low = false;
     for (;;) {
         if (w.receive) {
@@ -543,7 +537,7 @@ uint16_t polled_serve(const Window& w, uint16_t n, uint32_t ms, bool& closed) {
         Sm::push(replicated(out_frame(sent++), w.bits));
     }
     Sm::enable(true);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     bool saw_low = false;
     for (;;) {
         while (w.answer && sent < n && !Sm::tx_full()) {
@@ -617,7 +611,7 @@ spilink::Report run_exchange(const spilink::Params& a) {
         (void)go_dark();
         return r;
     }
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     bool closed = false;
     uint16_t got = 0;
     if (polled) {
@@ -628,9 +622,9 @@ spilink::Report run_exchange(const spilink::Params& a) {
     }
     if (!closed) {
         bool saw_low = true;
-        closed = window_closed(us_now(), 20, saw_low);
+        closed = window_closed(20, saw_low);
     }
-    const uint32_t dt = (us_now() - t0) / 1000u;
+    const uint32_t dt = (Ruler::now() - t0) / 1000u;
     Sm::enable(false);
     r.aux0 = fdebug_bits();
     if (Sm::rx_stalled()) {
@@ -669,7 +663,7 @@ spilink::Report run_sink_slow(const spilink::Params& a) {
     }
     Sm::pin_directions(tx_i, 1, false);   // nothing to answer with: the line dark
     Sm::enable(true);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     while (!expired(t0, a.ms)) {
         if (Sm::rx_stalled()) {
             r.sum = 1;
@@ -706,10 +700,10 @@ spilink::Report run_ss_pulse(const spilink::Params& a) {
     spilink::Report r{};
     Sm::enable(false);
     if (a.aux8 != 0u) {
-        hold_us(static_cast<uint32_t>(a.aux8) * 1000u);
+        brio::spin_us<Ruler>(static_cast<uint32_t>(a.aux8) * 1000u);
     }
     (void)CsPin::output(false);
-    hold_us(a.aux16 != 0u ? a.aux16 : 1000u);
+    brio::spin_us<Ruler>(a.aux16 != 0u ? a.aux16 : 1000u);
     (void)CsPin::input(PinPull::none);
     r.aux0 = 1;
     r.count = 1;
@@ -756,7 +750,7 @@ spilink::Report run_host_burst(const spilink::Params& a) {
             in[i] = 0xEE;
         }
     }
-    hold_us(static_cast<uint32_t>(a.aux8 != 0u ? a.aux8 : 20u) * 1000u);
+    brio::spin_us<Ruler>(static_cast<uint32_t>(a.aux8 != 0u ? a.aux8 : 20u) * 1000u);
     Host::Request q{};
     q.cs = {};   // the frame signal is the select
     q.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_bytes()));
@@ -766,9 +760,9 @@ spilink::Report run_host_burst(const spilink::Params& a) {
     q.mode = mode;
     q.bits = bits;
     q.engine = SpiEngine::polled;
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     (void)Host::start(q);
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     r.aux3 = Host::status();
     {
         spilink::Stream want(a.pattern, a.seed_b);
@@ -839,7 +833,7 @@ void handle(const spilink::Frame& f) {
     ack(op, f.sum, true);
     ++actions;
     const spilink::Params a = spilink::get_params(f.data);
-    const uint32_t started = us_now();
+    const uint32_t started = Ruler::now();
     spilink::Report r{};
     switch (op) {
         case Op::exchange: r = run_exchange(a); break;
@@ -852,7 +846,7 @@ void handle(const spilink::Frame& f) {
     if ((r.flags & spilink::report_cfg_failed) == 0) {
         r.flags |= spilink::report_ran;
     }
-    const uint32_t took = (us_now() - started) / 1000u;
+    const uint32_t took = (Ruler::now() - started) / 1000u;
     r.ms = took > 255u ? uint8_t{255} : static_cast<uint8_t>(took);
     r.op = spilink::byte_of(op);
     last_report = r;
@@ -901,7 +895,7 @@ bool bring_up() {
 /// listener: every frame the machine pushed fed to the decoder, and a
 /// rising select re-arming the machine at its entry.
 [[noreturn]] void peer_loop() {
-    uint32_t asked = us_now();
+    uint32_t asked = Ruler::now();
     bool cs_was_low = false;
     for (;;) {
         uint8_t c = 0;
@@ -933,21 +927,21 @@ bool bring_up() {
             print(console, "> ");
         }
         if (!client_up) {
-            if (us_now() - asked >= 1'000'000u) {
-                asked = us_now();
+            if (Ruler::now() - asked >= 1'000'000u) {
+                asked = Ruler::now();
                 if (link_pads_free() && bring_up()) {
                     print(console, crlf, "  the link pads are free: the dark client is up", crlf, "> ");
                 }
             }
             continue;
         }
-        if (decoder.partial() && us_now() - last_byte_us > 100'000u) {
+        if (decoder.partial() && Ruler::now() - last_byte_us > 100'000u) {
             decoder.reset();
         }
         bool handled = false;
         while (!handled && !Sm::rx_empty()) {
             const uint8_t b = static_cast<uint8_t>(Sm::pop() & 0xFFu);
-            last_byte_us = us_now();
+            last_byte_us = Ruler::now();
             switch (decoder.feed(b)) {
                 case spilink::Decoder::Result::frame:
                     if (spilink::is_command(decoder.frame().op)) {

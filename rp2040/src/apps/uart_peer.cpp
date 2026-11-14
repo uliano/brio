@@ -26,6 +26,7 @@
 #include "rp2040/platform.hpp"
 #include "rp2040/timer.hpp"
 #include "rp2040/uart.hpp"
+#include "util/test_wait.hpp"
 
 namespace {
 
@@ -45,7 +46,14 @@ using Led = Pin<25>;
 
 void mode_line_up() { ModeLine::input(PinPull::down); }
 bool mode_high() { return ModeLine::read(); }
-uint32_t us_now() { return Timer::now_low(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// the system timer's microsecond count (rp2040/timer.hpp): one bus read,
+/// legal in any context, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Timer::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 /// This board's pads are the ones that are not failsafe: nothing to guard.
 bool link_pads_free() { return true; }
 

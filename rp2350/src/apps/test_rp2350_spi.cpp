@@ -144,6 +144,7 @@
 #include "util/power.hpp"
 #include "util/print.hpp"
 #include "util/spi_bus.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: one file for every board
@@ -160,7 +161,7 @@ using namespace brio;
 using SysClock = Clock<ClockSource::pll, 150'000'000UL>;
 constexpr SysClock clock;
 using P = Rp2350Platform<>;
-using Ruler = Timer<0>;
+using Micros = Timer<0>;
 
 constexpr UartPins console_pins{
     .tx = {0, PinFunction::uart},
@@ -215,7 +216,14 @@ volatile bool transfer_done = false;
 volatile uint8_t transfer_status = 0;
 bool bus_ao_live = false;
 
-uint32_t us_now() { return Ruler::now_low(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// TIMER0's microsecond count (rp2350/timer.hpp): one bus read, legal in
+/// any context, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Micros::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 /// Letter f's ruler: TIMER1 counting clk_sys (main() switches its SOURCE).
 using Cycles = Timer<1>;
 uint32_t cycles_now() { return Cycles::now_low(); }
@@ -290,10 +298,7 @@ uint8_t xfer(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t* rx
     if (H::start(r)) {
         return H::status();
     }
-    const uint32_t t0 = us_now();
-    while (!transfer_done && us_now() - t0 < 200'000u) {
-    }
-    return transfer_done ? transfer_status : 0xFEu;
+    return brio::wait_until<Ruler>([] { return transfer_done; }, 200'000u) ? transfer_status : 0xFEu;
 }
 
 /// THE RATE ON THE WIRE, which a loop alone cannot tell: the time ONE FRAME
@@ -304,12 +309,15 @@ uint8_t xfer(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t* rx
 /// plus `gap_halves` half periods at the rate ASKED (clk_peri over the
 /// divisor). The best of three of each block is taken.
 uint32_t frame_permille(SpiClock rate, SpiMode mode, SpiDataSize bits, uint32_t gap_halves) {
+    // No console line inside a block: drained first, the answer dropped (a
+    // wedged console lengthens a block, and the best of three is taken).
+    (void)brio::console_drain<Ruler, Serial>();
     auto best = [&](uint16_t n) {
         uint32_t least = 0xFFFFFFFFu;
         for (uint8_t k = 0; k < 3u; ++k) {
-            const uint32_t t0 = us_now();
+            const uint32_t t0 = Ruler::now();
             (void)xfer<DmaHost>(nullptr, 0, nullptr, nullptr, n, mode, rate, bits, false);
-            const uint32_t took = us_now() - t0;
+            const uint32_t took = Ruler::now() - t0;
             least = took < least ? took : least;
         }
         return least;
@@ -496,14 +504,14 @@ void tb_loop() {
                      SpiDataSize::bits8, true);
     (void)xfer<Host>(nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0, SpiClocks::div16,
                      SpiDataSize::bits8, true, CsPin::ref(), 1);
-    uint32_t t0 = us_now();
+    uint32_t t0 = Ruler::now();
     const uint8_t bare = xfer<Host>(nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0,
                                     SpiClocks::div16, SpiDataSize::bits8, true);
-    const uint32_t bare_us = us_now() - t0;
-    t0 = us_now();
+    const uint32_t bare_us = Ruler::now() - t0;
+    t0 = Ruler::now();
     const uint8_t settled = xfer<Host>(nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0,
                                        SpiClocks::div16, SpiDataSize::bits8, true, CsPin::ref(), 200);
-    const uint32_t settled_us = us_now() - t0;
+    const uint32_t settled_us = Ruler::now() - t0;
     print(serial, "  a polled transaction of sixteen frames: ", bare_us, " us bare, ", settled_us,
           " us with cs_setup_us=200 (the difference ", settled_us - bare_us, ")", crlf);
     // The wait is served on the platform timer and measured on TIMER0:
@@ -533,10 +541,10 @@ void tc_rates() {
         for (uint16_t i = 0; i < 64; ++i) {
             rx_buf[i] = 0xEE;
         }
-        const uint32_t t0 = us_now();
+        const uint32_t t0 = Ruler::now();
         const uint8_t st = xfer<Host>(nullptr, 0, tx_buf, rx_buf, 64, SpiMode::mode0, rates[k],
                                       SpiDataSize::bits8, true);
-        const uint32_t took = us_now() - t0;
+        const uint32_t took = Ruler::now() - t0;
         const bool ok = st == spi_ok && same(tx_buf, rx_buf, 64);
         // Eight bits at clk_peri / divisor, in nanoseconds.
         const uint32_t wire_ns = 8u * 1000u * rates[k].divisor() / 150u;
@@ -573,11 +581,11 @@ void td_dma() {
     // of the flash, line by line into the XIP cache; the same block again
     // runs it out of the cache. Both are timed, the misses beside each.
     Xip::reset_counters();
-    uint32_t t0 = us_now();
+    uint32_t t0 = Ruler::now();
     dma_isr_entries = 0;
     const uint8_t st = xfer<DmaHost>(nullptr, 0, tx_buf, rx_buf, 128, SpiMode::mode0,
                                      SpiClocks::div4, SpiDataSize::bits8, false);
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     const uint32_t cold_misses = xip_misses();
     const uint32_t line_entries = dma_isr_entries;
     const bool exact = same(tx_buf, rx_buf, 128);
@@ -586,10 +594,10 @@ void td_dma() {
         rx_buf[i] = 0xEE;
     }
     Xip::reset_counters();
-    t0 = us_now();
+    t0 = Ruler::now();
     const uint8_t st_warm = xfer<DmaHost>(nullptr, 0, tx_buf, rx_buf, 128, SpiMode::mode0,
                                           SpiClocks::div4, SpiDataSize::bits8, false);
-    const uint32_t took_warm = us_now() - t0;
+    const uint32_t took_warm = Ruler::now() - t0;
     const uint32_t warm_misses = xip_misses();
     print(serial, "  128 bytes on the engines at div4 (37.5 MHz): status ", st, " in ", took,
           " us cold (", cold_misses, " XIP misses), ", took_warm, " us warm (", warm_misses,
@@ -623,19 +631,19 @@ void td_dma() {
     // either line, so no vector is asked of it, and exact. Its own first run,
     // and the same request warm.
     Xip::reset_counters();
-    t0 = us_now();
+    t0 = Ruler::now();
     const uint8_t st3 = xfer<DmaHost>(cmd_buf, 1, tx_buf, rx_buf, 64, SpiMode::mode3,
                                       SpiClocks::div2, SpiDataSize::bits8, true);
-    const uint32_t took3 = us_now() - t0;
+    const uint32_t took3 = Ruler::now() - t0;
     const uint32_t cold3 = xip_misses();
     const bool exact3 = same(tx_buf, rx_buf, 64);
     const uint32_t entries3 = dma_isr_entries;
     const uint32_t spi3 = spi0_isr_entries;
     Xip::reset_counters();
-    t0 = us_now();
+    t0 = Ruler::now();
     const uint8_t st3_warm = xfer<DmaHost>(cmd_buf, 1, tx_buf, rx_buf, 64, SpiMode::mode3,
                                            SpiClocks::div2, SpiDataSize::bits8, true);
-    const uint32_t took3_warm = us_now() - t0;
+    const uint32_t took3_warm = Ruler::now() - t0;
     const uint32_t warm3 = xip_misses();
     print(serial, "  polled at div2 (75 MHz), mode 3, on the engined host, a command frame and 64 data "
           "frames: status ", st3, " in ", took3, " us cold (", cold3, " XIP misses), ", took3_warm,
@@ -653,10 +661,10 @@ void td_dma() {
     }
     dma_isr_entries = 0;
     Xip::reset_counters();
-    t0 = us_now();
+    t0 = Ruler::now();
     const uint8_t st4 = xfer<DmaHost>(nullptr, 0, tx_buf, rx_buf, 64, SpiMode::mode3,
                                       SpiClocks::div4, SpiDataSize::bits16, false);
-    const uint32_t took4 = us_now() - t0;
+    const uint32_t took4 = Ruler::now() - t0;
     const uint32_t cold4 = xip_misses();
     const bool exact4 = same(tx_buf, rx_buf, 128);
     const uint32_t spi4 = spi0_isr_entries;
@@ -665,10 +673,10 @@ void td_dma() {
         rx_buf[i] = 0xEE;
     }
     Xip::reset_counters();
-    t0 = us_now();
+    t0 = Ruler::now();
     const uint8_t st4_warm = xfer<DmaHost>(nullptr, 0, tx_buf, rx_buf, 64, SpiMode::mode3,
                                            SpiClocks::div4, SpiDataSize::bits16, false);
-    const uint32_t took4_warm = us_now() - t0;
+    const uint32_t took4_warm = Ruler::now() - t0;
     const uint32_t warm4 = xip_misses();
     print(serial, "  64 16-bit frames on the engines at div4, mode 3: status ", st4, " in ", took4,
           " us cold (", cold4, " XIP misses), ", took4_warm, " us warm (", warm4, " misses, status ",
@@ -779,14 +787,15 @@ void pump() {
         TimeEvents<P>::process();
     }
 }
+/// The kernel pumped until `want` replies or `ms` have passed; a reply that
+/// never came shows in the letter's count of them, which it judges.
 void pump_until(uint8_t want, uint32_t ms) {
-    const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() - t0 < ms) {
-        pump();
-        if (Probe::n >= want) {
-            break;
-        }
-    }
+    (void)brio::wait_until<Ruler>(
+        [want] {
+            pump();
+            return Probe::n >= want;
+        },
+        ms * 1000u);
     pump();
 }
 

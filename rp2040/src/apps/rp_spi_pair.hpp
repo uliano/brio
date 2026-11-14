@@ -24,7 +24,9 @@
 //   LinkClient               SpiClient<1, {sck, tx, rx, cs}>
 //   SckPin, TxPin, RxPin,    the four link pads; CsPin is this end's GPIO
 //   CsPin                    select while it hosts, its client's select pad
-//   us_now()                 the microsecond ruler
+//   Ruler                    the microsecond ruler, util/test_wait.hpp's shape
+//                            (now(), constexpr hz() at 1 MHz): every wait
+//                            and time-out below is read on it
 //   partner_kind,            spi_link's kind byte of the peer, its name, and
 //   partner_text,            its clk_sys - what the peer's PIO client runs
 //   partner_sys_hz           at, which sets the ceiling letter p judges to
@@ -78,25 +80,8 @@ volatile uint32_t pair_isr_entries = 0;
 /// posted to the arbiter - the lost completion the per-bus timeout answers.
 volatile bool pair_swallow = false;
 
-// ---- shared waits ----------------------------------------------------------------------
-
-/// Spin until `done()` or `us` microseconds have passed; true when done.
-template <typename F>
-bool wait_until(F done, uint32_t us) {
-    const uint32_t t0 = us_now();
-    while (!done()) {
-        if (us_now() - t0 >= us) {
-            return done();
-        }
-    }
-    return true;
-}
-void spin_us(uint32_t us) {
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < us) {
-    }
-}
-void settle_ms(uint32_t ms) { spin_us(ms * 1000u); }
+static_assert(Ruler::hz() == 1'000'000u,
+              "rp_spi_pair.hpp: the includer's Ruler counts microseconds (its spans print as us)");
 
 // ---- the pads ----------------------------------------------------------------------------
 
@@ -130,7 +115,7 @@ bool link_dma_mode() {
 /// The hold around each select window: the protocol owns the select for
 /// these windows (the Request carries a null PinRef) and pays 30 us on each
 /// side, for the client's loop to see the edge.
-void link_hold() { spin_us(30); }
+void link_hold() { brio::spin_us<Ruler>(30); }
 
 /// One request through a host, the status or no_answer: naming the loop on a host
 /// without engines and the engines on one with them, its completion awaited on the
@@ -152,7 +137,7 @@ uint8_t run_request(const uint8_t* tx, uint8_t* rx, uint16_t n, SpiClock rate, S
     if (H::start(r)) {
         return H::status();
     }
-    return wait_until([] { return pair_done; }, 200'000u) ? pair_status : no_answer;
+    return brio::wait_until<Ruler>([] { return pair_done; }, 200'000u) ? pair_status : no_answer;
 }
 
 /// One protocol window: prime, select, hold, the transaction, hold,
@@ -165,7 +150,7 @@ uint8_t link_xfer(const uint8_t* tx, uint8_t* rx, uint16_t n, SpiClock rate = li
         return spi_ok;
     }
     H::prime(mode, rate, bits);
-    spin_us(10);
+    brio::spin_us<Ruler>(10);
     CsPin::clear();
     link_hold();
     const uint8_t st = run_request<H>(tx, rx, n, rate, mode, bits);
@@ -216,7 +201,7 @@ bool recv_frame(spilink::Frame& out) {
     return false;
 }
 
-void settle() { settle_ms(spilink::settle_ms); }
+void settle() { brio::spin_us<Ruler>(spilink::settle_ms * 1000u); }
 
 bool command_once(Op op, const uint8_t* p, uint8_t len) {
     send_frame(op, p, len);
@@ -238,7 +223,7 @@ bool command(Op op, const uint8_t* p = no_payload, uint8_t len = 0) {
             return true;
         }
         (void)link_command_mode();
-        settle_ms(spilink::serve_ms + 100u);
+        brio::spin_us<Ruler>((spilink::serve_ms + 100u) * 1000u);
     }
     if (!link_quiet) {
         print(serial, "    LINK FAILURE op ", hex(spilink::byte_of(op)), ": the answer window carried");
@@ -276,7 +261,7 @@ bool peer_report(spilink::Report& r) {
             r = spilink::get_report(f.data);
             return true;
         }
-        settle_ms(60);
+        brio::spin_us<Ruler>(60'000u);
     }
     return false;
 }
@@ -517,7 +502,7 @@ void tn_peer() {
     for (uint8_t i = 0; i < 32u; ++i) {
         dark = dark && xrx[i] == 0xFFu;
     }
-    settle_ms(20);
+    brio::spin_us<Ruler>(20'000u);
     const bool after = command(Op::ping);
     print(serial, "  noise into the dark listener: the answer line read ", dark ? "0xFF throughout" : "SOMETHING",
           ", a ping after it ", after ? "answered" : "LOST", crlf);
@@ -773,13 +758,14 @@ void tq_kernel() {
     pk::BusKernel::init_all();
     pair_owner = PairOwner::bus_ao;
     LinkDmaHost::prime(SpiMode::mode0, link_clock);
-    spin_us(10);
+    brio::spin_us<Ruler>(10);
     CsPin::clear();
     link_hold();
     for (uint8_t i = 0; i < 4u; ++i) {
         post<pk::SpiArb>(pk::request(qtx[i], qrx[i], i == 2u));
     }
-    (void)wait_until(
+    // Fewer than four replies after 800 ms is judged by the verdict below.
+    (void)brio::wait_until<Ruler>(
         [] {
             pk::pump();
             return pk::Probe::n >= 4u;
@@ -929,19 +915,28 @@ enum class Answer : uint8_t { driven, sod, released };
 /// flash, still left the loop behind at /32 in modes 1 and 3. So the WAIT for
 /// the far host's select is in here too, with the read of the answer pad's
 /// enable it is followed by: nothing between the select falling and the
-/// loop's first turn is fetched from the flash. The wait is bounded in turns
-/// as the loop is (some 200 ms). Returns the frames received; `sent` the
+/// loop's first turn is fetched from the flash. The wait is bounded on the
+/// ruler (200 ms), the loop in turns. Returns the frames received; `sent` the
 /// answers written, `oe_selected` the pad's output enable once the window
 /// opened.
 [[gnu::section(".fast_text"), gnu::noinline, gnu::flatten]] uint16_t serve_client(bool wide, uint16_t count,
                                                                                 uint16_t& sent,
                                                                                 bool& oe_selected) {
     using S = Pl022<1>;
-    for (uint32_t spins = SysClock::hz / 50u; CsPin::read() && spins != 0u; --spins) {
-    }
+    // The select's fall, 200 ms at most on the ruler (one bus read a turn,
+    // flattened in here with the rest: nothing fetched from the flash). A
+    // select that never falls serves nothing: the run reports no frame
+    // received, which every verdict on a burst judges.
+    const bool selected = brio::wait_until<Ruler>([] { return !CsPin::read(); }, 200'000u);
     oe_selected = TxPin::status().oe_to_pad;
     uint16_t got = 0;
     uint16_t out = sent;
+    if (!selected) {
+        return 0;
+    }
+    // THE LOOP KEEPS ITS TURN COUNT: it does work every turn (both FIFOs and
+    // the gauge), and its pace is the instrument - a ruler read a turn would
+    // add a bus access to every frame's service.
     uint32_t turns = SysClock::hz / 33u;
     while (got < count && turns-- != 0u) {
         const uint32_t sr = S::flags();
@@ -1022,7 +1017,9 @@ ClientRun client_burst(uint8_t mode, bool wide, uint16_t count, uint16_t div, ui
     bool oe_selected = false;
     const uint16_t got = serve_client(wide, count, sent, oe_selected);
     out.oe_selected = oe_selected;
-    (void)wait_until([] { return CsPin::read(); }, 100'000u);
+    // The select back up before the window counter is read; a select still
+    // low after 100 ms shows as a window count short of its due, judged.
+    (void)brio::wait_until<Ruler>([] { return CsPin::read(); }, 100'000u);
     out.windows = static_cast<uint16_t>(windows_seen());
     out.pulse_min = gauge_min;
     out.pulses = gauge_n;
@@ -1045,7 +1042,7 @@ ClientRun client_burst(uint8_t mode, bool wide, uint16_t count, uint16_t div, ui
             }
         }
     }
-    settle_ms(20);
+    brio::spin_us<Ruler>(20'000u);
     (void)peer_report(out.peer);
     return out;
 }
@@ -1290,7 +1287,9 @@ ClientRun client_vector_burst(uint8_t mode, bool wide, uint16_t count, uint16_t 
     // frames at /10 in mode 3. The transmit FIFO is empty here, so TXIM raises the
     // line at once, and the owner being none the vector masks it and leaves.
     LinkClient::interrupts(SpiInterrupt::tx, true);
-    (void)wait_until([] { return LinkClient::Resource::interrupts() == 0u; }, 1000u);
+    // A warm-up, not a check: an entry that did not come leaves the lines
+    // cold, which the first burst's figures show.
+    (void)brio::wait_until<Ruler>([] { return LinkClient::Resource::interrupts() == 0u; }, 1000u);
     spilink::Stream answers(a.pattern, a.seed_b);
     const uint16_t bytes = static_cast<uint16_t>(wide ? 2u * count : count);
     for (uint16_t i = 0; i < bytes; ++i) {
@@ -1320,7 +1319,9 @@ ClientRun client_vector_burst(uint8_t mode, bool wide, uint16_t count, uint16_t 
     // (the tail included: RTIM 32 bit periods after the last frame, under
     // 6 us at /64) - or, for a client that takes nothing, 5 ms, twenty
     // times a burst of 24 frames at /64.
-    (void)wait_until([] { return !CsPin::read(); }, 200'000u);
+    // A select that never falls leaves cv_got at zero, which the burst's
+    // verdicts judge.
+    (void)brio::wait_until<Ruler>([] { return !CsPin::read(); }, 200'000u);
     // THE LENGTHENERS, read around the burst from its select's fall to its
     // last frame taken: a kernel tick served inside the burst stands
     // between a receive interrupt and its refill without being the vector
@@ -1333,14 +1334,15 @@ ClientRun client_vector_burst(uint8_t mode, bool wide, uint16_t count, uint16_t 
     const uint32_t hits0 = Xip::hits();
     const uint32_t miss0 = Xip::accesses() - hits0;
     if (drain) {
-        (void)wait_until([] { return cv_got >= cv_count; }, 300'000u);
+        // Short of the count after 300 ms shows as out.got, judged.
+        (void)brio::wait_until<Ruler>([] { return cv_got >= cv_count; }, 300'000u);
     } else {
-        spin_us(5000);
+        brio::spin_us<Ruler>(5000);
     }
     const uint32_t hits1 = Xip::hits();
     out.misses = (Xip::accesses() - hits1) - miss0;
     out.ticks = Ticker::ticks() - tick0;
-    spin_us(200);
+    brio::spin_us<Ruler>(200);
     LinkClient::interrupts(SpiInterrupt::all, false);
     pair_owner = PairOwner::none;
     out.windows = static_cast<uint16_t>(windows_seen());
@@ -1381,7 +1383,7 @@ ClientRun client_vector_burst(uint8_t mode, bool wide, uint16_t count, uint16_t 
             }
         }
     }
-    settle_ms(20);
+    brio::spin_us<Ruler>(20'000u);
     (void)peer_report(out.peer);
     return out;
 }
@@ -1516,15 +1518,16 @@ void tw_wedge() {
     pk::BusKernel::init_all();
     pair_owner = PairOwner::bus_ao;
     pair_swallow = true;
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     post<pk::SpiArb>(pk::request(wtx[0], wrx[0], false));
-    (void)wait_until(
+    // No reply after 800 ms is judged by the verdict below (first_n).
+    (void)brio::wait_until<Ruler>(
         [] {
             pk::pump();
             return pk::Probe::n >= 1u;
         },
         800'000u);
-    const uint32_t took_us = us_now() - t0;
+    const uint32_t took_us = Ruler::now() - t0;
     const uint8_t first = pk::Probe::replies[0];
     const uint8_t first_n = pk::Probe::n;
     pair_swallow = false;
@@ -1532,7 +1535,8 @@ void tw_wedge() {
     for (uint8_t i = 0; i < 4u; ++i) {
         post<pk::SpiArb>(pk::request(wtx[i], wrx[i], i == 2u));
     }
-    (void)wait_until(
+    // Fewer than four replies after 800 ms is judged below (after_n).
+    (void)brio::wait_until<Ruler>(
         [] {
             pk::pump();
             return pk::Probe::n >= 4u;

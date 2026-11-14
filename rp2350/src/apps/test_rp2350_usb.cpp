@@ -68,6 +68,7 @@
 
 #include <stdint.h>
 
+#include <optional>
 #include <span>
 
 #include "rp2350/clock.hpp"
@@ -79,6 +80,7 @@
 #include "rp2350/uart.hpp"
 #include "rp2350/usb.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 #include "util/usb/cdc.hpp"
 #include "util/usb/device.hpp"
@@ -159,17 +161,19 @@ using Device2 = UsbDevice<Usb, Descriptors2, Port, PortB>;
 /// Which device the vector serves: letter x's two-port one while it runs.
 volatile bool two_ports = false;
 
-uint32_t us_now() { return Mtime::micros(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// the platform timer's microsecond count (rp2350/mtime.hpp): one bus
+/// read, the same on both architectures, which a clk_sys change does not
+/// move.
+struct Ruler {
+    static uint32_t now() { return Mtime::micros(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 
 bool within(uint32_t got, uint32_t want, uint32_t per_mille) {
     const uint32_t tol = static_cast<uint32_t>(static_cast<uint64_t>(want) * per_mille / 1000u);
     return got + tol >= want && got <= want + tol;
-}
-
-void wait_us(uint32_t span) {
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < span) {
-    }
 }
 
 const char* state_name(UsbDeviceState s) {
@@ -183,28 +187,22 @@ const char* state_name(UsbDeviceState s) {
 }
 
 /// A host letter's clean start: whatever a previous letter left in the
-/// rings is dropped (the receive ring drained, the transmit ring waited
-/// out for a second), so the counts are this letter's own.
-void settle_port() {
+/// rings is dropped (the receive ring drained a byte a turn, the transmit
+/// ring waited out), for at most a second, so the counts are this letter's
+/// own. False when the port did not fall quiet: a host still streaming
+/// into it, which the caller reports as a failed premise.
+bool settle_port() {
     uint8_t b = 0;
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < 1'000'000u) {
-        if (!Port::read_byte(b) && Port::tx_idle()) {
-            break;
-        }
-    }
+    return brio::wait_until<Ruler>([&b] { return !Port::read_byte(b) && Port::tx_idle(); }, 1'000'000u);
 }
 
-/// Wait for the device to reach CONFIGURED; the microseconds it took, 0 on a timeout.
-uint32_t wait_configured(uint32_t budget_us) {
-    const uint32_t t0 = us_now();
-    while (!Device::configured()) {
-        if (us_now() - t0 > budget_us) {
-            return 0;
-        }
-    }
-    return us_now() - t0;
+/// Wait for the device to reach CONFIGURED; the microseconds it took, nothing on a time-out.
+std::optional<uint32_t> wait_configured(uint32_t budget_us) {
+    return brio::cycles_until<Ruler>([] { return Device::configured(); }, budget_us);
 }
+
+/// The answer of wait_configured() as the console prints it, 0 for a time-out.
+uint32_t shown(const std::optional<uint32_t>& took) { return took ? *took : 0u; }
 
 bool usb_up = false;
 
@@ -220,9 +218,9 @@ void ta_enumerate() {
         Device::stop();
         Usb::release();
     }
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     usb_up = Usb::init(clock);
-    const uint32_t init_us = us_now() - t0;
+    const uint32_t init_us = Ruler::now() - t0;
     const auto usb_hz = SysClock::count_hz(CountSource::clk_usb);
     const auto sys_hz = SysClock::count_hz(CountSource::clk_sys);
     print(serial, "  init: ", usb_up ? "ok" : "FAILED", " in ", init_us, " us; clk_usb counted ", usb_hz ? *usb_hz : 0u,
@@ -259,14 +257,14 @@ void ta_enumerate() {
     const uint32_t stalls_before = Device::stalls();
     const uint32_t setups_before = Device::setups();
     Device::start();
-    const uint32_t took = wait_configured(1'500'000u);
-    print(serial, "  start(): pull-up=", Usb::pulled_up(), "; the host took ", took,
+    const auto took = wait_configured(1'500'000u);
+    print(serial, "  start(): pull-up=", Usb::pulled_up(), "; the host took ", shown(took),
           " us to configure: state=", state_name(Device::state()), " address=", Device::address(),
           " resets=", Device::resets(), " setups=", Device::setups(), " stalls=", Device::stalls(),
           " last request=", Device::last_request(), " frame=", Usb::frame(), crlf);
     bench.verdict("start() raises the pull-up and the host enumerates the device to CONFIGURED within a second and a "
                   "half",
-                  Usb::pulled_up() && took != 0u && Device::configured());
+                  Usb::pulled_up() && took.has_value() && Device::configured());
     bench.verdict("the host reset the bus at least once and assigned a non-zero address",
                   Device::resets() >= 1u && Device::address() != 0u);
     bench.verdict("enumeration took at least the four requests a host must make, and the stall counter is small (a "
@@ -282,7 +280,7 @@ void ta_enumerate() {
           " coding changes=", Port::coding_changes(), " frames seen=", Usb::frame(), crlf);
     // Ten milliseconds of frames: the host's start-of-frame counter moves.
     const uint16_t f0 = Usb::frame();
-    wait_us(10'000u);
+    brio::spin_us<Ruler>(10'000);
     const uint16_t frames = static_cast<uint16_t>((Usb::frame() - f0) & 0x7FFu);
     print(serial, "  start-of-frame counter advanced ", frames, " in 10 ms", crlf);
     bench.verdict("the host's start-of-frame counter advances a frame a millisecond", frames >= 9u && frames <= 11u);
@@ -306,7 +304,7 @@ void tb_additions() {
     const uint32_t raw_a = Usb::sof_timestamp_raw();
     const uint32_t last_a = Usb::sof_timestamp_last();
     const uint32_t since_a = Usb::since_sof();
-    wait_us(300u);
+    brio::spin_us<Ruler>(300);
     const uint32_t raw_b = Usb::sof_timestamp_raw();
     const uint32_t since_b = Usb::since_sof();
     const uint32_t advanced = (raw_b + 0x20'0000u - raw_a) % 0x20'0000u;
@@ -352,10 +350,10 @@ void tb_additions() {
     const bool armed = Usb::arm_device_watchdog({.limit = 0x3'FFFFu, .reset_on_fire = false});
     const uint32_t limit = Usb::device_watchdog_limit();
     const bool standing = Usb::device_watchdog_armed();
-    wait_us(20'000u);
+    brio::spin_us<Ruler>(20'000);
     const bool fired_wide = Usb::take_device_watchdog_fired();
     (void)Usb::arm_device_watchdog({.limit = 48'000u, .reset_on_fire = false});
-    wait_us(20'000u);
+    brio::spin_us<Ruler>(20'000);
     const bool fired_narrow = Usb::take_device_watchdog_fired();
     Usb::disarm_device_watchdog();
     print(serial, "  device watchdog: armed=", armed, " limit read back ", limit, " standing=", standing,
@@ -372,13 +370,13 @@ void tb_additions() {
     // chip fixes it.
     const uint8_t notify = usb_ep_in(1);
     Usb::abort(notify, true);
-    uint32_t spins = 0;
-    while (!Usb::abort_done(notify) && spins < 100'000u) {
-        ++spins;
-    }
-    const bool done = Usb::abort_done(notify);
+    // An idle endpoint has no transaction to finish, so the flag comes at
+    // once; 10 ms is only the time-out of an abort that never completes.
+    const auto abort_us = brio::cycles_until<Ruler>([notify] { return Usb::abort_done(notify); }, 10'000u);
+    const bool done = abort_us.has_value();
     Usb::abort(notify, false);
-    print(serial, "  endpoint abort on the notification endpoint: done after ", spins, " spins, lifted=",
+    print(serial, "  endpoint abort on the notification endpoint: ", done ? "done after " : "NOT done in ",
+          done ? *abort_us : 10'000u, " us, lifted=",
           !Usb::aborted(notify), ", done flag cleared=", !Usb::abort_done(notify), crlf);
     bench.verdict("an idle endpoint's abort completes and LIFTS - the RP2040's erratum E2 left it standing, and 12.7.2 "
                   "fixes it here",
@@ -398,15 +396,15 @@ void tc_reconnect() {
     const uint32_t resets = Device::resets();
     const uint8_t address = Device::address();
     Device::stop();
-    wait_us(500'000u);
+    brio::spin_us<Ruler>(500'000);
     print(serial, "  stopped for 500 ms: state=", state_name(Device::state()), "; start() again...", crlf);
     Device::start();
-    const uint32_t took = wait_configured(2'000'000u);
+    const auto took = wait_configured(2'000'000u);
     print(serial, "  resets ", resets, " -> ", Device::resets(), ", address ", address, " -> ", Device::address(),
-          ", configured in ", took, " us, state=", state_name(Device::state()), crlf);
+          ", configured in ", shown(took), " us, state=", state_name(Device::state()), crlf);
     bench.verdict("dropping the pull-up detaches the device; raising it again brings the host's bus reset (counted) "
                   "and a fresh enumeration",
-                  Device::resets() > resets && took != 0u);
+                  Device::resets() > resets && took.has_value());
     bench.verdict("the port is configured again with its bulk OUT armed", Port::configured() && Port::out_armed());
 }
 
@@ -422,7 +420,7 @@ void td_isolation() {
     Usb::phy_isolate(true);
     const bool isolated = Usb::phy_isolated();
     const bool pulled_while_isolated = Usb::pulled_up();
-    wait_us(500'000u);
+    brio::spin_us<Ruler>(500'000);
     print(serial, "  PHY isolated for 500 ms (MAIN_CTRL=", hex(Usb::regs().MAIN_CTRL), ", pull-up bit still ",
           pulled_while_isolated, "): this is what a power-down of the switched core domain leaves behind", crlf);
     // The way back is the whole of init(), which is what the datasheet
@@ -440,28 +438,28 @@ void td_isolation() {
     // still using. That silent half-open state is the finding, and the
     // reason a program coming back from a power-down must force the
     // reconnect itself.
-    const uint32_t took = wait_configured(6'000'000u);
+    const auto took = wait_configured(6'000'000u);
     print(serial, "  re-init=", up, ", PHY isolated=", Usb::phy_isolated(), ", resets ", resets, " -> ",
-          Device::resets(), ", address=", Device::address(), ", configured in ", took, " us, state=",
+          Device::resets(), ", address=", Device::address(), ", configured in ", shown(took), " us, state=",
           state_name(Device::state()), crlf);
     bench.verdict("MAIN_CTRL.PHY_ISO reads back set while it stands, and the bring-up sequence lifts it again",
                   isolated && up && !Usb::phy_isolated());
     bench.verdict("BUT THE ISOLATION IS INVISIBLE TO THE HOST: no bus reset arrives in six seconds and the device "
                   "is left in DEFAULT while the host goes on addressing the address it assigned, because isolating "
                   "the PHY does not take the pull-up off the wire",
-                  Device::resets() == resets && took == 0u && !Port::configured());
+                  Device::resets() == resets && !took.has_value() && !Port::configured());
     // The way back, and the only one: the device's own pull-up, down
     // long enough for the host to run its disconnect debounce.
     Device::stop();
-    wait_us(500'000u);
+    brio::spin_us<Ruler>(500'000);
     Device::start();
-    const uint32_t back = wait_configured(4'000'000u);
+    const auto back = wait_configured(4'000'000u);
     print(serial, "  the device forcing the reconnect afterwards: resets ", resets, " -> ", Device::resets(),
-          ", address=", Device::address(), ", configured in ", back, " us, state=", state_name(Device::state()),
+          ", address=", Device::address(), ", configured in ", shown(back), " us, state=", state_name(Device::state()),
           crlf);
     bench.verdict("and the way back is the device's own pull-up, dropped long enough for the host to see it: a bus "
                   "reset, a new address and CONFIGURED again",
-                  Device::resets() > resets && back != 0u && Port::configured() && Port::out_armed());
+                  Device::resets() > resets && back.has_value() && Port::configured() && Port::out_armed());
     const uint32_t errors = Usb::take_errors();
     const uint32_t again = Usb::take_errors();
     print(serial, "  SIE errors over the isolation round trip: ", hex(errors), ", and on a second read ", hex(again),
@@ -478,31 +476,35 @@ void ty_echo() {
         bench.verdict("the device is configured (run a first)", false);
         return;
     }
-    settle_port();
+    if (!settle_port()) {
+        bench.verdict("the port falls quiet within a second before the echo starts", false);
+        return;
+    }
     print(serial, "  echoing every byte for 10 s: send a stream on the port now", crlf);
     const uint32_t rx0 = Port::rx_bytes();
     const uint32_t tx0 = Port::tx_bytes();
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     uint32_t echoed = 0;
     uint8_t buf[64];
-    while (us_now() - t0 < 10'000'000u) {
+    while (Ruler::now() - t0 < 10'000'000u) {
         uint32_t n = 0;
         while (n < sizeof buf && Port::read_byte(buf[n])) {
             ++n;
         }
+        // Bounded by the letter's end: a host that stops taking the echo
+        // fills the transmit ring, and the bytes not written stay uncounted.
         uint32_t written = 0;
-        while (written < n) {
+        while (written < n && Ruler::now() - t0 < 11'000'000u) {
             written += Port::write_bulk(std::span<const uint8_t>(buf + written, n - written));
         }
-        echoed += n;
+        echoed += written;
     }
-    while (!Port::tx_idle() && us_now() - t0 < 11'000'000u) {
-    }
+    const bool flushed = brio::wait_until<Ruler>([] { return Port::tx_idle(); }, 1'000'000u);
     print(serial, "  echoed ", echoed, " bytes (received ", Port::rx_bytes() - rx0, ", sent ", Port::tx_bytes() - tx0,
           "), overruns ", Port::rx_overruns(), ", SIE errors ", hex(Usb::take_errors()), ", endpoint errors ",
-          Usb::endpoint_errors(2).tx_count, crlf);
+          Usb::endpoint_errors(2).tx_count, flushed ? "" : "; the host left the last echo untaken", crlf);
     bench.verdict("every byte received went back, no overrun (the host end judges the bytes)",
-                  echoed > 0u && Port::rx_bytes() - rx0 == echoed && Port::tx_bytes() - tx0 == echoed &&
+                  echoed > 0u && flushed && Port::rx_bytes() - rx0 == echoed && Port::tx_bytes() - tx0 == echoed &&
                       Port::rx_overruns() == 0u);
 }
 
@@ -519,7 +521,7 @@ void tw_line() {
     const uint32_t states = Port::line_state_changes();
     print(serial, "  now: ", before.baud, "/", before.data_bits, "/", before.parity, "/", before.stop_bits,
           " dtr=", Port::dtr(), "; 10 s for the host to open the port at another rate and raise DTR", crlf);
-    wait_us(10'000'000u);
+    brio::spin_us<Ruler>(10'000'000);
     const UsbLineCoding after = Port::line_coding();
     print(serial, "  then: ", after.baud, "/", after.data_bits, "/", after.parity, "/", after.stop_bits,
           " dtr=", Port::dtr(), " rts=", Port::rts(), " coding changes ", changes, " -> ", Port::coding_changes(),
@@ -538,45 +540,46 @@ void tv_throughput() {
         bench.verdict("the device is configured (run a first)", false);
         return;
     }
-    settle_port();
+    if (!settle_port()) {
+        bench.verdict("the port falls quiet within a second before the stream starts", false);
+        return;
+    }
     print(serial, "  device -> host for 3 s: read the port now", crlf);
     uint8_t pattern[64];
     uint8_t next = 0;
     const uint32_t tx0 = Port::tx_bytes();
-    uint32_t t0 = us_now();
-    while (us_now() - t0 < 3'000'000u) {
+    uint32_t t0 = Ruler::now();
+    while (Ruler::now() - t0 < 3'000'000u) {
         for (uint8_t i = 0; i < 64u; ++i) {
             pattern[i] = next++;
         }
         uint32_t written = 0;
-        while (written < 64u && us_now() - t0 < 3'000'000u) {
+        while (written < 64u && Ruler::now() - t0 < 3'000'000u) {
             written += Port::write_bulk(std::span<const uint8_t>(pattern + written, 64u - written));
         }
     }
-    while (!Port::tx_idle() && us_now() - t0 < 4'000'000u) {
-    }
+    const bool flushed = brio::wait_until<Ruler>([] { return Port::tx_idle(); }, 1'000'000u);
     const uint32_t sent = Port::tx_bytes() - tx0;
-    print(serial, "  sent ", sent, " bytes in 3 s: ", sent / 3000u, " KB/s", crlf);
-    bench.verdict("the device pours more than 200 KB/s into the port", sent > 600'000u);
+    print(serial, "  sent ", sent, " bytes in 3 s: ", sent / 3000u, " KB/s",
+          flushed ? "" : "; the host left the last packet untaken", crlf);
+    bench.verdict("the device pours more than 200 KB/s into the port", sent > 600'000u && flushed);
 
     print(serial, "  host -> device: write the port now, the two seconds count from the first byte", crlf);
     uint8_t b = 0;
-    t0 = us_now();
-    while (!Port::read_byte(b) && us_now() - t0 < 5'000'000u) {
-    }
+    const bool started = brio::wait_until<Ruler>([&b] { return Port::read_byte(b); }, 5'000'000u);
     const uint32_t rx0 = Port::rx_bytes();
     uint32_t drained = 0;
-    t0 = us_now();
-    while (us_now() - t0 < 2'000'000u) {
+    t0 = Ruler::now();
+    while (Ruler::now() - t0 < 2'000'000u) {
         if (Port::read_byte(b)) {
             ++drained;
         }
     }
     const uint32_t got = Port::rx_bytes() - rx0;
     print(serial, "  received ", got, " bytes in 2 s: ", got / 2000u, " KB/s, drained ", drained, ", overruns ",
-          Port::rx_overruns(), crlf);
+          Port::rx_overruns(), started ? "" : "; no first byte within 5 s", crlf);
     bench.verdict("the device takes more than 200 KB/s from the port with no overrun",
-                  got > 400'000u && Port::rx_overruns() == 0u);
+                  started && got > 400'000u && Port::rx_overruns() == 0u);
 }
 
 // =============================================================================
@@ -591,54 +594,57 @@ void tx_two_ports() {
         // letter left in its rings (v's host stream outlasts v's count)
         // would be echoed into this letter's count and keep its bulk OUT
         // unarmed behind a full ring.
-        settle_port();
+        if (!settle_port()) {
+            bench.verdict("port A falls quiet within a second before the two-port device starts", false);
+            return;
+        }
         Device::stop();
         Device2::stop();
     } else {
         usb_up = Usb::init(clock);
     }
-    wait_us(500'000u);
+    brio::spin_us<Ruler>(500'000);
     two_ports = true;
     Device2::start();
-    uint32_t took = 0;
-    {
-        const uint32_t t1 = us_now();
-        while (!Device2::configured() && us_now() - t1 < 2'000'000u) {
-        }
-        took = Device2::configured() ? us_now() - t1 : 0u;
-    }
+    const auto took = brio::cycles_until<Ruler>([] { return Device2::configured(); }, 2'000'000u);
     print(serial, "  the two-port device: configuration ", Descriptors2::configuration.size(), " bytes, ",
-          Descriptors2::configuration[4], " interfaces; configured in ", took, " us, address ", Device2::address(),
+          Descriptors2::configuration[4], " interfaces; configured in ", shown(took), " us, address ", Device2::address(),
           "; port A ", Port::configured(), ", port B ", PortB::configured(), crlf);
     bench.verdict("TWO PORTS IN ONE DEVICE: one configuration of four interfaces (125 bytes) enumerates to CONFIGURED "
                   "and both ports are configured with their bulk OUT armed",
-                  took != 0u && Descriptors2::configuration.size() == 125u && Descriptors2::configuration[4] == 4u &&
+                  took.has_value() && Descriptors2::configuration.size() == 125u && Descriptors2::configuration[4] == 4u &&
                       Port::configured() && PortB::configured() && Port::out_armed() && PortB::out_armed());
     print(serial, "  15 s: port A echoes every byte, port B every byte plus one - write both ports now", crlf);
     const uint32_t a0 = Port::rx_bytes();
     const uint32_t b0 = PortB::rx_bytes();
     uint32_t a_echo = 0;
     uint32_t b_echo = 0;
-    const uint32_t t2 = us_now();
+    const uint32_t t2 = Ruler::now();
     uint8_t buf[64];
-    while (us_now() - t2 < 15'000'000u) {
+    // The writes are bounded by the letter's end, a second past the window:
+    // a host that stops taking one port's echo fills its transmit ring, and
+    // the bytes not written stay uncounted.
+    const auto open = [t2] { return Ruler::now() - t2 < 16'000'000u; };
+    while (Ruler::now() - t2 < 15'000'000u) {
         uint32_t n = 0;
         while (n < sizeof buf && Port::read_byte(buf[n])) {
             ++n;
         }
-        for (uint32_t w = 0; w < n;) {
+        uint32_t w = 0;
+        while (w < n && open()) {
             w += Port::write_bulk(std::span<const uint8_t>(buf + w, n - w));
         }
-        a_echo += n;
+        a_echo += w;
         n = 0;
         while (n < sizeof buf && PortB::read_byte(buf[n])) {
             buf[n] = static_cast<uint8_t>(buf[n] + 1u);
             ++n;
         }
-        for (uint32_t w = 0; w < n;) {
+        w = 0;
+        while (w < n && open()) {
             w += PortB::write_bulk(std::span<const uint8_t>(buf + w, n - w));
         }
-        b_echo += n;
+        b_echo += w;
     }
     print(serial, "  port A echoed ", a_echo, " of ", Port::rx_bytes() - a0, ", port B ", b_echo, " of ",
           PortB::rx_bytes() - b0, "; overruns ", Port::rx_overruns(), " / ", PortB::rx_overruns(), ", SIE errors ",
@@ -648,11 +654,11 @@ void tx_two_ports() {
                   a_echo != 0u && b_echo != 0u && Port::rx_bytes() - a0 == a_echo && PortB::rx_bytes() - b0 == b_echo &&
                       Port::rx_overruns() == 0u && PortB::rx_overruns() == 0u);
     Device2::stop();
-    wait_us(500'000u);
+    brio::spin_us<Ruler>(500'000);
     two_ports = false;
     Device::start();
-    const uint32_t back = wait_configured(2'000'000u);
-    bench.verdict("and the one-port device enumerates again after it", back != 0u && Port::configured());
+    const auto back = wait_configured(2'000'000u);
+    bench.verdict("and the one-port device enumerates again after it", back.has_value() && Port::configured());
 }
 
 void banner() {

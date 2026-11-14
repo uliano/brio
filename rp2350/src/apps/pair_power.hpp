@@ -107,21 +107,22 @@ bool partner_rail_up(C clock, Say say) {
 }
 
 /// A letter that drives a link pad, registered through the guard: the
-/// rail read first, and with it down one failing verdict that says why
-/// and the letter itself not run. `bench` is the image's TestBench and
-/// `clock` its clock object, both at namespace scope.
+/// rail read first, and with it down one skip that says why
+/// (TestBench::skip(): a check the desk did not give its premise, counted
+/// apart from passes and fails) and the letter itself not run. `bench` is
+/// the image's TestBench and `clock` its clock object, both at namespace
+/// scope.
 template <auto& bench, auto& clock, void (*letter)()>
 void guarded() {
     if (partner_rail(clock).up()) {
         letter();
         return;
     }
-    bench.verdict(rp2350pair::board_a
-                      ? "THE PARTNER BOARD IS POWERED (GP16/GP17 read high through their pull-ups to its 3V3) "
-                        "- else no link pad is driven, an RP2040 pad not being failsafe"
-                      : "THE PARTNER BOARD IS POWERED (GP36/GP37 read high through their pull-ups to its 3V3) "
-                        "- else no link pad is driven, an RP2040 pad not being failsafe",
-                  false);
+    bench.skip(rp2350pair::board_a
+                   ? "the partner board is unpowered (GP16/GP17 read low through their pull-ups to its 3V3), "
+                     "so no link pad is driven, an RP2040 pad not being failsafe"
+                   : "the partner board is unpowered (GP36/GP37 read low through their pull-ups to its 3V3), "
+                     "so no link pad is driven, an RP2040 pad not being failsafe");
 }
 
 }  // namespace pair

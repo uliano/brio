@@ -37,6 +37,7 @@
 #include "rp2040/uart.hpp"
 #include "kernel/borrowed.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED (rp_twi_peer.hpp's header).
 #include "../../../avrxt/src/apps/twi_link.hpp"
@@ -65,7 +66,14 @@ using RefusalPlacement = InRam;
 using SdaPin = Pin<2>;
 using SclPin = Pin<3>;
 
-uint32_t us_now() { return Timer::now_low(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// the system timer's microsecond count (rp2040/timer.hpp): one bus read,
+/// legal in any context, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Timer::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 
 constexpr uint8_t peer_kind = twilink::peer_rp2040;
 constexpr char peer_label[8] = {'r', 'p', '2', '0', '4', '0', '\0', '\0'};

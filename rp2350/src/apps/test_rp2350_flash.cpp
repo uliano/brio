@@ -98,6 +98,7 @@
 #include "rp2350/timer.hpp"
 #include "rp2350/uart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 extern "C" {
@@ -125,7 +126,7 @@ constexpr UartPins console_pins{
 using Serial = Uart<0, console_pins>;
 constexpr Serial serial;
 
-using Ruler = Timer<0>;       // microseconds, independent of clk_sys
+using Micros = Timer<0>;       // microseconds, independent of clk_sys
 using Chip = QmiWindow<0>;    // the window the board's flash sits in
 using Spare = QmiWindow<1>;   // nothing is attached to it on this board
 
@@ -150,7 +151,18 @@ uint8_t page_buf[Flash::page_size];
 uint8_t got_buf[Flash::page_size];
 uint8_t answer[16];
 
-uint32_t us_now() { return Ruler::now_low(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// TIMER0's microsecond count (rp2350/timer.hpp): one bus read, legal in
+/// any context, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Micros::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
+
+/// Wait until the console's last byte is off the wire, at most 200 ms
+/// (util/test_wait.hpp); false when it did not drain.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 
 /// How far up the chip this image reaches: the flash cursor .data was
 /// loaded from, plus .data's own length.
@@ -450,12 +462,12 @@ void tc_aliases() {
                   "twice over",
                   warm_hits == cold_hits + 1u);
 
-    const uint32_t t_inv0 = us_now();
+    const uint32_t t_inv0 = Ruler::now();
     Xip::invalidate_all();
-    const uint32_t t_inv = us_now() - t_inv0;
-    const uint32_t t_cln0 = us_now();
+    const uint32_t t_inv = Ruler::now() - t_inv0;
+    const uint32_t t_cln0 = Ruler::now();
     Xip::clean_all();
-    const uint32_t t_cln = us_now() - t_cln0;
+    const uint32_t t_cln = Ruler::now() - t_cln0;
     print(serial, "  the whole cache: invalidate ", t_inv, " us, clean ", t_cln,
           " us (2048 lines each)", crlf);
     bench.verdict("both sweeps complete, and the program that issued the clean is still running "
@@ -565,13 +577,15 @@ void te_stream() {
 
     Xip::stream_start(Flash::window + from, words);
     uint32_t taken = 0;
-    const uint32_t t0 = us_now();
-    while (taken < words && us_now() - t0 < 100'000u) {
+    const uint32_t t0 = Ruler::now();
+    // A loop that pops as it waits, so not a brio::wait_until; bounded on
+    // the ruler, its time-out judged by the first verdict below.
+    while (taken < words && Ruler::now() - t0 < 100'000u) {
         if (const auto w = Xip::stream_pop()) {
             got[taken++] = *w;
         }
     }
-    const uint32_t elapsed = us_now() - t0;
+    const uint32_t elapsed = Ruler::now() - t0;
     const uint32_t left = Xip::stream_remaining();
     Xip::stream_stop();
 
@@ -617,11 +631,12 @@ StreamRun stream_run(volatile uint32_t& fifo, uint32_t from) {
     StreamEngine::arm(&fifo, Dreq::xip_stream);
     StreamRun r{};
     const bool started = StreamEngine::start(streamed, 1024u);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     Xip::stream_start(Flash::window + from, 1024u);
-    while (stream_blocks == 0u && us_now() - t0 < 100'000u) {
-    }
-    r.us = us_now() - t0;
+    // The budget, 100 ms, is the one the letter always had. The answer is
+    // dropped: r.done judges the one completion.
+    (void)brio::wait_until<Ruler>([] { return stream_blocks != 0u; }, 100'000u);
+    r.us = Ruler::now() - t0;
     r.errors = stream_errors;
     r.moved = 1024u - DmaChannel<StreamEngine::channel>::count();
     r.done = started && stream_blocks == 1u && stream_errors == 0u && Xip::stream_remaining() == 0u;
@@ -658,14 +673,15 @@ void tj_stream_dma() {
 void tf_window_cost() {
     // Let the console fall silent first: its transmitter would be the
     // interrupt this measures the absence of.
-    const uint32_t t_drain = us_now();
-    while (!Serial::tx_idle() && us_now() - t_drain < 200'000u) {
+    if (!console_drain()) {
+        bench.skip("the console did not drain: the window would carry its interrupt");
+        return;
     }
 
     const uint32_t ticks0 = Ticker::ticks();
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const auto id = Flash::jedec_id();
-    const uint32_t us = us_now() - t0;
+    const uint32_t us = Ruler::now() - t0;
     const uint32_t ticks = Ticker::ticks() - ticks0;
 
     print(serial, "  a 9Fh window: ", us, " us, ", ticks, " kernel ticks across it", crlf);
@@ -680,9 +696,9 @@ void tf_window_cost() {
     // The console's own bytes across a window: written before it, read
     // by the host after it, uncut.
     print(serial, "  the next line is written across a window, from a buffer in SRAM:", crlf);
-    const uint32_t t1 = us_now();
+    const uint32_t t1 = Ruler::now();
     (void)Flash::status_register<1>();
-    const uint32_t us1 = us_now() - t1;
+    const uint32_t us1 = Ruler::now() - t1;
     print(serial, "  ... and here it is, whole - the window took ", us1, " us", crlf);
     // Whether the line above arrived whole is the host's to see (brio run
     // --strict counts a lost line): the device has nothing to judge it with.
@@ -755,9 +771,9 @@ void th_erase_program() {
     bench.verdict("two sectors cleared and the second one marked", cleared && marked);
 
     const uint32_t ticks_e0 = Ticker::ticks();
-    const uint32_t te0 = us_now();
+    const uint32_t te0 = Ruler::now();
     const bool erased = QspiFlash::erase(store_base);
-    const uint32_t erase_us = us_now() - te0;
+    const uint32_t erase_us = Ruler::now() - te0;
     const uint32_t erase_ticks = Ticker::ticks() - ticks_e0;
     print(serial, "  sector erase: ", erase_us, " us; the kernel advanced ", erase_ticks,
           " ticks where ", erase_us / 1000u, " ms of wall clock passed", crlf);
@@ -776,9 +792,9 @@ void th_erase_program() {
         page_buf[i] = static_cast<uint8_t>(0xA5u ^ i);
     }
     const uint32_t ticks_p0 = Ticker::ticks();
-    const uint32_t tp0 = us_now();
+    const uint32_t tp0 = Ruler::now();
     const bool programmed = QspiFlash::program(store_base, page_buf);
-    const uint32_t program_us = us_now() - tp0;
+    const uint32_t program_us = Ruler::now() - tp0;
     const uint32_t program_ticks = Ticker::ticks() - ticks_p0;
     print(serial, "  page program: ", program_us, " us, ", program_ticks, " kernel ticks lost",
           crlf);
@@ -844,9 +860,9 @@ void ti_reprogram() {
 void tw_wipe() {
     print(serial, "  this letter spends two erase cycles on the whole 64 kB partition", crlf);
 
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool by_sector = Flash::erase(store_base, store_bytes, FlashEraseGrain::sector);
-    const uint32_t sector_us = us_now() - t0;
+    const uint32_t sector_us = Ruler::now() - t0;
     bench.verdict("the partition erased with the 4 kB command alone", by_sector);
     bench.verdict("and reads all ones", range_is(store_base, store_bytes, 0xFF));
 
@@ -862,9 +878,9 @@ void tw_wipe() {
     bench.verdict("a marker page written at each end of the partition, so the erase below has "
                   "something to erase", marked);
 
-    const uint32_t t1 = us_now();
+    const uint32_t t1 = Ruler::now();
     const bool by_block = Flash::erase(store_base, store_bytes, FlashEraseGrain::sector_or_block);
-    const uint32_t block_us = us_now() - t1;
+    const uint32_t block_us = Ruler::now() - t1;
     bench.verdict("the partition erased again, this time with the 64 kB block command offered",
                   by_block);
     bench.verdict("and both markers are gone, so the 64 kB command reached the chip and did "

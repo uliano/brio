@@ -137,6 +137,7 @@
 #include "util/line_reader.hpp"
 #include "util/print.hpp"
 #include "util/spi_bus.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // THE PROTOCOL HEADERS ARE SHARED, NOT COPIED: the far board's two
@@ -162,6 +163,7 @@ static_assert(SysClock::hz % 1'000'000u == 0u, "a whole number of cycles per mic
 
 /// TIMER1 on clk_sys: one load, a count a cycle; a compiler barrier on
 /// either side, so that no plain load or store is scheduled across a stamp.
+/// The same source on both architectures.
 struct Ruler {
     [[gnu::always_inline]] static uint32_t now() {
         std::atomic_signal_fence(std::memory_order_seq_cst);
@@ -169,8 +171,13 @@ struct Ruler {
         std::atomic_signal_fence(std::memory_order_seq_cst);
         return t;
     }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
+static_assert(CycleRuler<Ruler>);
 
+/// The shared body's spin(): a span in CORE CYCLES (a borrower's 3000, a
+/// timer's quieting), which util/test_wait.hpp's spin_us() does not offer -
+/// it takes whole microseconds - so it stays, the one loop of its own here.
 [[gnu::always_inline]] inline void spin(uint32_t cycles) {
     const uint32_t t0 = Ruler::now();
     while (Ruler::now() - t0 < cycles) {

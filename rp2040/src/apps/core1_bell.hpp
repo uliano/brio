@@ -18,7 +18,8 @@
 // (the pack's Pressure, with Tick among its events) and after kernel/
 // tenuto.hpp, util/inbox.hpp, rp2040/multicore.hpp, rp2040/timer.hpp,
 // rp2040/ticker.hpp and rp2040/nvic.hpp at file scope. It asks of the suite:
-// `clock`, `Ruler`, `core_hz` and `spin()`. Its glue binds isr_timer_1 to
+// `clock`, `Ruler` (util/test_wait.hpp's shape, a constexpr hz()), `core_hz` and
+// `spin()`. Its glue binds isr_timer_1 to
 // bell_alarm_isr() and isr_sio_proc0 to bell_doorbell_isr() with the pack's
 // own landing record, and main() calls Drain0::enable() before the kernel
 // runs.
@@ -90,13 +91,7 @@ bool core1_launch() {
     SioDoorbell<0>::pop_all();
     Nvic::clear_pending(SioDoorbell<0>::irq());
     SioDoorbell<0>::enable();
-    const uint32_t t0 = Ruler::now();
-    while (ok && core1_stage != 1u) {
-        if (Ruler::now() - t0 >= 10u * (core_hz / 1000u)) {
-            return false;
-        }
-    }
-    return ok;
+    return ok && brio::wait_until<Ruler>([] { return core1_stage == 1u; }, 10'000u);
 }
 
 bool core1_up = false;

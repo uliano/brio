@@ -126,6 +126,7 @@
 #include "util/i2c_bus.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: one file for every board
@@ -149,7 +150,7 @@ constexpr UartPins console_pins{
 };
 using Serial = Uart<0, console_pins>;
 constexpr Serial serial;
-using Ruler = Timer<0>;
+using Micros = Timer<0>;
 
 TestBench<Serial> bench;
 
@@ -175,7 +176,14 @@ using SclPin = Pin<rp2350pair::i2c_scl>;
 constexpr uint8_t partner_kind = twilink::peer_rp2040;
 constexpr const char* partner_text = "the WeAct RP2040";
 
-uint32_t us_now() { return Ruler::now_low(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// TIMER0's microsecond count (rp2350/timer.hpp): one bus read, legal in
+/// any context, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Micros::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 /// Every line of the XIP cache dropped: letter g's cold read.
 void xip_empty() { Xip::invalidate_all(); }
 /// Letters u and s: clk_sys cycles on the second system timer (main() sets its source).
@@ -289,9 +297,9 @@ void ta_block() {
     bench.verdict("enabled: IC_ENABLE_STATUS reports it, and the configuration, the timing, the target and "
                   "the own address are refused",
                   running && refused && S::target() == 0x42u);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool off = S::disable();
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     print(serial, "  disable on an idle bus: ", off ? "reported" : "NOT reported", " in ", took, " us", crlf);
     bench.verdict("the disable of an idle block is reported by IC_ENABLE_STATUS within a few microseconds",
                   off && took < 20u);
@@ -418,7 +426,7 @@ void ty_write_bytes() {
         bench.verdict("the peer accepted the serve command", false);
         return;
     }
-    uint32_t s0 = us_now();
+    uint32_t s0 = Ruler::now();
     write_host_ready();
     struct Run {
         uint16_t n;
@@ -435,9 +443,9 @@ void ty_write_bytes() {
     uint8_t read_ok = 0;
     uint8_t reads = 0;
     for (const Run& run : runs) {
-        const uint32_t t0 = us_now();
+        const uint32_t t0 = Ruler::now();
         const uint8_t st = pattern_write(a.seed, sent, run.n, run.speed, sum);
-        const uint32_t took = us_now() - t0;
+        const uint32_t took = Ruler::now() - t0;
         const uint32_t lines = dma_entries;
         const uint32_t entries = isr_entries;
         over = over || (Raw::raw_pending() & I2cInterrupt::tx_over) != 0u;
@@ -500,7 +508,7 @@ void ty_write_bytes() {
         bench.verdict("the peer accepted the serve command", false);
         return;
     }
-    s0 = us_now();
+    s0 = Ruler::now();
     write_host_ready();
     DmaTx::arm(Raw::data_address(), Raw::dreq_tx, false);
     uint32_t csum = 0;
@@ -533,7 +541,7 @@ void tn_write_nack() {
         bench.verdict("the peer accepted the nack-at serve", false);
         return;
     }
-    uint32_t s0 = us_now();
+    uint32_t s0 = Ruler::now();
     write_host_ready();
     uint32_t sum = 0;
     const uint8_t st = pattern_write(a.seed, 0, 255, link_speed, sum);
@@ -574,7 +582,7 @@ void tn_write_nack() {
         bench.verdict("the peer accepted the nack-at serve", false);
         return;
     }
-    s0 = us_now();
+    s0 = Ruler::now();
     write_host_ready();
     uint32_t sum1 = 0;
     const uint8_t s1 = pattern_write(f.seed, 0, 32, link_speed, sum1);
@@ -596,7 +604,7 @@ void tn_write_nack() {
         bench.verdict("the peer accepted the serve command", false);
         return;
     }
-    s0 = us_now();
+    s0 = Ruler::now();
     write_host_ready();
     uint32_t csum = 0;
     const uint8_t cs = pattern_write(c.seed, 0, 255, link_speed, csum);
@@ -633,7 +641,7 @@ void to_write_arbitration() {
             bench.verdict("the peer accepted the arbitration command", false);
             return;
         }
-        const uint32_t s0 = us_now();
+        const uint32_t s0 = Ruler::now();
         write_host_ready();
         fill_pattern(tx_buf, 255, 0xD0);
         const uint8_t st = arb_tenure<DmaHost>(rd.target, tx_buf, 255, nullptr, 0, 350, I2cEngine::dma);
@@ -671,7 +679,7 @@ void tv_write_fault() {
         bench.verdict("the peer accepted the serve command", false);
         return;
     }
-    const uint32_t s0 = us_now();
+    const uint32_t s0 = Ruler::now();
     write_host_ready();
     const uint8_t sf = tenure<DmaHost>(twilink::dut_addr, edge, 16, nullptr, 0, I2cSpeed::fast_400k, 20'000u, I2cEngine::dma);
     const uint32_t lines = dma_entries;
@@ -696,7 +704,7 @@ void tv_write_fault() {
         bench.verdict("the peer accepted the serve command", false);
         return;
     }
-    const uint32_t c0 = us_now();
+    const uint32_t c0 = Ruler::now();
     write_host_ready();
     uint32_t sum = 0;
     const uint8_t cs = pattern_write(c.seed, 0, 16, I2cSpeed::fast_400k, sum);

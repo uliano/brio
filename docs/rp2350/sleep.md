@@ -250,9 +250,10 @@ says whether the SLEEP state was reached.
   always-on timer with no alarm armed at all, the crystal stable and the
   PLL relocked. The pair desk does not carry that wire
   ([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)): with none
-  fitted, letter o reads GP8 low and declines BEFORE the dormant, which
-  nothing could end. On the WeAct RP2350A GP8 is the SPI link's receive
-  pad, so the letter is not registered there.
+  fitted, letter o reads GP8 low and skips (a skip, neither a pass nor a
+  fail) BEFORE the dormant, which nothing could end. On the WeAct
+  RP2350A GP8 is the SPI link's receive pad, so the letter is not
+  registered there.
 - **THE DORMANT WAKES ON A PAD THE PARTNER DRIVES** (letter x, the
   RP2040's sleep suite `w` waving GP20 - wire 9 - a second a level; both
   halves): each leg waits for the wave's change into the level before

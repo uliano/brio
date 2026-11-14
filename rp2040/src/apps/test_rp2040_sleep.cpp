@@ -91,6 +91,7 @@
 #include "rp2040/uart.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 namespace {
@@ -137,13 +138,23 @@ volatile bool site_alarm_fired = false;
 volatile bool rtc_fired = false;
 volatile bool post_on_suite_alarm = false;
 
-uint32_t us_now() { return Timer::now_low(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// the system timer's microsecond count (rp2040/timer.hpp): one bus read,
+/// legal in any context, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Timer::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 
+/// Let the console fall silent before a sleep: its transmit interrupt
+/// would end the sleep early. Called awake, where the system timer runs.
+/// A console still busy after the shared budget (200 ms, which covers its
+/// ring at 115200; tx_idle() covers the shift register, so no tail is
+/// added) is a failed verdict: the sleep after it is not the one judged.
 void console_drain() {
-    for (uint32_t spins = 2'000'000u; spins != 0u && !Serial::tx_idle(); --spins) {
-    }
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < 300u) {
+    if (!brio::console_drain<Ruler, Serial>()) {
+        bench.verdict("the console fell silent before the sleep", false);
     }
 }
 
@@ -171,7 +182,10 @@ void arm_suite_alarm(uint32_t us) {
 /// idle() until `flag` or `max_turns`: the loop's shape, one WFI a
 /// turn - and SysTick ends a turn every millisecond through the SLEEP
 /// state (letter c), so a wait of hundreds of milliseconds is hundreds
-/// of turns.
+/// of turns. THE BOUND IS A COUNT OF WAKES, NOT A TIME: a turn is a sleep,
+/// not a spin, and through a DORMANT the system timer stands with clk_ref,
+/// so a budget on the ruler would never run out there. Every caller judges
+/// the flag or the turns.
 uint16_t idle_until(volatile bool& flag, uint16_t max_turns = 5000) {
     uint16_t turns = 0;
     while (!flag && turns < max_turns) {
@@ -319,11 +333,11 @@ Leg sleep_leg(const char* name, bool deep, uint32_t us) {
     console_drain();
     Instrument::counter(0);
     arm_suite_alarm(us);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const uint32_t k0 = Ticker::ticks();
     const uint16_t turns = idle_until(suite_alarm_fired);
     const uint32_t k1 = Ticker::ticks();
-    const uint32_t t1 = us_now();
+    const uint32_t t1 = Ruler::now();
     const uint16_t counted = instrument_count();
     SCB->SCR &= ~SCB_SCR_SLEEPDEEP_Msk;
     Clocks::sleep_enables(sleep_clocks_all);
@@ -335,9 +349,7 @@ void tc_instrument() {
     instrument_start();
     // Awake, as the baseline: what the instrument counts in 20 ms.
     Instrument::counter(0);
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < 20'000u) {
-    }
+    brio::spin_us<Ruler>(20'000u);
     const uint16_t awake = instrument_count();
     print(serial, "  awake 20 ms: the instrument counted ", awake, " (488 kHz -> 9766)", crlf);
     bench.verdict("the instrument counts clk_sys / 256 awake", awake > 9'000u && awake < 10'500u);
@@ -393,12 +405,12 @@ void td_standby() {
     bench.verdict("arm(standby) takes, sets SLEEPDEEP, keeps the timer's gates and places alarm 3",
                   Timed::arm(SleepDepth::standby) && Timed::armed() == SleepDepth::standby && sleepdeep() && Timed::alarm_armed() &&
                       Timer::armed(3) && (Clocks::sleep_enables() & Timed::timer_gates) == Timed::timer_gates);
-    print(serial, "  placed: alarm 3 at +", Timer::alarm_reg(3) - us_now(), " us; entering the SLEEP state...", crlf);
+    print(serial, "  placed: alarm 3 at +", Timer::alarm_reg(3) - Ruler::now(), " us; entering the SLEEP state...", crlf);
     console_drain();
     Instrument::counter(0);
-    const uint32_t us0 = us_now();
+    const uint32_t us0 = Ruler::now();
     const uint16_t turns = idle_until(site_alarm_fired);
-    const uint32_t slept_us = us_now() - us0;
+    const uint32_t slept_us = Ruler::now() - us0;
     const uint16_t counted = instrument_count();
     const bool fired = site_alarm_fired;
     const bool still_deep = sleepdeep();
@@ -438,9 +450,9 @@ void te_other_wake() {
     console_drain();
     const uint32_t t_before = Ticker::ticks();
     arm_suite_alarm(100'000u);   // the suite's own wake at 100 ms
-    const uint32_t us0 = us_now();
+    const uint32_t us0 = Ruler::now();
     const uint16_t turns = idle_until(suite_alarm_fired);
-    const uint32_t slept_us = us_now() - us0;
+    const uint32_t slept_us = Ruler::now() - us0;
     const bool site_fired = site_alarm_fired;
     Timed::disarm();
     const uint32_t advanced = Timed::last_advance();
@@ -494,9 +506,9 @@ void tf_dormant_rosc() {
     // letter starts from where the first left it.
     const uint32_t dormants_before = PlainRosc::dormants();
     const std::optional<RtcDateTime> before = Rtc::read();
-    const uint32_t us0 = us_now();
+    const uint32_t us0 = Ruler::now();
     const uint16_t turns = idle_until(rtc_fired, 5);
-    const uint32_t timer_saw = us_now() - us0;
+    const uint32_t timer_saw = Ruler::now() - us0;
     const bool back = tree_on_pll();
     const std::optional<RtcDateTime> after = Rtc::read();
     const bool by_rtc = rtc_fired;
@@ -684,7 +696,7 @@ void th_manager() {
     console_drain();
     arm_suite_alarm(50'000u);   // a foreign wake at 50 ms that posts (armed after the drain: a line takes ten milliseconds)
     const uint32_t k0 = Ticker::ticks();
-    const uint32_t us0 = us_now();
+    const uint32_t us0 = Ruler::now();
     // THE KERNEL'S OWN HOOK, turn after turn: idle_if_empty() masks,
     // finds every queue empty and calls P::idle(); SysTick ends each
     // turn (letter c) and the loop takes the next, until the alarm's
@@ -694,7 +706,7 @@ void th_manager() {
         K::idle_if_empty();
         ++turns;
     }
-    const uint32_t slept_us = us_now() - us0;
+    const uint32_t slept_us = Ruler::now() - us0;
     const uint32_t k1 = Ticker::ticks();
     print(serial, "  the kernel slept ", slept_us, " us of the timer and ", k1 - k0, " ticks of kernel time in ", turns, " turns", crlf);
     bench.verdict("the kernel's idle hook took the standby the manager armed, a turn a tick, and the foreign alarm ended it near 50 ms",
@@ -746,11 +758,18 @@ void tw_wave() {
     using Out = Pin<21>;
     print(serial, "  GP21 (into the partner's GP20): one second low, one second high, twenty times", crlf);
     Out::output(false);
-    const uint32_t t0 = us_now();
+    // Each half ends on a deadline from the wave's start, so the halves do
+    // not drift by the loop's own turns; each one reads the pad back just
+    // before it ends - the level it drove, unless something on the wire
+    // fights it.
+    const uint32_t t0 = Ruler::now();
     uint8_t halves = 0;
+    uint8_t followed = 0;
     while (halves < 40u) {
-        while (us_now() - t0 < (static_cast<uint32_t>(halves) + 1u) * 1'000'000u) {
+        while (Ruler::now() - t0 < (static_cast<uint32_t>(halves) + 1u) * 1'000'000u) {
         }
+        const bool driven_high = (halves & 1u) != 0u;
+        followed = static_cast<uint8_t>(followed + (Out::read() == driven_high ? 1u : 0u));
         ++halves;
         if ((halves & 1u) != 0u) {
             Out::set();
@@ -760,25 +779,21 @@ void tw_wave() {
     }
     Out::clear();
     Out::release();
-    bench.verdict("the wave ran its forty seconds and the pad is given back", true);
+    print(serial, "  the pad read back the level driven in ", followed, " of 40 halves", crlf);
+    bench.verdict("the pad followed the wave in all forty halves (nothing on the wire fought it)",
+                  followed == 40u);
 }
 
 /// The partner's wave on GP20 (wire 10): a level change seen - `to` read
 /// after the other level was - within `us`.
 bool await_change(bool to, uint32_t us) {
     using In = Pin<20>;
-    const uint32_t t0 = us_now();
-    while (In::read() == to) {
-        if (us_now() - t0 >= us) {
-            return false;
-        }
+    const uint32_t t0 = Ruler::now();
+    if (!brio::wait_until<Ruler>([to] { return In::read() != to; }, us)) {
+        return false;
     }
-    while (In::read() != to) {
-        if (us_now() - t0 >= us) {
-            return false;
-        }
-    }
-    return true;
+    const uint32_t spent = Ruler::now() - t0;
+    return spent < us && brio::wait_until<Ruler>([to] { return In::read() == to; }, us - spent);
 }
 
 /// THE FOUR DORMANT-WAKE EVENTS ON A PIN THE PARTNER DRIVES (by name, the
@@ -808,11 +823,22 @@ void tv_dormant_partner() {
         {"a low level", DormantWakeEvent::level_low, true},
     };
     uint8_t good = 0;
+    bool first = true;
     for (const Leg& l : legs) {
         if (!await_change(l.before, 3'000'000u)) {
-            print(serial, "  ", l.name, ": NO WAVE on GP20 - the partner must be running its sleep suite's w", crlf);
+            if (first) {
+                // No wave at all: the partner is not running its w, a
+                // premise this board cannot give itself.
+                In::release();
+                bench.skip("no wave on GP20 within 3 s: the partner must be running its sleep "
+                           "suite's w");
+                quiesce();
+                return;
+            }
+            print(serial, "  ", l.name, ": THE WAVE STOPPED on GP20", crlf);
             break;
         }
+        first = false;
         DormantWake::acknowledge(20, 0x0Fu);
         const bool armed = DormantWake::enable(20, dormant_wake_bits(l.ev), true) && Plain::arm(SleepDepth::deep);
         const bool level_armed = In::read();

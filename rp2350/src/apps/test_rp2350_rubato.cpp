@@ -238,6 +238,7 @@
 #include "rp2350/uart.hpp"
 #include "util/inbox.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #include "board.hpp"
@@ -255,7 +256,8 @@ using Edge = Timer<1>;
 
 constexpr bool hazard3 = core_kind == CoreKind::hazard3;
 
-/// TIMER1 on clk_sys: one load, a count a cycle. A compiler barrier on
+/// TIMER1 on clk_sys: one load, a count a cycle - the ruler of the
+/// stamps and of the waits (util/test_wait.hpp). A compiler barrier on
 /// either side, so that no plain load or store of the program is
 /// scheduled across a stamp (the volatile read orders against volatile
 /// accesses alone).
@@ -266,7 +268,9 @@ struct Ruler {
         std::atomic_signal_fence(std::memory_order_seq_cst);
         return t;
     }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
+static_assert(CycleRuler<Ruler>);
 
 constexpr UartPins console_pins{
     .tx = {0, PinFunction::uart},
@@ -390,6 +394,13 @@ volatile uint32_t sp1_low_isr = 0xFFFF'FFFFu;
     }
 }
 
+/// A fixed span in clk_sys cycles, the body of a dispatch an edge lands
+/// in. Not util/test_wait.hpp's spin_us: the span is the preempted code
+/// itself, so it is written into the handler that spins (always_inline,
+/// no call: letter j's spin keeps the float registers of its loop live
+/// across the preemption, which a call would spill), and the scenarios'
+/// spans are counts of cycles the edges are placed against, 20000 of them
+/// not a whole number of microseconds at 150 MHz.
 [[gnu::always_inline]] inline void spin(uint32_t cycles) {
     const uint32_t t0 = Ruler::now();
     while (Ruler::now() - t0 < cycles) {
@@ -567,16 +578,10 @@ void reset_scenario() {
     tracing = true;
 }
 
-/// Wait until `runs` moves past `before`, at most `cycles`: true when it
-/// did.
-bool wait_runs(const volatile uint32_t& runs, uint32_t before, uint32_t cycles) {
-    const uint32_t t0 = Ruler::now();
-    while (runs == before) {
-        if (Ruler::now() - t0 >= cycles) {
-            return false;
-        }
-    }
-    return true;
+/// Wait until `runs` moves past `before`, at most `us` microseconds on
+/// the ruler: true when it did. One out-of-line poll for every caller.
+bool wait_runs(const volatile uint32_t& runs, uint32_t before, uint32_t us) {
+    return brio::wait_until<Ruler>([&runs, before] { return runs != before; }, us);
 }
 
 /// A post from the Console to Low with nothing to do and nothing traced:
@@ -585,15 +590,11 @@ void flush() {
     post<Low>(Hit{0});
 }
 
-/// Let the console's transmitter fall silent (at most 50 ms; 230 bytes at
-/// 115200 are 20 ms) and its last byte leave the wire (87 us, waited 100):
-/// its interrupt, landing in a measured path, would be measured.
-void console_drain() {
-    const uint32_t t0 = Ruler::now();
-    while (!Serial::tx_idle() && Ruler::now() - t0 < SysClock::hz / 20u) {
-    }
-    spin(SysClock::hz / 10'000u);
-}
+/// Let the console's transmitter fall silent, its last stop bit included
+/// (the PL011's BUSY, which tx_idle() answers), at most 50 ms (230 bytes
+/// at 115200 are 20 ms): its interrupt, landing in a measured path, would
+/// be measured. True when it did.
+bool console_drain() { return brio::console_drain<Ruler, Serial>(50'000u); }
 
 uint32_t ruler_cost() {
     uint32_t best = 0xFFFF'FFFFu;
@@ -865,8 +866,10 @@ void tc_latency() {
     reset_scenario();
     tracing = false;
     // One warm-up event (the XIP cache) not counted, then 100; each waits
-    // at most 1 ms for High's first statement.
-    console_drain();
+    // at most 1 ms for High's first statement. A drain that did not end
+    // leaves the UART's interrupt free to land in an event, which the
+    // witness counts (Lengtheners::uart): reported, never judged.
+    (void)console_drain();
     uint32_t missed = 0;
     // An event slower than the path's own count is one a tick landed in,
     // or an XIP refill (the suite is larger than the cache's share a run
@@ -879,7 +882,7 @@ void tc_latency() {
         const Lengtheners before = Lengtheners::now();
         edge_to = 1;
         edge_in(400u);
-        if (!wait_runs(High::runs, r, one_ms)) {
+        if (!wait_runs(High::runs, r, 1000u)) {
             ++missed;
             flush();
         }
@@ -1213,7 +1216,7 @@ void te_depth2() {
     // (36), 290.
     constexpr uint32_t depth2_bound = per_half(189u, 290u);
     for (int road = 2; road >= 1; --road) {
-        console_drain();
+        (void)console_drain();   // a run the UART's handler lands in is witnessed (Lengtheners)
         uint8_t alike = 0;
         uint32_t least = 0xFFFF'FFFFu;
         uint32_t most = 0;
@@ -1239,7 +1242,7 @@ void te_depth2() {
             } else {
                 edge_to = 1;     // the first edge starts High over the Console
                 edge_in(400u);
-                if (!wait_runs(High::runs, r, one_ms)) {
+                if (!wait_runs(High::runs, r, 1000u)) {
                     flush();
                 }
             }
@@ -1315,12 +1318,6 @@ void base_turn() {
     (void)activate_here();
 }
 
-/// Wait until the kernel tick has moved `ticks` on.
-void wait_ticks(uint32_t ticks) {
-    const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() - t0 < ticks) {
-    }
-}
 
 void tf_timers() {
     reset_scenario();
@@ -1397,7 +1394,11 @@ void tf_timers() {
     Low::action = [](uint8_t n) { ++fired[n]; };
     base_turn();                           // te_c and te_d: due at once
     const bool turn1 = fired[51] == 0u && fired[52] == 0u && fired[53] == 1u && fired[54] == 1u;
-    wait_ticks(4u);                        // te_a's three ticks, and one more
+    // te_a's three ticks, and one more, on the kernel tick; bounded on the
+    // ruler at six periods, a time-out failing the verdict below.
+    const uint32_t k0 = Ticker::ticks();
+    const bool ticked = brio::wait_until<Ruler>(
+        [k0] { return Ticker::ticks() - k0 >= 4u; }, 6u * (1'000'000u / P::ticks_per_second));
     base_turn();
     const bool turn2 = fired[51] == 1u && fired[52] == 0u && fired[53] == 1u && fired[54] == 1u;
     base_turn();
@@ -1437,7 +1438,7 @@ void tf_timers() {
                   turn1);
     bench.verdict("three ticks on: the re-armed one fired once; a turn more: nothing "
                   "twice, the list empty",
-                  turn2 && turn3 && empty);
+                  ticked && turn2 && turn3 && empty);
     // arm() over a list of one node (itself, re-armed), by the release
     // listing. The Cortex-M33: the stamp's store, the arguments and the
     // call (5); the frame, mrs and cpsid, the call to the unlink (10); the
@@ -1498,7 +1499,7 @@ template <class Receiver>
 }
 
 void tg_mask() {
-    console_drain();
+    (void)console_drain();   // a run the UART's handler lands in is witnessed (Lengtheners)
     pend_inside = true;
     ran_inside = false;
     // From the Console's dispatch (ceiling 4) to Mid, then from Low's (3)
@@ -1850,8 +1851,9 @@ void tk_softirq() {
                   req_hi == 0u);
 
     // 2. and 3. The registers across an entry and a nested one, and what a
-    //    dispatch the software interrupt started finds.
-    console_drain();
+    //    dispatch the software interrupt started finds. Nothing below is
+    //    timed: the drain only keeps the UART's handler out of the runs.
+    (void)console_drain();
     uint8_t outer_kept = 0;
     uint8_t inner_kept = 0;
     bool flag_low = true;
@@ -2061,13 +2063,7 @@ bool core1_launch() {
     P1::ceiling = 255;
     trace1_len = 0;
     ok = ok && Core1::protocol(&core1_rubato);
-    const uint32_t t0 = Ruler::now();
-    while (ok && core1_stage != 2u) {
-        if (Ruler::now() - t0 >= 10u * one_ms) {
-            return false;
-        }
-    }
-    return ok;
+    return ok && brio::wait_until<Ruler>([] { return core1_stage == 2u; }, 10'000u);
 }
 
 /// Core 1's ceiling read from core 0: through a volatile access, since the
@@ -2210,7 +2206,15 @@ void tl_both_cores() {
         k1_done = k1_done + 1u;
     };
     High1::action = nullptr;
-    console_drain();   // the lines above still leaving: core 0's UART handler would miss lines
+    // The lines above still leaving: core 0's UART handler would miss
+    // lines, and the crossings' witness counts the tick and the refills,
+    // not the UART: a console that did not fall silent skips them.
+    if (!console_drain()) {
+        bench.skip("the console did not fall silent within 50 ms: core 1's crossings would "
+                   "carry core 0's UART handler, which no bound here allows for");
+        bench.verdict("core 1 back in the bootrom", core1_park());
+        return;
+    }
     uint32_t bell_lo = 0xFFFF'FFFFu, bell_hi = 0, bell_clean_hi = 0;
     uint32_t alarm_lo = 0xFFFF'FFFFu, alarm_hi = 0, alarm_clean_hi = 0;
     uint8_t bell_lengthened = 0;
@@ -2225,7 +2229,7 @@ void tl_both_cores() {
         // longer, 2 to 6 cycles on the Cortex-M33 and 11 to 14 on Hazard3,
         // and its own fetches fell in the window of the miss counter.
         wait_for_interrupt();
-        const bool ran = wait_runs(k1_done, r, one_ms) && High1::runs == h + 1u;
+        const bool ran = wait_runs(k1_done, r, 1000u) && High1::runs == h + 1u;
         spin(core1_settle);
         if (!ran) {
             ++crossing_missed;
@@ -2281,7 +2285,12 @@ void tl_both_cores() {
     bool quiet = true;            ///< and core 1's request not raised by it
     // Run 0 is the warm-up, not judged: core 1's first crossing of a cold
     // program pays the XIP cache's fill for both cores.
-    console_drain();
+    if (!console_drain()) {
+        bench.skip("the console did not fall silent within 50 ms: the two cores' preemptions "
+                   "would carry core 0's UART handler, which no bound here allows for");
+        bench.verdict("core 1 back in the bootrom", core1_park());
+        return;
+    }
     for (int run = 0; run <= 10; ++run) {
         reset_scenario();
         trace1_len = 0;          // core 1 is idle at its base: nothing writes it now
@@ -2310,12 +2319,8 @@ void tl_both_cores() {
         // read is not taken again: core 1's loop then turns once more with
         // the ceiling at 0 (its base turn, kernel/rubato.hpp's run()) before
         // its idle puts 255 back, and a second read can land in that turn.
-        const bool done = wait_runs(k1_done, d0, 2u * one_ms);
-        const uint32_t t0 = Ruler::now();
-        bool back1 = core1_ceiling() == 255u;
-        while (!back1 && Ruler::now() - t0 < one_ms) {
-            back1 = core1_ceiling() == 255u;
-        }
+        const bool done = wait_runs(k1_done, d0, 2000u);
+        const bool back1 = brio::wait_until<Ruler>([] { return core1_ceiling() == 255u; }, 1000u);
         const bool back0 = P::ceiling == console_index;
         if (!(done && back1 && back0)) {   // printed for the warm-up too, judged after it
             print(serial, "  run ", run, " did not settle: Low1's end ", done ? "seen" : "NOT seen",

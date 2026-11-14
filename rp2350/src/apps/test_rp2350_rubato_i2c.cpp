@@ -103,6 +103,7 @@
 #include "util/i2c_bus.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // THE PROTOCOL HEADERS ARE SHARED, NOT COPIED: the far board's instrument
@@ -136,7 +137,9 @@ struct Ruler {
         std::atomic_signal_fence(std::memory_order_seq_cst);
         return t;
     }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
+static_assert(CycleRuler<Ruler>);
 
 // ---- the console -------------------------------------------------------------------
 

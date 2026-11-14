@@ -122,6 +122,7 @@
 #include "rp2040/uart.hpp"
 #include "rp2040/watchdog.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 #include "rt/selftest.hpp"
 
@@ -131,9 +132,9 @@ using P = brio::Rp2040Platform<>;
 
 // A word in .noinit, to learn whether SRAM survives each kind of reset
 // (the linker script keeps the section NOLOAD, the crt never touches
-// it). Inline, for the reason the other strata's suites give: gcc
-// gives an inline variable with a section attribute a COMDAT group
-// like the platform's own panic_record_, and a plain one would clash.
+// it). Inline, because gcc gives an inline variable with a section
+// attribute a COMDAT group like the platform's own panic_record_, and a
+// plain one would clash.
 [[gnu::section(".noinit")]] inline uint32_t noinit_canary;
 inline constexpr uint32_t canary_value = 0xC3A5F00Du;
 
@@ -179,14 +180,39 @@ void token_set(uint8_t leg, uint8_t code = 0, uint8_t context = 0) {
 }
 void token_clear() { Scratch<0>::write(0); }
 
-uint32_t us_now() { return Timer::now_low(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// the system timer's microsecond count (rp2040/timer.hpp): one bus read,
+/// legal in any context, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Timer::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 
-/// Let the console's own transmitter fall silent: its interrupt would
-/// otherwise wake every idle() below.
-void console_drain() {
-    const uint32_t t0 = us_now();
-    while (!Serial::tx_idle() && us_now() - t0 < 200'000u) {
+/// Let the console's own transmitter fall silent before a timed window:
+/// its interrupt would otherwise wake an idle() or lengthen a span. A
+/// console still busy after the shared budget (200 ms, util/test_wait.hpp)
+/// is a failed verdict, and the caller skips the window it guarded.
+bool console_drain() {
+    if (brio::console_drain<Ruler, Serial>()) {
+        return true;
     }
+    bench.verdict("the console fell silent before the timed window", false);
+    return false;
+}
+
+/// Wait for the kernel tick to move on from `from`: true at the first
+/// tick after it, false when five tick periods pass without one - a
+/// stopped timebase reported, never hung on. One poll turn is a read of
+/// the tick count and one of the ruler.
+[[gnu::always_inline]] inline bool tick_after(uint32_t from) {
+    return brio::wait_until<Ruler>([from] { return Ticker::ticks() != from; }, 5'000u);
+}
+
+/// Wait until `n` kernel ticks have passed since `from`: false when twice
+/// their nominal length passes first.
+[[gnu::always_inline]] inline bool ticks_since(uint32_t from, uint32_t n) {
+    return brio::wait_until<Ruler>([from, n] { return Ticker::ticks() - from >= n; }, n * 2'000u);
 }
 
 void print_causes(uint32_t c) {
@@ -275,14 +301,12 @@ void tb_critical() {
     // A masked window: the tick's interrupt is held pending, once, and the
     // RULER sees the window's true length.
     const uint32_t t0 = Ticker::ticks();
-    const uint32_t u0 = us_now();
+    const uint32_t u0 = Ruler::now();
     {
         P::CriticalSection cs;
-        const uint32_t s = us_now();
-        while (us_now() - s < 5000u) {
-        }
+        brio::spin_us<Ruler>(5000);
     }
-    const uint32_t window_us = us_now() - u0;
+    const uint32_t window_us = Ruler::now() - u0;
     const uint32_t through_mask = Ticker::ticks() - t0;
     print(serial, "  ", window_us, " us with interrupts masked advanced the tick by ",
           through_mask, " ms", crlf);
@@ -296,15 +320,17 @@ void tb_critical() {
 
     // idle(): WFI, then unmask. Any enabled interrupt wakes it, so the
     // console has to be silent first.
-    console_drain();
+    if (!console_drain()) {
+        return;
+    }
     const uint32_t t1 = Ticker::ticks();
-    const uint32_t u1 = us_now();
+    const uint32_t u1 = Ruler::now();
     uint8_t calls = 0;
     while (Ticker::ticks() == t1 && calls < 20u) {
         P::idle();
         ++calls;
     }
-    const uint32_t idle_us = us_now() - u1;
+    const uint32_t idle_us = Ruler::now() - u1;
     print(serial, "  with the console silent, ", calls, " idle() call(s) covered the ",
           idle_us, " us to the next tick", crlf);
     bench.verdict("idle() sleeps and the tick is what brings it back, inside one "
@@ -346,14 +372,18 @@ void tc_ticker() {
     // the PLL's ratio and the reload's rounding, and a microsecond or
     // two of phase at each end.
     const uint32_t target = 200;
-    uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() == t0) {
+    if (!tick_after(Ticker::ticks())) {
+        bench.verdict("the kernel tick advances (five periods waited)", false);
+        return;
     }
-    t0 = Ticker::ticks();
-    const uint32_t u0 = us_now();
-    while (Ticker::ticks() - t0 < target) {
+    const uint32_t t0 = Ticker::ticks();
+    const uint32_t u0 = Ruler::now();
+    const bool counted = ticks_since(t0, target);
+    const uint32_t span = Ruler::now() - u0;
+    if (!counted) {
+        bench.verdict("200 ticks came within 400 ms of the ruler", false);
+        return;
     }
-    const uint32_t span = us_now() - u0;
     const uint32_t expected_us = target * 1000u;
     const uint32_t err = span > expected_us ? span - expected_us : expected_us - span;
     print(serial, "  200 ticks = ", span, " us on the ruler, error ", err, " us (",
@@ -365,13 +395,22 @@ void tc_ticker() {
     // The VAL-delta accumulation delay.hpp is built on, against the
     // interrupt count over 200 wraps.
     const uint32_t period = reload + 1u;
+    // The accumulation is the wait's condition, sampled every turn, until
+    // 200 ticks have passed - bounded at 400 ms of the ruler. A turn
+    // (a VAL read, the tick count, the ruler) is far under the period, the
+    // one requirement of a delta that folds one reload.
     uint32_t last = SysTick->VAL;
     uint32_t accumulated = 0;
     const uint32_t t1 = Ticker::ticks();
-    while (Ticker::ticks() - t1 < target) {
+    const bool wrapped = brio::wait_until<Ruler>([&] {
         const uint32_t now = SysTick->VAL;
         accumulated += (last >= now) ? (last - now) : (last + period - now);
         last = now;
+        return Ticker::ticks() - t1 >= target;
+    }, 2u * target * 1000u);
+    if (!wrapped) {
+        bench.verdict("200 ticks came within 400 ms of the ruler", false);
+        return;
     }
     const uint32_t expected = target * period;
     const uint32_t cerr = accumulated > expected ? accumulated - expected
@@ -389,8 +428,8 @@ void tc_ticker() {
 void td_delay() {
     uint32_t zero_max = 0;
     for (uint8_t k = 0; k < 8; ++k) {
-        const uint32_t t0 = us_now();
-        const uint32_t b = us_now() - t0;
+        const uint32_t t0 = Ruler::now();
+        const uint32_t b = Ruler::now() - t0;
         if (b > zero_max) zero_max = b;
     }
     print(serial, "  empty measurement bracket: up to ", zero_max, " us of its own", crlf);
@@ -400,12 +439,12 @@ void td_delay() {
     // never seen it, and pays the QSPI fetches - a cost of this chip's
     // memory system, not of the wait, and one a program pays once per
     // eviction. The series below runs warm.
-    const uint32_t c0 = us_now();
+    const uint32_t c0 = Ruler::now();
     (void)delay_us(clock, 5u);
-    const uint32_t cold = us_now() - c0;
-    const uint32_t w0 = us_now();
+    const uint32_t cold = Ruler::now() - c0;
+    const uint32_t w0 = Ruler::now();
     (void)delay_us(clock, 5u);
-    const uint32_t warm = us_now() - w0;
+    const uint32_t warm = Ruler::now() - w0;
     print(serial, "  first delay_us(5) of the program: ", cold, " us (the XIP cache filling); "
           "the second: ", warm, " us", crlf);
     bench.verdict("the cold first call costs the cache fill and the warm one does not: "
@@ -415,9 +454,9 @@ void td_delay() {
     static const uint32_t spans[] = {5, 30, 100, 500, 900};
     bool all_exact = true;
     for (uint8_t i = 0; i < sizeof(spans) / sizeof(spans[0]); ++i) {
-        const uint32_t t0 = us_now();
+        const uint32_t t0 = Ruler::now();
         const bool ok = delay_us(clock, spans[i]);
-        const uint32_t took = us_now() - t0;
+        const uint32_t took = Ruler::now() - t0;
         print(serial, "  delay_us(", spans[i], ") -> ", took, " us measured", crlf);
         if (!ok || took < spans[i] || took > spans[i] + zero_max + 10u) {
             all_exact = false;
@@ -430,9 +469,9 @@ void td_delay() {
     uint32_t min_took = 0xFFFFFFFFu;
     uint32_t max_took = 0;
     for (uint16_t k = 0; k < 200; ++k) {
-        const uint32_t t0 = us_now();
+        const uint32_t t0 = Ruler::now();
         (void)delay_us(clock, 50u);
-        const uint32_t took = us_now() - t0;
+        const uint32_t took = Ruler::now() - t0;
         if (took < min_took) min_took = took;
         if (took > max_took) max_took = took;
     }
@@ -453,9 +492,9 @@ void td_delay() {
     uint32_t refusal_us = 0xFFFFFFFFu;
     bool refused = true;
     for (uint8_t k = 0; k < 4; ++k) {
-        const uint32_t t0r = us_now();
+        const uint32_t t0r = Ruler::now();
         refused = refused && !delay_us(clock, 1000u);
-        const uint32_t r = us_now() - t0r;
+        const uint32_t r = Ruler::now() - t0r;
         if (r < refusal_us) refusal_us = r;
     }
     const bool served_999 = delay_us(clock, 999u);
@@ -469,9 +508,9 @@ void td_delay() {
     uint32_t stopped_us = 0xFFFFFFFFu;
     bool refused_stopped = true;
     for (uint8_t k = 0; k < 4; ++k) {
-        const uint32_t t1 = us_now();
+        const uint32_t t1 = Ruler::now();
         refused_stopped = refused_stopped && !delay_us(clock, 100u);
-        const uint32_t r = us_now() - t1;
+        const uint32_t r = Ruler::now() - t1;
         if (r < stopped_us) stopped_us = r;
     }
     SysTick->CTRL = SysTick->CTRL | SysTick_CTRL_ENABLE_Msk;
@@ -496,9 +535,9 @@ void te_resets() {
     bench.verdict("hold(): the block's RESET bit is set and its RESET_DONE clears",
                   Resets::held(ResetBlock::pwm) && !Resets::released(ResetBlock::pwm));
 
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool released = Resets::release(ResetBlock::pwm);
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     print(serial, "  release(): RESET_DONE within ", took, " us", crlf);
     bench.verdict("release() reports the block ready, and quickly", released && took <= 10u);
     bench.verdict("RESET_DONE stands and RESET is clear",
@@ -557,19 +596,33 @@ void tg_breadcrumb() {
 // h - WFI idle over 200 ticks
 // =============================================================================
 void th_idle() {
-    console_drain();
+    if (!console_drain()) {
+        return;
+    }
     const uint32_t t0 = Ticker::ticks();
-    const uint32_t u0 = us_now();
+    const uint32_t u0 = Ruler::now();
     uint32_t slept = 0;
     uint32_t calls = 0;
+    // A loop that does work (it idles), bounded on the ruler as well as on
+    // the tick: 400 ms, twice the window, read from the stamp each turn
+    // already takes, so the bound adds no read to the figure. A stopped
+    // tick that leaves nothing else to wake idle() is not caught here; the
+    // console's line is the only other interrupt.
     while (Ticker::ticks() - t0 < 200u) {
-        const uint32_t a = us_now();
+        const uint32_t a = Ruler::now();
+        if (a - u0 >= 400'000u) {
+            break;
+        }
         P::idle();
-        slept += us_now() - a;
+        slept += Ruler::now() - a;
         ++calls;
     }
-    const uint32_t span = us_now() - u0;
+    const uint32_t span = Ruler::now() - u0;
     const uint32_t awake = span - slept;
+    if (Ticker::ticks() - t0 < 200u) {
+        bench.verdict("200 ticks came within 400 ms of the ruler", false);
+        return;
+    }
     print(serial, "  200 ticks: ", calls, " idle() calls, ", span, " us span, ", awake,
           " us awake (", awake * 1000u / span, " permille)", crlf);
     bench.verdict("one idle() per tick, give or take the console's last byte",
@@ -609,27 +662,23 @@ void tj_timer() {
     Timer::clear(0);
     Timer::interrupt(0, true);
     Nvic::enable(Timer::irq(0));
-    const uint32_t target = us_now() + 2000u;
+    const uint32_t target = Ruler::now() + 2000u;
     Timer::alarm(0, target);
     const bool was_armed = Timer::armed(0);
-    const uint32_t wait0 = us_now();
-    while (alarm_fires == 0u && us_now() - wait0 < 10'000u) {
-    }
+    const bool fired = brio::wait_until<Ruler>([] { return alarm_fires != 0u; }, 10'000u);
     const uint32_t latency = alarm_entry_us - target;
     print(serial, "  alarm 0 at +2000 us: fired ", alarm_fires, " time(s), handler entry ",
           latency, " us after the target", crlf);
     bench.verdict("writing ALARM0 arms it", was_armed);
     bench.verdict("it fires once, and the handler enters within 20 us of the match",
-                  alarm_fires == 1u && latency <= 20u);
+                  fired && alarm_fires == 1u && latency <= 20u);
     bench.verdict("ARMED clears when it fires", !Timer::armed(0));
     bench.verdict("the handler's write-1 cleared the raised flag", !Timer::raised(0));
 
     // A disarmed alarm does not fire.
     Timer::alarm_in(0, 2000u);
     Timer::disarm(0);
-    const uint32_t w1 = us_now();
-    while (us_now() - w1 < 4000u) {
-    }
+    brio::spin_us<Ruler>(4000);
     bench.verdict("an alarm disarmed before its time never fires", alarm_fires == 1u);
 
     // INTF forces the line without the counter's say.
@@ -662,6 +711,18 @@ volatile uint32_t line_entry = 0;
 
 constexpr uint32_t tick_period = SysClock::hz / Ticker::ticks_per_second;
 
+/// A sweep's sync: wait for the edge source's count to move on, at most
+/// 5 ms - both sources are periodic within a millisecond (the tick, a PWM
+/// wrap of 65536 cycles). False when it did not move: the try is then
+/// counted as a lost wake. Not inside the timed part of a try - the edge
+/// is placed by an absolute write after it - so the poll's turn (one count
+/// read, one ruler read) moves no figure.
+template <typename F>
+[[gnu::always_inline]] inline bool count_moves(F count) {
+    const uint32_t s = count();
+    return brio::wait_until<Ruler>([&] { return count() != s; }, 5'000u);
+}
+
 /// The kernel's own interrupt: SysTick, its edge placed by a reload. A
 /// write to VAL clears the counter and the next cycle reloads it from
 /// LOAD (ARMv6-M B3.3), so LOAD = d, VAL written, LOAD back to the
@@ -674,11 +735,7 @@ struct TickEdge {
     static void begin() {}
     static void end() {}
     /// Just after a tick: a whole period before the next natural edge.
-    static void sync() {
-        const uint32_t s = Ticker::ticks();
-        while (Ticker::ticks() == s) {
-        }
-    }
+    static bool sync() { return count_moves(count); }
     static uint32_t count() { return Ticker::ticks(); }
     [[gnu::always_inline]] static void place(uint32_t d) {
         SysTick->LOAD = d;
@@ -717,11 +774,7 @@ struct LineEdge {
         Pwm::clear_pending(EdgeSlice::bit);
         Nvic::clear_pending(Pwm::irq());
     }
-    static void sync() {
-        const uint32_t s = line_hits;
-        while (line_hits == s) {
-        }
-    }
+    static bool sync() { return count_moves(count); }
     static uint32_t count() { return line_hits; }
     [[gnu::always_inline]] static void place(uint32_t d) { EdgeSlice::ctr() = 0xFFFFu - d; }
     static uint32_t since_edge() { return EdgeSlice::ctr(); }
@@ -740,8 +793,11 @@ struct TryResult {
 /// system timer, with the rescue armed.
 template <typename Edge>
 TryResult walk_try(uint32_t d, uint32_t edges) {
-    Edge::sync();
     TryResult r{};
+    if (!Edge::sync()) {
+        r.rescued = true;   // no edge to sync on: the source is silent
+        return r;
+    }
     P::CriticalSection cs;
     const uint32_t r0 = rescue_fires;
     Timer::alarm_in(rescue_alarm, rescue_us);
@@ -751,10 +807,10 @@ TryResult walk_try(uint32_t d, uint32_t edges) {
     // the core (no handler can move the count meanwhile: the mask is up).
     Edge::place(d);
     for (uint8_t k = 0; k < 12u; ++k) {
-        (void)us_now();
+        (void)Ruler::now();
     }
     const uint32_t n0 = Edge::count();
-    const uint32_t u0 = us_now();
+    const uint32_t u0 = Ruler::now();
     for (;;) {
         P::CriticalSection turn;   // the kernel's own shape
         if (Edge::count() - n0 >= edges) {
@@ -764,7 +820,7 @@ TryResult walk_try(uint32_t d, uint32_t edges) {
     }
     r.to_loop = Edge::since_edge();
     r.entry = Edge::entry();
-    r.took_us = us_now() - u0;
+    r.took_us = Ruler::now() - u0;
     Timer::disarm(rescue_alarm);
     Timer::clear(rescue_alarm);
     Nvic::clear_pending(Timer::irq(rescue_alarm));
@@ -888,7 +944,9 @@ void walk_edge() {
             }
             clean = clean && s.lost == 0u && s.late == 0u;
         }
-        console_drain();
+        // The next rung is printed and not timed; tw_edge() drains, and
+        // acts on the answer, before every sweep.
+        (void)brio::console_drain<Ruler, Serial>();
     }
     bench.verdict("no edge position loses the wake or defers it a period, one edge or two, light, "
                   "standby, or standby with the sleep gates pruned to the core's, the PWM's and the console's",
@@ -896,7 +954,9 @@ void walk_edge() {
 }
 
 void tw_edge() {
-    console_drain();
+    if (!console_drain()) {
+        return;
+    }
     rescue_fires = 0;
     Timer::clear(rescue_alarm);
     Timer::interrupt(rescue_alarm, true);
@@ -904,8 +964,9 @@ void tw_edge() {
     Nvic::enable(Timer::irq(rescue_alarm));
 
     walk_edge<TickEdge>();
-    console_drain();
-    walk_edge<LineEdge>();
+    if (console_drain()) {
+        walk_edge<LineEdge>();
+    }
 
     Timer::interrupt(rescue_alarm, false);
     Nvic::disable(Timer::irq(rescue_alarm));
@@ -949,7 +1010,9 @@ volatile uint32_t spare_hits = 0;
 uint32_t systick_now() { return SysTick->VAL; }
 
 void tk_turns() {
-    console_drain();
+    if (!console_drain()) {
+        return;
+    }
     spare_hits = 0;
     QuietKernel::init_all();
 
@@ -1021,45 +1084,53 @@ void bank(uint8_t leg, uint8_t code = 0, uint8_t context = 0) {
     token_set(leg, code, context);
 }
 
-[[noreturn]] void await_reset(const char* what) {
-    console_drain();
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < 3'000'000u) {
-    }
+/// Let a leg's line leave before its reset. The answer is dropped: the
+/// tally is banked already, nothing is timed, and a verdict printed here
+/// would not cross the reset.
+void drain_before_reset() { (void)brio::console_drain<Ruler, Serial>(); }
+
+/// A leg whose reset did not come: after 3 s, the watchdog stopped, the
+/// token cleared (no later boot resumes this run), a failed verdict and
+/// the letter closed - the console back at its prompt, never a hang.
+void await_reset(const char* what) {
+    drain_before_reset();
+    brio::spin_us<Ruler>(3'000'000u);
+    Watchdog::stop();
+    token_clear();
     print(serial, "  ...3 s and still running ", what, crlf);
-    for (;;) {
-    }
+    bench.verdict("the leg's reset came within 3 s", false);
+    bench.end_letter();
 }
 
 [[noreturn]] void leg_software() {
     bank(1);
     print(serial, "  leg 1: Reset::core() - SYSRESETREQ, this core alone ...", crlf);
-    console_drain();
+    drain_before_reset();
     Reset::core();
 }
 [[noreturn]] void leg_force() {
     bank(2);
     print(serial, "  leg 2: Reset::software() - the chip through the watchdog's trigger ...", crlf);
-    console_drain();
+    drain_before_reset();
     Watchdog::force_reset();
 }
-[[noreturn]] void leg_timeout() {
+void leg_timeout() {
     bank(3);
     print(serial, "  leg 3: the watchdog started at 100 ms and never kicked ...", crlf);
-    console_drain();
+    drain_before_reset();
     Watchdog::start(100'000u);
     await_reset("(the watchdog did not fire)");
 }
 [[noreturn]] void leg_panic() {
     bank(4, static_cast<uint8_t>(PanicCode::queue_overflow), 0x33);
     print(serial, "  leg 4: panic<P, ResetReporter>(queue_overflow, 0x33) ...", crlf);
-    console_drain();
+    drain_before_reset();
     panic<P, ResetReporter>(PanicCode::queue_overflow, 0x33);
 }
-[[noreturn]] void leg_fault() {
+void leg_fault() {
     bank(5, static_cast<uint8_t>(PanicCode::kernel_fault), 0x77);
     print(serial, "  leg 5: UDF, HardFault, fault_reset() ...", crlf);
-    console_drain();
+    drain_before_reset();
     __asm__ volatile("udf #0");
     await_reset("(the undefined instruction did not fault)");
 }
@@ -1071,7 +1142,8 @@ void ti_resets() {
 }
 
 /// Everything after a reset: called from main() instead of the banner,
-/// it either starts the next leg (never returning) or closes the letter.
+/// it either starts the next leg (a leg whose reset never comes closes
+/// the letter itself and returns) or closes the letter.
 void ti_resume() {
     const uint8_t leg = token_leg();
     const uint32_t tally = Scratch<1>::read();
@@ -1081,7 +1153,10 @@ void ti_resume() {
     bench.resume_tally(static_cast<uint16_t>(tally >> 16), static_cast<uint16_t>(tally & 0xFFFFu));
     print(serial, crlf, "i (continued after reset ", leg, " of 5)", crlf);
     report_boot();
-    bench.verdict("the scratch token survived the reset", leg != 0u);
+    // main() calls this only when the token's magic is there, so what can
+    // fail is the leg it names: one of the five, or a garbled word.
+    bench.verdict("the scratch token survived the reset and names one of the five legs",
+                  leg >= 1u && leg <= 5u);
 
     // THE CAUSES ARE A HISTORY, NOT A CAUSE: CHIP_RESET's HAD_* bits
     // stand since the last chip-level event and WATCHDOG.REASON holds
@@ -1135,6 +1210,10 @@ void ti_resume() {
         token_clear();
         boot_record.reset();  // consumed: a second 'i' in this boot starts clean
         print(serial, "  all five legs done", crlf);
+        bench.end_letter();
+    }
+    if (leg == 0u || leg > 5u) {
+        token_clear();   // a garbled token: the run ends here, its verdict failed above
         bench.end_letter();
     }
 }

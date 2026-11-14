@@ -71,6 +71,7 @@
 #include "rp2040/timer.hpp"
 #include "rp2040/uart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 namespace {
@@ -124,12 +125,14 @@ uint8_t tx_buf[256];
 uint8_t rx_buf[256];
 uint32_t words[256];
 
-uint32_t us_now() { return Timer::now_low(); }
-void spin_us(uint32_t us) {
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < us) {
-    }
-}
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// the system timer's microsecond count (rp2040/timer.hpp): one bus read,
+/// legal in any context, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Timer::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 bool within(uint32_t got, uint32_t want, uint32_t per_mille) {
     const uint32_t tol = static_cast<uint32_t>(static_cast<uint64_t>(want) * per_mille / 1000u);
     return got + tol >= want && got <= want + tol;
@@ -151,10 +154,10 @@ template <uint8_t out_pin, uint8_t in_pin>
 bool wire_present() {
     Pin<in_pin>::input(PinPull::none);
     Pin<out_pin>::output(false);
-    spin_us(20);
+    brio::spin_us<Ruler>(20);
     const bool low = !Pin<in_pin>::read();
     Pin<out_pin>::set();
-    spin_us(20);
+    brio::spin_us<Ruler>(20);
     const bool high = Pin<in_pin>::read();
     Pin<out_pin>::release();
     Pin<in_pin>::release();
@@ -164,14 +167,14 @@ bool wire_13_15() {
     if (wire_present<13, 15>()) {
         return true;
     }
-    bench.verdict("DECLINED: GP13 -> GP15 is not wired - the pair desk carries no self-link (fit the jumper to run this letter)", false);
+    bench.skip("GP13 -> GP15 is not wired - the pair desk carries no self-link (fit the jumper to run this letter)");
     return false;
 }
 bool wire_17_9() {
     if (wire_present<17, 9>()) {
         return true;
     }
-    bench.verdict("DECLINED: GP17 -> GP9 is not wired - the pair desk carries no self-link (fit the jumper to run this letter)", false);
+    bench.skip("GP17 -> GP9 is not wired - the pair desk carries no self-link (fit the jumper to run this letter)");
     return false;
 }
 
@@ -236,7 +239,7 @@ void ta_block() {
     const auto at = P0::add(probe_program);
     bool ok = at && S::init(probe_program, *at, {.clock = {1, 0}});
     S::enable(true);
-    spin_us(50);
+    brio::spin_us<Ruler>(50);
     S::enable(false);
     const uint8_t level = S::rx_level();
     const uint32_t w0 = level >= 4u ? S::pop() : 0xDEADu;
@@ -283,7 +286,7 @@ void ta_block() {
     P0::interrupts_only(0, PioInterrupt::flag(0));
     Nvic::enable(P0::irq(0));
     P0::raise_flags(0x01);
-    spin_us(20);
+    brio::spin_us<Ruler>(20);
     Nvic::disable(P0::irq(0));
     P0::interrupts_only(0, 0);
     bench.verdict("flag 0 raised through IRQ_FORCE reaches line 0, the ISR body clears it, one entry",
@@ -337,8 +340,8 @@ template <uint8_t pin>
 uint32_t pad_rises(uint32_t us) {
     uint32_t rises = 0;
     bool last = Pin<pin>::read();
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < us) {
+    const uint32_t t0 = Ruler::now();
+    while (Ruler::now() - t0 < us) {
         const bool now = Pin<pin>::read();
         if (now && !last) {
             ++rises;
@@ -361,14 +364,14 @@ void th_corners() {
         if (m == 1u) { ok = at0 && PioSm<0, 1>::init(irq_rel0_program, *at0, {}); PioSm<0, 1>::enable(true); }
         if (m == 2u) { ok = at0 && PioSm<0, 2>::init(irq_rel0_program, *at0, {}); PioSm<0, 2>::enable(true); }
         if (m == 3u) { ok = at0 && PioSm<0, 3>::init(irq_rel0_program, *at0, {}); PioSm<0, 3>::enable(true); }
-        spin_us(10);
+        brio::spin_us<Ruler>(10);
         P0::disable(0x0F);
         raised[m] = ok ? P0::flags() : 0xEEu;
     }
     P0::clear_flags(0xFF);
     const bool ok3 = at1 && PioSm<0, 3>::init(irq_rel1_program, *at1, {});
     PioSm<0, 3>::enable(true);
-    spin_us(10);
+    brio::spin_us<Ruler>(10);
     P0::disable(0x0F);
     const uint8_t wrapped = ok3 ? P0::flags() : 0xEEu;
     P0::clear_flags(0xFF);
@@ -384,13 +387,13 @@ void th_corners() {
     const auto atw = P0::add(wait_rel_program);
     const bool okw = atw && W::init(wait_rel_program, *atw, {});
     W::enable(true);
-    spin_us(10);
+    brio::spin_us<Ruler>(10);
     P0::raise_flags(0x0B);   // 0, 1 and 3
-    spin_us(10);
+    brio::spin_us<Ruler>(10);
     const uint8_t held = W::rx_level();
     P0::clear_flags(0x0B);
     P0::raise_flags(0x04);   // 2: this machine's own
-    spin_us(10);
+    brio::spin_us<Ruler>(10);
     const uint8_t freed = W::rx_level();
     const uint32_t word = freed != 0u ? W::pop() : 0u;
     const bool cleared = !P0::flag(2);
@@ -411,7 +414,7 @@ void th_corners() {
         St::push(i);
     }
     St::enable(true);
-    spin_us(20);
+    brio::spin_us<Ruler>(20);
     St::enable(false);
     const uint8_t taken = St::rx_level();
     const uint8_t left = St::tx_level();
@@ -470,7 +473,7 @@ void th_corners() {
     for (uint8_t r = 0; r < 2u; ++r) {
         inits = LRx::init(clock, rates[r]) && inits;
         inits = LTx::init(clock, rates[r]) && inits;
-        spin_us(100);
+        brio::spin_us<Ruler>(100);
         fill_pattern(tx_buf, 64, static_cast<uint8_t>(0x41u + r));
         for (uint16_t i = 0; i < 64u; ++i) {
             (void)LTx::write_wait(tx_buf[i]);
@@ -509,7 +512,7 @@ void tb_square_wave() {
         const uint32_t window = hz >= 1'000'000u ? 2000u : (hz >= 100'000u ? 20'000u : 200'000u);
         Edges15::restart();
         Edges15::run(true);
-        spin_us(window);
+        brio::spin_us<Ruler>(window);
         Edges15::run(false);
         const uint32_t got = static_cast<uint32_t>(static_cast<uint64_t>(Edges15::count()) * 1'000'000u / window);
         Edges15::release();
@@ -542,10 +545,10 @@ void tc_serial() {
         for (uint16_t i = 0; i < 64; ++i) {
             rx_buf[i] = 0xEE;
         }
-        const uint32_t t0 = us_now();
+        const uint32_t t0 = Ruler::now();
         uint16_t got = 0;
         uint16_t sent = 0;
-        while (got < 64u && us_now() - t0 < 100'000u) {
+        while (got < 64u && Ruler::now() - t0 < 100'000u) {
             if (sent < 64u && Tx::writable()) {
                 Tx::write(tx_buf[sent++]);
             }
@@ -553,7 +556,7 @@ void tc_serial() {
                 rx_buf[got++] = Rx::read();
             }
         }
-        const uint32_t took = us_now() - t0;
+        const uint32_t took = Ruler::now() - t0;
         const bool exact = got == 64u && same(tx_buf, rx_buf, 64);
         const bool frame = Rx::frame_error();
         const uint32_t want_us = static_cast<uint32_t>(64ULL * 10u * 1'000'000u / baud);
@@ -574,9 +577,9 @@ void tc_serial() {
     (void)Rx::frame_error();
     Tx::Sm::enable(false);
     Tx::Sm::pin_levels(13, 1, false);   // the line held low: a break
-    spin_us(200);
+    brio::spin_us<Ruler>(200);
     Tx::Sm::pin_levels(13, 1, true);
-    spin_us(200);
+    brio::spin_us<Ruler>(200);
     const bool flagged = Rx::frame_error();
     const bool nothing = !Rx::readable();
     Tx::Sm::enable(true);
@@ -610,11 +613,13 @@ void td_dma() {
     RxEngine::arm(Rx::rx_top_byte_address(), Rx::Sm::dreq_rx);
     TxEngine::arm(Tx::tx_address(), Tx::Sm::dreq_tx);
     (void)RxEngine::start(rx_buf, 256);
-    const uint32_t t0 = us_now();
+    // The span opens before start() and closes at the read after the wait,
+    // as it did around the hand-written loop; a time-out leaves
+    // dma_rx_done false, which the verdict judges.
+    const uint32_t t0 = Ruler::now();
     (void)TxEngine::start(tx_buf, 256);
-    while (!dma_rx_done && us_now() - t0 < 100'000u) {
-    }
-    const uint32_t took = us_now() - t0;
+    (void)brio::wait_until<Ruler>([] { return dma_rx_done; }, 100'000u);
+    const uint32_t took = Ruler::now() - t0;
     print(serial, "  256 bytes at 1 Mbaud through two engines: tx ", dma_tx_done ? "done" : "NOT done", ", rx ",
           dma_rx_done ? "done" : "NOT done", " in ", took, " us (2560 on the wire), ", same(tx_buf, rx_buf, 256) ? "byte-exact" : "MISMATCH",
           crlf);
@@ -641,10 +646,10 @@ void te_pwm() {
     uint8_t ok = 0;
     for (uint16_t lv : levels) {
         Pwm17::duty(lv);
-        spin_us(500);
+        brio::spin_us<Ruler>(500);
         Level9::restart();
         Level9::run(true);
-        spin_us(100'000);
+        brio::spin_us<Ruler>(100'000);
         Level9::run(false);
         const uint32_t pm = static_cast<uint32_t>(static_cast<uint64_t>(Level9::count()) * 1000u / 48828u);
         const bool good = within(pm, lv, 20);
@@ -696,7 +701,7 @@ void tf_interrupts() {
     for (uint8_t i = 0; i < 32u; ++i) {
         (void)Tx::write_wait(tx_buf[i]);
     }
-    spin_us(2000);
+    brio::spin_us<Ruler>(2000);
     Nvic::disable(P0::irq(0));
     P0::interrupts_only(0, 0);
     rx_to_buffer = false;
@@ -714,7 +719,7 @@ void tf_interrupts() {
     P0::interrupts_only(1, PioInterrupt::flag(1));
     Nvic::enable(P0::irq(1));
     S3::enable(true);
-    spin_us(50);
+    brio::spin_us<Ruler>(50);
     S3::enable(false);
     Nvic::disable(P0::irq(1));
     P0::interrupts_only(1, 0);
@@ -727,7 +732,7 @@ void tf_interrupts() {
     (void)S2::init(flag_program, *at0, {});
     P0::clear_flags(0xFF);
     S2::enable(true);
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     const bool flag_up = P0::flag(0);
     const bool nothing = S2::rx_empty();
     const uint8_t held_at = S2::address();
@@ -735,7 +740,7 @@ void tf_interrupts() {
     // reads the following instruction (measured).
     const bool stalled = flag_up && nothing && held_at == *at0 + 1u;
     P0::clear_flags(0x01);
-    spin_us(100);
+    brio::spin_us<Ruler>(100);
     const bool went = !S2::rx_empty() && S2::pop() == 1u;
     S2::enable(false);
     print(serial, "  IRQ 0 WAIT at ", *at0, ": flag up=", flag_up, ", nothing pushed=", nothing, ", the machine at ", held_at,
@@ -778,11 +783,11 @@ void tg_sampler() {
     dma_rx_done = false;
     WordEngine::arm(Sampler::rx_address(), Sampler::dreq_rx);
     (void)WordEngine::start(words, 256);
-    const uint32_t t0 = us_now();
+    // A time-out leaves dma_rx_done false, which the verdict judges.
+    const uint32_t t0 = Ruler::now();
     Sampler::enable(true);
-    while (!dma_rx_done && us_now() - t0 < 100'000u) {
-    }
-    const uint32_t took = us_now() - t0;
+    (void)brio::wait_until<Ruler>([] { return dma_rx_done; }, 100'000u);
+    const uint32_t took = Ruler::now() - t0;
     Sampler::enable(false);
     uint32_t ones = 0;
     for (uint16_t i = 0; i < 256u; ++i) {

@@ -97,9 +97,10 @@ link nets, which carry a real pull-up to that board's 3V3
 [../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)); its six wire
 letters, `b`, `f`, `g`, `h`, `i` and `j`, on four wires between the
 chip's own pads that the pair desk does not carry, by name only, outside
-`z`, when they are fitted - on the WeAct RP2350B; on the WeAct RP2350A
-six of those eight pads are the pair's links, and the six letters are
-not registered.
+`z`, when they are fitted (a missing wire makes the letter skip, a check
+counted apart from the passes and the fails) - on the WeAct RP2350B; on
+the WeAct RP2350A six of those eight pads are the pair's links, and the
+six letters are not registered.
 
 ## What the silicon does
 

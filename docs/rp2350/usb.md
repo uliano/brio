@@ -375,9 +375,10 @@ beside them. Every verdict reads the same on the two halves.
   (48 000). So the counter is held while the machine is idle, and a limit
   past eighteen bits is refused instead of truncated.
 - **THE ENDPOINT ABORT WORKS, WHICH IS THE RP2040'S ERRATUM E2 FIXED.**
-  An idle endpoint's abort completes after **0 or 1 status reads** and
-  LIFTS - on the other chip it stood for ever - and the port is still
-  configured with its bulk OUT armed afterwards.
+  An idle endpoint's abort completes at once - after **0 or 1 status
+  reads**, inside the 1 us step of the microsecond ruler the letter prints
+  it on - and LIFTS - on the other chip it stood for ever - and the port
+  is still configured with its bulk OUT armed afterwards.
 - **A RECONNECT THROUGH THE PULL-UP** takes **528 to 553 ms** from the
   raise to CONFIGURED, with the host's bus reset counted (2 -> 5: three
   more) and a fresh address.

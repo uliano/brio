@@ -142,6 +142,7 @@
 #include "util/line_reader.hpp"
 #include "util/print.hpp"
 #include "util/spi_bus.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // THE PROTOCOL HEADERS ARE SHARED, NOT COPIED: the far board's two
@@ -161,11 +162,17 @@ constexpr uint32_t core_hz = SysClock::hz;
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
 static_assert(SysClock::hz % 1'000'000u == 0u, "a whole number of cycles per microsecond");
 
-/// Core 0's SysTick composed with its tick count: a count a cycle.
+/// Core 0's SysTick composed with its tick count: a count a cycle - the
+/// shared body's Ruler and util/test_wait.hpp's waits (core1_bell.hpp's).
 struct Ruler {
     [[gnu::always_inline]] static uint32_t now() { return CoreTicker<0>::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
+static_assert(CycleRuler<Ruler>);
 
+/// The shared body's spin(): a span in CORE CYCLES (a borrower's 3000, a
+/// timer's quieting), which util/test_wait.hpp's spin_us() does not offer -
+/// it takes whole microseconds - so it stays, the one loop of its own here.
 [[gnu::always_inline]] inline void spin(uint32_t cycles) {
     const uint32_t t0 = Ruler::now();
     while (Ruler::now() - t0 < cycles) {

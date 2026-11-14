@@ -11,8 +11,11 @@
 //   bench <op> n=<bytes> wall=<cycles> busy=<cycles> irq=<count> isr=<cycles> rate=<B/s> wire=<B/s> x=<wall/wire>
 //
 // and closes with one verdict, "ran", so that bin/brio reads its ALL: line.
-// Letter r alone judges something, because a ruler that is wrong makes every
-// other line wrong.
+// Letter r judges something, because a ruler that is wrong makes every other
+// line wrong; and letters d, e and i judge what their lines print beside the
+// numbers - every block completed and its bytes exact (d), no request
+// stalled, no overrun and every receive proof exact (e), every tenure's
+// status and bytes as the far end serves them (i).
 //
 // THE CLOCK is test_rp2350_platform's: the 12 MHz crystal through the
 // system PLL to clk_sys = 150 MHz, clk_peri = clk_sys (the UART's clock),
@@ -340,6 +343,7 @@
 #include "rp2350/uart.hpp"
 #include "util/bench.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: letter i commands the partner's
@@ -372,7 +376,7 @@ struct Ruler {
         std::atomic_signal_fence(std::memory_order_seq_cst);
         return t;
     }
-    static uint32_t hz() { return SysClock::hz; }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
 static_assert(brio::CycleRuler<Ruler>);
 
@@ -470,13 +474,14 @@ BenchCounters counters() {
 }
 
 /// Let the console fall silent before a measurement, so its interrupts are
-/// not inside what is measured. Bounded at one second of ruler.
-void console_drain() {
-    Stopwatch<Ruler> sw;
-    sw.start();
-    while (!Serial::tx_idle() && sw.elapsed() < Ruler::hz()) {
-    }
-}
+/// not inside what is measured: util/test_wait.hpp's console_drain() over
+/// tx_idle(), which answers for the ring and for the last frame's stop bit
+/// (UARTFR.BUSY). Bounded on the ruler at a tenth of a second, the full
+/// 256-byte ring at the wire being 22 ms; false = it gave up. The bench
+/// lines' runs drop the answer (a wedged console only lengthens the run
+/// after it, and the line prints what it measured); letter r's verdicts and
+/// letter p's line act on it.
+[[nodiscard]] bool console_drain() { return brio::console_drain<Ruler, Serial>(100'000u); }
 
 /// One idle turn the way the kernel's loop takes it: masked, then idle(),
 /// which sleeps and unmasks.
@@ -503,7 +508,7 @@ constexpr uint32_t instrument_reps = 1000;
 void tr_ruler() {
     identity();
 
-    console_drain();
+    const bool quiet = console_drain();
     Stopwatch<Ruler> sw;
     sw.start();
     const bool served = delay_us(clock, delay_request_us);
@@ -512,12 +517,17 @@ void tr_ruler() {
         static_cast<uint32_t>(static_cast<uint64_t>(Ruler::hz()) * delay_request_us / 1'000'000u);
     print(serial, "  delay_us(clock, ", delay_request_us, ") = ", took, " ruler cycles; ",
           delay_request_us, " us of clk_sys is ", floor_cycles, crlf);
-    bench.verdict("delay_us(clock, 999) is served and lasts AT LEAST 999 us of the ruler's "
-                  "clk_sys cycles - the platform timer on the crystal against TIMER1 on the PLL",
-                  served && took >= floor_cycles);
-    bench.verdict("and under 5 per cent more: the delay's documented price is one microsecond "
-                  "late (rp2350/delay.hpp)",
-                  took < floor_cycles + floor_cycles / 20u);
+    if (quiet) {
+        bench.verdict("delay_us(clock, 999) is served and lasts AT LEAST 999 us of the ruler's "
+                      "clk_sys cycles - the platform timer on the crystal against TIMER1 on the "
+                      "PLL",
+                      served && took >= floor_cycles);
+        bench.verdict("and under 5 per cent more: the delay's documented price is one "
+                      "microsecond late (rp2350/delay.hpp)",
+                      took < floor_cycles + floor_cycles / 20u);
+    } else {
+        bench.skip("the console did not drain: the timed wait would carry its interrupt");
+    }
 
     // ruler: pairs of back-to-back reads, the mean difference of a pair.
     uint32_t pair_sum = 0;
@@ -575,7 +585,7 @@ void tr_ruler() {
     bench_line(serial, "stamp", 0, {pair_cycles, pair_cycles, 0, 0}, Ruler::hz(), 0);
 
     // window: 100 ms of idle turns, per turn. It holds the tick handler.
-    console_drain();
+    (void)console_drain();
     const BenchCounters before = counters();
     const uint32_t turns0 = Idle::idle_turns();
     Stopwatch<Ruler> span;
@@ -657,14 +667,14 @@ BenchSample copy_at(uint32_t n, uint32_t dof, uint32_t so) {
 /// and at 60.
 void copy_alignment_lines() {
     bench_line(serial, "memcpy", line_run_bytes, copy_at(line_run_bytes, 0, 0), Ruler::hz(), copy_bytes_per_cycle * Ruler::hz());
-    console_drain();
+    (void)console_drain();
     for (const CopyAlignment& a : copy_alignments) {
         for (const uint32_t n : sizes) {
             bench_line(serial, a.op, n, copy_at(n, a.dst, a.src), Ruler::hz(), copy_bytes_per_cycle * Ruler::hz());
-            console_drain();
+            (void)console_drain();
         }
         bench_line(serial, a.op, line_run_bytes, copy_at(line_run_bytes, a.dst, a.src), Ruler::hz(), copy_bytes_per_cycle * Ruler::hz());
-        console_drain();
+        (void)console_drain();
     }
 }
 
@@ -684,7 +694,7 @@ void scan_lines(uint32_t off, const char* strlen_op, const char* memchr_op) {
             scan_sink = strlen(p);
         });
         bench_line(serial, strlen_op, n, a, Ruler::hz(), scan_wire);
-        console_drain();
+        (void)console_drain();
         const uint32_t bound = n < 64u ? 64u : n + 1u;
         const BenchSample b = best_of_8([off, bound] {
             const void* p = source_buffer + off;
@@ -693,7 +703,7 @@ void scan_lines(uint32_t off, const char* strlen_op, const char* memchr_op) {
             scan_sink = reinterpret_cast<size_t>(memchr(p, 0, len));
         });
         bench_line(serial, memchr_op, n, b, Ruler::hz(), scan_wire);
-        console_drain();
+        (void)console_drain();
     }
 }
 
@@ -701,16 +711,16 @@ void tm_memory() {
     for (uint32_t i = 0; i < sizeof(source_buffer); ++i) {
         source_buffer[i] = static_cast<uint8_t>(i * 7u + 1u);
     }
-    console_drain();
+    (void)console_drain();
     for (const uint32_t n : sizes) {
         const BenchSample s = best_of_8([n] { (void)copy_fn(destination_buffer, source_buffer, n); });
         bench_line(serial, "memcpy", n, s, Ruler::hz(), copy_bytes_per_cycle * Ruler::hz());
-        console_drain();
+        (void)console_drain();
     }
     for (const uint32_t n : sizes) {
         const BenchSample s = best_of_8([n] { (void)fill_fn(destination_buffer, 0x5A, n); });
         bench_line(serial, "memset", n, s, Ruler::hz(), fill_bytes_per_cycle * Ruler::hz());
-        console_drain();
+        (void)console_drain();
     }
     copy_alignment_lines();
     scan_lines(0, "strlen", "memchr");
@@ -748,13 +758,16 @@ PrintCounters print_counters() {
 
 void tp_print() {
     for (const uint32_t n : sizes) {
-        console_drain();
+        (void)console_drain();
         const PrintCounters before = print_counters();
         Stopwatch<Ruler> sw;
         sw.start();
         print(serial, std::string_view{payload.data(), n});
-        while (!Serial::tx_idle()) {
-        }
+        // The wire's end, bounded: 4096 bytes are 356 ms at 115200, and the
+        // budget a second. The drain's poll turn - tx_idle() and the
+        // ruler's one load - stands where the bare tx_idle() loop stood, so
+        // the end is seen at most one such turn late.
+        const bool drained = brio::console_drain<Ruler, Serial>(1'000'000u);
         const uint32_t wall = sw.elapsed();
         const PrintCounters after = print_counters();
         const BenchSample s = bench_sample(wall, before.all, after.all);
@@ -764,6 +777,9 @@ void tp_print() {
         bench_line(serial, "print", n, s, Ruler::hz(), console_baud / frame_bits);
         print(serial, "  of which the console's vector irq ", uart_irq, " isr ", uart_isr,
               ", the tick's irq ", s.irq - uart_irq, " isr ", s.isr - uart_isr, crlf);
+        if (!drained) {
+            print(serial, "  (the drain gave up: the line above is not a measurement)", crlf);
+        }
     }
     bench.verdict("ran", true);
 }
@@ -772,7 +788,7 @@ void tp_print() {
 // t - the tick's floor
 // =============================================================================
 void tt_tick() {
-    console_drain();
+    (void)console_drain();
     const BenchCounters before = counters();
     Stopwatch<Ruler> sw;
     sw.start();
@@ -810,14 +826,32 @@ volatile bool spi_done = false;
 volatile bool spi_live = false;
 volatile uint32_t spi_irq_at = 0;   // the ruler at the DMA line's entry, a transaction's completion
 
-/// A copy or a fill and its wait on BUSY, timed: the best of 8.
+/// What letter d's one verdict judges: every block started and ended, and
+/// its bytes exact (a give-up or a mismatch below clears it).
+bool d_clean = true;
+
+/// A copy or a fill and its wait on BUSY, timed: the best of 8. A refused
+/// start or a block that did not end clears d_clean.
+///
+/// THE WAIT IS A TURN COUNT, not util/test_wait.hpp's wait_until(): its
+/// poll turn is inside the wall the copy's fixed cost is read from (52
+/// cycles for 16 bytes), and a ruler read in every turn - a load through
+/// the APB bridge, three cycles at least, and its compare - would move
+/// that figure by a third. The count adds one decrement and its branch to
+/// the bare BUSY poll; 2^20 turns are milliseconds, the longest block (4096
+/// bytes, a word a cycle) 7 us.
 template <typename Op>
 BenchSample best_dma_of_8(Op op) {
-    return best_of_8([&op] {
-        (void)op();
-        while (Copy::busy()) {
+    bool ok = true;
+    const BenchSample best = best_of_8([&op, &ok] {
+        const bool started = op();
+        uint32_t turns = uint32_t{1} << 20;
+        while (Copy::busy() && --turns != 0u) {
         }
+        ok = ok & started & (turns != 0u);   // no branch inside the wall
     });
+    d_clean = d_clean && ok;
+    return best;
 }
 
 void dma_memory() {
@@ -828,14 +862,15 @@ void dma_memory() {
     for (uint32_t i = 0; i < sizeof(source_buffer); ++i) {
         source_buffer[i] = static_cast<uint8_t>(i * 7u + 1u);
     }
-    console_drain();
+    (void)console_drain();
     for (const uint32_t n : {16u, 256u, 4096u}) {
         const BenchSample s = best_dma_of_8([=] { return Copy::copy(to, from, n / 4u); });
         const bool exact = std::memcmp(destination_buffer, source_buffer, n) == 0;
         bench_line(serial, "copy", n, s, Ruler::hz(), dma_bytes_per_cycle * Ruler::hz());
+        d_clean = d_clean && exact;
         print(serial, "  copy ", n, ": fixed cost ", s.wall - n / 4u, " cycles over one a word, ",
               exact ? "exact" : "WRONG", crlf);
-        console_drain();
+        (void)console_drain();
     }
     for (const uint32_t n : {16u, 256u, 4096u}) {
         const BenchSample s = best_dma_of_8([=] { return Copy::fill(to, &cell, n / 4u); });
@@ -844,9 +879,10 @@ void dma_memory() {
             exact = exact && to[i] == cell;
         }
         bench_line(serial, "fill", n, s, Ruler::hz(), dma_bytes_per_cycle * Ruler::hz());
+        d_clean = d_clean && exact;
         print(serial, "  fill ", n, ": fixed cost ", s.wall - n / 4u, " cycles over one a word, ",
               exact ? "exact" : "WRONG", crlf);
-        console_drain();
+        (void)console_drain();
     }
     Copy::stop();
 }
@@ -862,7 +898,7 @@ void dma_paced() {
     BenchSample paced{};
     uint32_t banked = 0;
     for (uint8_t run = 0; run < 2u; ++run) {
-        console_drain();
+        (void)console_drain();
         paced_done = false;
         banked = DmaChannel<Paced::channel>::debug_credits();
         const BenchCounters before = counters();
@@ -875,7 +911,9 @@ void dma_paced() {
         const uint32_t wall = sw.elapsed();
         const BenchCounters after = counters();
         paced = bench_sample(wall, before, after);
+        d_clean = d_clean && paced_done;   // the loop above gives up after 100 ms
     }
+    d_clean = d_clean && paced_cell == paced_table[paced_words - 1u];
     bench_line(serial, "paced", paced_words * 4u, paced, Ruler::hz(),
                4u * (Ruler::hz() / pace_cycles));
     print(serial, "  paced: the cell holds ", hex(paced_cell), " (the table's last word ",
@@ -884,7 +922,7 @@ void dma_paced() {
 
     // The jitter: the same block, the core stamping the ruler each time
     // the channel's count steps.
-    console_drain();
+    (void)console_drain();
     Paced::arm(&paced_cell, Pace::dreq(), false, DmaReport::errors);
     uint32_t turns = 0;
     uint32_t start_at = 0;
@@ -907,6 +945,7 @@ void dma_paced() {
             }
         }
         (void)Paced::complete();
+        d_clean = d_clean && k == paced_words;   // the loop above gives up after 100 ms
     }
     const uint32_t span = pace_stamps[paced_words - 1u] - pace_stamps[0];
     const uint32_t turn = span / (turns != 0u ? turns : 1u);   // the instrument's resolution
@@ -959,7 +998,7 @@ SpiRun spi_once(uint16_t frames, SpiClock rate, SpiDataSize bits, SpiWait wait =
     r.clock = rate;
     r.mode = SpiMode::mode0;
     r.bits = bits;
-    console_drain();
+    (void)console_drain();
     spi_done = false;
     spi_irq_at = 0;
     cold_point();
@@ -970,6 +1009,9 @@ SpiRun spi_once(uint16_t frames, SpiClock rate, SpiDataSize bits, SpiWait wait =
     }
     const uint32_t launched = Ruler::now();
     if (wait == SpiWait::spin_ram) {
+        // A TURN COUNT, not util/test_wait.hpp's wait: this shape spins on
+        // the RAM flag ALONE, the ruler's APB read being what the next
+        // shape adds; the idle loop below bounds whatever is left.
         for (uint32_t spins = 1'000'000u; !spi_done && spins != 0u; --spins) {
         }
     } else if (wait == SpiWait::spin_apb) {
@@ -981,6 +1023,7 @@ SpiRun spi_once(uint16_t frames, SpiClock rate, SpiDataSize bits, SpiWait wait =
     }
     const uint32_t wall = Ruler::now() - t0;
     const BenchCounters after = counters();
+    d_clean = d_clean && spi_done;   // the loops above give up after 100 ms
     return {bench_sample(wall, before, after), launched - t0, spi_irq_at - t0};
 }
 
@@ -1096,10 +1139,13 @@ void dma_spi() {
 }
 
 void td_dma() {
+    d_clean = true;
     dma_memory();
     dma_paced();
     dma_spi();
-    bench.verdict("ran", true);
+    bench.verdict("ran: every block started and ended, every copy and fill exact, the paced cell "
+                  "holding the table's last word",
+                  d_clean);
 }
 
 // =============================================================================
@@ -1109,6 +1155,11 @@ using Plain = SpiHost<0, spi_pins, NoDmaEngine, NoDmaEngine, HotPath>;   // no e
 using SpiDc = Pin<22>;
 #include "../../../rp2040/src/apps/rp_spi_frame.hpp"
 uint8_t dcs_command = 0x2C;   // in SRAM, as a client's command byte would be
+
+/// What letter e's one verdict judges: no request stalled, no overrun
+/// raised, every receive proof exact (a line that says otherwise clears
+/// it).
+bool e_clean = true;
 
 struct SpiRate { SpiClock clock; const char* name; };
 constexpr SpiRate e_rates[] = {{SpiClocks::div2, "75 MHz"}, {SpiClocks::div4, "37.5 MHz"}, {SpiClocks::div16, "9.375 MHz"}};
@@ -1143,7 +1194,7 @@ SpiReqRun e_once(uint8_t cmd_len, uint16_t frames, SpiClock rate, SpiMode mode, 
     r.mode = mode;
     r.bits = bits;
     r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
-    console_drain();
+    (void)console_drain();
     H::Resource::clear_pending(SpiInterrupt::overrun);
     spi_done = false;
     const uint32_t irq0 = spi_meter.count();
@@ -1170,6 +1221,7 @@ SpiReqRun e_once(uint8_t cmd_len, uint16_t frames, SpiClock rate, SpiMode mode, 
     const BenchCounters after = counters();
     const bool overrun = (H::Resource::raw_pending() & SpiInterrupt::overrun) != 0u;
     if (!done) {
+        e_clean = false;
         // A transaction that never completed: the block's state, for the reader.
         print(serial, "  STALLED: SSPSR ", hex(H::Resource::flags()), " SSPRIS ",
               hex(H::Resource::raw_pending()), " SSPIMSC ", hex(H::Resource::interrupts()),
@@ -1246,7 +1298,7 @@ void e_rx_proof() {
     for (const SpiRate& rate : e_rates) {
         uint32_t exact = 0;
         uint32_t overruns = 0;
-        console_drain();
+        (void)console_drain();
         // The meter is written by the handler and read here: a fence on
         // either side of the loop, so the compiler reloads what it cannot
         // see change.
@@ -1278,6 +1330,7 @@ void e_rx_proof() {
         tick_stretch = 0;
         std::atomic_signal_fence(std::memory_order_seq_cst);
         const uint32_t ticks = tick_meter.count() - ticks0;
+        e_clean = e_clean && exact == rx_proof_runs && overruns == 0u;
         print(serial, "  spi.poll.rx under a tick handler of ", 1500, " cycles (eight frames at ",
               rate.name, " are ", 8u * (8u * Ruler::hz() / Plain::sck_hz(rate.clock)), "): ",
               rx_proof_runs, " requests of 256 frames on the loop-back, ", exact, " exact, ",
@@ -1317,7 +1370,7 @@ ColdRun e_cold_once(bool invalidate) {
     r.mode = SpiMode::mode0;
     r.bits = SpiDataSize::bits8;
     r.engine = SpiEngine::polled;
-    console_drain();
+    (void)console_drain();
     Plain::Resource::clear_pending(SpiInterrupt::overrun);
     const BenchCounters before = counters();
     if (invalidate) {
@@ -1363,6 +1416,7 @@ void e_cold() {
 }
 
 void te_host() {
+    e_clean = true;
     (void)SpiSelect::output(true);
     (void)SpiDc::output(true);
     (void)Plain::init(clock);
@@ -1370,7 +1424,7 @@ void te_host() {
         source_buffer[i] = static_cast<uint8_t>(i * 7u + 1u);
     }
     e_cold();   // FIRST: its first request must be the host's first
-    console_drain();
+    (void)console_drain();
     rp_spi_frame::measure_and_print(source_buffer, destination_buffer);
 
     // spi.poll (the write) and spi.poll.rx (the receive): rates x widths x
@@ -1391,6 +1445,7 @@ void te_host() {
                             e_best<Plain>(0, frames, rate.clock, mode, bits, shape.polled, shape.with_rx);
                         const uint32_t n = frames * frame_bytes;
                         walls[k++] = run.sample.wall;
+                        e_clean = e_clean && !run.overrun;
                         bench_line(serial, op, n, run.sample, Ruler::hz(), sck / 8u);
                         print(serial, "  ", op, " ", frames, " frames of ", spi_data_bits(bits),
                               " bits at ", rate.name, ", mode ", static_cast<uint8_t>(mode),
@@ -1414,6 +1469,7 @@ void te_host() {
         const uint32_t n = 1u + len;
         const uint32_t wire = e_wire_cycles(n, req_sck);
         const uint32_t gap = e_gap_cycles(len, req_sck);   // the command byte's phase has none
+        e_clean = e_clean && !run.overrun;
         bench_line(serial, "spi.req", n, run.sample, Ruler::hz(), req_sck / 8u);
         print(serial, "  spi.req: a command byte and ", len, " data bytes at ", req_rate.name,
               ": the wire ", wire, " cycles (", wire + gap, " with the gap), the fixed cost ",
@@ -1439,7 +1495,9 @@ void te_host() {
     }
     spi_live = false;
     Spi::release();
-    bench.verdict("ran", true);
+    bench.verdict("ran: no request stalled, the overrun flag never raised, every receive proof "
+                  "exact under the stretched tick",
+                  e_clean);
 }
 
 // =============================================================================
@@ -1485,6 +1543,9 @@ std::span<const uint8_t> payload_bytes(uint32_t from, uint32_t n) {
     return {reinterpret_cast<const uint8_t*>(payload.data()) + from, n};
 }
 
+/// One frame of 8N1 at `baud`, in whole microseconds rounded up.
+constexpr uint32_t frame_us(uint32_t baud) { return (10'000'000u + baud - 1u) / baud; }
+
 template <typename T>
 bool loop_up(LoopMode mode, uint32_t baud, bool receiver) {
     loop_mode = mode;   // the vector serves T from its init on
@@ -1492,11 +1553,7 @@ bool loop_up(LoopMode mode, uint32_t baud, bool receiver) {
     if (!receiver) {
         T::Resource::interrupts(UartInterrupt::rx | UartInterrupt::rx_timeout, false);
     }
-    const uint32_t frame = SysClock::hz / (baud / 10u);
-    Stopwatch<Ruler> sw;
-    sw.start();
-    while (sw.elapsed() < 4u * frame) {
-    }
+    spin_us<Ruler>(4u * frame_us(baud));
     // NOTHING SHOULD BE HERE: the loop-back is chosen at the bring-up, so
     // the receiver's first sample is the transmitter's idle line (measured
     // on the RP2350: none in 30 bring-ups on each half, where a bring-up
@@ -1525,7 +1582,7 @@ void loop_down() {
 /// with a kernel would spend idle.
 template <typename T>
 void run_uart_tx(const char* op, LoopMode mode, uint32_t baud, uint32_t n) {
-    console_drain();
+    (void)console_drain();
     if (!loop_up<T>(mode, baud, false)) {
         print(serial, "  ", op, ": init refused at ", baud, crlf);
         return;
@@ -1565,7 +1622,7 @@ void run_uart_tx(const char* op, LoopMode mode, uint32_t baud, uint32_t n) {
 /// ring, the data checked after.
 template <typename T>
 void run_uart_rx(const char* op, LoopMode mode, uint32_t baud, uint32_t n) {
-    console_drain();
+    (void)console_drain();
     if (!loop_up<T>(mode, baud, true)) {
         print(serial, "  ", op, ": init refused at ", baud, crlf);
         return;
@@ -1620,7 +1677,7 @@ void run_uart_rx(const char* op, LoopMode mode, uint32_t baud, uint32_t n) {
 template <typename T>
 void run_uart_edge(const char* op, LoopMode mode, uint32_t baud) {
     constexpr uint32_t n = 17u;
-    console_drain();
+    (void)console_drain();
     if (!loop_up<T>(mode, baud, true)) {
         print(serial, "  ", op, ": init refused at ", baud, crlf);
         return;
@@ -1676,16 +1733,13 @@ void run_uart_edge(const char* op, LoopMode mode, uint32_t baud) {
 /// engine, then ten frames of silence: UARTRIS read raw (RTRIS, RXRIS),
 /// the FIFO's emptiness and what the channel took.
 void probe_rt_under_engine(uint32_t baud) {
-    console_drain();
+    (void)console_drain();
     (void)loop_up<RxEngined>(LoopMode::rx_engined, baud, true);
-    const uint32_t frame = SysClock::hz / (baud / 10u);
     (void)RxEngined::write_bulk(payload_bytes(0, 17));
-    const uint32_t t0 = Ruler::now();
-    while (!RxEngined::tx_idle() && Ruler::now() - t0 < 40u * frame) {
-    }
-    const uint32_t t1 = Ruler::now();
-    while (Ruler::now() - t1 < 10u * frame) {
-    }
+    // The burst's last stop bit, at most 40 frames (the line printed below
+    // says what landed either way), then ten frames of silence.
+    (void)wait_until<Ruler>([] { return RxEngined::tx_idle(); }, 40u * frame_us(baud));
+    spin_us<Ruler>(10u * frame_us(baud));
     const uint32_t ris = Pl011<1>::raw_pending();
     const bool empty = Pl011<1>::rx_empty();
     (void)RxEngined::harvest();
@@ -1737,7 +1791,7 @@ uint32_t time_byte_loop(uint32_t off_dst, uint32_t k) {
 }
 
 void run_copy_crossover() {
-    console_drain();
+    (void)console_drain();
     uint32_t empty = 0xFFFFFFFFu;
     for (uint8_t i = 0; i < 8u; ++i) {
         const uint32_t e = time_empty();
@@ -1811,6 +1865,10 @@ volatile uint32_t i2c_isr_max = 0;   // the longest host entry since the op bega
 
 uint8_t i2c_out[256];
 uint8_t i2c_in[256];
+/// What letter i's one verdict judges beside the far end's answer: every
+/// line's status and bytes as the far end serves them (a MISMATCH clears
+/// it).
+bool i2c_all_exact = true;
 
 /// One tenure on the pump for the far end's command channel, waited out
 /// on the tick: the status, or 0xFE.
@@ -1825,10 +1883,7 @@ uint8_t link_tenure(const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uint8_t rx_l
     if (I2cPump::start(r)) {
         return I2cPump::status();
     }
-    const uint32_t t0 = Ticker::ticks();
-    while (!i2c_done && Ticker::ticks() - t0 < 100u) {
-    }
-    if (!i2c_done) {
+    if (!wait_until<Ruler>([] { return i2c_done; }, 100'000u)) {
         (void)I2cPump::recover();
         return 0xFEu;
     }
@@ -1857,18 +1912,14 @@ bool far_serve(uint16_t ms) {
             for (const uint8_t b : answer) {
                 if (dec.feed(b) == twilink::Decoder::Result::frame) {
                     if (dec.frame().op == twilink::Op::ack) {
-                        const uint32_t t0 = Ticker::ticks();
-                        while (Ticker::ticks() - t0 <= twilink::arm_ms) {
-                        }
+                        spin_us<Ruler>((twilink::arm_ms + 1u) * 1000u);
                         return true;
                     }
                     break;
                 }
             }
         }
-        const uint32_t t0 = Ticker::ticks();
-        while (Ticker::ticks() - t0 < 400u) {
-        }
+        spin_us<Ruler>(400'000u);
     }
     return false;
 }
@@ -1907,7 +1958,7 @@ I2cOp i2c_once(uint8_t addr, uint8_t tx_len, uint8_t rx_len, I2cSpeed speed,
     for (uint16_t i = 0; i < rx_len; ++i) {
         i2c_in[i] = 0;
     }
-    console_drain();
+    (void)console_drain();
     i2c_done = false;
     std::atomic_signal_fence(std::memory_order_seq_cst);
     const BenchCounters c0 = i2c_counters();
@@ -2028,6 +2079,7 @@ void i2c_print(const char* op, uint32_t n, const I2cOp& o, uint32_t periods_x10,
     const uint32_t wire_bps =
         n == 0u || wire_cycles == 0u ? 0u : static_cast<uint32_t>(static_cast<uint64_t>(n) * Ruler::hz() / wire_cycles);
     bench_line(serial, op, n, o.s, Ruler::hz(), wire_bps);
+    i2c_all_exact = i2c_all_exact && o.exact;
     print(serial, "    fixed=", static_cast<int32_t>(o.s.wall - wire_cycles), " (wire ", wire_cycles, " = ", periods_x10 / 10u, '.', periods_x10 % 10u,
           " SCL) start=", o.start_cycles, " xip_miss=", static_cast<int32_t>(o.xip_miss), " isr_max=", o.isr_max, " status=", o.status,
           o.exact ? " exact" : " MISMATCH", crlf);
@@ -2144,6 +2196,7 @@ void i2c_cost_of_engines(I2cSpeed speed, bool write, const uint8_t (&lens)[count
     // b in hundredths of a cycle a byte, from the tenures of 16 and 255.
     const uint32_t b_x100 = (pump[k255] - pump[k16]) * 100u / (255u - 16u);
     const int32_t f = static_cast<int32_t>(pump[k16]) - static_cast<int32_t>(b_x100 * 16u / 100u);
+    i2c_all_exact = i2c_all_exact && exact;
     print(serial, "  i2c.engines ", write ? "write" : "read", " at ", i2c_speed_hz(speed) / 1000u, " kHz: E=", eng[k16], " F=", f, " b=",
           b_x100 / 100u, '.', b_x100 % 100u / 10u, b_x100 % 10u, " a byte; dma costs the core less from n=",
           first_cheaper, first_cheaper == 0u ? " (never in the list)" : "", exact ? "" : "  MISMATCH", crlf);
@@ -2165,6 +2218,7 @@ void ti_i2c() {
           " for ", serve_ms, " ms a speed, every read answered ", hex(i2c_seed), "; ", hex(i2c_nobody),
           " is nobody. init: host=", host_ok, crlf);
     bool ran = host_ok;
+    i2c_all_exact = true;
     for (const I2cSpeed speed : {I2cSpeed::standard_100k, I2cSpeed::fast_400k, I2cSpeed::fast_plus_1m}) {
         if (!ran || !far_serve(serve_ms)) {
             print(serial, "  NO FAR END: nothing answered the serve command on ", hex(twilink::command_addr),
@@ -2191,10 +2245,18 @@ void ti_i2c() {
         i2c_mode = I2cMode::pump;
         (void)I2cPump::init(clock);
         print(serial, "  the serve's lines took ", Ticker::ticks() - s0, " ms of its ", serve_ms, crlf);
-        while (Ticker::ticks() - s0 < serve_ms + 100u) {
+        // The rest of the serve and 100 ms, on the tick the serve was
+        // counted on; bounded on the ruler 100 ms past that, a give-up
+        // ending the run (the far end's command channel would not be back).
+        if (!wait_until<Ruler>([s0] { return Ticker::ticks() - s0 >= serve_ms + 100u; },
+                               (serve_ms + 200u) * 1000u)) {
+            ran = false;
+            break;
         }
     }
-    bench.verdict("ran", ran);
+    bench.verdict("ran: the far end served every speed, every line's status and bytes as it "
+                  "serves them",
+                  ran && i2c_all_exact);
     i2c_mode = I2cMode::none;
     I2cPump::release();
 }

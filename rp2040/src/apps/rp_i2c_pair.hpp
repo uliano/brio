@@ -19,7 +19,9 @@
 //                                client, the resource
 //   DmaTx, DmaRx                 DmaHost's two engine types
 //   SdaPin, SclPin               the link's pads
-//   us_now()                     the microsecond ruler (the system timer)
+//   Ruler                        the microsecond ruler (the system timer) in
+//                                util/test_wait.hpp's shape: now(), and hz()
+//                                at 1 MHz, which every span here assumes
 //   xip_empty()                  every line of the XIP cache dropped (the
 //                                family's Xip verb): letter g's cold read
 //   partner_kind, partner_text   twi_link's kind byte of the peer, its name
@@ -44,7 +46,13 @@
 // window.
 //
 // THE RULER is the system timer, one microsecond; every time-out below is
-// a deadline on it, read through `wait_until()`.
+// a budget on it, read through util/test_wait.hpp's waits, and every wait
+// that can run out acts on its answer: a status of its own, or a count a
+// verdict judges, said beside the wait. The kernel letter's pump waits on
+// the kernel tick (wait_ticks). The loops still written out do work beyond
+// waiting - keeping a load running, sampling a pad, a masked poll whose turn
+// is the instrument's resolution - and each is bounded on the ruler or on a
+// turn count, said beside it.
 
 #pragma once
 
@@ -71,25 +79,7 @@ volatile bool bus_ao_live = false;
 uint8_t tx_buf[256];
 uint8_t rx_buf[256];
 
-// ---- shared waits -----------------------------------------------------------------
-
-/// Spin until `done()` or `us` microseconds have passed; true when done.
-template <typename F>
-bool wait_until(F done, uint32_t us) {
-    const uint32_t t0 = us_now();
-    while (!done()) {
-        if (us_now() - t0 >= us) {
-            return done();
-        }
-    }
-    return true;
-}
-void spin_us(uint32_t us) {
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < us) {
-    }
-}
-void settle_ms(uint32_t ms) { spin_us(ms * 1000u); }
+static_assert(Ruler::hz() == 1'000'000u, "rp_i2c_pair.hpp reads its spans and budgets in microseconds of the ruler");
 
 // ---- this board's client, served from its vector (letter l) ----------------------
 
@@ -207,7 +197,7 @@ uint8_t tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uin
     if (H::start(r)) {
         return H::status();
     }
-    if (!wait_until([] { return transfer_done; }, wait_us)) {
+    if (!brio::wait_until<Ruler>([] { return transfer_done; }, wait_us)) {
         (void)H::recover();
         return no_answer;
     }
@@ -268,11 +258,11 @@ const uint8_t no_payload[1] = {0};
 bool command(Op op, const uint8_t* p = no_payload, uint8_t len = 0) {
     for (uint8_t k = 0; k < 3u; ++k) {
         if (command_once(op, p, len)) {
-            settle_ms(twilink::arm_ms);
+            brio::spin_us<Ruler>(twilink::arm_ms * 1000u);
             return true;
         }
         host_ready();
-        settle_ms(400);
+        brio::spin_us<Ruler>(400'000u);
     }
     if (!link_quiet) {
         print(serial, "    LINK FAILURE op ", hex(twilink::byte_of(op)), ": ", partner_text,
@@ -290,7 +280,7 @@ bool peer_report(twilink::Report& r) {
             r = twilink::get_report(f.data);
             return true;
         }
-        settle_ms(60);
+        brio::spin_us<Ruler>(60'000u);
     }
     return false;
 }
@@ -302,7 +292,7 @@ bool peer_counters(twilink::Counters& c) {
             c = twilink::get_counters(f.data);
             return true;
         }
-        settle_ms(60);
+        brio::spin_us<Ruler>(60'000u);
     }
     return false;
 }
@@ -343,9 +333,9 @@ twilink::Params serve_params(uint16_t ms, uint8_t seed) {
 /// one more command round trip need.
 void outlast(const twilink::Params& a, uint32_t since_us) {
     const uint32_t due = static_cast<uint32_t>(a.ms) * 1000u + 100'000u;
-    const uint32_t spent = us_now() - since_us;
+    const uint32_t spent = Ruler::now() - since_us;
     if (spent < due) {
-        spin_us(due - spent);
+        brio::spin_us<Ruler>(due - spent);
     }
 }
 
@@ -400,9 +390,9 @@ void tb_scan() {
     uint8_t others = 0;
     uint32_t nobody_us = 0;
     for (uint8_t a = 0x08; a <= 0x77u; ++a) {
-        const uint32_t t0 = us_now();
+        const uint32_t t0 = Ruler::now();
         const uint8_t st = tenure<Host>(a, nullptr, 0, nullptr, 0, link_speed);
-        const uint32_t took = us_now() - t0;
+        const uint32_t took = Ruler::now() - t0;
         if (st == i2c_ok) {
             if (found == 0u) {
                 first = a;
@@ -488,7 +478,7 @@ void td_shapes() {
         bench.verdict("the peer accepted the serve command", false);
         return;
     }
-    const uint32_t s0 = us_now();
+    const uint32_t s0 = Ruler::now();
     uint16_t served = 0;   // the counting pattern's next index
     uint8_t w8[8];
     fill_pattern(w8, 8, 0x11);
@@ -570,7 +560,7 @@ void te_vocabulary() {
     d.flags = twilink::flag_deaf;
     uint8_t deaf_w = 0xFF, deaf_p = 0xFF, deaf_r = 0xFF;
     if (peer_act(Op::serve, d)) {
-        const uint32_t s0 = us_now();
+        const uint32_t s0 = Ruler::now();
         uint8_t w4[4] = {1, 2, 3, 4};
         deaf_w = tenure<Host>(twilink::dut_addr, w4, 4, nullptr, 0);
         deaf_p = tenure<Host>(twilink::dut_addr, nullptr, 0, nullptr, 0);
@@ -596,7 +586,7 @@ void te_vocabulary() {
             bench.verdict("the peer accepted the general-call serve", false);
             return;
         }
-        const uint32_t g0 = us_now();
+        const uint32_t g0 = Ruler::now();
         uint8_t gw[2] = {0x5A, 0xA5};
         Host::Request bad{};
         bad.addr = 0x7A;
@@ -643,7 +633,7 @@ void te_vocabulary() {
             bench.verdict("the peer accepted the nack-at serve", false);
             return;
         }
-        const uint32_t s0 = us_now();
+        const uint32_t s0 = Ruler::now();
         uint8_t w6[6] = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60};
         const uint8_t st = tenure<Host>(twilink::dut_addr, w6, 6, nullptr, 0);
         outlast(n, s0);
@@ -669,15 +659,15 @@ void te_vocabulary() {
             bench.verdict("the peer accepted the stretched serve", false);
             return;
         }
-        const uint32_t s0 = us_now();
+        const uint32_t s0 = Ruler::now();
         uint8_t w8[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-        uint32_t t0 = us_now();
+        uint32_t t0 = Ruler::now();
         st_ok = static_cast<uint8_t>(st_ok + (tenure<Host>(twilink::dut_addr, nullptr, 0, rx_buf, 8) == i2c_ok ? 1u : 0u));
-        const uint32_t r_us = us_now() - t0;
+        const uint32_t r_us = Ruler::now() - t0;
         const uint8_t mism = pattern_mismatches(rx_buf, 8, h.seed, 0);
-        t0 = us_now();
+        t0 = Ruler::now();
         st_ok = static_cast<uint8_t>(st_ok + (tenure<Host>(twilink::dut_addr, w8, 8, nullptr, 0) == i2c_ok ? 1u : 0u));
-        const uint32_t w_us = us_now() - t0;
+        const uint32_t w_us = Ruler::now() - t0;
         st_ok = static_cast<uint8_t>(st_ok + (mism == 0u ? 1u : 0u));
         if (hold == 0u) {
             plain_r = r_us;
@@ -727,7 +717,7 @@ void tf_speeds() {
             bench.verdict("the peer accepted the serve command", false);
             return;
         }
-        const uint32_t s0 = us_now();
+        const uint32_t s0 = Ruler::now();
         fill_pattern(tx_buf, 16, static_cast<uint8_t>(0x70u + s));
         const uint8_t w = tenure<Host>(twilink::dut_addr, tx_buf, 16, nullptr, 0, sp);
         const uint16_t w_sum = sum_of(tx_buf, 16);
@@ -739,9 +729,9 @@ void tf_speeds() {
         // The rate: a 64-byte write is 9 x 65 SCL periods, plus START and
         // STOP (1.4) and the software around them, which only lengthen it.
         fill_pattern(tx_buf, 64, 0x07);
-        const uint32_t t0 = us_now();
+        const uint32_t t0 = Ruler::now();
         const uint8_t m = tenure<Host>(twilink::dut_addr, tx_buf, 64, nullptr, 0, sp);
-        const uint32_t took = us_now() - t0;
+        const uint32_t took = Ruler::now() - t0;
         const uint16_t m_sum = sum_of(tx_buf, 64);
         const uint32_t scl_hz = took == 0u ? 0u : static_cast<uint32_t>(9ULL * 65u * 1'000'000u / took);
         const uint32_t asked = i2c_speed_hz(sp);
@@ -755,9 +745,9 @@ void tf_speeds() {
         const bool w_in = m == i2c_ok && scl_hz <= asked + asked / 50u && scl_hz >= asked - (asked * 15u) / 100u;
         // And a 64-byte read, the peer giving a FIFO ahead: its four refills
         // are the far end's only pace.
-        const uint32_t t1 = us_now();
+        const uint32_t t1 = Ruler::now();
         const uint8_t mr = tenure<Host>(twilink::dut_addr, nullptr, 0, rx_buf, 64, sp);
-        const uint32_t took_r = us_now() - t1;
+        const uint32_t took_r = Ruler::now() - t1;
         const bool mr_ok = mr == i2c_ok && pattern_mismatches(rx_buf, 64, a.seed, 16) == 0u;
         const uint32_t scl_r = took_r == 0u ? 0u : static_cast<uint32_t>(9ULL * 65u * 1'000'000u / took_r);
         const bool r_in = mr_ok && scl_r <= asked + asked / 50u && scl_r >= asked - (asked * 15u) / 100u;
@@ -821,7 +811,7 @@ volatile uint16_t released_sink = 0;
 uint8_t released_request_moves() {
     DmaTx::arm(&released_sink, Raw::dreq_tx, false, DmaReport::errors);
     (void)DmaTx::start(released_cells, 4u);
-    spin_us(20);
+    brio::spin_us<Ruler>(20);
     const uint8_t moved = static_cast<uint8_t>(4u - DmaChannel<DmaTx::channel>::count());
     DmaTx::stop();
     return moved;
@@ -833,7 +823,7 @@ void released_stage() {
     DmaTx::stop();
     DmaRx::stop();
     Raw::dma_requests(true, true);
-    spin_us(5);
+    brio::spin_us<Ruler>(5);
 }
 
 void tr_released_requester() {
@@ -845,7 +835,7 @@ void tr_released_requester() {
         bench.verdict("the peer accepted the serve command", false);
         return;
     }
-    const uint32_t s0 = us_now();
+    const uint32_t s0 = Ruler::now();
     owner = Owner::none;
     Host::release();
     uint8_t after_reset = 0;
@@ -906,7 +896,7 @@ void tg_dma() {
         bench.verdict("the peer accepted the serve command", false);
         return;
     }
-    const uint32_t s0 = us_now();
+    const uint32_t s0 = Ruler::now();
     owner = Owner::none;
     Host::release();
     (void)DmaHost::init(clock);
@@ -923,9 +913,9 @@ void tg_dma() {
         rx_buf[i] = 0xEE;
     }
     constexpr I2cEngine dma = I2cEngine::dma;
-    uint32_t t0 = us_now();
+    uint32_t t0 = Ruler::now();
     const uint8_t st0 = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 64, I2cSpeed::fast_400k, 20'000u, dma);
-    const uint32_t took0 = us_now() - t0;
+    const uint32_t took0 = Ruler::now() - t0;
     const uint32_t entries0 = isr_entries;
     const uint8_t m0 = pattern_mismatches(rx_buf, 64, a.seed, served);
     served = static_cast<uint16_t>(served + 64u);
@@ -934,9 +924,9 @@ void tg_dma() {
     for (uint8_t i = 0; i < 64u; ++i) {
         rx_buf[i] = 0xEE;
     }
-    t0 = us_now();
+    t0 = Ruler::now();
     const uint8_t st = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 64, I2cSpeed::fast_400k, 20'000u, dma);
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     const uint32_t entries = isr_entries;
     const uint8_t m64 = pattern_mismatches(rx_buf, 64, a.seed, served);
     served = static_cast<uint16_t>(served + 64u);
@@ -951,9 +941,9 @@ void tg_dma() {
         rx_buf[i] = 0xEE;
     }
     xip_empty();
-    t0 = us_now();
+    t0 = Ruler::now();
     const uint8_t stc = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 64, I2cSpeed::fast_400k, 20'000u, dma);
-    const uint32_t tookc = us_now() - t0;
+    const uint32_t tookc = Ruler::now() - t0;
     const uint32_t entriesc = isr_entries;
     const uint8_t mc = pattern_mismatches(rx_buf, 64, a.seed, served);
     served = static_cast<uint16_t>(served + 64u);
@@ -1157,7 +1147,7 @@ void tg_dma() {
         bench.verdict("the peer accepted the nack-at serve", false);
         return;
     }
-    const uint32_t n0 = us_now();
+    const uint32_t n0 = Ruler::now();
     owner = Owner::none;
     Host::release();
     (void)DmaHost::init(clock);
@@ -1238,14 +1228,15 @@ void pump() {
         TimeEvents<P>::process();
     }
 }
+/// The kernel pumped until `want` replies came or `ms` milliseconds of the
+/// tick passed (one tick a millisecond), then once more. The answer is
+/// dropped: every caller's verdict judges the replies counted.
 void pump_until(uint8_t want, uint32_t ms) {
-    const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() - t0 < ms) {
+    static_assert(P::ticks_per_second == 1000u, "pump_until() counts a millisecond a tick");
+    (void)brio::wait_ticks<P>([want] {
         pump();
-        if (Probe::n >= want) {
-            break;
-        }
-    }
+        return Probe::n >= want;
+    }, ms);
     pump();
 }
 
@@ -1272,7 +1263,7 @@ void th_kernel() {
         bench.verdict("the peer accepted the serve command", false);
         return;
     }
-    const uint32_t s0 = us_now();
+    const uint32_t s0 = Ruler::now();
     kl::BusKernel::init_all();
     bus_ao_live = true;
     fill_pattern(kl::out_a, 8, 0x01);
@@ -1325,7 +1316,7 @@ void th_kernel() {
         bench.verdict("the peer accepted the holding serve", false);
         return;
     }
-    const uint32_t h0 = us_now();
+    const uint32_t h0 = Ruler::now();
     kl::BusKernel::init_all();
     bus_ao_live = true;
     kl::Probe::clear_tally();
@@ -1349,7 +1340,7 @@ void th_kernel() {
     host_ready();
     const twilink::Params b = serve_params(300, 0x44);
     const bool again = peer_act(Op::serve, b);
-    const uint32_t b0 = us_now();
+    const uint32_t b0 = Ruler::now();
     kl::BusKernel::init_all();
     bus_ao_live = true;
     kl::Probe::clear_tally();
@@ -1380,7 +1371,7 @@ void ti_unstick() {
         bench.verdict("the peer accepted the hold_sda command", false);
         return;
     }
-    const uint32_t s0 = us_now();
+    const uint32_t s0 = Ruler::now();
     // The peer takes SDA after 40 us of quiet wire, counted from the closing
     // NACK of the ack read - inside arm_ms.
     const bool held = !SdaPin::read();
@@ -1405,10 +1396,10 @@ void ti_unstick() {
         bench.verdict("the peer accepted the second hold_sda command", false);
         return;
     }
-    const uint32_t s1 = us_now();
-    const uint32_t t0 = us_now();
+    const uint32_t s1 = Ruler::now();
+    const uint32_t t0 = Ruler::now();
     const uint8_t stuck = Host::unstick();
-    const uint32_t pulse_us = us_now() - t0;
+    const uint32_t pulse_us = Ruler::now() - t0;
     outlast(s, s1);
     host_ready();
     const uint8_t after = Host::unstick();
@@ -1450,14 +1441,14 @@ uint8_t arb_tenure(uint8_t addr, const uint8_t* tx, uint8_t len, uint8_t* rx, ui
     transfer_done = false;
     isr_entries = 0;
     inject_start();
-    spin_us(lead_us);
+    brio::spin_us<Ruler>(lead_us);
     const bool sync = H::start(r);
-    spin_us(20);
+    brio::spin_us<Ruler>(20);
     inject_stop();
     if (sync) {
         return H::status();
     }
-    if (!wait_until([] { return transfer_done; }, 200'000u)) {
+    if (!brio::wait_until<Ruler>([] { return transfer_done; }, 200'000u)) {
         (void)H::recover();
         return no_answer;
     }
@@ -1492,7 +1483,7 @@ void tk_arbitration() {
             bench.verdict("the peer accepted the arbitration command", false);
             return;
         }
-        const uint32_t s0 = us_now();
+        const uint32_t s0 = Ruler::now();
         host_ready();
         fill_pattern(tx_buf, 5, 0xD0);
         // The window: 350 us, past the peer's 40 us of quiet and its 120 us
@@ -1539,7 +1530,7 @@ void tk_arbitration() {
             bench.verdict("the peer accepted the arbitration command", false);
             return;
         }
-        const uint32_t s0 = us_now();
+        const uint32_t s0 = Ruler::now();
         owner = Owner::none;
         Host::release();
         (void)DmaHost::init(clock);
@@ -1570,7 +1561,7 @@ void tk_arbitration() {
 /// hand `us` microseconds, the peer's start() written inside, then the STOP.
 void client_window(uint32_t us) {
     inject_start();
-    spin_us(us);
+    brio::spin_us<Ruler>(us);
     inject_stop();
 }
 
@@ -1589,11 +1580,12 @@ void tl_roles() {
         bench.verdict("the peer accepted the host command that addresses this board", false);
         return;
     }
-    uint32_t s0 = us_now();
+    uint32_t s0 = Ruler::now();
     Host::release();
     const bool up = client_ready(twilink::dut_addr, false);
     client_window(400);
-    (void)wait_until([] { return client_stops != 0u; }, 300'000u);
+    // The verdict judges the bytes and the one STOP waited for here.
+    (void)brio::wait_until<Ruler>([] { return client_stops != 0u; }, 300'000u);
     const uint8_t mism = pattern_mismatches(client_heard, 6, c.seed, 0);
     const uint16_t heard = client_count;
     const uint16_t stops = client_stops;
@@ -1620,14 +1612,15 @@ void tl_roles() {
         bench.verdict("the peer accepted the host_read command", false);
         return;
     }
-    s0 = us_now();
+    s0 = Ruler::now();
     Host::release();
     const bool up2 = client_ready(twilink::dut_addr, false);
     for (uint8_t i = 0; i < sizeof client_answers; ++i) {
         client_answers[i] = static_cast<uint8_t>(0xC0u + 7u * i);
     }
     client_window(400);
-    (void)wait_until([] { return client_nacks >= 2u && client_stops >= 2u; }, 400'000u);
+    // The verdict judges the closing NACKs and the bytes given, counted here.
+    (void)brio::wait_until<Ruler>([] { return client_nacks >= 2u && client_stops >= 2u; }, 400'000u);
     const uint16_t gave = client_given;
     const uint16_t nacks = client_nacks;
     const uint16_t flushes = client_flushes;
@@ -1663,13 +1656,14 @@ void tl_roles() {
         bench.verdict("the peer accepted the general-call command", false);
         return;
     }
-    s0 = us_now();
+    s0 = Ruler::now();
     Host::release();
     const bool up3 = client_ready(twilink::dut_addr, true);
     client_window(400);
     // No STOP_DET closes a general call (IC_CON's note): the third byte does.
-    (void)wait_until([] { return client_count >= 3u; }, 300'000u);
-    spin_us(200);
+    // The verdict wants nothing heard: this wait is expected to run out.
+    (void)brio::wait_until<Ruler>([] { return client_count >= 3u; }, 300'000u);
+    brio::spin_us<Ruler>(200);
     const uint16_t gheard = client_count;
     const uint16_t gcalls = client_gcalls;
     const uint16_t gstops = client_stops;
@@ -1724,33 +1718,34 @@ EdgeRun client_write_run(uint8_t count, uint8_t seed, bool hold, bool drain, uin
     if (!peer_act(Op::arb, c)) {
         return e;
     }
-    const uint32_t s0 = us_now();
+    const uint32_t s0 = Ruler::now();
     Host::release();
     e.up = client_ready(twilink::dut_addr, false, hold);
     if (!drain) {
         Client::interrupts(I2cInterrupt::rx_full, false);
     }
     inject_start();
-    spin_us(400);
+    brio::spin_us<Ruler>(400);
     inject_stop();
     if (cut_after != 0u) {
         // The block disabled from here, the instant the vector has taken
         // byte `cut_after` (polled: the vector stores each byte as it lands;
         // the peer's host starts at the window's STOP, 90 us a byte).
-        const bool reached = wait_until([cut_after] { return client_count >= cut_after; }, 20'000u);
+        const bool reached = brio::wait_until<Ruler>([cut_after] { return client_count >= cut_after; }, 20'000u);
         if (reached) {
             (void)Raw::disable(0);
         }
-        e.idle = wait_until([] { return !Raw::running(); }, 5000u);
+        e.idle = brio::wait_until<Ruler>([] { return !Raw::running(); }, 5000u);
         e.busy_bit = Raw::client_disabled_while_busy();
         e.lost_bit = Raw::client_rx_data_lost();
-        spin_us(3000);
+        brio::spin_us<Ruler>(3000);
     } else {
         if (drain_after_us != 0u) {
-            spin_us(drain_after_us);
+            brio::spin_us<Ruler>(drain_after_us);
             Client::interrupts(I2cInterrupt::rx_full, true);
         }
-        (void)wait_until([] { return client_stops != 0u; }, 300'000u);
+        // The caller's verdicts judge the bytes and the STOPs counted here.
+        (void)brio::wait_until<Ruler>([] { return client_stops != 0u; }, 300'000u);
         if (!drain && drain_after_us == 0u) {
             while (Client::data_ready()) {
                 const uint8_t b = Client::take();
@@ -1820,7 +1815,7 @@ void tm_client_edges() {
         bench.verdict("the peer accepted the host_read command", false);
         return;
     }
-    const uint32_t s0 = us_now();
+    const uint32_t s0 = Ruler::now();
     Host::release();
     const bool up = client_ready(twilink::dut_addr, false);
     for (uint8_t i = 0; i < sizeof client_answers; ++i) {
@@ -1828,15 +1823,15 @@ void tm_client_edges() {
     }
     client_cut_at = 2;
     client_window(400);
-    const bool held = wait_until([] { return client_cut; }, 50'000u);
+    const bool held = brio::wait_until<Ruler>([] { return client_cut; }, 50'000u);
     (void)Raw::disable(0);
-    const bool idle_early = wait_until([] { return !Raw::running(); }, 2000u);
+    const bool idle_early = brio::wait_until<Ruler>([] { return !Raw::running(); }, 2000u);
     // Not idle while SCL is held for a byte: the request answered, then.
     Client::give(0xA5);
     Client::clear_read_request();
-    const uint32_t t_dis = us_now();
-    const bool idle = wait_until([] { return !Raw::running(); }, 50'000u);
-    const uint32_t idle_us = us_now() - t_dis;
+    const uint32_t t_dis = Ruler::now();
+    const bool idle = brio::wait_until<Ruler>([] { return !Raw::running(); }, 50'000u);
+    const uint32_t idle_us = Ruler::now() - t_dis;
     const bool busy_bit = Raw::client_disabled_while_busy();
     const bool lost_bit = Raw::client_rx_data_lost();
     const uint16_t gave = client_given;
@@ -2166,8 +2161,8 @@ void late_start(const DmaHost::Request& r) {
 
 /// One millisecond with the load kept: what a late channel has left to write lands.
 void late_after_reply() {
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < 1000u) {
+    const uint32_t t0 = Ruler::now();
+    while (Ruler::now() - t0 < 1000u) {
         late_load_turn();
     }
 }
@@ -2208,14 +2203,14 @@ void late_read(uint8_t tx_len, uint8_t n, I2cSpeed s, LateStage stage, uint8_t t
     isr_entries = 0;
     dma_entries = 0;
     const uint32_t limit = late_limit_us(static_cast<uint32_t>(tx_len) + n, s);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     late_start(r);
     if (stage != LateStage::none) {
         // The tail begins at this count. The transmit block's end lets the request up
         // again (dma_isr()), so a read that has one waits for it first.
         const uint32_t room = n < tail ? n : tail;
         while (((n > 2u && DmaTx::busy()) || LateRxChannel::count() > room) && !transfer_done &&
-               us_now() - t0 < limit) {
+               Ruler::now() - t0 < limit) {
             late_load_turn();
         }
         if (stage == LateStage::away || stage == LateStage::steal) {
@@ -2224,7 +2219,7 @@ void late_read(uint8_t tx_len, uint8_t n, I2cSpeed s, LateStage stage, uint8_t t
             LateRxChannel::enable(false);
         }
     }
-    while (!transfer_done && us_now() - t0 < limit) {
+    while (!transfer_done && Ruler::now() - t0 < limit) {
         late_load_turn();
     }
     // THE REPLY: the first loads the requester could make.
@@ -2298,9 +2293,9 @@ void late_write(uint8_t n, I2cSpeed s, LateRow& row) {
     transfer_done = false;
     dma_entries = 0;
     const uint32_t limit = late_limit_us(n, s);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     late_start(r);
-    while (!transfer_done && us_now() - t0 < limit) {
+    while (!transfer_done && Ruler::now() - t0 < limit) {
         late_load_turn();
     }
     const bool answered = transfer_done;
@@ -2344,8 +2339,10 @@ void late_lag_row(I2cSpeed s, LagRow& row) {
     transfer_done = false;
     (void)DmaHost::start(r);
     Raw::dma_requests(false, false);
-    const uint32_t t_wait = us_now();
-    while (Raw::rx_count() == 0u && us_now() - t_wait < limit) {
+    // Kept written out: each turn keeps the load running. A byte that never came
+    // leaves the poll below to find nothing and the read below wrong (row.wrong).
+    const uint32_t t_wait = Ruler::now();
+    while (Raw::rx_count() == 0u && Ruler::now() - t_wait < limit) {
         late_load_turn();
     }
     uint32_t zero_at = 0;
@@ -2380,8 +2377,8 @@ void late_lag_row(I2cSpeed s, LagRow& row) {
         }
     }
     late_line(true);
-    const uint32_t t1 = us_now();
-    while (!transfer_done && us_now() - t1 < limit) {
+    const uint32_t t1 = Ruler::now();
+    while (!transfer_done && Ruler::now() - t1 < limit) {
         late_load_turn();
     }
     if (!transfer_done) {
@@ -2417,7 +2414,7 @@ bool late_begin(uint16_t bytes, uint8_t seed, twilink::Params& a, uint32_t& s0) 
         bench.verdict("the peer accepted the serve command", false);
         return false;
     }
-    s0 = us_now();
+    s0 = Ruler::now();
     owner = Owner::none;
     Host::release();
     (void)DmaHost::init(clock);
@@ -2434,7 +2431,7 @@ bool late_end(const twilink::Params& a, uint32_t s0, twilink::Report& r) {
     owner = Owner::none;
     DmaHost::release();
     host_ready();
-    settle_ms(120);
+    brio::spin_us<Ruler>(120'000u);
     if (peer_report(r)) {
         return true;
     }
@@ -2569,9 +2566,9 @@ void late_says_row(bool count, I2cSpeed s, SaysRow& row) {
     transfer_done = false;
     (void)DmaHost::start(r);
     Raw::dma_requests(false, false);
-    const uint32_t t_wait = us_now();
-    while (Raw::rx_count() == 0u && us_now() - t_wait < limit) {
-    }
+    // A byte that never came reads as a stale row (the cell's own value), which the
+    // verdict counts.
+    (void)brio::wait_until<Ruler>([] { return Raw::rx_count() != 0u; }, limit);
     uint8_t first = 0;
     uint32_t turns = 0;
     {
@@ -2590,10 +2587,7 @@ void late_says_row(bool count, I2cSpeed s, SaysRow& row) {
         first = *static_cast<volatile uint8_t*>(late_cells);
     }
     late_line(true);
-    const uint32_t t1 = us_now();
-    while (!transfer_done && us_now() - t1 < limit) {
-    }
-    if (!transfer_done) {
+    if (!brio::wait_until<Ruler>([] { return transfer_done; }, limit)) {
         (void)DmaHost::recover();
     }
     row.rows += 1u;
@@ -2619,9 +2613,9 @@ void late_stray_row(bool request_up, I2cSpeed s, uint32_t& stood, uint32_t& stra
     transfer_done = false;
     (void)DmaHost::start(r);
     Raw::dma_requests(false, false);
-    const uint32_t t_wait = us_now();
-    while (Raw::rx_count() == 0u && us_now() - t_wait < limit) {
-    }
+    // A byte that never came is a byte not read (`stood` short), which the verdict
+    // counts.
+    (void)brio::wait_until<Ruler>([] { return Raw::rx_count() != 0u; }, limit);
     uint8_t read = 0;
     uint32_t banked = 0;
     {
@@ -2641,10 +2635,7 @@ void late_stray_row(bool request_up, I2cSpeed s, uint32_t& stood, uint32_t& stra
     stood += read == late_rx_value(0) ? 1u : 0u;
     credits = banked > credits ? banked : credits;
     late_line(true);
-    const uint32_t t1 = us_now();
-    while (!transfer_done && us_now() - t1 < limit) {
-    }
-    if (!transfer_done) {
+    if (!brio::wait_until<Ruler>([] { return transfer_done; }, limit)) {
         (void)DmaHost::recover();
     }
     late_rx_at = static_cast<uint8_t>(late_rx_at + 1u);
@@ -2684,11 +2675,10 @@ void late_credits_row(I2cSpeed s, uint32_t& before, uint32_t& after, uint32_t& m
     const uint32_t limit = late_limit_us(4, s);
     late_line(false);
     transfer_done = false;
-    const uint32_t t0 = us_now();
     (void)DmaHost::start(r);
     LateRxChannel::enable(false);
-    while ((Raw::raw_pending() & I2cInterrupt::stop_det) == 0u && us_now() - t0 < limit) {
-    }
+    // A STOP that never came leaves the read unfinished, which `exact` counts.
+    (void)brio::wait_until<Ruler>([] { return (Raw::raw_pending() & I2cInterrupt::stop_det) != 0u; }, limit);
     uint32_t banked = 0;
     uint32_t left = 0;
     uint32_t remaining = 0;
@@ -2706,10 +2696,7 @@ void late_credits_row(I2cSpeed s, uint32_t& before, uint32_t& after, uint32_t& m
     after = left > after ? left : after;
     moved = 4u - remaining > moved ? 4u - remaining : moved;
     late_line(true);
-    const uint32_t t1 = us_now();
-    while (!transfer_done && us_now() - t1 < limit) {
-    }
-    if (!transfer_done) {
+    if (!brio::wait_until<Ruler>([] { return transfer_done; }, limit)) {
         (void)DmaHost::recover();
     }
     bool whole = transfer_done && transfer_status == i2c_ok;
@@ -2978,12 +2965,12 @@ void tx_window() {
     const bool sda0 = SdaPin::read();
     const bool scl0 = SclPin::read();
     inject_start();
-    spin_us(10);
+    brio::spin_us<Ruler>(10);
     const bool sda1 = SdaPin::read();
     const uint32_t raw1 = Raw::raw_pending();
     const uint32_t st1 = Raw::flags();
     inject_stop();
-    spin_us(10);
+    brio::spin_us<Ruler>(10);
     const bool sda2 = SdaPin::read();
     const uint32_t raw2 = Raw::raw_pending();
     print(serial, "  idle SDA ", sda0, " SCL ", scl0, "; held: SDA ", sda1, " raw ", hex(raw1), " status ", hex(st1),
@@ -2998,14 +2985,14 @@ void tx_window() {
     r.speed = link_speed;
     transfer_done = false;
     inject_start();
-    spin_us(50);
-    const uint32_t t0 = us_now();
+    brio::spin_us<Ruler>(50);
+    const uint32_t t0 = Ruler::now();
     const bool sync = Host::start(r);
-    const uint32_t start_us = us_now() - t0;
+    const uint32_t start_us = Ruler::now() - t0;
     uint8_t scl_falls = 0;
     bool prev = SclPin::read();
-    const uint32_t t1 = us_now();
-    while (us_now() - t1 < 300u) {
+    const uint32_t t1 = Ruler::now();
+    while (Ruler::now() - t1 < 300u) {
         const bool now = SclPin::read();
         if (prev && !now) {
             ++scl_falls;
@@ -3015,9 +3002,10 @@ void tx_window() {
     const bool done_in_window = transfer_done;
     const uint32_t st2 = Raw::flags();
     inject_stop();
-    const bool done = wait_until([] { return transfer_done; }, 200'000u);
+    const bool done = brio::wait_until<Ruler>([] { return transfer_done; }, 200'000u);
     print(serial, "  start() inside the window: sync ", sync, " in ", start_us, " us; over the next 300 us SCL fell ",
           scl_falls, " times, done ", done_in_window, ", status ", hex(st2), "; after the STOP done ", done,
           " status ", transfer_status, crlf);
-    bench.verdict("traced", true);
+    // A trace, outside z: what the block reports is printed, and no verdict is
+    // claimed for it.
 }

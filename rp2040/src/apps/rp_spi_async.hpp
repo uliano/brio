@@ -16,7 +16,7 @@
 // What the including suite states before it includes this file, inside its
 // own anonymous namespace with `using namespace brio` in force:
 //
-//   SysClock, clock, serial, bench
+//   SysClock, clock, Serial, serial, bench
 //   Host, DmaHost        SpiHost<0, {18, 19, 16}> without engines, and the
 //                        same with half-word engines reporting on DMA_IRQ_0
 //   HostTxEngine, HostRxEngine   those two engines
@@ -33,7 +33,8 @@
 //   wire_probe           what the DMA line's glue reads around dma_isr() for
 //                        letter t (the suite's glue, wire_probe_vector() below)
 //   cycles_now()         a ruler of clk_sys cycles
-//   us_now()             the microsecond ruler
+//   Ruler                the microsecond ruler (util/test_wait.hpp's shape,
+//                        hz() 1 MHz): every wait and time-out below
 //   Xip                  the XIP cache's counters
 //   xip_line_cycles      what one miss adds to a wall, at the boot's XIP setting
 //   dma_host_ready()     DmaHost brought up, its vector the DMA line's owner
@@ -78,6 +79,8 @@
 
 #pragma once
 
+static_assert(Ruler::hz() == 1'000'000u,
+              "rp_spi_async.hpp: the includer's Ruler counts microseconds (its spans print as us)");
 static_assert(SysClock::pclk_hz == SysClock::hz, "clk_peri is clk_sys: a frame's cycles are bits x the divisor");
 
 /// One request naming the engines on a host, and the way it ran: inside start()
@@ -111,10 +114,7 @@ AsyncRun async_once(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint
     if (run.inside) {
         run.status = H::status();
     } else {
-        const uint32_t t0 = us_now();
-        while (!transfer_done && us_now() - t0 < 200'000u) {
-        }
-        run.status = transfer_done ? transfer_status : 0xFEu;
+        run.status = brio::wait_until<Ruler>([] { return transfer_done; }, 200'000u) ? transfer_status : 0xFEu;
     }
     run.dma_entries = dma_isr_entries;
     return run;
@@ -135,10 +135,12 @@ template <typename H = DmaHost>
 uint32_t xfer_cycles(uint16_t frames, bool read, bool polled, SpiClock rate = SpiClocks::div4) {
     uint32_t least = 0xFFFF'FFFFu;
     uint32_t fewest = 0xFFFF'FFFFu;
+    // The console's last line off the wire first: its transmit interrupt would
+    // land inside the windows. The answer is dropped: a wedged console only
+    // lengthens runs, and the least wall of fifteen is the one taken.
+    (void)brio::console_drain<Ruler, Serial>();
     for (uint8_t round = 0; round < 3u; ++round) {
-        const uint32_t pause = us_now();
-        while (us_now() - pause < 3000u) {
-        }
+        brio::spin_us<Ruler>(3000);
         int32_t error = 0;
         for (uint8_t k = 0; k < 8u; ++k) {
             Xip::reset_counters();
@@ -417,9 +419,8 @@ void tf_async() {
     const bool alone_inside = DmaHost::start(alone);
     const bool alone_dc_during = DcPin::read_out();
     const bool alone_cs_during = CsPin::read_out();
-    const uint32_t alone_t0 = us_now();
-    while (!transfer_done && us_now() - alone_t0 < 200'000u) {
-    }
+    // A completion that never came leaves transfer_done false, judged below.
+    (void)brio::wait_until<Ruler>([] { return transfer_done; }, 200'000u);
     print(serial, "  a command of 16 frames alone at /64: ", alone_inside ? "INSIDE start()" : "on the engines", ", D/C on its way ",
           alone_dc_during ? "HIGH" : "low", ", the select ", alone_cs_during ? "HIGH" : "low", ", ", dma_isr_entries,
           " DMA interrupts, status ", transfer_status, ", D/C after it ", DcPin::read_out() ? "high" : "LOW", ", the select ",
@@ -504,7 +505,12 @@ constexpr WireRung wire_rungs[] = {{SpiClock{254, 255}, 65024}, {SpiClock{16, 25
 constexpr uint8_t wire_rung_count = sizeof(wire_rungs) / sizeof(wire_rungs[0]);
 
 /// A spin bound for the two figures read after an end, in turns: one slowest frame's
-/// worth, which only a block that stopped clocking spends.
+/// worth, which only a block that stopped clocking spends. IN TURNS, NOT ON THE
+/// RULER: read_end() runs in the DMA line's handler as well as in main, where the
+/// shared waits are not for (util/test_wait.hpp), and its figures are cycles from
+/// the end to the pad's idle level, one pad read a turn - a ruler read a turn would
+/// coarsen the very figure. A bound spent reads as a figure of millions of cycles,
+/// which the ladder judges.
 constexpr uint32_t wire_spin_bound = 1'000'000u;
 
 /// The end of one request as the pad and the block read it.
@@ -586,11 +592,9 @@ WireEnd wire_once(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_
         read_end(e, idle);
         e.status = DmaHost::status();
     } else {
-        const uint32_t t0 = us_now();
-        while (!transfer_done && us_now() - t0 < 200'000u) {
-        }
+        const bool done = brio::wait_until<Ruler>([] { return transfer_done; }, 200'000u);
         e = wire_probe;
-        e.status = transfer_done ? transfer_status : 0xFEu;
+        e.status = done ? transfer_status : 0xFEu;
     }
     e.inside = inside;
     e.select_high = CsPin::read_out();
@@ -633,14 +637,18 @@ void tt_wire_end() {
         bool seen_high = false;
         bool seen_low = false;
         if (!DmaHost::start(r)) {
-            const uint32_t t0 = us_now();
-            while (!transfer_done && us_now() - t0 < 200'000u) {
-                if (SckPad::read()) {
-                    seen_high = true;
-                } else {
-                    seen_low = true;
-                }
-            }
+            // The pad sampled every turn of the wait; a completion that never
+            // came leaves the two frames' levels to judge, which they do.
+            (void)brio::wait_until<Ruler>(
+                [&] {
+                    if (SckPad::read()) {
+                        seen_high = true;
+                    } else {
+                        seen_low = true;
+                    }
+                    return transfer_done;
+                },
+                200'000u);
         }
         if (seen_high && seen_low) {
             ++both_seen;
@@ -773,13 +781,7 @@ void tt_wire_end() {
 /// do not mind its wrap. RNE with BSY clear: a frame has come back and none is
 /// still shifting.
 bool wait_frames_landed(uint32_t limit_us) {
-    const uint32_t t0 = us_now();
-    while (!Pl022<0>::rx_not_empty() || Pl022<0>::busy()) {
-        if (us_now() - t0 >= limit_us) {
-            return false;
-        }
-    }
-    return true;
+    return brio::wait_until<Ruler>([] { return Pl022<0>::rx_not_empty() && !Pl022<0>::busy(); }, limit_us);
 }
 
 /// SSPSR as the block's reset leaves it: both FIFOs empty, the transmit one
@@ -825,9 +827,9 @@ uint8_t stalled_write(uint16_t frames = 9) {
 template <typename H>
 uint32_t timed_stall(uint16_t frames) {
     (void)stage_stall<H>(true);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     (void)stalled_write<H>(frames);
-    return us_now() - t0;
+    return Ruler::now() - t0;
 }
 
 /// `rx_buf` cleared and `frames` of a pattern in `tx_buf`: what the next request
@@ -911,10 +913,13 @@ bool run(const DmaHost::Request& one, const DmaHost::Request& two) {
     Kernel::init_all();
     bus_ao_live = true;
     post<Client>(Go{});
-    const uint32_t t0 = us_now();
-    while (Client::n < 2u && us_now() - t0 < 1'000'000u) {
-        (void)Kernel::step();
-    }
+    // The kernel stepped every turn; a lost reply shows in the answer below.
+    (void)brio::wait_until<Ruler>(
+        [] {
+            (void)Kernel::step();
+            return Client::n >= 2u;
+        },
+        1'000'000u);
     (void)Kernel::step();
     bus_ao_live = false;
     return Client::n == 2u;
@@ -941,9 +946,9 @@ void tg_stall() {
     Host::loopback(true);
     const bool stood = stage_stall<Host>(true);
     fill_pattern(tx_buf, 16, 0x7C);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const uint8_t st = stalled_write<Host>();
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     const bool released = CsPin::read_out();
     const bool clean = fifos_clean();
     const bool enabled = Pl022<0>::enabled();
@@ -1326,9 +1331,8 @@ void tj_request_end() {
         }
     }
     const bool still_running = !transfer_done;
-    const uint32_t t0 = us_now();
-    while (!transfer_done && us_now() - t0 < 10'000u) {
-    }
+    // A first request that never ended leaves transfer_done false, judged below.
+    (void)brio::wait_until<Ruler>([] { return transfer_done; }, 10'000u);
     const bool exact = same(tx_buf, rx_buf, 64);
     print(serial, "  over 64 frames on the engines (still running ", still_running ? "yes" : "NO", "): ", refused,
           " of 2 requests refused with the select and the D/C unmoved; the first ends status ", transfer_status, ", ",
@@ -1441,15 +1445,13 @@ uint8_t spi_reinit_without_reset() {
     HostRxEngine::arm(Pl022<0>::data_address(), Pl022<0>::dreq_rx, true, DmaReport::errors);
     (void)HostRxEngine::start(rx_buf, 32);
     HostTxEngine::arm(Pl022<0>::data_address(), Pl022<0>::dreq_tx, false, DmaReport::errors);
-    const uint32_t t_disabled = us_now();
-    while (us_now() - t_disabled < 20u) {
-    }
+    brio::spin_us<Ruler>(20);
     spi_disabled_moved = 32u - DmaChannel<HostRxEngine::channel>::count();
     Pl022<0>::enable(true);
     (void)HostTxEngine::start(tx_buf, 32);
-    const uint32_t t0 = us_now();
-    while (!HostRxEngine::idle() && us_now() - t0 < 1000u) {
-    }
+    // A receive channel still busy after 1 ms reads as frames missing at the
+    // block's start, which the control's verdict judges.
+    (void)brio::wait_until<Ruler>([] { return HostRxEngine::idle(); }, 1000u);
     uint8_t stale = 0;
     while (stale < stale_spi_frames && rx_buf[stale] == static_cast<uint8_t>(0xE1u + stale)) {
         ++stale;

@@ -124,6 +124,7 @@
 #include "util/power.hpp"
 #include "util/print.hpp"
 #include "util/spi_bus.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: one file for every board
@@ -189,7 +190,14 @@ volatile bool transfer_done = false;
 volatile uint8_t transfer_status = 0;
 bool bus_ao_live = false;
 
-uint32_t us_now() { return Timer::now_low(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// the system timer's microsecond count (rp2040/timer.hpp): one bus read,
+/// legal in any context, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Timer::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 uint32_t cycles_now() { return Ticker::cycles(); }
 /// What a miss adds to a wall at the boot's XIP setting: the figure under which E
 /// reads 765 to 771 over runs counting 2 to 10 misses (rp_spi_async.hpp).
@@ -250,10 +258,7 @@ uint8_t xfer(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t* rx
     if (H::start(r)) {
         return H::status();
     }
-    const uint32_t t0 = us_now();
-    while (!transfer_done && us_now() - t0 < 200'000u) {
-    }
-    return transfer_done ? transfer_status : 0xFEu;
+    return brio::wait_until<Ruler>([] { return transfer_done; }, 200'000u) ? transfer_status : 0xFEu;
 }
 
 /// THE RATE ON THE WIRE, which a loop alone cannot tell: the time ONE FRAME
@@ -264,12 +269,15 @@ uint8_t xfer(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t* rx
 /// plus `gap_halves` half periods at the rate ASKED (clk_peri over the
 /// divisor). The best of three of each block is taken.
 uint32_t frame_permille(SpiClock rate, SpiMode mode, SpiDataSize bits, uint32_t gap_halves) {
+    // No console line inside a block: drained first, the answer dropped (a
+    // wedged console lengthens a block, and the best of three is taken).
+    (void)brio::console_drain<Ruler, Serial>();
     auto best = [&](uint16_t n) {
         uint32_t least = 0xFFFFFFFFu;
         for (uint8_t k = 0; k < 3u; ++k) {
-            const uint32_t t0 = us_now();
+            const uint32_t t0 = Ruler::now();
             (void)xfer<DmaHost>(nullptr, 0, nullptr, nullptr, n, mode, rate, bits, false);
-            const uint32_t took = us_now() - t0;
+            const uint32_t took = Ruler::now() - t0;
             least = took < least ? took : least;
         }
         return least;
@@ -418,9 +426,9 @@ void tc_rates() {
         for (uint16_t i = 0; i < 64; ++i) {
             rx_buf[i] = 0xEE;
         }
-        const uint32_t t0 = us_now();
+        const uint32_t t0 = Ruler::now();
         const uint8_t st = xfer<Host>(nullptr, 0, tx_buf, rx_buf, 64, SpiMode::mode0, rates[k], SpiDataSize::bits8, true);
-        const uint32_t took = us_now() - t0;
+        const uint32_t took = Ruler::now() - t0;
         const bool ok = st == spi_ok && same(tx_buf, rx_buf, 64);
         const uint32_t wire_ns = 8u * 1000u * rates[k].divisor() / 125u;   // eight bits at clk_peri / divisor
         print(serial, "  div", rates[k].divisor(), " (", Host::sck_hz(rates[k]) / 1000u, " kHz): 64 frames in ", took,
@@ -450,9 +458,9 @@ void td_dma() {
     for (uint16_t i = 0; i < 128; ++i) {
         rx_buf[i] = 0xEE;
     }
-    uint32_t t0 = us_now();
+    uint32_t t0 = Ruler::now();
     const uint8_t st = xfer<DmaHost>(nullptr, 0, tx_buf, rx_buf, 128, SpiMode::mode0, SpiClocks::div4, SpiDataSize::bits8, false);
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     const uint32_t dma_entries = dma_isr_entries;
     print(serial, "  128 bytes on the engines at div4 (31.25 MHz): status ", st, " in ", took, " us (the wire alone ",
           128u * 8u * 4u / 125u, "), ", same(tx_buf, rx_buf, 128) ? "byte-exact" : "MISMATCH", ", cs released=",
@@ -479,9 +487,9 @@ void td_dma() {
     for (uint16_t i = 0; i < 64; ++i) {
         rx_buf[i] = 0xEE;
     }
-    t0 = us_now();
+    t0 = Ruler::now();
     const uint8_t st3 = xfer<DmaHost>(cmd_buf, 1, tx_buf, rx_buf, 64, SpiMode::mode3, SpiClocks::div2, SpiDataSize::bits8, true);
-    const uint32_t took3 = us_now() - t0;
+    const uint32_t took3 = Ruler::now() - t0;
     const uint32_t entries3 = dma_isr_entries;
     print(serial, "  polled at div2, mode 3, on the engined host, a command frame and 64 data frames: status ", st3,
           " in ", took3, " us (the wire alone ", 65u * 8u * 2u / 125u, "), ", entries3, " DMA interrupt(s)", crlf);
@@ -592,14 +600,15 @@ void pump() {
         TimeEvents<P>::process();
     }
 }
+/// The kernel pumped until `want` replies or `ms` have passed; a reply that
+/// never came shows in the letter's count of them, which it judges.
 void pump_until(uint8_t want, uint32_t ms) {
-    const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() - t0 < ms) {
-        pump();
-        if (Probe::n >= want) {
-            break;
-        }
-    }
+    (void)brio::wait_until<Ruler>(
+        [want] {
+            pump();
+            return Probe::n >= want;
+        },
+        ms * 1000u);
     pump();
 }
 

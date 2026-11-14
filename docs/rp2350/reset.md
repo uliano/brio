@@ -219,7 +219,7 @@ and the other is a function nobody calls.
 On an RP2350 in the QFN-80 package, **stepping A2**, and on BOTH
 architectures. The boot letter is part of `test_rp2350_timer`'s **93
 pass, 0 fail** on each half; the reboot letter runs by name and reports
-**28 pass, 0 fail** on the Cortex-M33 pair over five legs and **24 pass,
+**28 pass, 0 fail** on the Cortex-M33 pair over five legs and **23 pass,
 0 fail** on the Hazard3 pair over four.
 
 - **A REBOOT LEAVES THE CHIP-LEVEL RECORD ALONE.** Across a

@@ -76,6 +76,7 @@
 #include "rp2040/uart.hpp"
 #include "util/nv_journal.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 namespace {
@@ -113,7 +114,14 @@ struct Calibration {
 uint8_t page_buf[Flash::page_size];
 uint8_t got_buf[Flash::page_size];
 
-uint32_t us_now() { return Timer::now_low(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// the system timer's microsecond count (rp2040/timer.hpp): one bus read,
+/// legal in any context, which a clk_sys change does not move.
+struct Ruler {
+    static uint32_t now() { return Timer::now_low(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 
 // The HardFault body's hand-over: a fault expected by a letter is
 // counted and stepped over (the faulting instruction is a 16-bit store
@@ -212,9 +220,9 @@ void ta_engine() {
 void tb_page() {
     const uint32_t sector = QspiFlashPartition::storage_base;   // the partition's first sector
 
-    uint32_t t0 = us_now();
+    uint32_t t0 = Ruler::now();
     bool ok = Flash::erase_sector(sector);
-    const uint32_t erase_us = us_now() - t0;
+    const uint32_t erase_us = Ruler::now() - t0;
     const auto sr = Flash::status_register();
     print(serial, "  sector erase: ", ok ? "ok" : "refused", " in ", erase_us, " us; status register after: ", sr ? hex(*sr) : hex(uint8_t{0}),
           crlf);
@@ -225,9 +233,9 @@ void tb_page() {
     for (uint32_t i = 0; i < Flash::page_size; ++i) {
         page_buf[i] = static_cast<uint8_t>(i * 7u + 0x13u);
     }
-    t0 = us_now();
+    t0 = Ruler::now();
     ok = Flash::program(sector, page_buf);
-    const uint32_t program_us = us_now() - t0;
+    const uint32_t program_us = Ruler::now() - t0;
     print(serial, "  page program: ", ok ? "ok" : "refused", " in ", program_us, " us", crlf);
     bench.verdict("the page program completes", ok);
     Flash::read(sector, got_buf);
@@ -315,9 +323,9 @@ void td_window() {
     // window stays masked, so the count comes up one where the timer
     // says tens.
     const uint32_t ticks0 = Ticker::ticks();
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool ok = Flash::erase_sector(sector);
-    const uint32_t erase_us = us_now() - t0;
+    const uint32_t erase_us = Ruler::now() - t0;
     const uint32_t ticks = Ticker::ticks() - ticks0;
     print(serial, "  a sector erase of ", erase_us, " us: the ticker counted ", ticks, " ms of it", crlf);
     bench.verdict("during a sector erase the ticker counts at most two ticks (one that fell before the window, the one "
@@ -465,9 +473,9 @@ void tf_journal() {
     // The panic reserve: a maximum-size entry with NO erase.
     memset(churn_buf, 0xE7, sizeof churn_buf);
     const uint32_t free_before = journal.free_cells();
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool reserved = journal.save_reserved(id_panic, churn_buf);
-    const uint32_t reserved_us = us_now() - t0;
+    const uint32_t reserved_us = Ruler::now() - t0;
     print(serial, "  save_reserved(): ", reserved_us, " us", crlf);
     bench.verdict("save_reserved() lands in the cell every save left behind, one page program and no erase (under 5 ms)",
                   reserved && journal.free_cells() + 1u == free_before && reserved_us < 5'000u);
@@ -609,9 +617,9 @@ void tx_boundary() {
     bool marked = (range_is(keeper, Flash::page_size, 0x5A) || (Flash::erase_sector(keeper) && Flash::program(keeper, page_buf)));
     marked = marked && Flash::program(below, page_buf) && Flash::program(floor, page_buf) &&
              Flash::program(QspiFlashPartition::storage_end - Flash::page_size, page_buf);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool ok = Flash::erase(below, bytes);
-    const uint32_t us = us_now() - t0;
+    const uint32_t us = Ruler::now() - t0;
     const bool clean = range_is(below, bytes, 0xFF);
     const bool kept = range_is(keeper, Flash::page_size, 0x5A);
     const bool tidy = Flash::erase_sector(keeper) && range_is(keeper, Flash::sector_size, 0xFF);
@@ -625,9 +633,9 @@ void tx_boundary() {
 
 void tw_wipe() {
     const uint32_t bytes = QspiFlashPartition::storage_end - QspiFlashPartition::storage_base;
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool ok = Flash::erase(QspiFlashPartition::storage_base, bytes);
-    const uint32_t us = us_now() - t0;
+    const uint32_t us = Ruler::now() - t0;
     const auto sr = Flash::status_register();
     print(serial, "  ", bytes / 1024u, " KB erased in one run (the 64 KB block command): ", us, " us; status register after: ",
           sr ? hex(*sr) : hex(uint8_t{0}), crlf);

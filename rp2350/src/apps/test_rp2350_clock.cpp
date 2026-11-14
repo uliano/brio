@@ -128,6 +128,7 @@
 #include "rp2350/ticker.hpp"
 #include "rp2350/uart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 #include "pair_power.hpp"
@@ -159,13 +160,19 @@ TestBench<Serial> bench;
 /// The USB PLL's 48 MHz, which letters i and k both want.
 constexpr PllConfig usb_pll = pll_config_for(Boot::xtal_hz, clk_usb_hz);
 
-uint32_t us_now() { return Mtime::micros(); }
+/// The ruler every wait and span here is read on (util/test_wait.hpp):
+/// the platform timer's microsecond count (rp2350/mtime.hpp): one bus
+/// read, the same on both architectures, which a clk_sys change does not
+/// move.
+struct Ruler {
+    static uint32_t now() { return Mtime::micros(); }
+    static constexpr uint32_t hz() { return 1'000'000u; }
+};
+static_assert(brio::CycleRuler<Ruler>);
 
-void console_drain() {
-    const uint32_t t0 = us_now();
-    while (!Serial::tx_idle() && us_now() - t0 < 200'000u) {
-    }
-}
+/// Let the console's last byte leave the wire (util/test_wait.hpp), within
+/// 200 ms; false when it did not - a wedged console.
+[[nodiscard]] bool console_drain() { return brio::console_drain<Ruler, Serial>(); }
 
 /// Within `permille` per mille of `expected`.
 bool near(uint32_t value, uint32_t expected, uint32_t permille) {
@@ -228,9 +235,9 @@ uint32_t counted(CountSource what) {
 template <typename C>
 bool switch_to(C, const char* name, uint32_t* took_us = nullptr) {
     Serial::rebase(C::pclk_hz);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool ok = C::init();
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     if (!ok) {
         Serial::rebase(Boot::pclk_hz);
         (void)Boot::init();
@@ -291,7 +298,7 @@ void ta_boot() {
     // init() again to judge this image's own writes.
     const bool inherited_xosc = Xosc::badwrite();
     const bool inherited_rosc = Rosc::badwrite();
-    console_drain();
+    (void)console_drain();   // a wedged console costs only its own lines
     Xosc::clear_badwrite();
     Rosc::clear_badwrite();
     const bool again = Boot::init();
@@ -383,10 +390,10 @@ void td_peri() {
     count("clk_sys meanwhile", CountSource::clk_sys, X150::hz);
 
     // clk_sys moves; the UART is NOT touched (pclk_hz is the same).
-    console_drain();
-    const uint32_t t0 = us_now();
+    (void)console_drain();   // a wedged console costs only its own lines
+    const uint32_t t0 = Ruler::now();
     const bool ok = X48::init();
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     Ticker::rebase(X48::hz);
     print(serial, "  clk_sys moved to 48 MHz in ", took, " us with the UART untouched - this "
           "line is the proof", crlf);
@@ -394,7 +401,7 @@ void td_peri() {
     count("clk_peri, unchanged", CountSource::clk_peri, X48::pclk_hz);
     count("clk_sys at 48", CountSource::clk_sys, X48::hz);
 
-    console_drain();
+    (void)console_drain();   // a wedged console costs only its own lines
     const bool back = X150::init();
     Ticker::rebase(X150::hz);
     print(serial, "  and back to 150 MHz, the UART still untouched", crlf);
@@ -416,12 +423,12 @@ void delay_at(C c, const char* name) {
         return;
     }
     (void)delay_us(c, 5);   // the cold call, spent
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool long_ok = delay_us(c, 900);
-    const uint32_t took = us_now() - t0;
-    const uint32_t s0 = us_now();
+    const uint32_t took = Ruler::now() - t0;
+    const uint32_t s0 = Ruler::now();
     const bool short_ok = delay_us(c, 100);
-    const uint32_t short_took = us_now() - s0;
+    const uint32_t short_took = Ruler::now() - s0;
     // The ruler steps once a microsecond and its phase against the call
     // is unknown, so the wait itself is one count long; the bracket adds
     // two more reads and the calls, at this rate's price.
@@ -449,9 +456,16 @@ void te_delay() {
     // the ruler on the Cortex-M33 half, where the kernel tick is SysTick
     // on clk_sys; the same counter on the Hazard3 half, where it is the
     // platform timer's comparator, and the verdict is then arithmetic.
-    console_drain();
+    // The window opens on a quiet console, and on a tick edge waited on the
+    // ruler: within 2 ms (a period is 1 ms), or the timebase stopped.
+    if (!console_drain()) {
+        bench.verdict("the console fell quiet before the hundred waits", false);
+        return;
+    }
     const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() == t0) {
+    if (!brio::wait_until<Ruler>([t0] { return Ticker::ticks() != t0; }, 2'000u)) {
+        bench.verdict("the kernel timebase ticks (no tick in 2 ms)", false);
+        return;
     }
     const uint32_t start = Ticker::ticks();
     for (uint16_t i = 0; i < 100u; ++i) {
@@ -473,19 +487,26 @@ void ticker_at(C c, const char* name) {
         bench.verdict(name, false);
         return;
     }
-    console_drain();
+    // The window opens on a quiet console: a transmit interrupt inside it
+    // would move the tick handler's entry at either edge.
+    if (!console_drain()) {
+        bench.verdict(name, ": the console fell quiet before the window", false);
+        return;
+    }
+    // Both edges are waited on the ruler, which this rate does not move: a
+    // tick within 2 ms (a period is 1 ms), the hundredth within 200 ms. A
+    // timebase that stopped is a time-out and a failed verdict, not a hang.
     const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() == t0) {
-    }
-    const uint32_t u0 = us_now();
+    const bool edge = brio::wait_until<Ruler>([t0] { return Ticker::ticks() != t0; }, 2'000u);
+    const uint32_t u0 = Ruler::now();
     const uint32_t t1 = Ticker::ticks();
-    while (Ticker::ticks() - t1 < 100u) {
-    }
-    const uint32_t span = us_now() - u0;
-    print(serial, "  at ", name, ": 100 ticks spanned ", span, " us", crlf);
+    const bool hundred = brio::wait_until<Ruler>([t1] { return Ticker::ticks() - t1 >= 100u; }, 200'000u);
+    const uint32_t span = Ruler::now() - u0;
+    print(serial, "  at ", name, ": 100 ticks spanned ", span, " us", edge && hundred ? "" : " (the timebase STOPPED)",
+          crlf);
     bench.verdict(name, ": the timebase keeps 1 ms per tick within 0.1 % (rebased on the "
                   "Cortex-M33 half, untouched on the Hazard3 one)",
-                  near(span, 100'000u, 1));
+                  edge && hundred && near(span, 100'000u, 1));
 }
 
 void tf_ticker() {
@@ -589,7 +610,7 @@ void th_divider_and_refusal() {
         bench.verdict("PeriSource::crystal", false);
         return;
     }
-    console_drain();
+    (void)console_drain();   // a wedged console costs only its own lines
     Clocks::sys_divider(2);
     Ticker::rebase(X150::hz / 2u);
     print(serial, "  clk_sys divided by 2 under a crystal-fed console: this line is the proof",
@@ -599,7 +620,7 @@ void th_divider_and_refusal() {
 
     // The fractional half of the divider, which the RP2040's clk_sys had
     // in 256ths and this one has in 65536ths: 2.5 is 60 MHz.
-    console_drain();
+    (void)console_drain();   // a wedged console costs only its own lines
     Clocks::sys_divider(2, 0x8000u);
     Ticker::rebase(X150::hz / 5u * 2u);
     print(serial, "  clk_sys divided by 2.5 (the 16.16 divider): this line too", crlf);
@@ -612,14 +633,14 @@ void th_divider_and_refusal() {
 
     // The PLL asked for the impossible, with clk_sys parked on clk_ref
     // (the crystal, 12 MHz) so nothing runs on the PLL meanwhile.
-    console_drain();
+    (void)console_drain();   // a wedged console costs only its own lines
     const bool parked = Clocks::sys_from_ref();
     Ticker::rebase(X150::xtal_hz);
     bench.verdict("clk_sys parks on clk_ref", parked);
     const PllConfig low_vco{.refdiv = 1, .fbdiv = 16, .postdiv1 = 7, .postdiv2 = 7};   // 192 MHz VCO
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool locked = PllSys::init(low_vco);
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     print(serial, "  the PLL at a 192 MHz VCO (below the 750 MHz floor): LOCK ",
           locked ? "ROSE" : "did not rise", " in ", took, " us (printed, not judged: the "
           "datasheet promises nothing outside the range)", crlf);
@@ -635,9 +656,9 @@ void th_divider_and_refusal() {
 /// the console; init() must come back from it.
 void park_first_from(const char* what, uint32_t expected_from_hz) {
     const uint32_t from = counted(CountSource::clk_sys);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool ok = restore_boot();
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     const uint32_t now = counted(CountSource::clk_sys);
     print(serial, "  from ", what, ": clk_sys was ", from, " Hz, init() took ", took,
           " us, clk_sys is now ", now, " Hz", crlf);
@@ -648,19 +669,19 @@ void park_first_from(const char* what, uint32_t expected_from_hz) {
 
 void ti_park_first() {
     // 1. clk_sys on the ring oscillator - the tree the bootrom leaves.
-    console_drain();
+    (void)console_drain();   // a wedged console costs only its own lines
     (void)Clocks::sys_from_aux(SysAux::rosc);
     park_first_from("the ring oscillator", 0u);
 
     // 2. clk_sys on the crystal through its AUX mux (not through
     //    clk_ref): another thing a previous image can leave standing.
-    console_drain();
+    (void)console_drain();   // a wedged console costs only its own lines
     (void)Clocks::sys_from_aux(SysAux::xosc);
     park_first_from("the crystal on the aux mux", Boot::xtal_hz);
 
     // 3. clk_sys on the USB PLL at 48 MHz - a PLL this image did not
     //    lock for clk_sys, which is exactly the case init() must survive.
-    console_drain();
+    (void)console_drain();   // a wedged console costs only its own lines
     if (PllUsb::init(usb_pll) && Clocks::sys_from_aux(SysAux::pll_usb)) {
         park_first_from("the USB PLL at 48 MHz", clk_usb_hz);
     } else {
@@ -674,7 +695,7 @@ void ti_park_first() {
     //    the length of init()'s first steps - nothing may be printed
     //    there, and on the Hazard3 half the kernel timebase's own tick
     //    slows with clk_ref until init() puts it back.
-    console_drain();
+    (void)console_drain();   // a wedged console costs only its own lines
     (void)Clocks::sys_from_ref();
     const bool on_lposc = Clocks::ref_select(RefSource::lposc);
     const bool ok = restore_boot();
@@ -846,9 +867,9 @@ void tn_counter() {
           nothing.died ? 0u : nothing.hz, crlf);
     bench.verdict("a source that is not running is reported dead, or counts zero",
                   nothing.died || nothing.hz == 0u);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     const bool idle = FreqCounter::stop();
-    const uint32_t took = us_now() - t0;
+    const uint32_t took = Ruler::now() - t0;
     print(serial, "  handed back: the counter went idle in ", took, " us", crlf);
     bench.verdict("the counter is idle once it is handed back - it finishes the window it is "
                   "in first",
@@ -858,7 +879,7 @@ void tn_counter() {
 // -----------------------------------------------------------------------------
 void tq_resus() {
     bench.verdict("nothing has resuscitated this clk_sys yet", !Resus::resussed());
-    console_drain();
+    (void)console_drain();   // a wedged console costs only its own lines
     // The timeout is the longest the eight-bit field takes: a healthy
     // clk_sys must never trip it, and only the FORCE below does.
     Resus::enable(255u);
@@ -867,22 +888,21 @@ void tq_resus() {
     // the console's divisor is wrong until the tree is restored, and
     // nothing may be printed here. RESUSSED is polled rather than read
     // once: the machine is at 12 MHz now, and the status is the block's
-    // own clk_ref cycles away.
-    uint32_t polls = 0;
-    while (!Resus::resussed() && polls < 10'000u) {
-        ++polls;
-    }
-    const bool resussed = Resus::resussed();
+    // own clk_ref cycles away. The ruler counts clk_ref's microseconds,
+    // which the forced selection does not move; 10 ms is only the time-out
+    // of a resus that never stands.
+    const auto stood = brio::cycles_until<Ruler>([] { return Resus::resussed(); }, 10'000u);
+    const bool resussed = stood.has_value();
     const uint32_t forced_hz = counted(CountSource::clk_sys);
     Resus::unforce();
     Resus::clear();
     const bool restored = restore_boot();
     Resus::disable();
-    print(serial, "  forced: RESUSSED ", resussed ? "stood after " : "did not stand in ", polls,
-          " polls, clk_sys was ", forced_hz, " Hz (clk_ref, the crystal) - then cleared and the "
+    print(serial, "  forced: RESUSSED ", resussed ? "stood after " : "did not stand in ",
+          resussed ? *stood : 10'000u, " us, clk_sys was ", forced_hz, " Hz (clk_ref, the crystal) - then cleared and the "
           "tree rebuilt", crlf);
     bench.verdict("a forced resus moves clk_sys onto clk_ref, which is the crystal",
-                  near(forced_hz, Boot::xtal_hz, 1));
+                  resussed && near(forced_hz, Boot::xtal_hz, 1));
     bench.verdict("cleared, the tree comes back to 150 MHz", restored);
     count("clk_sys after the resus", CountSource::clk_sys, Boot::hz);
     bench.verdict("the circuit is disarmed again, and its status clear",
@@ -931,9 +951,7 @@ void ts_schedule() {
         print(serial, "  GPOUT0 = the crystal / ", st.div_int, st.div_frac != 0u ? " + 32768/65536" : "",
               st.dc50 ? ", duty corrected" : "", read_back ? "" : "  NOT AS WRITTEN", crlf);
         ok = static_cast<uint8_t>(ok + (up && read_back && ClockOut<0>::running() ? 1u : 0u));
-        const uint32_t t0 = us_now();
-        while (us_now() - t0 < 2'000'000u) {
-        }
+        brio::spin_us<Ruler>(2'000'000);
     }
     ClockOut<0>::stop();
     bench.verdict("the six settings ran two seconds each, each read back as written, and the output is stopped",
@@ -983,10 +1001,10 @@ void tu_one_hz() {
         Sm::enable(true);
     }
     print(serial, "  one pulse per second on GP21 for 40 s", crlf);
-    const uint32_t t0 = us_now();
+    const uint32_t t0 = Ruler::now();
     uint32_t rises = 0;
     bool last = PulsePad::read();
-    while (us_now() - t0 < 40'000'000u) {
+    while (Ruler::now() - t0 < 40'000'000u) {
         const bool now = PulsePad::read();
         if (now && !last) {
             ++rises;
