@@ -261,8 +261,8 @@ architectures on stepping A2, and the QFN-60 on both architectures on
 stepping A4: every suite and bench app of the project runs on the WeAct
 RP2350A, its link partners on the WeAct RP2040, bar the letters a
 package of 30 pads cannot serve (each refused at compile time, its
-reason beside it) and the power-down letters of the power chapter
-([powman.md](powman.md)).
+reason beside it); of the power chapter's power-downs, P1.0 comes back
+every time and P1.7 only sometimes ([powman.md](powman.md)).
 
 ## What the silicon does to a program, before any driver
 

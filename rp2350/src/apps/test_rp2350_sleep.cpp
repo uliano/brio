@@ -1322,17 +1322,24 @@ void report_boot() {
           crlf);
 }
 
+// No token pending NOW, read from the words themselves: the boot's
+// snapshot (report_boot()) still says "alive" for the whole of a boot that
+// a previous leg's wake started, after tq_resume() has cleared the token,
+// so a verdict on the snapshot fails every leg run after another in one
+// boot with nothing pending.
+bool no_token_pending() {
+    return powman_leg() == 0u && watchdog_leg() == 0u && noinit_leg() == 0u;
+}
+
 void tq_power_down() {
     report_boot();
-    bench.verdict("no token is pending on a clean start",
-                  !boot_powman_alive && !boot_scratch_alive);
+    bench.verdict("no token is pending before the leg", no_token_pending());
     power_down_leg(1, PowerState::p1_0, 3000u);
 }
 
 void tr_power_down_deepest() {
     report_boot();
-    bench.verdict("no token is pending on a clean start",
-                  !boot_powman_alive && !boot_scratch_alive);
+    bench.verdict("no token is pending before the leg", no_token_pending());
     power_down_leg(2, PowerState::p1_7, 3000u);
 }
 

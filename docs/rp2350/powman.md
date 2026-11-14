@@ -49,8 +49,9 @@ the switched core does not return: what comes back is a boot, the
 eight scratch words and whatever memory domain the state left powered
 being all that survives, and `power_down()` refuses, writing nothing,
 unless a way back is armed (the alarm with `powerup_on_alarm(true)`, or
-a GPIO power-up slot). P1.0 is measured to come back by the alarm; P1.7
-is measured NOT to, on two boards, and the states between are untried
+a GPIO power-up slot). P1.0 is measured to come back by the alarm, on
+stepping A2 and A4; P1.7 never came back on two A2 boards and came back
+two times in four on an A4, and the states between are untried
 (Bench findings). On this bench the debug port also blocks a
 power-down until `ignore_debug_powerup(true)` (the second block below).
 Every register of the block up to offset 0xac takes a write only with
@@ -299,7 +300,7 @@ ruler that answers in every state.
   SCRATCH WORDS CROSS IT; the watchdog's four do not, living in the
   switched core. The `.noinit` SRAM crosses P1.0, which keeps both memory
   domains powered.
-- **A POWER-DOWN INTO P1.7 DOES NOT COME BACK ON THIS BENCH.** P1.7 is
+- **A POWER-DOWN INTO P1.7 COMES BACK ONLY SOMETIMES.** P1.7 is
   the deepest state this chip has: the switched core, the XIP cache and
   both SRAM domains unpowered, the always-on domain and its timer the
   only thing left. Asked for exactly as P1.0 is - the alarm three seconds
@@ -319,7 +320,13 @@ ruler that answers in every state.
   fits a sequencer that never completes the power-down - 6.2.3.2 enables
   the GPIO power-ups only once it has - but the pad's wake is not
   measured from any state, and which domain holds the sequence is not
-  established. Both boards are stepping A2.
+  established. Both of those boards are stepping A2. On a stepping A4
+  die (the WeAct RP2350A, QFN-60) the same letter came back two times in
+  four - once in three on the Cortex-M33 build, once in one on the
+  Hazard3 build - every verdict of the way back passing when it did,
+  and the failures the same signature as on A2: so the state is not
+  one the A2 die alone refuses, and what decides the outcome is not
+  established.
 - **AND THE DEBUG PORT'S RESCUE DOES NOT REACH A POWERED-DOWN CORE.**
   3.5.8 says the rescue reset works "even when system clocks are stopped
   and the switched core power domain is powered down". The first half is
@@ -393,12 +400,6 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **A power-down on stepping A4.** The WeAct RP2350A runs every other
-  verdict of this chapter, the dormant and sleep ones included; the
-  power-downs into P1.0 and P1.7 have not been asked of it. What would
-  measure them: the same two letters on that board, P1.0 first, with its
-  supply at hand to cycle - which would also say whether the P1.7
-  finding above belongs to the A2 die or to the sequence.
 - **The four GPIO power-up slots as a wake from a P1.m state.** The slots
   are written, read back and refused for a pad the package has not got,
   and the wake this chapter measures is the alarm's. The one try, a

@@ -425,10 +425,11 @@ horizon itself, one entry each.
   12, docs/rp2040/multicore.md); the USB device stack was born here.
   What remains is in the documents' gap lists (a power vote across the
   cores, the bus fabric's counters).
-- **The RP2350 stratum**: `in bring-up` on the WeAct RP2350B, written
-  ONCE and run TWICE (M33 and Hazard3), every chapter green on both
-  halves, the power chapter included bar a power-down into P1.7, which
-  does not come back on the bench (docs/rp2350/powman.md); two declared
+- **The RP2350 stratum**: `in bring-up` on the WeAct RP2350A (QFN-60,
+  stepping A4; the WeAct RP2350B's QFN-80 measured on stepping A2),
+  written ONCE and run TWICE (M33 and Hazard3), every chapter green on
+  both halves, the power chapter included bar a power-down into P1.7,
+  which comes back only sometimes (docs/rp2350/powman.md); two declared
   gaps above the lists:
   the HSTX (born with its first user) and the M33's coprocessors
   (declined: one architecture of two has them). The bench verb is
