@@ -463,7 +463,7 @@ uint16_t convert_median(uint8_t channel) {
 
 /// The two configurations every letter picks between: a SLOW one for the
 /// internal channels (VREFINT wants 4 us of sampling, the temperature
-/// sensor 5 and VBAT 12 - DS13560 tables 27, 65 and 66; 160.5 cycles at
+/// sensor 5 and VBAT 12 - DS13560 tables 27, 69 and 70; 160.5 cycles at
 /// the asynchronous 8 MHz is 20 us, which covers all three), and a FAST
 /// one for the DAC-driven pads, whose source is a low-impedance buffer.
 constexpr AdcConfig cfg_internal{
@@ -579,6 +579,111 @@ bool apply_async(const AdcConfig& c) {
 /// A closed band, the other suites' helper.
 bool within(uint32_t v, uint32_t lo, uint32_t hi) { return v >= lo && v <= hi; }
 
+uint16_t abs_diff(uint16_t a, uint16_t b) { return static_cast<uint16_t>(a > b ? a - b : b - a); }
+
+/// A reading within `tol` counts of `code`, on either side.
+bool near_code(uint16_t v, uint16_t code, uint16_t tol) { return abs_diff(v, code) <= tol; }
+
+/// The lowest, the highest and the mean of `n` conversions of one channel.
+struct Spread {
+    uint16_t lo;
+    uint16_t hi;
+    uint32_t mean;
+};
+
+Spread spread_of(uint8_t channel, uint8_t n) {
+    (void)Adc::select_channel(channel);
+    uint16_t lo = 0xFFFFu, hi = 0;
+    uint32_t sum = 0;
+    for (uint8_t i = 0; i < n; ++i) {
+        const uint16_t v = Adc::read();
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+        sum += v;
+    }
+    return {lo, hi, sum / n};
+}
+
+// =============================================================================
+// What the data sheet bounds, for the verdicts that judge a converted value
+// =============================================================================
+//
+// DS13560 Rev 5, the STM32G0B1's data sheet (the bench part), in LSB of 12
+// bits. The ADC and the DAC both convert against VREF+, which the
+// Nucleo-64 ties to VDDA, and VDDA to VDD (UM2324 table 10: SB28), so a DAC
+// code read back by the ADC cancels the reference's value and leaves each
+// converter's own error.
+
+/// The ADC's total unadjusted error: table 64's +-6.5 for 2 V < VDDA < 3.6 V
+/// over the whole temperature range, rounded up. The row's conditions are
+/// fADC = 35 MHz and fs <= 2.5 MSps; this suite converts at 32 MHz (PCLK/2)
+/// and at 8 MHz (HSI16/2), both inside them.
+constexpr uint16_t adc_et_lsb = 7;
+/// The ADC's integral nonlinearity, table 64's EL on the same row: +-3.
+constexpr uint16_t adc_inl_lsb = 3;
+/// The DAC's total unadjusted error at a code (table 66): +-30 with the
+/// output buffer on, +-12 with it off.
+constexpr uint16_t dac_tue_buffered_lsb = 30;
+constexpr uint16_t dac_tue_unbuffered_lsb = 12;
+/// The DAC's integral nonlinearity (table 66), either mode: +-4.
+constexpr uint16_t dac_inl_lsb = 4;
+/// The codes the BUFFERED output is specified over: table 65's VDAC_OUT,
+/// 0.2 V from either rail with the buffer on, is codes 274..3822 at
+/// VREF+ = 3.0 V (0.2 / 3.0 x 4096 = 273.07), a range every higher supply
+/// contains. Outside it the buffered output is the part's, not the sheet's.
+constexpr uint16_t dac_buffered_lo = 274;
+constexpr uint16_t dac_buffered_hi = 3822;
+/// The board's analog supply: UM2324 table 7 gives the Nucleo-64's 3V3
+/// rail 3.0..3.6 V (the Nucleo-32 the STM32G031K8 sits on has its own
+/// manual, which this suite's documents do not include).
+constexpr uint16_t board_vdda_lo_mv = 3000;
+constexpr uint16_t board_vdda_hi_mv = 3600;
+/// VREFINT in counts on that supply: table 27's 1.182..1.232 V over the
+/// whole temperature range is 1344.9 counts at 3.6 V and 1682.1 at 3.0 V.
+constexpr uint16_t vrefint_counts_lo = 1344;
+constexpr uint16_t vrefint_counts_hi = 1683;
+
+/// THE NOISE ALLOWANCE, which no table gives: table 64 states the noise as
+/// a least SNR, an rms figure that bounds no single reading. So a verdict
+/// below that judges a converted value adds the noise MEASURED on the same
+/// input in the same letter: the full span of 64 conversions, which for a
+/// Gaussian noise is about 4.7 standard deviations (the expected range of
+/// 64 draws), where one conversion strays farther than that from the
+/// input's mean a few times in a million and a median of five far less
+/// often.
+uint16_t noise_span(uint8_t channel) {
+    const Spread s = spread_of(channel, 64);
+    return static_cast<uint16_t>(s.hi - s.lo);
+}
+
+/// The VDDA a reading through VREFINT may report on this board, in mV.
+/// The reading is 3000 x VREFINT_CAL / raw (15.9), so its relative error
+/// is the bandgap's move since ST's calibration plus the raw count's:
+///   - the bandgap: table 27's spread over the temperature range at
+///     VDD = 3 V, 7.5 mV of at least 1182 (6345 ppm), and its voltage
+///     coefficient, 1200 ppm/V over the 0.6 V from ST's 3.0 V to 3.6 V
+///     (720 ppm): 7065 ppm, taken as 7070;
+///   - the raw count: the ADC's error (7), the calibration word's own
+///     rounding (half a count, taken as one) and the noise allowance, each
+///     count worth at most 745 ppm of the least raw reading the supply
+///     allows, 1344 (1e6 / 1344 = 744.05, rounded up).
+/// The board's 3.0..3.6 V widened by that error is the band.
+struct MvBand {
+    uint16_t lo;
+    uint16_t hi;
+};
+MvBand vdda_band(uint16_t noise) {
+    uint32_t e_ppm = 7070UL + (static_cast<uint32_t>(adc_et_lsb) + 1UL + noise) * 745UL;
+    if (e_ppm > 999'999UL) {
+        e_ppm = 999'999UL;
+    }
+    return {static_cast<uint16_t>(board_vdda_lo_mv -
+                                  static_cast<uint32_t>(board_vdda_lo_mv) * e_ppm / 1'000'000UL),
+            static_cast<uint16_t>(board_vdda_hi_mv +
+                                  (static_cast<uint32_t>(board_vdda_hi_mv) * e_ppm + 999'999UL) /
+                                      1'000'000UL)};
+}
+
 /// THE SECOND ANALOG SOURCE, which is where a part without a DAC costs
 /// this suite something. Half the ADC letters need a channel that is not
 /// the bandgap and whose reading is steady: with a DAC that is the
@@ -603,7 +708,7 @@ void second_source_up(uint16_t code) {
 #else
 void second_source_up(uint16_t) {
     Adc::temperature(true);
-    (void)delay_us(clock, 500);   // tSTART_TEMP is 20 us max (table 66)
+    (void)delay_us(clock, 500);   // the sensor starts in 120 us at most (DS13560 table 69)
 }
 #endif
 
@@ -846,10 +951,18 @@ void tb_scale() {
           "TSENSE=", ts_raw, " counts = ", temp, " centi-C; ",
           "VBAT/3=", vbat_raw, " counts = VBAT ", vbat_mv, " mV", crlf);
 
+    // The band: the board's 3.0..3.6 V widened by the reading's own error
+    // (vdda_band() has the arithmetic), whose noise term is measured here,
+    // on the same channel, before the verdict.
+    const uint16_t vref_noise = noise_span(Adc::vrefint_channel);
+    const MvBand vdda_ok = vdda_band(vref_noise);
+    print(serial, "  the band: ", vdda_ok.lo, "..", vdda_ok.hi,
+          " mV (the noise allowance ", vref_noise, " counts)", crlf);
     bench.verdict("VDDA MEASURED WITH NO METER: 15.9's own ratio against "
                   "VREFINT_CAL puts this board's analog supply inside the "
-                  "3.0..3.6 V a Nucleo's 3.3 V regulator can produce",
-                  vdda >= 3000u && vdda <= 3600u);
+                  "3.0..3.6 V the Nucleo-64's 3V3 rail is given (UM2324 "
+                  "table 7), widened by the reading's own error",
+                  within(vdda, vdda_ok.lo, vdda_ok.hi));
     bench.verdict("and the reading is on the right side of the calibration - "
                   "a supply ABOVE the 3.0 V ST used gives FEWER counts for the "
                   "same bandgap", vref_raw < AdcFactory::vrefint_cal());
@@ -1187,11 +1300,18 @@ void td_zero_length_wire() {
     }
     print(serial, crlf);
 
-    // The best-fit line through the two ends, and the worst residual.
-    const int32_t x0 = code[1], y0 = got[1];      // 256, off the buffer's floor
-    const int32_t x1 = code[points - 2], y1 = got[points - 2];   // 3840, off its ceiling
+    // The line through two points, and the worst residual from it. The two
+    // ends, and every point judged, sit inside the codes table 65 specifies
+    // the buffered output over (274..3822 at VDDA = 3.0 V): 512 and 3584,
+    // the sweep's third and fifteenth points. Outside them the buffer's
+    // swing limit, not its linearity, sets the reading.
+    constexpr uint8_t first = 2;
+    constexpr uint8_t last = points - 3u;
+    static_assert(first * 256u >= dac_buffered_lo && last * 256u <= dac_buffered_hi);
+    const int32_t x0 = code[first], y0 = got[first];
+    const int32_t x1 = code[last], y1 = got[last];
     uint16_t worst = 0;
-    for (uint8_t i = 1; i < points - 1u; ++i) {
+    for (uint8_t i = first; i <= last; ++i) {
         const int32_t fit = y0 + ((static_cast<int32_t>(code[i]) - x0) * (y1 - y0)) /
                                      (x1 - x0);
         const int32_t r = static_cast<int32_t>(got[i]) - fit;
@@ -1200,14 +1320,31 @@ void td_zero_length_wire() {
             worst = a;
         }
     }
-    print(serial, "  worst residual from the end-to-end line: ", worst,
-          " counts of 4096 (the two converters' COMBINED nonlinearity, "
-          "deliberately not apportioned)", crlf);
+    // THE BOUND, derived. An error that is a straight line in the code -
+    // either converter's offset or gain - cancels in a line drawn through
+    // two of the points, and what is left is each reading's departure from
+    // a straight line: the DAC's INL (4), the ADC's (3) and the noise
+    // allowance, D in all. A residual is the point's departure less the
+    // line's at that code, and the line moves by at most the larger of its
+    // two ends', so it is at most 2 x D, plus a count for the fit's
+    // integer division. The allowance is measured here, at mid-scale.
+    (void)Dac::write(0, 2048);
+    (void)delay_us(clock, 60);
+    const uint16_t n_buf = noise_span(In4::channel);
+    const uint16_t straight_bound =
+        static_cast<uint16_t>(2u * (dac_inl_lsb + adc_inl_lsb + n_buf) + 1u);
+    print(serial, "  worst residual from the line through codes 512 and 3584: ",
+          worst, " counts of 4096, against ", straight_bound,
+          " (the two converters' integral nonlinearity and a noise allowance of ",
+          n_buf, " counts; the COMBINED figure, deliberately not apportioned)",
+          crlf);
     bench.verdict("the transfer curve is MONOTONIC across the whole range",
                   monotonic);
-    bench.verdict("and straight to better than 1 % of full scale - which is "
-                  "a DAC, a bond pad and an ADC in series, reported as one "
-                  "number because nothing here can split them", worst < 41u);
+    bench.verdict("and straight within the two converters' integral "
+                  "nonlinearity (DS13560 tables 64 and 66) over the codes the "
+                  "buffered output is specified for - a DAC, a bond pad and an "
+                  "ADC in series, reported as one number because nothing here "
+                  "can split them", worst <= straight_bound);
 
     // The buffer's own swing, measured: a buffered output cannot reach
     // either rail, and turning the buffer OFF is what says by how much.
@@ -1219,17 +1356,31 @@ void td_zero_length_wire() {
     (void)delay_us(clock, 200);
     const uint16_t floor_raw = dac_then_adc(0, 0, In4::channel);
     const uint16_t ceil_raw = dac_then_adc(0, 4095, In4::channel);
+    (void)Dac::write(0, 2048);
+    (void)delay_us(clock, 60);
+    const uint16_t n_raw = noise_span(In4::channel);
+    // THE BOUND, derived: an unbuffered code reaches the pad within table
+    // 66's TUE for the buffer off (12), and the ADC reads it within its ET
+    // (7) and the noise allowance measured just above. The ADC can take the
+    // unbuffered output's impedance at this sampling time: RO is 13.8 kOhm
+    // at most (table 65), table 63 allows 15 kOhm at 39.5 cycles of a
+    // 35 MHz clock, and cfg_pad's 39.5 cycles at 32 MHz are longer.
+    const uint16_t raw_tol =
+        static_cast<uint16_t>(dac_tue_unbuffered_lsb + adc_et_lsb + n_raw);
     print(serial, "  code 0 / code 4095: buffered ",
           adc_mv(floor_buf, 4096, vdda), " / ", adc_mv(ceil_buf, 4096, vdda),
           " mV, unbuffered ", adc_mv(floor_raw, 4096, vdda), " / ",
-          adc_mv(ceil_raw, 4096, vdda), " mV (VDDA ", vdda, " mV)", crlf);
+          adc_mv(ceil_raw, 4096, vdda), " mV (VDDA ", vdda, " mV); unbuffered ",
+          floor_raw, " / ", ceil_raw, " counts against at most ", raw_tol,
+          " / at least ", 4095u - raw_tol, crlf);
     bench.verdict("THE OUTPUT BUFFER CANNOT REACH THE RAILS and the "
                   "unbuffered mode can: turning it off moves code 0 DOWN and "
                   "code 4095 UP, which is the swing limit measured rather "
                   "than quoted", floor_raw < floor_buf && ceil_raw > ceil_buf);
-    bench.verdict("and an unbuffered output really does span nearly the whole "
-                  "reference, so the pad and the ADC are not what is limiting "
-                  "it", floor_raw < 60u && ceil_raw > 4030u);
+    bench.verdict("and an unbuffered output spans the whole reference within "
+                  "its own error and the ADC's (DS13560 tables 64 and 66), so "
+                  "the pad and the ADC are not what is limiting it",
+                  floor_raw <= raw_tol && ceil_raw >= 4095u - raw_tol);
 
     // The three data formats, all reaching the same output.
     (void)Dac::enable(0, false);
@@ -1277,6 +1428,13 @@ void te_led_dimmer() {
     bench.verdict("both DAC channels run at once - one on a free pad, one on "
                   "the board's LED", up && Dac::enabled(0) && Dac::enabled(1));
 
+    // The noise allowance of each pad, at mid-scale, before the sweep.
+    (void)Dac::write(0, 2048);
+    (void)Dac::write(1, 2048);
+    (void)delay_us(clock, 60);
+    const uint16_t n4 = noise_span(In4::channel);
+    const uint16_t n5 = noise_span(In5::channel);
+
     constexpr uint8_t points = 9;
     uint16_t free_mv[points];
     uint16_t led_mv[points];
@@ -1286,31 +1444,47 @@ void te_led_dimmer() {
         const uint16_t c = static_cast<uint16_t>(i * 512u > 4095u ? 4095u : i * 512u);
         free_mv[i] = adc_mv(dac_then_adc(0, c, In4::channel), 4096, vdda);
         led_mv[i] = adc_mv(dac_then_adc(1, c, In5::channel), 4096, vdda);
+        // The droop is judged over the codes table 65 specifies the
+        // buffered output for (dac_buffered_lo..hi): 512..3584. At code 0
+        // and 4095 each buffer stops at its own swing limit, which the
+        // sheet does not bound, and the two are printed only.
         const uint16_t d = free_mv[i] > led_mv[i] ? free_mv[i] - led_mv[i] : 0u;
-        if (d > worst_droop) {
+        if (c >= dac_buffered_lo && c <= dac_buffered_hi && d > worst_droop) {
             worst_droop = d;
             droop_at = c;
         }
     }
+    // THE BOUND, derived: each pad carries its channel's code within the
+    // buffered DAC's TUE (30) and is read within the ADC's ET (7) and that
+    // pad's noise allowance, so two channels at one code differ by at most
+    // 2 x (30 + 7) + n4 + n5 counts - in mV on the same VDDA scale both
+    // readings were converted on, rounded up, plus 1 mV for adc_mv()'s
+    // truncation of each. A conducting LED on PA5 would droop it by
+    // hundreds of millivolts at the top of the range.
+    const uint32_t pair_counts = 2UL * (dac_tue_buffered_lsb + adc_et_lsb) + n4 + n5;
+    const uint16_t pair_mv =
+        static_cast<uint16_t>((pair_counts * vdda + 4095UL) / 4096UL + 1UL);
     console_drain();
     print(serial, "  code: free pad mV / LED pad mV");
     for (uint8_t i = 0; i < points; ++i) {
         print(serial, " ", i * 512u, ":", free_mv[i], "/", led_mv[i]);
     }
-    print(serial, crlf, "  worst droop ", worst_droop, " mV at code ", droop_at, crlf);
+    print(serial, crlf, "  worst droop over codes 512..3584 ", worst_droop,
+          " mV at code ", droop_at, ", against ", pair_mv, " mV (two channels' "
+          "error and the noise allowances ", n4, " and ", n5, " counts)", crlf);
 
     bench.verdict("the LED pad tracks the free pad at the BOTTOM of the "
                   "range, where the LED is below its forward voltage and "
-                  "draws nothing",
-                  static_cast<uint16_t>(free_mv[1] > led_mv[1]
-                                            ? free_mv[1] - led_mv[1]
-                                            : led_mv[1] - free_mv[1]) < 60u);
-    bench.verdict("AND THE TWO CHANNELS AGREE ALL THE WAY UP: the pad that "
-                  "carries LD4 tracks the free one to within a handful of "
-                  "millivolts at every code, so whatever LD4's drive path is "
-                  "on this board it is NOT a load the DAC's buffer can feel - "
-                  "measured, where the obvious guess was a diode drooping the "
-                  "output", worst_droop < 20u);
+                  "draws nothing - within the two channels' own error "
+                  "(DS13560 tables 64 and 66)",
+                  abs_diff(free_mv[1], led_mv[1]) <= pair_mv);
+    bench.verdict("AND THE TWO CHANNELS AGREE ALL THE WAY UP: over every code "
+                  "the buffered output is specified for, the pad that carries "
+                  "LD4 tracks the free one within the two channels' own "
+                  "error, so whatever LD4's drive path is on this board it is "
+                  "NOT a load the DAC's buffer can feel - measured, where the "
+                  "obvious guess was a diode drooping the output",
+                  worst_droop <= pair_mv);
     bench.verdict("the dimmer works over the whole range: the LED pad is "
                   "monotonic in the code, which is what a brightness knob "
                   "needs", led_mv[8] > led_mv[4] && led_mv[4] > led_mv[1]);
@@ -1404,15 +1578,36 @@ void sequencer_order(const AdcConfig& fwd) {
                     converted;
         b[i] = Adc::result();
     }
+    // THE THREE BANDS, derived, each conversion told by the band it lands
+    // in. A DAC code reaches its pad within the buffered TUE (30) and is
+    // read within the ADC's ET (7); VREFINT is vrefint_counts_lo..hi on
+    // this board's supply, read within the same ET; and each band carries
+    // the noise allowance, the largest of the three inputs' spans,
+    // measured here under the same configuration. Codes 1024 and 3072 sit
+    // inside the buffered output's specified range, and the three bands
+    // are disjoint while the allowance stays under 138 counts - judged too,
+    // since bands that overlap could not order anything.
+    const uint16_t n4 = noise_span(In4::channel);
+    const uint16_t n5 = noise_span(In5::channel);
+    const uint16_t nv = noise_span(Adc::vrefint_channel);
+    const uint16_t n = n4 > n5 ? (n4 > nv ? n4 : nv) : (n5 > nv ? n5 : nv);
+    const uint16_t dac_tol = static_cast<uint16_t>(dac_tue_buffered_lsb + adc_et_lsb + n);
+    const uint16_t vref_lo = static_cast<uint16_t>(vrefint_counts_lo - adc_et_lsb - n);
+    const uint16_t vref_hi = static_cast<uint16_t>(vrefint_counts_hi + adc_et_lsb + n);
+    const bool bands_apart = 1024u + dac_tol < vref_lo && vref_hi < 3072u - dac_tol;
+    const auto quarter = [dac_tol](uint16_t v) { return near_code(v, 1024, dac_tol); };
+    const auto three_q = [dac_tol](uint16_t v) { return near_code(v, 3072, dac_tol); };
+    const auto bandgap = [vref_lo, vref_hi](uint16_t v) { return within(v, vref_lo, vref_hi); };
     print(serial, "  forward ", f[0], " ", f[1], " ", f[2], " | backward ",
           b[0], " ", b[1], " ", b[2], " (ch4 quarter, ch5 three quarters, "
-          "ch13 VREFINT)", crlf);
+          "ch13 VREFINT); bands 1024 +/- ", dac_tol, ", 3072 +/- ", dac_tol,
+          ", VREFINT ", vref_lo, "..", vref_hi, crlf);
     bench.verdict("the bitmap sequencer scans in NUMERIC ORDER and SCANDIR "
                   "reverses it exactly - the same three values come back "
-                  "front to back",
-                  seq_ok && converted && f[0] > 800u && f[0] < 1300u && f[1] > 2700u &&
-                      f[1] < 3400u && f[2] < 2000u && b[0] < 2000u &&
-                      b[1] > 2700u && b[1] < 3400u && b[2] > 800u && b[2] < 1300u);
+                  "front to back, each inside its own band (DS13560 tables "
+                  "27, 64 and 66)",
+                  seq_ok && converted && bands_apart && quarter(f[0]) && three_q(f[1]) &&
+                      bandgap(f[2]) && bandgap(b[0]) && three_q(b[1]) && quarter(b[2]));
     bench.verdict("and EOS rises at the end of the sequence and not before",
                   eos_fwd);
 
@@ -1435,9 +1630,10 @@ void sequencer_order(const AdcConfig& fwd) {
           " CHSELR=", hex(Adc::selection()), crlf);
     bench.verdict("the FULLY CONFIGURABLE face walks the channels in the "
                   "order written and not in their numeric order (15.3.8), "
-                  "with 0xF terminating a short list",
-                  ord_ok && ord_converted && o[0] < 2000u && o[1] > 2700u && o[2] > 800u &&
-                      o[2] < 1300u && (Adc::selection() & 0xFFFF000u) != 0u);
+                  "with 0xF terminating a short list - each value inside the "
+                  "band of the input it names",
+                  ord_ok && ord_converted && bands_apart && bandgap(o[0]) && three_q(o[1]) &&
+                      quarter(o[2]) && (Adc::selection() & 0xFFFF000u) != 0u);
 }
 #else
 void sequencer_order(const AdcConfig& fwd) {
@@ -1468,12 +1664,25 @@ void tf_sequencer() {
     (void)delay_us(clock, 500);
     const uint16_t floating_down = convert_median(In0::channel);
     PadA0::pull(PinPull::none);
+    // THE THRESHOLD, derived: what a CONNECTED pull-up would read. Table 55
+    // puts RPU at 55 kOhm at most and an analog pad's leakage at 150 nA at
+    // most (the TT_a row, the largest of them below VDDIO), so a pulled pad
+    // sits within 8.25 mV of VDD = VDDA - 12 counts at VDDA = 3.0 V. The
+    // converter takes that source in full: table 63 allows 50 kOhm at
+    // 160.5 cycles of a 35 MHz clock (4.6 us), and cfg_internal samples for
+    // 20 us. So a connected pull reads at least 4095 less the ADC's ET (7),
+    // those 12 and the noise allowance - measured on VREFINT, the
+    // converter's own noise on a quiet input.
+    const uint16_t n_ref = noise_span(Adc::vrefint_channel);
+    const uint16_t pulled_floor = static_cast<uint16_t>(4095u - adc_et_lsb - 12u - n_ref);
     print(serial, "  an ANALOG pad with its pull-up asked for reads ",
-          floating_up, " counts, with the pull-down ", floating_down, crlf);
+          floating_up, " counts, with the pull-down ", floating_down,
+          "; a connected pull-up would read at least ", pulled_floor, crlf);
     bench.verdict("7.3.13 IS LITERAL: the weak pulls are disabled by hardware "
-                  "in analog mode, so a pad asked to pull up does NOT read "
-                  "full scale, so a pull-walked analog stimulus does not exist "
-                  "on this family", floating_up < 3800u);
+                  "in analog mode, so a pad asked to pull up reads short of "
+                  "what a connected pull-up would hold it at (DS13560 tables "
+                  "55, 63 and 64), so a pull-walked analog stimulus does not "
+                  "exist on this family", floating_up < pulled_floor);
 
     // The bitmap face and the ordered one, both read off three values
     // that DIFFER.
@@ -1509,29 +1718,7 @@ void tf_sequencer() {
 // =============================================================================
 // g - the noise floor MEASURED, and only then the oversampler
 // =============================================================================
-struct Spread {
-    uint16_t lo;
-    uint16_t hi;
-    uint32_t mean;
-};
-
 uint32_t base_mean_delta(uint32_t a, uint32_t b) { return a > b ? a - b : b - a; }
-uint16_t mv_delta(uint16_t a, uint16_t b) {
-    return static_cast<uint16_t>(a > b ? a - b : b - a);
-}
-
-Spread spread_of(uint8_t channel, uint8_t n) {
-    (void)Adc::select_channel(channel);
-    uint16_t lo = 0xFFFFu, hi = 0;
-    uint32_t sum = 0;
-    for (uint8_t i = 0; i < n; ++i) {
-        const uint16_t v = Adc::read();
-        if (v < lo) lo = v;
-        if (v > hi) hi = v;
-        sum += v;
-    }
-    return {lo, hi, sum / n};
-}
 
 void tg_oversampler() {
     if (!analog_up(cfg_internal)) {
@@ -1547,12 +1734,11 @@ void tg_oversampler() {
     print(serial, "  noise floor over 64 conversions: VREFINT spans ",
           ref.hi - ref.lo, " counts around ", ref.mean, ", ", second_source_name,
           " ", pad.hi - pad.lo, " around ", pad.mean, crlf);
-    bench.verdict("THE NOISE IS MEASURED BEFORE ANYTHING IS CLAIMED ABOUT IT: "
-                  "both sources are quiet enough to be a converter's own "
-                  "noise and not a broken connection",
-                  ref.hi >= ref.lo && pad.hi >= pad.lo &&
-                      static_cast<uint16_t>(ref.hi - ref.lo) < 60u &&
-                      static_cast<uint16_t>(pad.hi - pad.lo) < 60u);
+    // THE NOISE IS MEASURED BEFORE ANYTHING IS CLAIMED ABOUT IT - and it is
+    // PRINTED, NOT JUDGED: table 64 gives the noise as a least SNR, an rms
+    // figure, and no maximum for a span of 64 conversions is written
+    // anywhere. What the oversampler's verdicts below need from it, they
+    // take from these two spans.
 
     // The noisier of the two is the measurand; the oversampler is judged
     // against it and only if there is something to reduce.
@@ -1568,14 +1754,27 @@ void tg_oversampler() {
     ovs.oversampling_shift = 4;   // back on the 12-bit scale (table 79)
     (void)apply(ovs);
     const Spread avg = spread_of(noisy, 64);
+    // THE MEAN'S BOUND, derived from the base run itself: the input's own
+    // mean lies inside the base run's span (all 64 draws on one side of it
+    // is a chance of 2 in 2^64) and so does the base mean, so the two are
+    // at most base_span apart; the oversampled mean averages 1024
+    // conversions of the same input, so its distance from the input's
+    // mean is the base run's spread over sqrt(1024) = 32, rounded up; and
+    // each mean's integer division truncates under a count while the
+    // oversampler rounds its shift to the nearest (15.8), under half a
+    // count: base_span + base_span / 32 + 3.
+    const uint32_t mean_bound = static_cast<uint32_t>(base_span) +
+                                (static_cast<uint32_t>(base_span) + 31u) / 32u + 3u;
     print(serial, "  x16 oversampling, shift 4: spans ", avg.hi - avg.lo,
-          " counts around ", avg.mean, " (full scale ", Adc::result_steps(), ")", crlf);
+          " counts around ", avg.mean, " (full scale ", Adc::result_steps(),
+          "); the mean may move ", mean_bound, crlf);
     bench.verdict("16x oversampling with a 4-bit shift is back on the 12-bit "
-                  "full scale, and the MEAN does not move - table 79's row, "
-                  "measured",
+                  "full scale, and the MEAN does not move past the base run's "
+                  "own span - table 79's row, measured",
                   Adc::result_steps() == 4096u &&
                       base_mean_delta(avg.mean, noisy == second_source ? pad.mean
-                                                                       : ref.mean) < 20u);
+                                                                       : ref.mean) <=
+                          mean_bound);
     if (base_span >= 4u) {
         bench.verdict("and the spread SHRINKS - which is claimed only because "
                       "the noise floor above was big enough to have something "
@@ -1602,7 +1801,7 @@ void tg_oversampler() {
     bench.verdict("and util/analog.hpp converts BOTH scales to the same "
                   "voltage, because the arithmetic takes the full scale as an "
                   "argument rather than assuming twelve bits",
-                  mv_delta(adc_mv(raw.mean, 65536, 3300),
+                  abs_diff(adc_mv(raw.mean, 65536, 3300),
                            adc_mv(avg.mean, 4096, 3300)) <= 2u);
     quiet_everything();
 }
@@ -1910,11 +2109,15 @@ void ti_comparators() {
     // Capped at 100 ms: a charge that outlasts it reads as the cap.
     const auto fell = brio::cycles_until<Ruler>([] { return !C1::value(); }, 100'000u);
     const uint32_t held_us = fell ? *fell / cycles_per_us : 100'000u;
+    // PRINTED, NOT JUDGED: how long the node holds is the pad's capacitance
+    // against its leakage, and table 55 gives the capacitance as a typical
+    // figure only - no document bounds the hold from below, so it is a
+    // figure of this pad and this board. Each leg below judges its own
+    // reading of a precharged node, the longest of them (the blanking
+    // leg's) 400 us after the release.
     print(serial, "  the precharged node held above half VREFINT for ",
-          held_us, " us", crlf);
-    bench.verdict("and it holds for long enough to be read many times over - "
-                  "the pad's own capacitance against its leakage, measured "
-                  "rather than assumed", held_us > 500u);
+          held_us, " us (the longest leg below reads it 400 us after the "
+          "release)", crlf);
 
     // POLARITY inverts VALUE, which 18.6.1 says sits AFTER the selector.
     precharge(true);
@@ -2316,23 +2519,45 @@ void tj_sampler_ao() {
           "); unknown inputs ", Sampler::unknown_inputs(),
           ", queue overflows ", Collector::queue.overflows(), crlf);
 
+    // The count is the pump's own: it runs to 60 samples, and its 400-tick
+    // cap is over three times the 120 ticks a pace of one conversion every
+    // two ticks needs for them.
     bench.verdict("AnalogSampler RUNS UNCHANGED ON THE THIRD ARCHITECTURE: "
                   "an active object walking three inputs of a converter with "
                   "a hardware sequencer it does not use", Collector::samples >= 60u);
-    bench.verdict("the walk is EVEN - three inputs, three roughly equal "
-                  "counts, because the sampler selects the next one on every "
-                  "result",
-                  Collector::per_index[0] >= 18u && Collector::per_index[1] >= 18u &&
-                      Collector::per_index[2] >= 18u);
+    // EVEN, exactly: the sampler selects the input after the one just
+    // reported (util/analog_sampler.hpp), and every result is dispatched
+    // long before the next pace tick (a conversion here is 21.6 us against
+    // 2 ms), so the labels walk 0, 1, 2, 0 ... and three inputs differ by
+    // at most one sample - each has at least a third of them, rounded down.
+    const uint16_t third = static_cast<uint16_t>(Collector::samples / 3u);
+    bench.verdict("the walk is EVEN - each of the three inputs has at least a "
+                  "third of the samples, because the sampler selects the next "
+                  "one on every result",
+                  Collector::per_index[0] >= third && Collector::per_index[1] >= third &&
+                      Collector::per_index[2] >= third);
     bench.verdict("and NOT ONE sample was mislabelled: every result carried "
                   "an input code the list knows, so `unknown_inputs` stayed "
                   "at zero", Sampler::unknown_inputs() == 0u);
     if constexpr (dac_present()) {
+        // THE BANDS, derived: the VDDA band of vdda_band() and the DAC's
+        // code 3000 within the buffered TUE (30) and the ADC's ET (7), each
+        // with the noise allowance of its own input, measured here under
+        // the sampler's configuration now that the kernel is stopped. Code
+        // 3000 sits inside the buffered output's specified range.
+        const uint16_t n_ref = noise_span(Adc::vrefint_channel);
+        const uint16_t n_pad = noise_span(second_source);
+        const MvBand vdda_ok = vdda_band(n_ref);
+        const uint16_t pad_tol =
+            static_cast<uint16_t>(dac_tue_buffered_lsb + adc_et_lsb + n_pad);
+        print(serial, "  bands: VDDA ", vdda_ok.lo, "..", vdda_ok.hi,
+              " mV, the DAC pad 3000 +/- ", pad_tol, " counts", crlf);
         bench.verdict("the values are the right ones for their labels - VREFINT "
-                      "gives a plausible VDDA and the DAC's pad reads near the "
-                      "three quarters it was set to",
-                      vdda >= 3000u && vdda <= 3600u && Collector::last[2] > 2700u &&
-                          Collector::last[2] < 3200u);
+                      "gives a VDDA inside this board's band and the DAC's pad "
+                      "reads its code 3000 within the two converters' error "
+                      "(DS13560 tables 27, 64 and 66)",
+                      within(vdda, vdda_ok.lo, vdda_ok.hi) &&
+                          near_code(Collector::last[2], 3000, pad_tol));
     } else {
         bench.skip("the labelled-values check rests on a THIRD input this program "
                    "set to a known code, and without a DAC there is nothing to "
@@ -3024,11 +3249,13 @@ void tm_comp_analog() {
           "delays at 30 ns and 300 ns for a 200 mV step; what is COMMON to "
           "the two arms - the DAC's settling and the poll loop - is not the "
           "comparator's and is NOT subtracted out of the absolutes", crlf);
-    bench.verdict("THE TWO POWER MODES DIFFER BY A REAL, MEASURED TIME, and "
-                  "that difference is the comparator's own, because the DAC "
-                  "and the read loop are identical in both arms",
-                  ms_ns > hs_ns && (ms_ns - hs_ns) > 50u &&
-                      (ms_ns - hs_ns) < 5000u);
+    // THE DIFFERENCE IS PRINTED, NOT JUDGED. Table 68 gives the two delays
+    // as typical figures and maxima - no minimum, so not even the sign of
+    // the difference is promised - and its maxima hold for a 100 mV
+    // overdrive, which the settled node's own motion (the band printed
+    // above, about a hundred millivolts with HYST clear) does not
+    // guarantee on any one step. Nothing written bounds the figure on this
+    // node either way.
 
     // ---- 6. THE WINDOW'S INSIDE STATE, which letter i can only decline -----
     // The node sits BETWEEN two thresholds, and BOTH of them are
@@ -3400,7 +3627,7 @@ void tn_comp_pads() {
 //     a SEQUENCE and not as a spectrum, and its amplitude and period
 //     are counted rather than estimated.
 //   - THE USER CALIBRATION wants "a tTRIM delay from DS13560 and a
-//     reason". The delay is 50 us (table 67's tTRIM) and the reason is
+//     reason". The delay is 50 us (table 65's tTRIM) and the reason is
 //     that 16.4.12's procedure is the only thing that says what
 //     CAL_FLAGx is for.
 //   - SAMPLE-AND-HOLD wants LSI, which is `dac_hold_ck` (table 85) and
@@ -3494,15 +3721,26 @@ void to_dac_tail() {
     }
     print(serial, crlf);
     const uint16_t pad_swing = static_cast<uint16_t>(pad_hi - pad_lo);
+    // THE BOUND, derived. The swing is the difference of two pad readings,
+    // at the triangle's bottom and top (codes 1024 and 1087, inside the
+    // buffered output's specified range), so every error common to both
+    // cancels and what is left is each end's departure from a straight
+    // line - the DAC's INL (4) and the ADC's (3), twice - plus both gains
+    // over 63 codes (table 66's 0.5 % is 0.32 of a count, table 64's 5 LSB
+    // of 4095 is 0.08: one count together), plus the noise allowance at
+    // each end, measured here with DOR standing still: 15 + 2 x noise.
+    const uint16_t n_tri = noise_span(In4::channel);
+    const uint16_t tri_tol =
+        static_cast<uint16_t>(2u * (dac_inl_lsb + adc_inl_lsb) + 1u + 2u * n_tri);
     print(serial, "  the same triangle read back through ADC_IN4: ", pad_lo,
           "..", pad_hi, " counts, a swing of ", pad_swing, " where ",
           amplitude, " codes is ", dac_mv(amplitude, Dac::steps, vdda),
-          " mV", crlf);
+          " mV; the bound is ", amplitude, " +/- ", tri_tol, crlf);
     bench.verdict("...and the PAD follows it: the swing read back through the "
-                  "zero-length wire is the generator's own amplitude to a "
-                  "handful of counts, so this is a waveform and not a "
-                  "register",
-                  pad_swing + 8u >= amplitude && pad_swing <= amplitude + 8u);
+                  "zero-length wire is the generator's own amplitude within "
+                  "the two converters' nonlinearity and gain (DS13560 tables "
+                  "64 and 66), so this is a waveform and not a register",
+                  near_code(pad_swing, amplitude, tri_tol));
 
     // ---- 2. the NOISE generator, and what the mask is worth ---------------
     // 16.4.9: an LFSR whose low bits are masked by MAMP and added to
@@ -3549,7 +3787,7 @@ void to_dac_tail() {
     // The procedure, exactly: the channel DISABLED and buffered, CEN
     // set, OTRIM swept upward from zero, and the first value at which
     // CAL_FLAG rises is the trim - the buffer comparing its own offset
-    // against VREF+/2. tTRIM is 50 us (DS13560 table 67) and the caller
+    // against VREF+/2. tTRIM is 50 us (DS13560 table 65) and the caller
     // spends it, because only the caller knows what its clock is worth.
     const uint8_t factory = Dac::trim(0);
     (void)Dac::enable(0, false);
@@ -3570,20 +3808,28 @@ void to_dac_tail() {
             found = t;
         }
     }
-    (void)Dac::calibration_mode(0, false);
-    const bool cal_left = !Dac::calibration_mode(0, false) || true;
+    const bool cal_left = Dac::calibration_mode(0, false);
     (void)Dac::set_trim(0, factory);
     const uint8_t restored = Dac::trim(0);
     print(serial, "  offset calibration: the factory trim is ", factory,
           ", 16.4.12's own sweep from zero raises CAL_FLAG at ", found,
-          " (flag low at trim 0: ", flag_low, "), and the factory value is "
-          "put back: ", restored, crlf);
-    bench.verdict("THE USER OFFSET CALIBRATION IS A REAL PROCEDURE AND NOT A "
-                  "REGISTER: with the channel disabled and buffered, CEN set "
-                  "and OTRIM swept upward, CAL_FLAG crosses at one value - "
-                  "the buffer comparing its own offset against VREF+/2 "
-                  "(16.4.12)",
-                  cal_entered && cal_left && found < 32u && flag_low);
+          " (32: never; flag low at trim 0: ", flag_low, "), and the factory "
+          "value is put back: ", restored, crlf);
+    // WHERE CAL_FLAG CROSSES IS PRINTED, NOT JUDGED. 16.4.12's own loop
+    // runs "until the CAL_FLAGx is read as 1 or the maximum trimming code
+    // is reached": a buffer whose offset at this supply and temperature
+    // lies past the trim's reach never crosses, and one that needs trim 0
+    // reads the flag high from the start - so the crossing, and the flag at
+    // trim 0, are this die's figures (the factory trim is the crossing at
+    // ST's conditions, not at this bench's). What the procedure promises
+    // is judged: CEN taken with the channel disabled and buffered, and
+    // cleared again.
+    bench.verdict("THE USER OFFSET CALIBRATION RUNS AS 16.4.12 WRITES IT: "
+                  "with the channel disabled and buffered CEN is taken, "
+                  "OTRIM is swept upward with tTRIM spent at each code, and "
+                  "CEN is cleared again - where CAL_FLAG crossed is printed "
+                  "above",
+                  cal_entered && cal_left);
     bench.verdict("...and calibration is REFUSED in an unbuffered mode, "
                   "where 16.4.12 says it has no effect at all - a silent "
                   "nothing this driver turns into a false",
@@ -3642,35 +3888,42 @@ void to_dac_tail() {
           "reads ", no_lsi, " counts with LSI stopped, ", sampled,
           " with it running and still ", held, " a hold time later, against ",
           direct, " with the mode off", crlf);
-    // THE HEADER'S OWN CLAIM IS WRONG AND THIS IS WHERE IT SHOWS.
-    // dac.hpp says a caller who asks for sample-and-hold with LSI
-    // stopped "gets a channel that never samples". Measured, with LSI
-    // demonstrably stopped (LSIRDY read clear): the pad carries the
-    // value all the same, to a count, exactly as the plain buffered
-    // mode does - and NOT EVEN BWST reports anything, the times landing
-    // with the flag clear whether dac_hold_ck runs or not.
+    // THE OBVIOUS GUESS IS A CHANNEL THAT NEVER SAMPLES, and this is
+    // where it fails. Measured, with LSI demonstrably stopped (LSIRDY
+    // read clear): the pad carries the value all the same, to a count,
+    // exactly as the plain buffered mode does - and NOT EVEN BWST reports
+    // anything, the times landing with the flag clear whether dac_hold_ck
+    // runs or not (dac.hpp's sample_hold_times() says so).
     //
     // So the failure mode is not a dead channel but a SILENT
     // DEGRADATION, and that is worse: the output looks right, no status
     // bit disagrees, and the low-power behaviour the mode was chosen
     // for is simply absent. There is nothing an application can read to
     // tell the two apart; only the RCC knows.
-    bench.verdict("SAMPLE-AND-HOLD WITHOUT LSI DOES NOT FAIL LOUDLY - IT "
-                  "DEGRADES IN SILENCE, and dac.hpp's own comment had it "
-                  "backwards: with dac_hold_ck stopped the channel keeps "
-                  "driving its value like the plain buffered mode it also "
-                  "is, the times land all the same and BWST never stands, so "
-                  "NOTHING an application can read says the mode is not armed",
-                  lsi_up && times_ok && times_no_lsi && lsi_stopped &&
-                      !busy_no_lsi && !busy_with_lsi &&
-                      no_lsi + 40u > direct && direct + 40u > no_lsi);
-    bench.verdict("...and with LSI running it samples AND HOLDS: the pad "
-                  "carries the value it was given and is still carrying it a "
-                  "whole hold time later, with nothing written in between - "
-                  "which is the mode working, and is indistinguishable from "
-                  "the mode NOT working, which is the finding above",
-                  sampled + 120u > direct && direct + 120u > sampled &&
-                      held + 120u > sampled && sampled + 120u > held);
+    //
+    // THAT FINDING IS PRINTED, NOT JUDGED, and so is the mode's own hold.
+    // What a channel does with dac_hold_ck stopped is not described by the
+    // manual, so the pad's value and BWST's silence there are one die's
+    // behaviour; and with LSI running, table 65's sample-and-hold rows
+    // assume a hold capacitor of 100 nF on the pad, which this board has
+    // not got (letter a sees PA4 follow its internal pull within 300 us,
+    // where 100 nF on table 55's least 25 kOhm would take 2.5 ms for one
+    // time constant), so the hold is outside the sheet's conditions too.
+    // What stays a verdict is the CONTROL the printed figures need:
+    // LSIRDY falls when LSI is stopped (RM0444 5.4.24: within three LSI
+    // cycles, 102 us at DS13560 table 46's least 29.5 kHz, under the 1.8 ms
+    // waited) and rises when it is started, and the channel takes its
+    // times both ways.
+    print(serial, "  with LSI stopped the pad is ",
+          abs_diff(no_lsi, direct), " counts from the plain buffered mode's "
+          "value and BWST stood ", busy_no_lsi ? "yes" : "no", "; with it "
+          "running the pad is ", abs_diff(sampled, direct), " counts from it "
+          "and moves ", abs_diff(held, sampled), " over a hold time", crlf);
+    bench.verdict("THE CONTROL OF THE SAMPLE-AND-HOLD FIGURES: LSI, which is "
+                  "dac_hold_ck, is really stopped (LSIRDY clear) for the first "
+                  "half and really running for the second, and the channel "
+                  "takes its sample, hold and refresh times both ways",
+                  lsi_stopped && lsi_up && times_no_lsi && times_ok);
     print(serial, "  what this desk CANNOT say about the mode is the thing "
           "it exists for: 16.4.6 sells it as a power saving, and that is a "
           "current measurement this bench has no meter for", crlf);
@@ -4540,12 +4793,42 @@ void tr_external_inputs() {
     const uint16_t vref = convert_median(Adc::vrefint_channel);
     const uint16_t temp = convert_median(Adc::temperature_channel);
     const uint16_t vbat = convert_median(Adc::vbat_channel);
+    // THE THREE BANDS, derived, each in counts on this board's 3.0..3.6 V
+    // and each widened by the ADC's ET (7) and the channel's own noise
+    // allowance, measured here:
+    //   - VREFINT: vrefint_counts_lo..hi (table 27);
+    //   - the sensor: table 69's V30 of 0.742..0.785 V, widened by its
+    //     +-5 C and its +-2 C linearity at the steepest slope (2.7 mV/C,
+    //     18.9 mV), moved by 2.3..2.7 mV/C over a junction between -10 and
+    //     85 C (a bench at room temperature with the die's own rise):
+    //     0.6151 V at 3.6 V is 699.8 counts, 0.9524 V at 3.0 V is 1300.4;
+    //   - VBAT/3: the Nucleo-64 ties VBAT and VDDA to VDD (UM2324 table
+    //     10: SB26 and SB28), so the reading is 4096 / Q whatever the
+    //     supply, and table 70's Q is 3 within 10 %: 1241.2..1517.0.
+    constexpr uint16_t ts_counts_lo = 699;
+    constexpr uint16_t ts_counts_hi = 1301;
+    constexpr uint16_t vbat_counts_lo = 1241;
+    constexpr uint16_t vbat_counts_hi = 1518;
+    const uint16_t n_vref = noise_span(Adc::vrefint_channel);
+    const uint16_t n_temp = noise_span(Adc::temperature_channel);
+    const uint16_t n_vbat = noise_span(Adc::vbat_channel);
+    const auto in_band = [](uint16_t v, uint16_t lo, uint16_t hi, uint16_t noise) {
+        return within(v, static_cast<uint32_t>(lo) - adc_et_lsb - noise,
+                      static_cast<uint32_t>(hi) + adc_et_lsb + noise);
+    };
     print(serial, "  and the three internal channels: VREFINT ", vref,
-          ", temperature ", temp, ", VBAT/3 ", vbat, crlf);
+          ", temperature ", temp, ", VBAT/3 ", vbat, " (bands ",
+          vrefint_counts_lo, "..", vrefint_counts_hi, ", ", ts_counts_lo, "..",
+          ts_counts_hi, ", ", vbat_counts_lo, "..", vbat_counts_hi,
+          " widened by ", adc_et_lsb, " and the noise allowances ", n_vref, ", ",
+          n_temp, ", ", n_vbat, ")", crlf);
     bench.verdict("and the three internal channels sit where the earlier "
-                  "letters put them, on the same multiplexer",
-                  vref > 1000u && vref < 2000u && temp > 500u &&
-                      temp < 1500u && vbat > 1000u && vbat < 3000u);
+                  "letters put them, on the same multiplexer - each inside "
+                  "the band DS13560's tables 27, 69 and 70 give it on this "
+                  "board's supply",
+                  in_band(vref, vrefint_counts_lo, vrefint_counts_hi, n_vref) &&
+                      in_band(temp, ts_counts_lo, ts_counts_hi, n_temp) &&
+                      in_band(vbat, vbat_counts_lo, vbat_counts_hi, n_vbat));
     quiet_everything();
 }
 

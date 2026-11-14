@@ -45,7 +45,7 @@ RM0444 Rev 6 ch. 18, with the EXTI line table
 **no item touching the comparators**. Driver: `stm32g0/comp.hpp`; the
 per-part presence and the EXTI line numbers come from
 `stm32g0/device_tables.hpp` (the reserve: the table of what each part has, read off the device header). Bench suite:
-`test_stm32_analog` letters i (15 verdicts), m (6 - the analog
+`test_stm32_analog` letters i (14 verdicts), m (5 - the analog
 questions) and n (8 - the other two comparators, the output on a pad,
 the blanking sources), shared with the ADC, the DAC and the reference
 buffer; a letter is one command key of the suite's console and the group of verdicts it runs.
@@ -156,13 +156,21 @@ in analog mode, the pad is driven to a rail by GPIO and then handed to
 the comparator; the node's own capacitance holds it there. Measured:
 precharged high the comparator reads 1 and precharged low it reads 0,
 and **the node stays above half VREFINT for longer than the 100 ms cap
-the letter puts on the measurement** - so this is a technique with four
-orders of magnitude of margin and not a race.
+the letter puts on the measurement**, where the longest leg reads it
+400 us after its release - so this is a technique with orders of
+magnitude of margin on this board and not a race. The hold is printed
+and not judged: it is the pad's capacitance, which DS13560 table 55
+gives as a typical figure only, against its leakage, so no document
+bounds it from below and it is a figure of this pad and board.
 
 **7.3.13 is literal, and here is the number.** A pad in analog mode with
 its pull-up ASKED FOR converts to 960 counts of 4096 and with the
-pull-down to 1056 - a floating node drifting, not two rails. The SAM's
-pull-walked analog stimulus does not exist on this family.
+pull-down to 1056 - a floating node drifting, not two rails. The
+verdict judges the pull-up's reading against what a CONNECTED pull-up
+would read: at least full scale less the ADC's total unadjusted error,
+the 12 counts table 55's 55 kOhm and 150 nA of leakage can drop, and the
+noise measured on VREFINT. The SAM's pull-walked analog stimulus does
+not exist on this family.
 
 **All four VREFINT taps work and POLARITY inverts what VALUE reports.**
 Each of 1/4, 1/2, 3/4 and full VREFINT sits between the rails (high on a
@@ -209,9 +217,10 @@ comparator, agreeing on what happened.
 
 **Hysteresis and the speed selector** are written and read back; DS13560
 table 68 puts the three hysteresis levels at 10, 20 and 30 mV typical
-and the two speeds at 30 ns and 0.3 us of propagation delay. **Their
-analog effect is not measured** - both need an input that MOVES through
-a threshold, which is the same missing wire.
+and the two speeds at 30 ns and 0.3 us of propagation delay. **Letter i
+does not measure their analog effect** - both need an input that MOVES
+through a threshold; letter m's settled node and DAC threshold come
+closest, below.
 
 **COMP3 RUNS, and not only as a register** (letter n). Its two bonded
 plus pads PB0 and PC1 read high and low against half of VREFINT, and its
@@ -263,14 +272,18 @@ WINMODE, one settled node reaches ALL THREE states - above both limits,
 between them, below both - by moving the WINDOW instead of the signal.
 18.3.5's window comparator is complete on this desk.
 
-**The two propagation delays differ by a real, measured time.** A DAC
-step of 300 codes (242 mV, table 68's own 100 mV of overdrive and more)
-across the threshold is answered in **687..1062 ns in high-speed mode
-and 1109..1218 ns in medium-speed mode** over several runs, a difference
-of **406..484 ns** where table 68 prices the gap at 270. The absolutes
-are the DAC's settling plus the comparator plus the poll loop and are
-NOT the comparator's; the difference is, because everything else does
-the same thing twice.
+**The two propagation delays are measured and printed.** A DAC step of
+300 codes (242 mV, table 68's own 100 mV of overdrive and more) across
+the threshold is answered in **468..1062 ns in high-speed mode and
+1046..1218 ns in medium-speed mode** over the runs on record, a
+difference of **406..594 ns** where table 68's typical figures put the
+gap at 270. The absolutes are the DAC's settling plus the comparator
+plus the poll loop and are NOT the comparator's; the difference is,
+because everything else does the same thing twice. No verdict judges
+it: table 68 gives the delays as typical figures and maxima with no
+minimum, so not even the difference's sign is promised, and its maxima
+hold for a 100 mV overdrive that the settled node's own motion (below)
+does not guarantee on any one step.
 
 **THE OFFSET AND THE HYSTERESIS ARE DECLINED, with the number that
 declines them.** The band between a falling crossing and a rising one is
@@ -354,6 +367,11 @@ Driver gaps: none - chapter 18's register surface is implemented whole.
   reading it - one wire from PA4 to PA1, and this suite is wireless by
   construction.
 - WINOUT, which did nothing measurable (above) and is recorded as such.
+- **The two speeds' propagation delays**, measured and printed (above)
+  and judged by no verdict: table 68 gives no minimum, and its maxima's
+  100 mV of overdrive is not held by a node that moves. The same wire
+  from PA4 to PA1 would hold the plus input still enough to judge both
+  against the maxima.
 - **TIM1_OC5 as a blanking source**, because `tim.hpp` builds four
   channels per timer and TIM1's fifth and sixth are the combined-PWM
   pair it does not build ([tim.md](tim.md)). The BLANKSEL bit is written

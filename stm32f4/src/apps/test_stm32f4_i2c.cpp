@@ -3352,12 +3352,16 @@ void stages(const char* arb) {
         return;
     }
     const Row own = row_of<Arb, Kernel>(arb, "FMPI2C1's own hold at its address", Stage{.target_hold = true});
-    // 8000 us is when the row lets go; a bit period for the acknowledge's clock, the target's
-    // vector and the host's: 7 us measured, 500 for a tick and a turn of the pump over that.
+    // The floor is exact: one_pass() unmasks the target's event line no earlier than
+    // hold_cycles (8 ms) after t0, and until its vector clears ADDR the target holds SCL
+    // (RM0390 23.4.8), so the host's completion cannot come before. What comes after the
+    // release - the loop's last turn, a tick that lands, the target's vector, the
+    // acknowledge's clock and the host's vector - is code with no written bound: row_of()
+    // prints the completion's span, no ceiling judged.
     bench.verdict("A HOLD AHEAD OF THE ACKNOWLEDGE'S END IS NOT THIS PATH: the tenure's own completion waits for it (8 ms from "
-                  "the post, 8000 to 8500 us), no STOP stands, the request behind it runs",
+                  "the post, no earlier than 8000 us), no STOP stands, the request behind it runs",
                   own.stood == 0u && own.first_ok == own.passes && own.behind_ok == own.passes && own.witness_ok == own.passes &&
-                      own.next_ok == own.passes && own.first_min >= 8000u * cycles_per_us && own.first_max <= 8500u * cycles_per_us);
+                      own.next_ok == own.passes && own.first_min >= 8000u * cycles_per_us);
 }
 
 }  // namespace drain

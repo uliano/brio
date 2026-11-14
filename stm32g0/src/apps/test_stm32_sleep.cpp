@@ -586,7 +586,8 @@ void tc_stop_freezes() {
     // the bit and judges the state it finds rather than assuming one:
     // "the sleep does not last" is true of the probe's setting and not
     // of the silicon.
-    const uint32_t with_tick = wall_ms(one_sleep(PwrMode::stop1, counts, false));
+    const uint32_t with_tick_ticks = one_sleep(PwrMode::stop1, counts, false);
+    const uint32_t with_tick = wall_ms(with_tick_ticks);
     const uint32_t k0 = Ticker::millis();
     const uint32_t rtc0 = rtc_wakes;   // the count is cumulative: this sleep's own
     const uint32_t slept = one_sleep(PwrMode::stop1, counts);
@@ -594,9 +595,29 @@ void tc_stop_freezes() {
     const uint32_t rtc_ended = rtc_wakes - rtc0;
     const uint32_t slept_ms = wall_ms(slept);
     const bool dbg_stop = Pwr::debug_in_stop();
+    // THE BAND, DERIVED, in the wall's own ticks: the wake-up timer and
+    // the calendar count the same RTCCLK, so no oscillator's error enters
+    // (the milliseconds printed convert with the root's rate). 30.6.6: the
+    // first WUTF comes between WUT and WUT + 1 periods of RTCCLK/16 after
+    // WUTE, 8192..8208 RTCCLK cycles. one_sleep()'s first reading follows
+    // WUTE by a few register accesses, under a cycle of RTCCLK; its last
+    // follows the wake by the Stop 1 exit (DS13560 table 37: 11.2 us from
+    // flash), the RTC's handler and at most one kernel tick handler at
+    // HSISYS's 16 MHz (under 300 cycles each, 37.5 us), the PLL's relock
+    // (table 47's tLOCK, 40 us) and the reading itself: under 100 us, four
+    // RTCCLK cycles. Each reading is a live counter (BYPSHAD set), so the
+    // difference of two is off the time between them by under one tick.
+    // In ticks of RTCCLK / (PREDIV_A + 1), div = PREDIV_A + 1: more than
+    // 8192 / div - 2, so at least 8192 / div - 1; under 8208 / div +
+    // 4 / div + 1, so at most their ceilings' sum. This suite's wall has
+    // div = 1: 8191..8212.
+    const uint32_t div = static_cast<uint32_t>(Rtc::prescalers().async) + 1u;
+    const uint32_t stop_lo = (counts * 16u) / div - 1u;
+    const uint32_t stop_hi = ((counts + 1u) * 16u + div - 1u) / div + (4u + div - 1u) / div;
     print(serial, "  a 250 ms Stop 1 with the kernel tick STILL ARMED lasted ",
           with_tick, " ms; with it paused, ", slept_ms,
-          " (DBGMCU_CR.DBG_STOP = ", dbg_stop, ")", crlf);
+          " (DBGMCU_CR.DBG_STOP = ", dbg_stop, "); in wall ticks ", with_tick_ticks,
+          " and ", slept, ", the band ", stop_lo, "..", stop_hi, crlf);
     if (dbg_stop) {
         bench.verdict("UNDER A DEBUGGER'S DBG_STOP the debug logic keeps HCLK "
                       "and SysTick running inside a Stop, and a Stop entered "
@@ -606,12 +627,13 @@ void tc_stop_freezes() {
         bench.verdict("A STOP ENTERED WITH THE TICK ARMED LASTS on a board no "
                       "debugger has touched: 4.3.3's pending-interrupt window "
                       "is one instruction wide, and HCLK stops with the WFI",
-                      within(with_tick, 230u, 290u));
+                      within(with_tick_ticks, stop_lo, stop_hi));
     }
     print(serial, "  a Stop 1 of ", slept_ms,
           " ms of wall advanced the kernel tick by ", kernel_ms, " ms", crlf);
-    bench.verdict("the sleep really happened, and the RTC saw all of it",
-                  within(slept_ms, 230u, 290u));
+    bench.verdict("the sleep really happened, and the RTC saw all of it: the wake-up "
+                  "timer's first period in the wall's own ticks (the band derived)",
+                  within(slept, stop_lo, stop_hi));
     bench.verdict("KERNEL TIME STANDS STILL ACROSS A STOP - SysTick rides "
                   "HCLK and HCLK is one of the clocks that stopped (5.3)",
                   kernel_ms < 20u);

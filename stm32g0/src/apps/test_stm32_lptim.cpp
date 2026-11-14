@@ -2742,9 +2742,23 @@ void th_site() {
                       within(to_blip, 500u, site_span_ms(500u) + 3u));
     bench.verdict("and NEVER EARLY - the lower bound is the kernel's own "
                   "promise", to_blip >= 500u);
-    bench.verdict("the sleep was real: the resync handed back a frozen span of "
-                  "hundreds of ticks",
-                  Site::last_advance() > 350u && Site::last_advance() < 520u);
+    // THE ADVANCE, DERIVED from the site's own arithmetic (sleep.hpp's
+    // place_alarm() and resync()), in kernel ticks and so free of any
+    // clock's error. The deadline is 500 ticks from k0 and the site arms
+    // e ticks later, e at most 1 (three dispatches with no wait between
+    // the time event's arm and the site's, microseconds after a tick
+    // edge), so the alarm is placed for n = 500 - e ticks: c =
+    // ceil(1.024 n) + 1 counts. It fires with the counter c counts past
+    // the reading place_alarm() took, which follows arm()'s own baseline
+    // reading by 0 or 1 count; the ISR reads the counter in the matching
+    // count or the next (its wake and relock, about 50 us, are far
+    // under a 977 us count). So elapsed is c .. c + 2, resync() converts
+    // elapsed - 1 counts rounding down - n .. n + 1 ticks for n = 499 or
+    // 500 - and subtracts what SysTick counted between arm() and the
+    // pause, 0 or 1: 498..501.
+    bench.verdict("the sleep was real: the resync handed back the frozen span the "
+                  "site's arithmetic gives a 500 ms deadline, 498..501 ticks (derived)",
+                  Site::last_advance() >= 498u && Site::last_advance() <= 501u);
     bench.verdict("and the round closed by the convention",
                   Probe::wakes >= 1u && Site::armed() == SleepDepth::none);
 

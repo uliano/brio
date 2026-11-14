@@ -181,6 +181,18 @@
  * look finds the ring empty. A stream that does not move has the wait for
  * a frame taken down until its mark or the consumer's look (rx_vector()).
  *
+ * What a burst is, then, is what IDLE says it is, and IDLE is not raised
+ * everywhere the line was idle for a frame. On the F446, ES0298 2.13.1
+ * ("idle frame is not detected if the receiver clock speed is deviated",
+ * no workaround): after an idle of about one frame, a character from a
+ * sender faster than this receiver starts before the idle frame is
+ * counted, no IDLE is raised, and the engine takes the two bursts for
+ * one - both told together at the next idle it does see, or at a mark.
+ * The same geometry was read on the STM32G0's receiver, whose sheet
+ * lists no such item (docs/stm32f4/usart.md, the bench findings). An idle
+ * of a frame and a half or more was told after every burst from a sender
+ * up to 3 % fast.
+ *
  * What the channel's read cannot do: an error on the frame right after one
  * the vector counted is lost - the stream's read of that frame clears the
  * flag the count's status read saw, and it is the same bit. A run of k

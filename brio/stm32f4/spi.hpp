@@ -486,7 +486,7 @@ struct Spi {
     static bool disable() {
         bool ok = true;
         if (enabled() && !master_receive_only()) {
-            ok = wait_until([] { return tx_empty(); }) && wait_until([] { return !busy(); });
+            ok = wait_until([] { return tx_empty(); }, frame_spins) && wait_until([] { return !busy(); }, frame_spins);
         }
         regs().CR1 &= ~SPI_CR1_SPE;
         return ok;
@@ -719,18 +719,36 @@ private:
         }
     }
 
-    /// A bounded wait: true when the condition came, false when the budget
-    /// ran out (a bus whose clock never runs must not hang the kernel; the
-    /// budget is generous against the slowest frame at the slowest rate).
+    /// A bounded wait: true when the condition came, false when `spins`
+    /// turns ran out first (a bus whose clock never runs must not hang
+    /// the kernel).
     template <typename Pred>
-    static bool wait_until(Pred pred) {
-        for (uint32_t spins = 400'000u; spins != 0u; --spins) {
+    static bool wait_until(Pred pred, uint32_t spins) {
+        for (; spins != 0u; --spins) {
             if (pred()) {
                 return true;
             }
         }
         return false;
     }
+
+public:
+    /**
+     * disable()'s budget, derived from what it waits for: TXE within the
+     * frame in flight, BSY at the end of the next - each wait one frame at
+     * most. The slowest frame this generator makes is 16 bits (CR1.DFF) of
+     * 256 PCLK cycles (CR1.BR, RM0390 26.7.1), the core at most 16 HCLK
+     * cycles to one PCLK cycle (RCC_CFGR.PPRE1/PPRE2, 6.3.3), and a turn of
+     * the polling loop never under 7 core cycles (the release listing: a
+     * load of SR, a test, an untaken branch, a decrement and a taken
+     * branch, 2 + 1 + 1 + 1 + 2 on the Cortex-M4, ARM DDI 0439B 3.3.1). A
+     * CLIENT's frame is its host's, which this chip cannot bound: the same
+     * budget covers a host no slower than this generator's slowest rung at
+     * this chip's PCLK.
+     */
+    static constexpr uint32_t poll_turn_cycles = 7u;
+    static constexpr uint32_t frame_spins = (16u * 256u * 16u + poll_turn_cycles - 1u) / poll_turn_cycles;
+    static_assert(frame_spins == 9'363u, "the comment above states the arithmetic");
 };
 
 // =============================================================================
@@ -968,7 +986,7 @@ struct I2s {
     static bool disable() {
         bool ok = true;
         if (enabled() && i2s_mode_is_transmit(mode())) {
-            ok = wait_until([] { return tx_empty(); }) && wait_until([] { return !busy(); });
+            ok = wait_until([] { return tx_empty(); }, slot_spins) && wait_until([] { return !busy(); }, slot_spins);
         }
         regs().I2SCFGR &= ~SPI_I2SCFGR_I2SE;
         return ok;
@@ -1042,14 +1060,33 @@ struct I2s {
 
 private:
     template <typename Pred>
-    static bool wait_until(Pred pred) {
-        for (uint32_t spins = 400'000u; spins != 0u; --spins) {
+    static bool wait_until(Pred pred, uint32_t spins) {
+        for (; spins != 0u; --spins) {
             if (pred()) {
                 return true;
             }
         }
         return false;
     }
+
+public:
+    /**
+     * disable()'s budget for a transmitting configuration, derived from
+     * what it waits for: TXE within the channel slot in flight, BSY at the
+     * end of the next, each wait one slot at most. A frame (1 / fs) is at
+     * most 256 x (2 x I2SDIV + ODD) = 256 x 511 kernel clock cycles (RM0390
+     * 26.6.4, the master clock out), a slot half of it. The kernel clock
+     * from a PLL is at least 100 MHz / 7 (the VCO's floor over R's ceiling,
+     * 6.3.2 and 6.3.23; RM0090's and RM0383's PLLI2S the same), the HSI
+     * 16 MHz, so at the stratum's top HCLK of
+     * 180 MHz a kernel cycle is at most 13 core cycles; a turn of the
+     * polling loop is never under 7 (Spi<n>::frame_spins). An I2S_CKIN
+     * input, and the F446's HSE (from 1 MHz in bypass, DS10693 table 37),
+     * have no floor this stratum can rely on: a slot past this budget on
+     * one of them is the caller's to wait out before disable().
+     */
+    static constexpr uint32_t slot_spins = (128u * 511u * 13u + 7u - 1u) / 7u;
+    static_assert(slot_spins == 121'472u, "the comment above states the arithmetic");
 };
 
 /// The full-duplex extension block of instance `n` - a slave-only second

@@ -346,7 +346,7 @@ and a peer is a second board on the other end of a link.
 | `test_stm32_clock` | 41 | **40** | letter `h` (`delay_us` at 20 us) needs that same 4 us wall; the rest runs on an LSE wall instead |
 | `test_stm32_tim` | 125 | **114** | TIM4: its counter, its four channels on PB6..PB9, and TIM3's shared vector |
 | `test_stm32_dma` | 83 (+ `p` 4, `q` 5, `u` 3) | **76**, counted on the one image it was before it split into three | DMA2's five channels, and letter `m`'s peripheral-to-peripheral destination ([dma.md](dma.md)) |
-| `test_stm32_analog` | 137 | **136** | COMP3's register block and its whole signal path |
+| `test_stm32_analog` | 133 | **136** | COMP3's register block and its whole signal path |
 | `test_stm32_serial` | 121 (+ y/w/v/x; + `t` 172, the STM32F446RE as peer) | **112** (+ y/w/v) | LPUART2 (two verdicts), and four to ES0418 2.2.4 ([usart.md](usart.md)) |
 | `test_stm32_spi` | 106 (the STM32F446RE as peer) | - | the same self-link letters that skip on the G0B1RE; SPI3 and SPI2's I2S are absent; the peer letters want a board paired with this one, and none is ([spi.md](spi.md)) |
 | `test_stm32_i2c` | 198 (+ `w` 35, the STM32F446RE as peer) | **54** (peer) | the same self-link letters, and the peer set's `s` and `t`, whose third node is the self-link's I2C2; I2C3 is absent and I2C2 has no independent clock |
@@ -413,7 +413,7 @@ the G071RB:
 | `test_stm32_clock` | 41 | 40 | **40** | letter `h`: the 4 us wall needs TIM2's ETR taking MCO, a G0B1 code; the LSE code is the wall here, as on the G071 ([clock.md](clock.md)) |
 | `test_stm32_tim` | 125 | 114 | **108** | TIM4, TIM6, TIM7 and TIM15 - four instances the part has not got - and PB13..PB15, which the package does not bond |
 | `test_stm32_dma` | 83 | 76 | **62** (+ `u` 3, `w` 0), counted on the one image it was before it split into three | DMA2, the console's DMA-fed rate (five channels, and the letters own all five) and the peripheral-to-peripheral leg; letters `o` (6) and `r` (4) are built and not run here, nor letter `h`'s rate verdict on the interrupt console, and `p` and `q` skip by name (no console engines) |
-| `test_stm32_analog` | 137 | 136 | **67** | the DAC's letters and the comparators' - this part has neither block, so eight of the eighteen letters are compiled out ([adc.md](adc.md)) |
+| `test_stm32_analog` | 133 | 136 | **67** | the DAC's letters and the comparators' - this part has neither block, so eight of the eighteen letters are compiled out ([adc.md](adc.md)) |
 | `test_stm32_serial` | 121 (+ y/w/v) | 112 | **79** (+ `y` 1, `v` 2, `w` 0), counted on the one image it was before it outgrew the part and before its letters timed the wire | USART2 is a basic instance here (no kernel-clock multiplexer, no wake), LPUART1's only bonded pads are the console's, and there is no LPUART2 |
 | `test_stm32_spi` | 106 (the STM32F446RE as peer) | - | - | the eleven self-link letters, compiled out: SPI2's four pads are bonded to no pin of the LQFP32, so that instrument cannot exist here at any wiring; the peer letters want a paired board, and none is |
 | `test_stm32_i2c` | 198 (+ `w` 35) | 54 (peer) | **54** (peer), not re-counted on its group images | the self-link letters, skipped on the probe's answer like everywhere else - this package does bond I2C2's PA11/PA12, so what rules them out is the desk and not the plastic |

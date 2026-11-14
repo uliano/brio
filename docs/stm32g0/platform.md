@@ -452,7 +452,10 @@ listing) - ST's
   every time; a deadline one tick away sleeps 980 us and lands on it;
   a due deadline returns in 7 us with no interrupt; with nothing armed
   the sleep lasts until a foreign wake (the RTC's wake-up timer,
-  232 ms) and the LPTIM never speaks.
+  250.1..250.3 ms, inside a band of 244385..254429 us derived from
+  30.6.6's first period, up to a tick of the nap's own start and table
+  44 on TIM2's scale; the console drained before the timer is armed) and
+  the LPTIM never speaks.
 - **The handshake the errata force**: two arms 150 us apart - the
   second finds CMPOK standing, pends the vector once and declines; the
   handler's clear is visible on the APB side in 0 us; the third arm

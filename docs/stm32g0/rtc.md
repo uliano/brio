@@ -353,8 +353,11 @@ no pad.
   one count and no longer than the period).
 - **THE SMOOTH CALIBRATION DOES NOT REACH THE DIVIDED RTCCLK WAKE-UP
   CLOCKS.** On ck_spre the full swing between CALP and CALM = 511
-  measures **1022 ppm** where 30.3.13's range is 975 (-487.1 .. +488.5),
-  with CALM lengthening the second and CALP shortening it. The same two
+  measures **734..1244 ppm** over ten runs where 30.3.13's range is 975
+  (-487.1 .. +488.5), with CALM lengthening the second and CALP
+  shortening it every time; the size is printed, not judged, because
+  its two legs are weighed seconds apart on a ruler over HSI16, whose
+  wander over seconds no table bounds. The same two
   settings measured on a wake-up period built from RTCCLK/16 give 62657
   ticks BOTH TIMES - a swing of exactly zero. The calibrator masks
   pulses into the PRESCALERS, so the calendar moves and the divided
@@ -412,11 +415,21 @@ no pad.
   a 50 Hz reference on the pad it measures 64006056 against the
   64000000 that fifty reference periods are by construction. A 60 Hz
   reference gives 64004301 against 63999960 - one detector, both of the
-  chapter's mains rates, the same corrected second. And the control is
-  the strongest part: **a HALTED reference gives the crystal's second
-  back with REFCKON still set** (64126458 ticks), so the correction is
-  an EDGE and not a mode, exactly as 30.3.12's "the calendar is updated
-  continuously based solely on the LSE clock" says.
+  chapter's mains rates, the same corrected second. Each is judged
+  within 94000 ticks of the reference's second, a bound derived from
+  30.3.12's narrow window: every corrected update lands within 1.5
+  ck_apre periods of a reference edge, and a mean of eight spans is its
+  two end stamps' difference over eight. The two legs need the core and
+  the crystal to agree within that same window (a reference made on the
+  core walks out of it in one second otherwise); DS13560 table 44 lets
+  the HSI16 sit three times farther off, so a die that does is skipped
+  with the figure, where this one sits about 0.2 % apart. And the
+  control is the strongest part: **a HALTED reference gives the
+  crystal's second back with REFCKON still set** (64126458 ticks, judged
+  on the crystal's own band, its distance from the first leg's figure
+  printed), so the correction is an EDGE and not a mode, exactly as
+  30.3.12's "the calendar is updated continuously based solely on the
+  LSE clock" says.
 - **The correction is quantized at one ck_apre period**, which nothing
   states but the mechanism implies: 30.3.12 reloads the ASYNCHRONOUS
   prescaler, so a corrected second's spread across four measurements is

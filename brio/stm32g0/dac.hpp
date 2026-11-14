@@ -493,9 +493,9 @@ public:
      * And with LSI stopped nothing says so. Measured with LSIRDY read
      * clear: the channel does not stop sampling - the pad carries the
      * value to within a count, exactly as the plain buffered mode does,
-     * the times land, and BWST never stands. So the mode degrades to
-     * plain buffered in silence and there is no bit an application can
-     * read to tell the two apart.
+     * the times land, and BWST never stands. So on the die measured (an
+     * STM32G0B1RE) the mode degraded to plain buffered in silence, and no
+     * bit the chapter describes lets an application tell the two apart.
      * Whoever selects a sample-and-hold mode owns the LSI.
      *
      * Sample and hold are 10-bit fields, refresh is 8. The write crosses

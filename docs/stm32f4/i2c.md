@@ -789,7 +789,9 @@ in band over the bus under test: letter `n`, 13 verdicts, green in every run of
   `init()` and no `recover()` a read finds the register as the answered requests left it
   and a write and its read-back are exact. FMPI2C1 as the client does not reach this path:
   its hold at its address, 8 ms, delays the first tenure's own completion to 8007 us, no
-  STOP stands, and the request behind it is `i2c_ok`.
+  STOP stands, and the request behind it is `i2c_ok`. Judged: the completion no earlier than
+  the 8000 us the hold lasts (ADDR holds SCL until its vector clears it, 23.4.8); the 7 us
+  past it, two vectors and the acknowledge's clock, is printed.
 
 **A read under `dma` ends on its stream** (`test_stm32f4_i2c` letters `o` and `p` on the
 self-link, ten and fifteen runs, 180 MHz with 45 MHz on APB1). In that phase the event vector

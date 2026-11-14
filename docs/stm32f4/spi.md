@@ -1516,10 +1516,15 @@ PCLK/4, every data frame exact.
 ## Not covered yet
 
 Driver gaps:
-- The resource's own waits stay a count of turns: `Spi<n>`'s `wait_until()`, under
-  `disable()`, bounds at 400 000 polls, a verb below the host, which has no rate of
-  its own to derive from and whose answer the host drops. A rate change behind a
-  stalled block pays it once; deriving it means handing the resource the applied rate.
+- The resource's own waits are bounded for the slowest rate, not the applied one:
+  `Spi<n>::disable()` bounds each of its two waits at one 16-bit frame at the /256
+  prescaler and the widest APB ratio (`frame_spins`, 9 363 turns), `I2s<n>::disable()`
+  at one channel slot at I2SDIV 255 with the master clock out and a kernel clock no
+  slower than a PLL's or the HSI's (`slot_spins`, 121 472; an I2S_CKIN input or the
+  F446's HSE below that is the caller's to wait out), each a verb below the host,
+  which has no rate of its own and whose answer the host drops. A rate change behind
+  a stalled block pays it once; a bound at the applied rate means handing the
+  resource that rate. A client's frame is its host's, which no budget here can know.
 - No CRC phase in `SpiHost`'s Request or in `SpiClient`'s runs: the unit
   is the resource's (`crc_polynomial`, `crc_enable`, `crc_next`, the two
   accumulators, CRCERR), measured on the wire by hand from both ends

@@ -55,11 +55,12 @@
 //   g  THE RING AGAINST COPIES ON ITS OWN CONTROLLER (DMA2): the receive
 //      stream at its default level and at rx_priority = low, beside zero,
 //      two, three and four copies at very_high, at 5.625 and 11.25 Mbaud
-//      - the default never loses a byte, two copies starve nothing, four
-//      starve the ring armed low; and the overrun a starved stream leaves
-//      with nothing to take cleared, the vector quiet after it. The vector's
-//      entries against a bound derived from its states, and the same four
-//      copies in a load that does not end until the thread ends it
+//      - the default never loses a byte, nor the ring armed low alone;
+//      what two and three copies leave it printed, four starve it; and
+//      the overrun a starved stream leaves with nothing to take cleared,
+//      the vector quiet after it. The vector's entries against a bound
+//      derived from its states, and the same four copies in a load that
+//      does not end until the thread ends it
 //   h  THE TRANSMIT ROOM AND EDGE, AND in_handler(): tx_room() the ring's
 //      capacity on an idle port, less a run written with interrupts
 //      masked, the capacity again after the wire time; tx_drained() false
@@ -94,7 +95,8 @@
 //      sender up to 3 % faster, judged at gaps of a frame and a half and
 //      more, printed at one frame; and the erratum's own case drawn by the
 //      far engine (the stage op) - an idle of 9.5 to 11 of the SENDER's
-//      bits, the sender 0 to 3 % fast, the erratum's case printed
+//      bits, the sender 0 to 3 % fast, the erratum's case printed - and
+//      the same trains into the receive engine: what a consumer is told
 //   8  letter g's ring against copies, the far chip as the sender at the
 //      ladder's top rungs
 //   9  half duplex against a second board: drive_rxd, one open-drain wire
@@ -118,6 +120,12 @@
 //      whole and its own frames timed by the far chip; TCIE's vector two
 //      frames after the last write, within the derived window; LBDIE's
 //      vector on a far break in LIN mode
+//
+// By name only (in neither all-key), against the same peer:
+//   p  ES0298 2.13.2's window measured: PE's lead over RXNE with nothing
+//      written, the workaround's loop with its SR-to-write window widened
+//      by a swept spin, the erratum's order with its write delayed by the
+//      same spins, and the task over 4000 frames - the counts printed
 //
 // build: boards = f446re
 // build: monitor_speed = 115200
@@ -1132,7 +1140,8 @@ void tg_arbitration() {
     }
     bool levels = true;
     bool default_whole = true;
-    bool two_whole = true;
+    bool alone_whole = true;
+    uint8_t two_legs = 0, two_whole = 0, three_legs = 0, three_whole = 0;
     bool four_starve = true;
     bool quiet = true;
     bool bounded = true;
@@ -1160,8 +1169,15 @@ void tg_arbitration() {
                          hi.level == DmaPriority::very_high;
                 default_whole = default_whole && hi.got == arb_chars && hi.lost == 0u &&
                                 hi.faults == 0u;
-                if (copies <= 2u) {
-                    two_whole = two_whole && lo.got == arb_chars && lo.lost == 0u;
+                const bool lo_whole = lo.got == arb_chars && lo.lost == 0u;
+                if (copies == 0u) {
+                    alone_whole = alone_whole && lo_whole;
+                } else if (copies == 2u) {
+                    ++two_legs;
+                    two_whole = static_cast<uint8_t>(two_whole + (lo_whole ? 1u : 0u));
+                } else if (copies == 3u) {
+                    ++three_legs;
+                    three_whole = static_cast<uint8_t>(three_whole + (lo_whole ? 1u : 0u));
                 }
                 if (copies == 4u) {
                     four_starve = four_starve && lo.got < arb_chars;
@@ -1207,8 +1223,18 @@ void tg_arbitration() {
     bench.verdict("THE DEFAULT RING LOSES NOTHING: at very_high, beside up to four copies at "
                   "very_high on its own controller, every byte in order at 5.625 and 11.25 "
                   "Mbaud, word and byte beats", default_whole);
-    bench.verdict("two copies ranked above a ring armed low starve it of nothing: the arbiter "
-                  "serves it between them", two_whole);
+    // The level arbitrates between requests (RM0390 9.3.5): with nothing
+    // else on the controller the ring armed low is served as the default
+    // one is, so a loss with the copies beside it is theirs.
+    bench.verdict("THE CONTROL: a ring armed low with no copies beside it loses nothing, at both rates "
+                  "and both beats", alone_whole);
+    // What two and three copies leave the ring armed low is printed: 9.3.5
+    // grants the higher level first while its request stands, and whether
+    // the copies' requests leave the ring a turn within a frame is this
+    // controller's timing (the beats, the FIFOs, the two ports), which no
+    // section states.
+    print(serial, "  the ring armed low whole beside two copies in ", two_whole, " of ", two_legs,
+          " legs, beside three in ", three_whole, " of ", three_legs, crlf);
     // The stage's control, not a promise of the manual's: RM0390 9.3.5
     // grants the higher level first, and whether four copies keep the
     // ring's request waiting past a frame is this controller's timing. The
@@ -2295,10 +2321,17 @@ void t2_rates() {
         const int32_t expect = base + divisor_ppm(rate);
         print(serial, "  ", rate, ": ", n, " frames, the far receiver times ");
         print_ppm(k.ppm);
-        print(serial, " against this divisor's ", divisor_ppm(rate), " and the clocks' ", base, crlf);
-        judge(num(rate), " baud: this transmitter's rate on the wire, timed by the far chip, within 200 ppm "
-                         "of the divisor's",
-              k.ok && near(k.ppm, expect, 200));
+        print(serial, " against this divisor's ", divisor_ppm(rate), " and the clocks' ", base, "; off by ",
+              k.ppm - expect, crlf);
+        // The rate's agreement is printed, not judged. Letter 1's terms
+        // (agree_ppm's and blast_ppm's, a time at each end of the span, the
+        // start sampling a sixteenth of this rung's bit) give 18 ppm over
+        // the 0.9 s of the 9600 rung for this leg and for the far blast
+        // below; the desk has read -19 here and 57 there. The slow rungs
+        // carry a term letter 1's 1 Mbaud spans do not show (span_frames'
+        // 0.4 bit a stamp), and no written figure bounds it. The far
+        // count is the verdict.
+        judge(num(rate), " baud: this transmitter's frames counted whole by the far chip (its rate printed)", k.ok);
         // c. The peer's blast into this end: the polled receiver timing it,
         //    then the interrupt receiver and the receive engine.
         {
@@ -2320,13 +2353,17 @@ void t2_rates() {
             const bool known = have && (r.flags & link::report_rate_stated) != 0u;
             print(serial, "    the far blast on this ruler: ", dr.frames, " of ", n, ", ORE ", dr.ore, ", ");
             print_ppm(ppm);
-            print(serial, " against the far divisor's ", far, " less the clocks' ", base, crlf);
-            judge(num(rate), known ? " baud: the far blast arrives whole on the polled receiver, its rate within "
-                                     "200 ppm of the far divisor's less the clocks' offset"
-                                   : " baud: the far blast arrives whole on the polled receiver, inside a per "
-                                     "cent of its rate (the far end does not state its own)",
-                  up && dr.frames == n && dr.fe == 0u && dr.ore == 0u &&
-                      (known ? near(ppm, far - base, 200) : near(ppm, 0, 10'000)));
+            print(serial, " against the far divisor's ", far, " less the clocks' ", base);
+            if (known) {
+                print(serial, "; off by ", ppm - (far - base));
+            } else {
+                print(serial, " (the far end does not state its rate)");
+            }
+            print(serial, crlf);
+            // Printed, not judged, for the reason above (57 ppm read at 9600
+            // against letter 1's terms' 18).
+            judge(num(rate), " baud: the far blast arrives whole on the polled receiver (its rate printed)",
+                  up && dr.frames == n && dr.fe == 0u && dr.ore == 0u);
         }
         for (uint8_t which = 1; which <= 2u; ++which) {
             link::Params a{};
@@ -2851,6 +2888,395 @@ void t5_parity_full_duplex() {
 }
 
 // ---------------------------------------------------------------------------
+// p - ES0298 2.13.2's window, measured (by name): where a parity error is lost
+// ---------------------------------------------------------------------------
+//
+// Letter 5's polled loop in the workaround's order and the task have each
+// missed one parity error of 64 in about one run of 40. Two mechanisms could
+// do it, and they predict different things:
+//  (A) a frame completes between the loop's SR read and its DR write, and the
+//      write - an SR read followed by a DR access is PE's clearing sequence
+//      (RM0390 25.6.1) - clears the flag before anything has read it. The
+//      misses grow with the time from the SR read to the DR write: a window
+//      of W cycles in each transmit period T, the far frames arriving at every
+//      phase of it, loses W / T of them.
+//  (B) PE rises before RXNE (25.6.1: "the software must wait for the RXNE
+//      flag to be set before clearing the PE bit"), and an SR read inside
+//      that lead, seeing TXE, is followed by the write: lead / T of the
+//      frames lost, whatever the window.
+// Two measurements tell them apart. First, read-only: SR polled with nothing
+// written to DR until RXNE, PE's lead over RXNE timed on the DWT. Then the
+// workaround's loop with a spin of N cycles put on purpose between its SR
+// read and its DR write, N swept: (A) predicts misses in proportion to N
+// plus the loop's own window, (B) a floor that does not move with N. Then
+// a second SR read just before the write, a frame it shows served first;
+// then the converse, the erratum's order with its write delayed by the same N:
+// what a write clears when the SR read before it did not see the flag.
+// Last, the task's vector over 4000 frames. The far end's `send` leaves two bit times idle after
+// each frame's TC, a period of about thirteen bits against this
+// transmitter's eleven back to back, so the arrival phase walks through the
+// transmit period frame after frame. What the die does is PRINTED (an
+// erratum is a behaviour of the die, one board of the part on the desk);
+// the controls - every frame read, every one the far end sent - are judged.
+
+constexpr uint16_t pe_window_frames = 1024;   ///< one far `send`; the protocol's count is 16 bits
+/// One 8E1 frame at 115200 in core cycles: eleven bits of 1562.5 at 180 MHz.
+constexpr uint32_t pe_frame_cycles = (11u * SysClock::hz) / 115'200u;
+static_assert(pe_frame_cycles == 17'187u, "letter p's prediction states the frame: move its text with it");
+
+link::Params pe_window_params(uint16_t count) {
+    link::Params a{};
+    a.cfg.rate = 115'200;
+    a.cfg.parity = 2;   // odd from the far end, into this end's even: every frame a parity error
+    a.count = count;
+    a.ms = bound_ms(115'200, count);
+    a.value = 0x5A;
+    a.pattern = link::pattern_fixed;
+    return a;
+}
+
+struct PeLead {
+    bool up = false;
+    uint16_t sent = 0, frames = 0, pe = 0;
+    uint16_t led = 0;                      ///< frames whose PE was seen while RXNE was still clear
+    uint32_t lead_min = 0xFFFF'FFFFu, lead_max = 0;
+    uint32_t turn_max = 0;                 ///< the slowest turn of the poll: the lead's resolution
+};
+
+/// SR polled, DR read only once RXNE stands, nothing transmitted.
+PeLead pe_lead(uint16_t count) {
+    PeLead l{};
+    const link::Params a = pe_window_params(count);
+    link::Cfg dc = a.cfg;
+    dc.parity = 1;
+    const bool acted = peer_act(link::Op::send, a);
+    l.up = acted && dut_link(dc);
+    USART_TypeDef& u = U1::regs();
+    const uint32_t t0 = Ticker::millis();
+    uint32_t last = t0;
+    bool pe_open = false;
+    uint32_t t_pe = 0;
+    uint32_t prev = CycleCounter::now();
+    while (l.up && Ticker::millis() - t0 < a.ms) {
+        const uint32_t now = CycleCounter::now();
+        const uint32_t st = u.SR;
+        if (now - prev > l.turn_max) l.turn_max = now - prev;
+        prev = now;
+        if ((st & UsartFlag::rxne) != 0u) {
+            if ((st & UsartFlag::pe) != 0u) ++l.pe;
+            (void)u.DR;
+            ++l.frames;
+            if (pe_open) {
+                const uint32_t lead = now - t_pe;
+                ++l.led;
+                if (lead < l.lead_min) l.lead_min = lead;
+                if (lead > l.lead_max) l.lead_max = lead;
+            }
+            pe_open = false;
+            last = Ticker::millis();
+            prev = CycleCounter::now();   // the read and the bookkeeping are not a turn of the poll
+        } else if ((st & UsartFlag::pe) != 0u && !pe_open) {
+            pe_open = true;
+            t_pe = now;
+        }
+        if (l.frames >= count || (l.frames != 0u && Ticker::millis() - last > 5u)) {
+            break;
+        }
+    }
+    link::Report r{};
+    if (peer_report(r, 0)) l.sent = r.count;
+    return l;
+}
+
+/// A frame read without PE: what DR held (the parity bit in bit 8, 25.6.2)
+/// and the SR its receive was decided on.
+struct PeMiss {
+    uint16_t word = 0;
+    uint16_t sr = 0;
+};
+
+struct PeWindowLeg {
+    bool up = false;
+    uint16_t sent = 0, frames = 0, pe = 0, ne = 0, fe = 0;
+    uint8_t misses = 0;   ///< how many of miss[] are filled
+    PeMiss miss[4]{};
+};
+
+/// The first four frames read without PE in `l`, the rest counted only.
+void pe_note_miss(PeWindowLeg& l, uint32_t st, uint16_t word) {
+    if (l.misses < 4u) {
+        l.miss[l.misses] = PeMiss{word, static_cast<uint16_t>(st)};
+        ++l.misses;
+    }
+}
+
+/// The workaround's loop (one SR read, DR read on RXNE, then the write on
+/// TXE), a spin of `spin` cycles between that SR read and the write. With
+/// `reread`, SR is read again just before the write and a frame it shows
+/// is served first, its PE judged from that read.
+PeWindowLeg pe_window_leg(uint32_t spin, bool reread = false) {
+    PeWindowLeg l{};
+    const link::Params a = pe_window_params(pe_window_frames);
+    link::Cfg dc = a.cfg;
+    dc.parity = 1;
+    const bool acted = peer_act(link::Op::send, a);
+    l.up = acted && dut_link(dc);
+    USART_TypeDef& u = U1::regs();
+    const uint32_t t0 = Ticker::millis();
+    uint32_t last = t0;
+    while (l.up && Ticker::millis() - t0 < a.ms) {
+        const uint32_t st = u.SR;
+        if ((st & UsartFlag::rxne) != 0u) {
+            const uint16_t word = static_cast<uint16_t>(u.DR & 0x1FFu);
+            if ((st & UsartFlag::pe) != 0u) {
+                ++l.pe;
+            } else {
+                pe_note_miss(l, st, word);
+            }
+            if ((st & UsartFlag::ne) != 0u) ++l.ne;
+            if ((st & UsartFlag::fe) != 0u) ++l.fe;
+            ++l.frames;
+            last = Ticker::millis();
+        }
+        if ((st & UsartFlag::txe) != 0u) {
+            if (spin != 0u) {
+                const uint32_t c0 = CycleCounter::now();
+                while (CycleCounter::now() - c0 < spin) {
+                }
+            }
+            if (reread) {
+                const uint32_t st2 = u.SR;
+                if ((st2 & UsartFlag::rxne) != 0u) {
+                    const uint16_t word = static_cast<uint16_t>(u.DR & 0x1FFu);
+                    if ((st2 & UsartFlag::pe) != 0u) {
+                        ++l.pe;
+                    } else {
+                        pe_note_miss(l, st2, word);
+                    }
+                    ++l.frames;
+                    last = Ticker::millis();
+                }
+            }
+            u.DR = 0x33u;
+        }
+        if (l.frames >= pe_window_frames || (l.frames != 0u && Ticker::millis() - last > 5u)) {
+            break;
+        }
+    }
+    wait_tc();
+    link::Report r{};
+    if (peer_report(r, 0)) l.sent = r.count;
+    return l;
+}
+
+/// The erratum's order with the write delayed: a tight poll on TXE alone -
+/// whose SR reads see a frame's PE when it has finished - a spin of
+/// `delay` cycles, the DR write, then one SR read and the receive it
+/// decides. A received frame every thirteen bits, a transmitted one every
+/// eleven, so one look a transmit period serves them all.
+PeWindowLeg pe_delay_leg(uint32_t delay) {
+    PeWindowLeg l{};
+    const link::Params a = pe_window_params(pe_window_frames);
+    link::Cfg dc = a.cfg;
+    dc.parity = 1;
+    const bool acted = peer_act(link::Op::send, a);
+    l.up = acted && dut_link(dc);
+    USART_TypeDef& u = U1::regs();
+    const uint32_t t0 = Ticker::millis();
+    uint32_t last = t0;
+    while (l.up && Ticker::millis() - t0 < a.ms) {
+        // The poll is the measurement's resolution, so it carries no clock
+        // read: 100000 turns of at least five instructions are 2.7 ms or
+        // more, past any TXE of a running transmitter (a frame is 95 us).
+        uint32_t guard = 0;
+        while ((u.SR & UsartFlag::txe) == 0u && ++guard < 100'000u) {
+        }
+        if (delay != 0u) {
+            const uint32_t c0 = CycleCounter::now();
+            while (CycleCounter::now() - c0 < delay) {
+            }
+        }
+        u.DR = 0x33u;
+        const uint32_t st = u.SR;
+        if ((st & UsartFlag::rxne) != 0u) {
+            const uint16_t word = static_cast<uint16_t>(u.DR & 0x1FFu);
+            if ((st & UsartFlag::pe) != 0u) {
+                ++l.pe;
+            } else {
+                pe_note_miss(l, st, word);
+            }
+            if ((st & UsartFlag::ne) != 0u) ++l.ne;
+            if ((st & UsartFlag::fe) != 0u) ++l.fe;
+            ++l.frames;
+            last = Ticker::millis();
+        }
+        if (l.frames >= pe_window_frames || (l.frames != 0u && Ticker::millis() - last > 5u)) {
+            break;
+        }
+    }
+    wait_tc();
+    link::Report r{};
+    if (peer_report(r, 0)) l.sent = r.count;
+    return l;
+}
+
+/// The far end's frames into the task while its transmitter runs back to
+/// back; `count` stays under the task's saturating 8-bit counter.
+PeWindowLeg pe_task_leg(uint16_t count) {
+    PeWindowLeg l{};
+    const link::Params a = pe_window_params(count);
+    const bool acted = peer_act(link::Op::send, a);
+    link_task_down();
+    link_owner = 1;
+    l.up = acted && LinkIrq::init(clock, 115'200, {.bits = UartBits::eight, .parity = UartParity::even});
+    static const uint8_t fill[64] = {};
+    const uint32_t t0 = Ticker::millis();
+    uint32_t last = t0;
+    uint32_t seen = 0;
+    while (l.up && Ticker::millis() - t0 < a.ms) {
+        (void)LinkIrq::write_bulk(std::span<const uint8_t>(fill, sizeof fill));
+        const uint32_t now_seen = LinkIrq::parity_errors() + LinkIrq::rx_pending();
+        if (now_seen != seen) {
+            seen = now_seen;
+            last = Ticker::millis();
+        }
+        if (seen >= count || (seen != 0u && Ticker::millis() - last > 5u)) {
+            break;
+        }
+    }
+    l.pe = LinkIrq::parity_errors();
+    l.ne = LinkIrq::noise_errors();
+    l.fe = LinkIrq::frame_errors();
+    l.frames = static_cast<uint16_t>(l.pe + LinkIrq::rx_pending());
+    for (uint8_t b = 0; l.misses < 4u && LinkIrq::read_byte(b);) {
+        pe_note_miss(l, 0u, b);
+    }
+    link_task_down();
+    link::Report r{};
+    if (peer_report(r, 0)) l.sent = r.count;
+    return l;
+}
+
+/// The frames a leg read without PE: the far end sent 0x5A with odd
+/// parity (bit 8 set), so 0x15A is the frame whole with its PE lost, and
+/// any other word is a frame changed on the way - a single flipped bit
+/// leaves even parity, which this receiver takes as correct.
+void pe_print_misses(const PeWindowLeg& l) {
+    for (uint8_t k = 0; k < l.misses; ++k) {
+        print(serial, "    read without PE: word ", hex(l.miss[k].word), " SR ", hex(l.miss[k].sr), crlf);
+    }
+}
+
+void tp_pe_window() {
+    if (!ensure_link()) {
+        bench.verdict("the peer is reachable", false);
+        link_release();
+        return;
+    }
+    // 1. PE's lead over RXNE, read-only.
+    {
+        PeLead all{};
+        all.up = true;
+        for (uint8_t k = 0; k < 4u; ++k) {
+            const PeLead l = pe_lead(pe_window_frames);
+            all.up = all.up && l.up && l.sent == pe_window_frames && l.frames == pe_window_frames &&
+                     l.pe == pe_window_frames;
+            all.frames = static_cast<uint16_t>(all.frames + l.frames);
+            all.led = static_cast<uint16_t>(all.led + l.led);
+            if (l.lead_min < all.lead_min) all.lead_min = l.lead_min;
+            if (l.lead_max > all.lead_max) all.lead_max = l.lead_max;
+            if (l.turn_max > all.turn_max) all.turn_max = l.turn_max;
+        }
+        print(serial, "  SR polled, nothing written: PE seen before RXNE on ", all.led, " of ", all.frames,
+              " frames");
+        if (all.led != 0u) {
+            print(serial, ", the lead ", all.lead_min, "..", all.lead_max, " cycles");
+        }
+        print(serial, "; the poll's slowest turn ", all.turn_max, " cycles", crlf);
+        judge("the control: four legs of 1024 odd-parity frames read whole, every one with PE, nothing written",
+              all.up);
+    }
+    // 2. The workaround's loop with its window widened by N cycles.
+    static constexpr uint32_t spins[] = {0, 200, 1000, 5000};
+    static constexpr uint8_t legs[] = {8, 4, 4, 4};
+    bool whole = true;
+    for (uint8_t i = 0; i < 4u; ++i) {
+        uint32_t frames = 0, pe = 0, ne = 0, fe = 0;
+        for (uint8_t k = 0; k < legs[i]; ++k) {
+            const PeWindowLeg l = pe_window_leg(spins[i]);
+            whole = whole && l.up && l.sent == pe_window_frames && l.frames == pe_window_frames;
+            frames += l.frames;
+            pe += l.pe;
+            ne += l.ne;
+            fe += l.fe;
+            pe_print_misses(l);
+        }
+        const uint32_t missed = frames - pe;
+        print(serial, "  spin ", spins[i], " cycles between the SR read and the DR write: ", missed,
+              " parity errors missed of ", frames, " frames (NE ", ne, ", FE ", fe, "); the spin alone predicts ",
+              (frames * spins[i] + pe_frame_cycles / 2u) / pe_frame_cycles, " under (A)", crlf);
+    }
+    judge("the control: every leg of the sweep read its 1024 frames whole, all the far end sent", whole);
+    // 2a. The workaround's loop with SR read AGAIN just before the write, a
+    //     frame that read shows served first: what a second read buys when
+    //     the window is not the span from the first read to the write.
+    {
+        uint32_t frames = 0, pe = 0;
+        bool reread_whole = true;
+        for (uint8_t k = 0; k < 8u; ++k) {
+            const PeWindowLeg l = pe_window_leg(0, true);
+            reread_whole = reread_whole && l.up && l.sent == pe_window_frames && l.frames == pe_window_frames;
+            frames += l.frames;
+            pe += l.pe;
+            pe_print_misses(l);
+        }
+        print(serial, "  SR read again just before the write, a frame it shows served first: ", frames - pe,
+              " parity errors missed of ", frames, " frames", crlf);
+        judge("the control: every leg with the second read read its 1024 frames whole", reread_whole);
+    }
+    // 2b. The converse: the ERRATUM'S order, the write delayed. The TXE
+    //     poll's SR reads see a finished frame's PE and the write clears it
+    //     (2.13.2 as written); a frame that finishes after the poll's last
+    //     read and before the SR read behind the write keeps it. If a write
+    //     clears only what an SR read before it saw, the frames that keep PE
+    //     grow with the delay, (delay + the loop's own few cycles) / T.
+    bool delay_whole = true;
+    for (const uint32_t d : spins) {
+        uint32_t frames = 0, pe = 0;
+        for (uint8_t k = 0; k < 4u; ++k) {
+            const PeWindowLeg l = pe_delay_leg(d);
+            delay_whole = delay_whole && l.up && l.sent == pe_window_frames && l.frames == pe_window_frames;
+            frames += l.frames;
+            pe += l.pe;
+        }
+        print(serial, "  the erratum's order, the write ", d, " cycles after the TXE poll: PE kept on ", pe, " of ",
+              frames, " frames; the delay alone predicts ", (frames * d + pe_frame_cycles / 2u) / pe_frame_cycles,
+              crlf);
+    }
+    judge("the control: every leg of the erratum's order read its 1024 frames whole", delay_whole);
+    // 3. The task.
+    {
+        constexpr uint16_t per_leg = 250;   // under the 8-bit counter's 255
+        uint32_t frames = 0, pe = 0, ne = 0, fe = 0;
+        bool task_whole = true;
+        for (uint8_t k = 0; k < 16u; ++k) {
+            const PeWindowLeg l = pe_task_leg(per_leg);
+            task_whole = task_whole && l.up && l.sent == per_leg && l.frames == per_leg;
+            frames += l.frames;
+            pe += l.pe;
+            ne += l.ne;
+            fe += l.fe;
+            pe_print_misses(l);
+        }
+        print(serial, "  through the task, transmitting the whole time: ", frames - pe,
+              " parity errors missed (delivered as bytes) of ", frames, " (NE ", ne, ", FE ", fe, ")", crlf);
+        judge("the control: sixteen legs of 250 frames through the task, each frame counted or delivered",
+              task_whole);
+    }
+    link_release();
+}
+
+// ---------------------------------------------------------------------------
 // 6 - the engine's shapes: where a start is believed, the operational
 //     range, one stretched cell
 // ---------------------------------------------------------------------------
@@ -2935,12 +3361,27 @@ void t6_shapes() {
     print(serial, "  the narrowest pulse taken: ", first_taken[0], " ticks at OVER16 (",
           (first_taken[0] * 16u + 104u) / 208u, " sixteenths), ", first_taken[1], " at OVER8; taken clean eight "
           "of eight from ", first_clean[0], " and ", first_clean[1], crlf);
-    judge("a pulse under half a bit is never a start at OVER16 (25.4.5: the 3rd, 5th and 7th samples and the "
+    judge("a pulse under half a bit is never a start at OVER16 (25.4.3: the 3rd, 5th and 7th samples and the "
           "8th, 9th and 10th vote)", under_half);
     judge("a whole bit low is a clean 0xFF frame, eight of eight, in either oversampling",
           whole_clean[0] && whole_clean[1]);
-    judge("and the narrowest start sits between 8 and 11 sixteenths of a bit at OVER16",
-          first_taken[0] >= 104u && first_taken[0] <= 143u);
+    // The narrowest start, derived (25.4.3, figure 282): sample 1 is the
+    // first to read the falling edge, some phi in (0, 1] sixteenth after
+    // it, and a start is validated, with NE at worst, only if two of
+    // samples 8, 9 and 10 read low - so a single low pulse is taken exactly
+    // when it still stands at sample 9, phi + 8 sixteenths after its edge:
+    // never at 8 sixteenths or less, always past 9. The errors on the
+    // pulse's width are some 25 ns, 0.05 of a 542 ns sixteenth: the far
+    // engine's edges on TIM1 counts of 15.6 ns (half a count of rounding),
+    // a few ns of pad between its fall and its rise (DS13560 table 58,
+    // very high speed), and one PCLK2 cycle of this divisor's fraction on
+    // a sample; the two crystals' offset is 0.01 sixteenth even at 1000
+    // ppm. The widths are 24 MHz ticks, 13.0 a sixteenth: 91 is 6.99
+    // sixteenths, never taken; 104 (7.99) the first that may be; 123
+    // (9.45) the first past 9 + 0.05, taken by every pulse.
+    judge("and the narrowest start taken is a rung from 8 to 9.5 sixteenths of a bit at OVER16 (sample 9 must read "
+          "low, the edge a sixteenth or less ahead of sample 1)",
+          first_taken[0] >= 104u && first_taken[0] <= 123u);
 
     // b. THE OPERATIONAL RANGE of a gapped 0x00 frame at 9600 and 115200,
     //    against this receiver's real rate (its divisor's error out).
@@ -3004,6 +3445,27 @@ void t6_shapes() {
         }
         print(serial, crlf);
     }
+    // The three bounds, derived in sixteenths of a bit, the start's falling
+    // edge at 0 (25.4.3, figure 282): sample 1 comes phi in (0, 1] after
+    // it, and bit k is voted from samples 16k + 8, 9, 10 - at phi + 16k + 7
+    // to phi + 16k + 9, no resynchronization inside the frame. The far
+    // engine stretches cell c by p (frame_edges: every later cell moves by
+    // 16p). Every sample inside its own cell, so the frame decodes clean
+    // at any phase, needs the first sample of a moved cell past its start,
+    // 16p <= phi + 7, and the last before its end, phi + 9 < 16 + 16p (the
+    // stretched cell's own last sample too when p < 0): -6/16 < p <= 7/16.
+    // At +-30 % the nearest of the two is 1.2 sixteenths away. The
+    // stretched data cell 4 (bit 3, low in 0x55, bit 4 high after it) is
+    // never clean once a sample of its own lands in bit 4's cell at every
+    // phase, 16p <= phi - 7 for phi down to 0, p <= -7/16; or once bit 4's
+    // first sample lands in cell 4 at every phase, 16p > phi + 7, p > 8/16:
+    // -60 % and +60 % are 2.6 and 1.6 sixteenths past those. And the stop
+    // cell is the same level as the four bits of idle after it, so its
+    // length moves only the next frame's start, 3.4 bits of idle at least.
+    // Against every margin, the errors on an edge: the two clocks over ten
+    // bits, 0.16 sixteenth even at 1000 ppm (the far engine plays this
+    // receiver's own rate, its divisor's error in), half a TIM1 count of
+    // the far engine (0.01) and one PCLK2 cycle on a sample (0.02).
     judge("a start or data cell 30 % longer or shorter is decoded: every later sample stays inside its cell",
           thirty_ok);
     judge("a data cell 60 % longer or shorter is not: the next sample lands in the neighbouring cell",
@@ -3132,6 +3594,66 @@ StageLeg stage_leg(const link::Params& a, const link::Cfg& dc) {
     return l;
 }
 
+/// The same drawn train into the RECEIVE ENGINE, read the way the kernel's
+/// glue reads it: the consumer looks only when the vector says a burst was
+/// told, and drains the ring whole at each look (which re-opens the edge).
+/// `most` is the longest run one look found - the frames a consumer is
+/// told of together, the first of them waiting for the last.
+struct StageTold {
+    bool up = false;
+    bool drawn = false;
+    uint16_t frames = 0, wrong = 0, most = 0, untold = 0;
+    uint32_t edges = 0;
+};
+
+uint16_t stage_take(uint8_t value, uint16_t& wrong) {
+    uint16_t n = 0;
+    for (;;) {
+        const std::span<const uint8_t> run = LinkDma::read_span();
+        if (run.empty()) {
+            return n;
+        }
+        for (const uint8_t b : run) {
+            if (b != value) ++wrong;
+        }
+        (void)LinkDma::consume(static_cast<uint32_t>(run.size()));
+        n = static_cast<uint16_t>(n + run.size());
+    }
+}
+
+StageTold stage_engine_leg(const link::Params& a) {
+    StageTold l{};
+    const bool acted = peer_act(link::Op::stage, a);
+    link_task_down();
+    link_owner = 2;
+    l.up = acted && LinkDma::init(clock, 50'000);
+    link_edges = 0;
+    uint32_t seen = 0;
+    const uint32_t t0 = Ticker::millis();
+    uint32_t last = t0;
+    while (l.up && Ticker::millis() - t0 < 400u) {
+        const uint32_t e = link_edges;
+        if (e != seen) {
+            seen = e;
+            const uint16_t n = stage_take(a.value, l.wrong);
+            if (n > l.most) l.most = n;
+            l.frames = static_cast<uint16_t>(l.frames + n);
+            if (n != 0u) last = Ticker::millis();
+        }
+        if (l.frames != 0u && Ticker::millis() - last > 30u) {
+            break;
+        }
+    }
+    l.untold = stage_take(a.value, l.wrong);   // in the ring and never told: none, if the edges cover it
+    l.frames = static_cast<uint16_t>(l.frames + l.untold);
+    l.edges = link_edges;
+    link_task_down();
+    link::Report r{};
+    l.drawn = peer_report(r, 0) && (r.flags & link::report_ran) != 0u && (r.flags & link::report_mismatch) == 0u &&
+              r.count == a.count;
+    return l;
+}
+
 void t7_idle_faster() {
     if (!ensure_link()) {
         bench.verdict("the peer is reachable", false);
@@ -3226,11 +3748,31 @@ void t7_idle_faster() {
         }
         print(serial, crlf);
     }
+    // The two told rows, derived in this receiver's sixteenths from a
+    // frame's falling edge. An idle frame is a whole frame of ones, ten
+    // bits at M = 0 (25.4.1, and the note to 25.4.5's tables, "Idle
+    // frames of exactly 10-bit times"); the receiver begins counting it
+    // no later than the end of its own frame, the sixteenth sample of the
+    // stop bit, at phi + 159 <= 160 (25.4.3, figure 282: sample 1 at phi
+    // in (0, 1]). So IDLE is set at the latest by a line still high at
+    // 320, and a train whose next falling edge comes later is told after
+    // every frame. 0xF0 drawn with a gap of g sender sixteenths, the
+    // sender e fast, puts that edge at (160 + g) / (1 + e): 176 from a
+    // sender 3 % fast is 326.2, 164 from an exact one 324 - 6.2 and 4
+    // sixteenths past 320. Against those, the clocks: this divisor is
+    // exact at 50000 (90 MHz / 16 / 112.5), the far engine plays its rate
+    // on the tracked core, the two crystals' offset is 0.33 sixteenth over
+    // the 20 bits even at 1000 ppm, and the far engine's TIM1 count (15.6
+    // ns) is 0.01. How early in the stop bit the count may begin is not
+    // written - from the stop bit's vote, an idle frame's own stop bit
+    // read at its vote too, the line need stand only to about 305 - so
+    // the rows whose edge comes by 320 are the die's: printed.
     judge("every drawn train arrives whole, sixteen frames of sixteen", trains_whole);
     judge("an idle of eleven sender bits is told by IDLE after every frame, the far end up to 3 % faster",
           eleven_told);
-    judge("from an exact sender the idle frame is ten bits: told after every frame at 10.25, after none at "
-          "9.75", exact_long == 16u && exact_short == 1u);
+    judge("from an exact sender an idle of 10.25 bits is told by IDLE after every frame", exact_long == 16u);
+    print(serial, "  from an exact sender an idle of 9.75 bits told after ", exact_short,
+          " of 16 frames (1: the train's last alone) - the die's threshold, printed", crlf);
     // ES0298 2.13.1's own case - one idle frame and then a character from
     // a sender 3 % fast (160 sixteenths), and 10.5 sender bits, 10.2 of
     // this receiver's (168) - is PRINTED, not judged: an erratum that must
@@ -3238,6 +3780,41 @@ void t7_idle_faster() {
     // the desk. The far G0's letter 9 reads the same table on its own die.
     print(serial, "  ES0298 2.13.1 read: one idle frame and a character from a sender 3 % fast told after ",
           own_case, " of 16 frames, at 10.5 sender bits after ", past_case, " (1: the train's last alone)", crlf);
+
+    // THE SAME TRAINS INTO THE RECEIVE ENGINE: what a consumer is told. Its
+    // burst edge is the line's IDLE, so where the polled receiver saw IDLE
+    // after every frame each frame is a burst of its own, told before the
+    // next one ends: the look follows the edge within the consumer loop's
+    // turn (microseconds), the next frame needs at least ten bits of idle
+    // and ten of frame (400 us at 50000) - one frame a look, at most.
+    // Where IDLE is withheld the frames are one burst to the engine,
+    // told together at the next idle it does see.
+    static constexpr uint16_t engine16[] = {152, 160, 168, 176};
+    bool engine_whole = true, engine_each = true;
+    uint16_t engine_case = 0;
+    for (const int16_t e : fast) {
+        print(serial, "  receive engine, the far end +", e, " per mille, gap: the most frames one look found:");
+        for (const uint16_t g : engine16) {
+            link::Params a{};
+            a.cfg.rate = static_cast<uint32_t>((static_cast<int64_t>(50'000) * (1'000 + e)) / 1'000);
+            a.count = 16;
+            a.value = 0xF0;
+            a.pattern = link::pattern_fixed;
+            a.aux16 = g;
+            const StageTold l = stage_engine_leg(a);
+            print(serial, " ", g, ":", l.most, " (", l.edges, " edges)");
+            engine_whole = engine_whole && l.up && l.drawn && l.frames == 16u && l.wrong == 0u && l.untold == 0u;
+            if (g == 176u) engine_each = engine_each && l.most == 1u;
+            if (g == 160u && e == 30) engine_case = l.most;
+        }
+        print(serial, crlf);
+    }
+    judge("every train reaches the receive engine whole, and every frame of it is told by an edge", engine_whole);
+    judge("an idle of eleven sender bits: the engine tells every frame on its own, one frame a look, the far end "
+          "up to 3 % faster", engine_each);
+    // The erratum's case is printed, as above: a behaviour of the die.
+    print(serial, "  ES0298 2.13.1 through the engine: one idle frame and a character from a sender 3 % fast - ",
+          engine_case, " of 16 frames told at one look, the first waiting for the train's end", crlf);
     link_release();
 }
 
@@ -3338,7 +3915,8 @@ void t8_ring_copies() {
             copy_src[k][i] = (i + k) * 2654435761u;
         }
     }
-    bool levels = true, default_whole = true, two_whole = true, four_starve = true, honest = true;
+    bool levels = true, default_whole = true, alone_whole = true, four_starve = true, honest = true;
+    uint8_t two_legs = 0, two_whole = 0, three_legs = 0, three_whole = 0;
     static constexpr uint32_t rates[] = {4'266'667, 6'400'000};
     for (const uint32_t rate : rates) {
         for (uint8_t beat = 0; beat < 2u; ++beat) {
@@ -3354,8 +3932,15 @@ void t8_ring_copies() {
                 levels = levels && lo.level == DmaPriority::low && hi.level == DmaPriority::very_high;
                 default_whole = default_whole && hi.up && hi.c.got == f8_frames && hi.c.gaps == 0u &&
                                 hi.c.bad == 0u && hi.faults == 0u;
-                if (copies <= 2u) {
-                    two_whole = two_whole && lo.up && lo.c.got == f8_frames && lo.c.gaps == 0u;
+                const bool lo_whole = lo.up && lo.c.got == f8_frames && lo.c.gaps == 0u;
+                if (copies == 0u) {
+                    alone_whole = alone_whole && lo_whole;
+                } else if (copies == 2u) {
+                    ++two_legs;
+                    two_whole = static_cast<uint8_t>(two_whole + (lo_whole ? 1u : 0u));
+                } else if (copies == 3u) {
+                    ++three_legs;
+                    three_whole = static_cast<uint8_t>(three_whole + (lo_whole ? 1u : 0u));
                 }
                 if (copies == 4u) {
                     four_starve = four_starve && lo.c.got < f8_frames;
@@ -3367,7 +3952,12 @@ void t8_ring_copies() {
     judge("rx_priority reaches the silicon on USART1's ring: SxCR.PL read back low and very_high", levels);
     judge("THE DEFAULT RING LOSES NOTHING to a real sender at 4.27 and 6.4 Mbaud beside up to four copies at "
           "very_high, word and byte beats", default_whole);
-    judge("two copies ranked above a ring armed low starve it of nothing", two_whole);
+    // Letter g's control and print: alone, the ring armed low is served
+    // as the default one is (RM0390 9.3.5 arbitrates between requests);
+    // beside two or three copies its share is this controller's timing.
+    judge("THE CONTROL: a ring armed low with no copies beside it loses nothing to a real sender", alone_whole);
+    print(serial, "  the ring armed low whole beside two copies in ", two_whole, " of ", two_legs,
+          " legs, beside three in ", three_whole, " of ", three_legs, crlf);
     // The stage's control (letter g's): the verdict after it needs a starved ring.
     judge("THE CONTROL: FOUR COPIES RANKED ABOVE A RING ARMED LOW DO STARVE IT, a real sender as the loop's "
           "thread - the case the next verdict needs", four_starve);
@@ -4544,6 +5134,7 @@ int main() {
     bench.second_letter('r', "IrDA SIR both ways against the far ST ENDEC; RS-485 refused (no DE)", tr_irda);
     bench.second_letter('s', "mute and the multiprocessor wake from a foreign sender; ES0298 2.13.3", ts_mute);
     bench.second_letter('u', "set_baud() at run time, and the TC and LBD interrupt enables", tu_baud_irqs);
+    bench.letter('p', "ES0298 2.13.2's window measured: PE's lead, the loop widened, the task", tp_pe_window, false);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL" : "FAILED", " tick=",

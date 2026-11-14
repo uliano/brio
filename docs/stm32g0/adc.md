@@ -46,13 +46,14 @@ why the example reads VREFINT first.
 
 RM0444 Rev 6 ch. 15, with 5.4.13 (RCC_CCIPR.ADCSEL)
 and the vector table 12.3 (table 61); DS13560 Rev 5 tables 5, 6, 12, 27,
-62, 63, 65 and 66 (the factory calibration values and their addresses,
-the pad-to-channel map, fADC and the sampling-time minima); errata
+62, 63, 64, 69 and 70 (the factory calibration values and their
+addresses, the pad-to-channel map, fADC, the sampling-time minima and the
+accuracy the suite's bands are derived from); errata
 ES0548 Rev 3 items 2.6.1..2.6.5, read on the bench chip's revision Z
 column. Driver: `stm32g0/adc.hpp`; the reference vocabulary is
 `stm32g0/vref.hpp`'s (see [vref.md](vref.md)), the per-part facts come
 from `stm32g0/device_tables.hpp` (the reserve: the table of what each part has, read off the device header). Bench suite:
-`test_stm32_analog` (18 letters, 137 verdicts, wireless; a letter is one command key of the suite's console and the group of verdicts it runs),
+`test_stm32_analog` (18 letters, 133 verdicts, wireless; a letter is one command key of the suite's console and the group of verdicts it runs),
 shared with the DAC, the reference buffer and the comparators. Family fixture
 `test/family_stm32g0/adc.cpp` plus four negatives under
 `brio check stm32g0`.
@@ -209,7 +210,11 @@ revision Z. The numbers below are one run's.
 1511 counts against a factory value of 1667 taken at 3.0 V, so 15.9's
 ratio puts this board's analog supply at **3310 mV** - and the reading
 falls on the right side of the calibration by construction, a supply
-above 3.0 V giving fewer counts for the same bandgap. The same reading
+above 3.0 V giving fewer counts for the same bandgap. The verdict's band
+is the Nucleo-64's 3V3 rail, 3.0..3.6 V (UM2324 table 7), widened by the
+reading's own error: table 27's bandgap spread and voltage coefficient,
+the ADC's total unadjusted error (table 64) and the noise measured on
+the same channel - 2952..3658 mV for a 4-count noise. The same reading
 in volts is **1221 mV at 12 bits and 1219 mV at 10**, two counts of the
 coarse scale apart, which is the full-scale arithmetic checked at two
 resolutions. The 12-bit figure is the factory word on this scale -
@@ -225,7 +230,7 @@ formula leaves out and every application gets wrong once.
 **VBAT reads a third of the supply** (1369 counts, 3318 mV after the
 divider), which is what the divider in front of that channel does and
 what a board tying VBAT to VDD looks like. Its sampling-time minimum is
-12 us (DS13560 table 66), which is why the internal-channel letters run
+12 us (DS13560 table 70), which is why the internal-channel letters run
 the asynchronous clock at 8 MHz: 160.5 cycles there is 20 us.
 
 **CONVERSION TIME IS EXACT TO THE CPU CYCLE.** With CKMODE = PCLK/2 the
@@ -306,9 +311,14 @@ the same sequence, equally far outside its own window, flagged. The
 erratum reproduces, and the control is what makes that a measurement.
 
 **The oversampler, against a noise floor measured first.** Over 64
-conversions VREFINT spans 4 counts and the DAC-driven pad 7 - both a
-converter's own noise. With x16 oversampling and a 4-bit shift the pad's
-spread falls to **2 counts** with the mean unmoved (2038 both ways), and
+conversions VREFINT spans 3..5 counts and the DAC-driven pad 4..7,
+printed and not judged: table 64 gives the noise only as a least SNR, an
+rms figure that bounds no span. That span is also the NOISE ALLOWANCE
+a band derived from the data sheet adds to the sheet's own errors in
+this suite, measured on the input it judges in the same letter. With x16
+oversampling and a 4-bit shift the pad's spread falls to **2 counts**
+with the mean unmoved (2038 both ways; judged within the base run's
+span, a thirty-second of it and three counts of rounding), and
 with NO shift the accumulator itself lands in ADC_DR: **32616 of a
 65536 full scale**, sixteen times the value on sixteen times the scale,
 which `util/analog.hpp` converts to the same voltage because its
@@ -321,7 +331,10 @@ apportioned.
 
 **The sequencer, both faces.** The bitmap scans in numeric order and
 SCANDIR reverses it exactly (1011 / 3062 / 1510 forward, the same three
-values back to front); the ordered face walks 13, 5, 4 in that order
+values back to front), each value inside a band derived for its input -
+a DAC code within the buffered output's total unadjusted error (30,
+DS13560 table 66) and the ADC's (7), VREFINT within table 27's range on
+the board's supply, each with the noise allowance; the ordered face walks 13, 5, 4 in that order
 with CHSELR reading 0xFFFFF45D, the 0xF terminating a three-entry list;
 EOS rises at the end of the sequence and not before; and a channel
 selection is refused while a conversion runs.
@@ -466,7 +479,7 @@ rows instead of six and says so.
 ## On the STM32G031K8
 
 On the Nucleo-G031K8 (DEV_ID 0x466, REV_ID 0x1003) `test_stm32_analog`
-claims **67 of its 137** verdicts, and the shortfall is not the ADC's:
+claims **66 of its 133** verdicts, and the shortfall is not the ADC's:
 **this part has no DAC and no comparators at all**, so eight of the
 suite's eighteen letters (the DAC's four - `d`, `e`, `o`, `p` - the
 comparators' three - `i`, `m`, `n` - and `k`, which pairs a DAC stream

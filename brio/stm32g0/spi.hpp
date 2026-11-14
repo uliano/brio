@@ -937,6 +937,44 @@ struct Spi {
     /// is why this is a verb of its own and not the tail of configure().
     static void enable() { regs().CR1 = regs().CR1 | SPI_CR1_SPE; }
 
+    /**
+     * THE BUDGETS OF THE BOUNDED WAITS BELOW, each derived from what it
+     * waits for, in turns of a polling loop (wait_sr()).
+     *
+     * A turn is never under 7 core cycles: at least a load of SR, a test
+     * of the flag, a test of the budget with its decrement and a taken
+     * branch back, 2 + 1 + 1 + 1 + 2 cycles on the Cortex-M0+ (ARM DDI
+     * 0484C 3.3, table 3-1) - the release listing's turn is 9 (two taken
+     * branches and a compare) - flash wait states and the APB's only
+     * adding to it.
+     * The core runs at most 16 HCLK cycles to one PCLK cycle (RCC_CFGR.PPRE,
+     * RM0444 5.4.3).
+     *
+     * The slowest SPI bit this generator makes is 256 PCLK cycles (CR1.BR,
+     * 35.9.1), a frame at most 16 bits (CR2.DS, 35.9.2), and the TXFIFO
+     * holds 32 bits (35.5.9): FTLVL empties once the frame in the shifter
+     * and the first of the FIFO's are out - 32 bits - and BSY falls at the
+     * end of the last frame, 16 more.
+     */
+    static constexpr uint32_t poll_turn_cycles = 7u;
+    static constexpr uint32_t spi_bit_core_cycles = 256u * 16u;
+    static constexpr uint32_t ftlvl_spins = (32u * spi_bit_core_cycles + poll_turn_cycles - 1u) / poll_turn_cycles;
+    static constexpr uint32_t bsy_spins = (16u * spi_bit_core_cycles + poll_turn_cycles - 1u) / poll_turn_cycles;
+    static_assert(ftlvl_spins == 18'725u && bsy_spins == 9'363u, "the comment above states the arithmetic");
+
+    /// SR polled until the bits of `mask` all read `set` (or all clear),
+    /// at most `spins` turns: false when the budget ran out first.
+    static bool wait_sr(uint32_t mask, bool set, uint32_t spins) {
+        const uint32_t want = set ? mask : 0u;
+        while ((regs().SR & mask) != want) {
+            if (spins == 0u) {
+                return false;
+            }
+            --spins;
+        }
+        return true;
+    }
+
     /// 35.5.9's DISABLE PROCEDURE, and the only way this driver turns the
     /// peripheral off:
     ///   1. wait FTLVL = 00 (nothing left to transmit)
@@ -945,24 +983,21 @@ struct Spi {
     ///   4. read DR until FRLVL = 00 (nothing left unread)
     ///
     /// ES0548 2.12.1's workaround falls out of steps 1 and 2 for the
-    /// master-transmit case it names. Both waits are BOUNDED - the
-    /// slowest frame this generator can produce is 256 x 16 PCLK cycles -
-    /// and a wait that runs out returns false with SPE cleared anyway:
-    /// an engine that reports is worth more than one that hangs.
+    /// master-transmit case it names. Both waits are BOUNDED by the
+    /// slowest the generator can make them (ftlvl_spins, bsy_spins above),
+    /// and a wait that runs out returns false with SPE cleared anyway: an
+    /// engine that reports is worth more than one that hangs. A CLIENT's
+    /// FIFO empties at its host's clock, which this chip cannot bound: the
+    /// same budget covers a host no slower than this generator's slowest
+    /// rung at this chip's PCLK, and answers that a window the host closed
+    /// left answers standing in the FIFO, which never leave - false, SPE
+    /// cleared and the FIFO flushed by the clear (35.5.9).
     ///
     /// Returns false when a wait ran out (the flags are left readable for
     /// whoever wants to say WHICH).
     static bool disable() {
-        constexpr uint32_t spins = 200'000u;
-        bool ok = true;
-        uint32_t left = spins;
-        while ((regs().SR & SPI_SR_FTLVL) != 0u && left-- != 0u) {
-        }
-        ok = ok && left != 0u;
-        left = spins;
-        while ((regs().SR & SPI_SR_BSY) != 0u && left-- != 0u) {
-        }
-        ok = ok && left != 0u;
+        bool ok = wait_sr(SPI_SR_FTLVL, false, ftlvl_spins);
+        ok = wait_sr(SPI_SR_BSY, false, bsy_spins) && ok;
         regs().CR1 = regs().CR1 & ~SPI_CR1_SPE;
         flush_rx();
         return ok;
@@ -981,10 +1016,7 @@ struct Spi {
      */
     static bool disable_receive_only() {
         regs().CR1 = regs().CR1 & ~SPI_CR1_SPE;
-        uint32_t left = 200'000u;
-        while ((regs().SR & SPI_SR_BSY) != 0u && left-- != 0u) {
-        }
-        const bool ok = left != 0u;
+        const bool ok = wait_sr(SPI_SR_BSY, false, bsy_spins);   // the frame in flight, at most
         flush_rx();
         return ok;
     }
@@ -1509,19 +1541,22 @@ struct Spi {
         }
     }
 
+    /// The longest I2S channel slot, in core cycles: a frame (1 / fs) is at
+    /// most 256 x (2 x I2SDIV + ODD) = 256 x 511 kernel clock cycles
+    /// (35.7.4, the master clock out), a slot half of it, and the kernel
+    /// clock is never slower than PCLK (35.7.4's warning), so at most 16
+    /// core cycles a kernel cycle - in either role, the host's clock bound
+    /// by the same warning on a correctly clocked bus.
+    static constexpr uint32_t i2s_slot_spins = (128u * 511u * 16u + poll_turn_cycles - 1u) / poll_turn_cycles;
+    static_assert(i2s_slot_spins == 149'504u, "the comment above states the arithmetic");
+
     /// 35.7.5's transmitter shutdown: "to switch off the I2S, by clearing
-    /// I2SE, it is mandatory to wait for TXE = 1 and BSY = 0".
-    /// Returns false when either wait ran out (bounded, as everywhere).
+    /// I2SE, it is mandatory to wait for TXE = 1 and BSY = 0" - TXE within
+    /// the slot in flight, BSY at the end of the next, each wait bounded by
+    /// i2s_slot_spins. Returns false when either ran out.
     static bool i2s_stop_transmit() {
-        constexpr uint32_t spins = 400'000u;
-        uint32_t left = spins;
-        while ((regs().SR & SPI_SR_TXE) == 0u && left-- != 0u) {
-        }
-        bool ok = left != 0u;
-        left = spins;
-        while ((regs().SR & SPI_SR_BSY) != 0u && left-- != 0u) {
-        }
-        ok = ok && left != 0u;
+        bool ok = wait_sr(SPI_SR_TXE, true, i2s_slot_spins);
+        ok = wait_sr(SPI_SR_BSY, false, i2s_slot_spins) && ok;
         regs().I2SCFGR = regs().I2SCFGR & ~SPI_I2SCFGR_I2SE;
         return ok;
     }

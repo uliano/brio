@@ -918,19 +918,46 @@ void tc_idle_until() {
     // NO DEADLINE: the sleep ends on a foreign wake - the RTC's wake-up
     // timer 250 ms out - and the LPTIM stays silent (a lap inside the
     // window would speak, once, for the carry: the window is placed in
-    // the first half of a lap).
+    // the first half of a lap). The console is drained BEFORE the timer
+    // is armed: the wake-up timer runs from WUTE on, and a drain inside
+    // nap() would eat the start of its period.
     Rtc::clear_wakeup();
     lap_room();
+    const bool quiet = brio::console_drain<Ruler, Serial>();
     const bool wut = Rtc::set_wakeup(RtcWakeupClock::div16, 512u);   // (512 + 1) / 2048 s
     const Nap none = nap(std::nullopt);
     Rtc::clear_wakeup();
+    // THE BAND, DERIVED. 30.6.6: the first WUTF comes between WUT and
+    // WUT + 1 periods of RTCCLK/16 after WUTE, 8192..8208 RTCCLK cycles.
+    // The nap's first stamp follows WUTE by up to one timebase tick (the
+    // sync to a tick edge, 32 counts of the same root) and under a count
+    // more (the poll that sees the edge and the steps around it); its
+    // last stamp follows the wake by under a count (the wake path, as for
+    // every nap above). On the crystal that is 248992..250520 us of real
+    // time (its 20 ppm inside the rounding of the factors below), on the
+    // LSI 8192 / 34000 - (32 + 1) / 29500 .. 8208 / 29500 + 1 / 29500 s
+    // (table 46's extremes), and TIM2 reads either through table 44's
+    // 0.9815..1.0156: 244385..254429 us on the crystal.
+    const uint32_t root_lo = wall_on_lse ? 32'768u : 29'500u;   // the slowest the root may be
+    const uint32_t root_hi = wall_on_lse ? 32'768u : 34'000u;   // and the fastest
+    const uint32_t real_lo_us = static_cast<uint32_t>(
+        (8'192ULL * 1'000'000u) / root_hi - (33ULL * 1'000'000u + root_lo - 1u) / root_lo);
+    const uint32_t real_hi_us = static_cast<uint32_t>(
+        (8'208ULL * 1'000'000u + root_lo - 1u) / root_lo + (1'000'000u + root_lo - 1u) / root_lo);
+    const uint32_t none_lo = static_cast<uint32_t>((uint64_t{real_lo_us} * 9'815u) / 10'000u);
+    const uint32_t none_hi = static_cast<uint32_t>((uint64_t{real_hi_us} * 10'156u + 9'999u) / 10'000u);
     print(serial, "  (the wake-up timer was ", wut ? "armed" : "REFUSED", ")", crlf);
     print_nap("idle_until(nothing armed), RTC 250 ms out", none);
-    // The wake-up timer's first period is shortened by its asynchronous
-    // start (the sleep suite's own band for this setting is 230..290 ms).
-    bench.verdict("with nothing armed the sleep lasts until a FOREIGN wake - the RTC "
-                  "wake-up timer ended it, the LPTIM never spoke",
-                  within(none.t2_us, 220'000u, 290'000u) && none.rtc == 1u && none.irqs == 0u);
+    print(serial, "    the band ", none_lo, "..", none_hi, " us", crlf);
+    if (quiet) {
+        bench.verdict("with nothing armed the sleep lasts until a FOREIGN wake - the RTC "
+                      "wake-up timer ended it at its first period (the band derived), the "
+                      "LPTIM never spoke",
+                      within(none.t2_us, none_lo, none_hi) && none.rtc == 1u && none.irqs == 0u);
+    } else {
+        bench.skip("the console did not drain in 200 ms before the wake-up timer was armed: "
+                   "the nap's own drain would start inside its period");
+    }
 }
 
 // =============================================================================

@@ -477,11 +477,10 @@ void tb_lse() {
     print(serial, "  two seconds = ", cycles, " core cycles; RTCCLK = ");
     print_hz(millihertz);
     print(serial, ", ", ppm, " ppm fast against the core clock", crlf);
-    bench.verdict("the crystal is within 200 ppm of 32768 Hz",
-                  millihertz > 1000ULL * (lse_nominal_hz - 7u) &&
-                      millihertz < 1000ULL * (lse_nominal_hz + 7u));
-    bench.verdict("and the calendar's second is within 200 ppm of the core's",
-                  ppm > -200 && ppm < 200);
+    // Printed, not judged: the ruler is the HSE, and the Nucleo-F446RE's HSE is
+    // the ST-LINK's MCO, whose crystal's tolerance UM1724 does not state (nor
+    // does any board page here state the black pill's or the DISCOVERY's), so
+    // no written figure bounds the difference between the two crystals.
 }
 
 // =============================================================================

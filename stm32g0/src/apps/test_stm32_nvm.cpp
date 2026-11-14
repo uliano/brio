@@ -515,19 +515,15 @@ void tc_lock() {
 void td_cost() {
     (void)Flash::unlock();
 
+    // THE MEASUREMENTS FIRST, the console quiet: the letter's title line
+    // is still going out when the letter starts, and a transmit interrupt
+    // inside a span is part of no flash operation. Every reading is taken
+    // into a variable and printed after the last one.
+    const bool quiet = brio::console_drain<Ruler, Serial>();
     uint32_t t0 = Ruler::now();
     const uint32_t err_erase = raw_erase(scratch_a);
     const uint32_t erase_cycles = Ruler::now() - t0;
-
-    bench.verdict("a page erase reports no error", err_erase == 0u);
-    bench.verdict("and the page reads as erased, every byte",
-                  is_erased(scratch_a, 256));
-    print(serial, "  page erase ", cycles_to_us(erase_cycles),
-          " us (DS13560 table 48: 22.0 typ, 40.0 max ms... in MICROseconds "
-          "22000/40000)", crlf);
-    bench.verdict("the erase lands inside the datasheet's typ..max band",
-                  cycles_to_us(erase_cycles) >= 15'000u &&
-                      cycles_to_us(erase_cycles) <= 45'000u);
+    const bool erased = is_erased(scratch_a, 256);
 
     // One double word, then eight of them: the per-cell cost and the
     // fixed overhead separate themselves.
@@ -540,14 +536,54 @@ void td_cost() {
     const uint32_t err_eight = Flash::program(scratch_a + 64u, out_span(64));
     const uint32_t eight_cycles = Ruler::now() - t0;
 
+    // THE BOUNDS, DERIVED. Table 48 gives a maximum and no minimum (the
+    // typicals are printed), so only the upper end is judged. The ruler is
+    // SysTick on the PLL over HSI16, so a time t reads at most t x 1.0156
+    // (table 44's three rows, as letter g takes them). Beside the
+    // operation itself, the span holds the call's own setup and release
+    // and the wait's last turn - a few hundred cycles, 1000 counted - and
+    // one kernel tick handler for every millisecond it lasts and one more,
+    // under 300 cycles each (letter f's figure, uncached; the cache is on
+    // here). The console is drained, so nothing else runs. So:
+    //   erase:  40000 x 1.0156 = 40624 us, plus 42 x 300 + 1000 cycles
+    //           (213 us at 64 MHz): 40837 us;
+    //   one double word: 125 x 1.0156 = 127 us, plus 300 + 1000 cycles
+    //           (21 us): 148 us.
+    constexpr uint32_t erase_max_us = 40'000u * 10'156u / 10'000u +
+                                      (42u * 300u + 1'000u + cycles_per_us - 1u) / cycles_per_us;
+    constexpr uint32_t one_max_us = (125u * 10'156u + 9'999u) / 10'000u +
+                                    (300u + 1'000u + cycles_per_us - 1u) / cycles_per_us;
+    static_assert(erase_max_us == 40'837u && one_max_us == 148u,
+                  "letter d's verdicts state the derived bounds: move their text with them");
+
+    bench.verdict("a page erase reports no error", err_erase == 0u);
+    bench.verdict("and the page reads as erased, every byte", erased);
+    print(serial, "  page erase ", cycles_to_us(erase_cycles),
+          " us (DS13560 table 48: 22.0 ms typical, 40.0 maximum; the bound on this ruler ",
+          erase_max_us, " us)", crlf);
+    if (quiet) {
+        bench.verdict("the erase takes no longer than table 48's maximum, 40 ms (40837 us "
+                      "on this ruler, derived)",
+                      cycles_to_us(erase_cycles) <= erase_max_us);
+    } else {
+        bench.skip("the console did not drain in 200 ms: a transmit interrupt may sit in "
+                   "the erase's span, which the bound does not count");
+    }
+
     bench.verdict("one double word programs clean", err_one == 0u);
     bench.verdict("and eight in one call too", err_eight == 0u);
     print(serial, "  program: 1 double word ", cycles_to_us(one_cycles),
           " us, 8 of them ", cycles_to_us(eight_cycles), " us (",
           cycles_to_us(eight_cycles) / 8u, " us each; DS13560 tprog 85 typ / "
-          "125 max)", crlf);
-    bench.verdict("a double word costs what table 48 says (85 us typ, 125 max)",
-                  cycles_to_us(one_cycles) >= 50u && cycles_to_us(one_cycles) <= 200u);
+          "125 max; the bound on this ruler ", one_max_us, " us)", crlf);
+    if (quiet) {
+        bench.verdict("a double word takes no longer than table 48's maximum, 125 us "
+                      "(148 us on this ruler, derived)",
+                      cycles_to_us(one_cycles) <= one_max_us);
+    } else {
+        bench.skip("the console did not drain in 200 ms: a transmit interrupt may sit in "
+                   "the double word's span, which the bound does not count");
+    }
     bench.verdict("and eight cost eight times it, so the ramp is per double "
                   "word and not per call",
                   cycles_to_us(eight_cycles) >= 6u * cycles_to_us(one_cycles));

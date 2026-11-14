@@ -1232,7 +1232,9 @@ letter `7`'s control through the bridge (below).
   the 9600 rung 500..700 ppm away three times in ten, which is why the
   verdict reads the run's own window). The far crystal's 1 Mbaud blast
   reads -2950 ppm on this ruler against the far divisor's 0 (90 MHz / 90)
-  less the HSI's +2949 over its window: 1 ppm apart. A far `send` or
+  less the HSI's +2949 over its window and the crystals' offset, judged
+  within 73 ppm (101 on the 8 KB part), derived as letter `2`'s far
+  blasts are ("The rates across the wire"). A far `send` or
   `blast` STATES ITS OWN RATE (the Report's aux16 with
   `report_rate_stated` beside it, the far divisor on its crystal,
   usart_link.hpp), so the far transmitter is judged as tightly as this
@@ -1561,9 +1563,10 @@ Two runs' differences part by at most twice the sum, 1.82 us, and two
 whole-ppm figures in each add two: over 0.4 s that is **7 ppm**, the
 verdict's bound, computed in the suite from those three times
 (`agree_ppm`); over the 40 ms the 8 KB part's 62 ms ring allows, 48.
-The offset itself is judged within 150 ppm, the tens of ppm two
-crystals' tolerances allow (UM2324 6.7.1 names a 20 ppm part for the
-LSE; the ST-LINK's 8 MHz has none stated) against the 0.3 % an
+The offset itself is printed, not judged: UM2324 6.7.1 names a 20 ppm
+part for the LSE, but UM1724 states no tolerance for the ST-LINK's
+8 MHz behind the far end, so no written figure bounds it; the three
+runs' agreement is what tells two crystals from the 0.3 % an
 uncorrected HSI16 would put there.
 
 ### The rates across the wire

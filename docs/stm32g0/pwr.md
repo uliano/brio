@@ -402,7 +402,12 @@ clock in the chip stopped.
 - **A STOP ENTERED WITH THE TICK ARMED LASTS, unless DBGMCU_CR.DBG_STOP
   is set**: 250 ms of 250 with the bit clear and 1 ms with it set - the
   same image, the same letter, the bit written and cleared over SWD;
-  with the tick paused, 250 ms in both states. The letter reads the bit
+  with the tick paused, 250 ms in both states. Both sleeps are judged in
+  the wall's own ticks, 8191..8212 of RTCCLK: the wake-up timer and the
+  calendar count the same root, so no oscillator's tolerance enters, and
+  the band is 30.6.6's first period (8192..8208 cycles) widened by the
+  readings and the wake path (the Stop 1 exit, the handlers at 16 MHz,
+  the PLL's relock: under four cycles). The letter reads the bit
   through its clock gate and judges the state it finds. The site pauses
   the ticker for the deep rungs regardless, which is what makes it
   immune.
@@ -482,7 +487,11 @@ clock in the chip stopped.
 
 - **A 500 ms deadline through a Stop 1 matures at 501..502 ms of wall
   and never earlier**, with the LPTIM as both the alarm and the witness
-  and the RTC untouched; the resync hands back 500 ticks of frozen span.
+  and the RTC untouched; the resync hands back 500 ticks of frozen span
+  (judged in 498..501, the site's own conversion of a 500-tick deadline:
+  the alarm's extra count, the baseline read up to a count apart from
+  the compare's, the handler's read up to a count late, and one tick of
+  SysTick before the pause).
   Six repeats of 150 ms all land at 151..152 ms and NOT ONE IS EARLY.
   The band is derived: under one count of the site's 1024 Hz counter
   late by its alarm arithmetic, the wake and the PLL's relock (under

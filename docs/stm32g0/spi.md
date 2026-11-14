@@ -324,8 +324,8 @@ back, unless the program calls `recover()` when it opens the gate (Bench finding
 function in the flash under either placement: the RCC's pulse (RM0444 5.4.11 and 5.4.12), the
 applied configuration written back, the enable, under a thousand cycles. It declines
 35.5.9's disable procedure: that lets a last frame out, behind a released select nobody wants
-it, and with frames standing and SPE down it waits out its 200 000 polls on FTLVL, 28.4 ms,
-and leaves them there. On a host with engines `start()` pays for it a literal load, a byte load,
+it, and with frames standing and SPE down it waits out its budget on FTLVL - 18 725 turns,
+some 2.6 ms at 64 MHz at the listing's 9 cycles a turn - and leaves them there. On a host with engines `start()` pays for it a literal load, a byte load,
 a compare and a branch a request (the release listing), the call only when a reset is owed; on a
 host without engines the test compiles away.
 
@@ -1514,11 +1514,16 @@ it.
 **Driver gaps** - implemented nowhere, and a program that wants them
 must reach the registers itself:
 
-- **the disable procedure's own waits stay a count of turns.** `Spi<n>::disable()`
-  bounds its two waits at 200 000 polls, a resource verb below the host, which has
-  no rate of its own to derive from and whose answer the host drops ("the
-  transaction's budget" above). A rate change behind a stalled block pays them once;
-  deriving them means handing the resource the applied rate.
+- **the disable procedure's waits are bounded for the slowest rate, not the applied
+  one.** `Spi<n>::disable()`, `disable_receive_only()` and `i2s_stop_transmit()`
+  derive their budgets from the slowest frame or slot the block can make at the
+  widest APB ratio (the header's arithmetic: 18 725 and 9 363 turns for FTLVL and
+  BSY, 149 504 for each I2S wait), a resource verb below the host, which has no rate
+  of its own and whose answer the host drops ("the transaction's budget" above). A
+  rate change behind a stalled block pays them once; a bound at the applied rate
+  means handing the resource that rate. A client's FIFO empties at its host's clock,
+  which no budget here can know: the derived one covers a host no slower than this
+  chip's slowest rung.
 - **no half-duplex or receive-only TASK.** `SpiDirection` and its verbs
   are on the resource and `spi_config_valid()` knows the rules, but
   `SpiHost`'s Request is full-duplex only: a bidirectional device wants

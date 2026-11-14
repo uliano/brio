@@ -136,25 +136,37 @@ through ADC_IN4 on the same pad:
 |---|---|---|---|---|---|---|---|---|---|
 | ADC counts | 57 | 503 | 1014 | 1528 | 2039 | 2553 | 3063 | 3575 | 4053 |
 
-Monotonic across the whole range, and the **worst residual from the
-end-to-end line is 2 counts of 4096** - which is a DAC, a bond pad and
-an ADC in series, reported as one number because nothing on this bench
-can split them.
+Monotonic across the whole range, and the **worst residual from a line
+through two of its points is 1..3 counts of 4096** over the runs on
+record - which is a DAC, a bond pad and an ADC in series, reported as
+one number because nothing on this bench can split them. It is judged
+over codes 512..3584, inside the range DS13560 table 65 specifies the
+buffered output for (codes 274..3822 at VREF+ = 3.0 V), against the two
+converters' integral nonlinearity (table 66's 4 and table 64's 3, twice)
+plus twice the noise measured on the pad and a count: 25 for a 5-count
+noise.
 
 **THE OUTPUT BUFFER CANNOT REACH THE RAILS, and turning it off says by
 how much.** Code 0 and code 4095 measure **46 mV and 3276 mV buffered**,
 and **3 mV and 3308 mV unbuffered** against a 3312 mV supply. So the
 buffer costs about 43 mV at the bottom and 32 mV at the top, the pad and
 the ADC are not what is limiting it, and the unbuffered mode really does
-span nearly the whole reference - at the price of driving nothing.
+span the whole reference within its own error - table 66's 12 counts
+with the buffer off, the ADC's 7 and the noise - at the price of driving
+nothing.
 
 **The three data formats are PLACEMENTS of one 12-bit datum** (16.4.4):
 DHR12R1 = 2048, DHR12L1 = 0x8000 and DHR8R1 = 128 all put 2048 in DOR.
 
 **LD4 is not a load the DAC can feel.** Both channels run at once, one
 on the free PA4 and one on PA5 = LD4, and the two agree to **5 mV at
-every code** across the range - the worst difference is at code 1024,
-not at the top where a conducting LED would droop the buffer. PA5 also
+every code** across the range - the worst difference is at code 512 or
+1024, not at the top where a conducting LED would droop the buffer. The
+verdict reads codes 512..3584, where table 65 specifies the buffered
+output (at code 0 and 4095 each buffer stops at its own swing limit),
+against twice the buffered output's total unadjusted error and the
+ADC's (30 and 7 counts) plus the two pads' noise: about 70 mV, where a
+conducting LED would droop the output by hundreds. PA5 also
 follows a 40 kohm internal pull between the rails exactly as the free
 pads do. So whatever drives LD4 on this board is high-impedance seen
 from the pin, and the obvious guess - a diode and a series resistor to
@@ -178,8 +190,10 @@ At MAMP 5 (amplitude 63) `DAC_DOR` climbs exactly 63 codes from the
 holding register and comes back, **and it turns at the top**: the first
 fall is the step after the amplitude is reached, which is what makes the
 period twice the amplitude and not twice the amplitude plus two. Read
-back through the zero-length wire the same triangle spans 64 ADC counts
-against 63 codes, so the analog side follows. The NOISE generator's MAMP
+back through the zero-length wire the same triangle spans 63..64 ADC
+counts against 63 codes, so the analog side follows - judged within
+both converters' integral nonlinearity at the two ends and their gains,
+15 counts, plus twice the noise measured on the pad. The NOISE generator's MAMP
 is a MASK and behaves as one: 256 consecutive values span 15 codes at
 MAMP 3 and 489 at MAMP 8, each inside its own `2^(MAMP+1) - 1`.
 
@@ -188,7 +202,13 @@ the channel disabled and buffered, CEN set and OTRIM swept upward from
 zero with 60 us (DS13560's tTRIM is 50) spent at each value, CAL_FLAG is
 low at trim 0 and crosses at **14**, where this die's FACTORY trim is
 **7** - the buffer comparing its own offset against VREF+/2, exactly as
-16.4.12 describes. The factory value is restored bit for bit. Calibration
+16.4.12 describes. Where it crosses is printed and not judged: 16.4.12's
+own loop runs until the flag reads 1 or the trim's last code, so a
+buffer whose offset lies past the trim's reach never crosses, and the
+factory trim is the crossing at ST's conditions, not at this bench's.
+What is judged is the procedure - CEN taken with the channel disabled
+and buffered, and cleared again. The factory value is restored bit for
+bit. Calibration
 in an unbuffered mode is REFUSED, where 16.4.12 says it has no effect at
 all.
 
@@ -201,7 +221,12 @@ bit an application can read to tell an armed sample-and-hold from a
 degraded one - only the RCC knows. With LSI running the mode samples and
 holds (the pad still carrying its value a whole hold time later with
 nothing written in between), and that is indistinguishable from the
-failure. What this desk cannot say is the thing the mode exists for:
+failure. All of this is printed and not judged: what a channel does
+with dac_hold_ck stopped is not in the manual, and table 65's
+sample-and-hold rows assume a 100 nF hold capacitor this board's PA4 has
+not got. The verdict is the control those figures need: LSI really
+stopped (LSIRDY clear) for one half and running for the other, and the
+times taken both ways. What this desk cannot say is the thing the mode exists for:
 16.4.6 sells it as a power saving, and that is a current measurement
 with no meter here.
 
@@ -304,7 +329,11 @@ Default_Handler spin).
   what makes them countable and is not the same measurement - and the
   trigger rows themselves are all measured (above), so what is left is
   only the RATE.
-- What sample-and-hold COSTS. The mode runs and holds (above); 16.4.6
-  sells it as a power saving and this bench has no current meter.
+- What sample-and-hold COSTS. The mode's figures are printed (above);
+  16.4.6 sells it as a power saving and this bench has no current meter.
+- Sample-and-hold's HOLD under the sheet's own conditions: table 65's
+  sample-and-hold rows assume a 100 nF capacitor on the pad, which this
+  board's PA4 has not got, so the hold is printed and not judged; that
+  capacitor on PA4 would put it under the table.
 - The dual holding registers as a two-channel stream: `write_dual()` is
   exercised, `data_address_dual_12r()` has never carried a DMA channel.

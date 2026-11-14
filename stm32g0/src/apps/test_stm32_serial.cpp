@@ -6233,6 +6233,9 @@ static_assert(run_err_ppm(9600, 863u * 20u, far_end_ns) == 48, "864 frames at 96
 int32_t crystal_offset_ppm = 0;
 bool crystal_offset_known = false;
 constexpr int32_t crystal_offset_err = run_err_ppm(calib_rate, (agree_frames - 1u) * 20u, far_end_ns) + 3;
+static_assert(run_err_ppm(calib_rate, (calib_frames - 1u) * 20u, here_end_ns) + 3 + crystal_offset_err ==
+                  (SRAM_SIZE_MAX >= 0x4000UL ? 73 : 101),
+              "letter 1's far-blast verdict states the derived bound: move its text with it");
 
 // ---------------------------------------------------------------------------
 // 1 - the rendezvous, and this core's HSI16 against the far crystal
@@ -6323,9 +6326,11 @@ void t1_link() {
     // LSE time the same HSI over the same run, whatever the HSI did: their
     // difference is the crystals' offset, the same in the three runs to
     // the bound derived above (7 ppm over 0.4 s; 48 over the 8 KB part's 40
-    // ms), and the offset itself the tens of ppm two crystals' tolerances
-    // allow (150, as the far suite judges it), against the 0.3 % an uncorrected
-    // HSI16 would put there.
+    // ms). The offset itself is PRINTED, not judged: UM1724 states no
+    // tolerance for the ST-LINK's crystal behind the far end's 8 MHz, so
+    // no written figure bounds it; the three runs' agreement is the
+    // verdict that tells two crystals from the 0.3 % an uncorrected HSI16
+    // would put there.
     bool agree = all;
     int32_t lo = 0, hi = 0;
     for (uint8_t i = 0; i < 3u; ++i) {
@@ -6338,10 +6343,10 @@ void t1_link() {
           ", ", k[2].ppm - k[2].hsi, " ppm", crlf);
     bench.verdict(SRAM_SIZE_MAX >= 0x4000UL
                       ? "and this board's LSE reads the three windows as the far crystal does, within 7 ppm "
-                        "(derived), the two crystals within 150 ppm of each other"
+                        "(derived; the crystals' offset printed)"
                       : "and this board's LSE reads the three windows as the far crystal does, within 48 ppm "
-                        "(derived), the two crystals within 150 ppm of each other",
-                  agree && hi - lo <= agree_ppm && near(lo, 0, 150) && near(hi, 0, 150));
+                        "(derived; the crystals' offset printed)",
+                  agree && hi - lo <= agree_ppm);
     // DS13560's HSI16 accuracy at the factory trim, over temperature.
     bench.verdict("the HSI16 lies inside its datasheet's one per cent (the error a finding, printed)",
                   all && near(k[0].ppm, 0, 10'000));
@@ -6361,6 +6366,9 @@ void t1_link() {
         a.cfg.rate = calib_rate;
         a.count = calib_frames;
         a.ms = bound_ms(calib_rate, calib_frames);
+        // The stamps' bound counts one SysTick handler and no console
+        // line: the window opens with the console quiet.
+        const bool quiet = brio::console_drain<Ruler, Serial>();
         const bool acted = peer_act(link::Op::blast, a);
         const bool up = acted && dut_link(a.cfg);
         const Drain dr = up ? collect(a.ms, calib_frames) : Drain{};
@@ -6370,18 +6378,35 @@ void t1_link() {
         const int32_t ppm = span_ppm(dr.span, calib_rate, 20, dr.frames);
         // The far end says what its divisor gives on its crystal (the
         // Report's aux16 for a blast, report_rate_stated beside it - 0
-        // then means exact): this ruler reads that, less this HSI's error
-        // over the very window (this board's LSE).
+        // then means exact).
         const int32_t far = static_cast<int16_t>(r.aux16);
         const bool stated = (r.flags & link::report_rate_stated) != 0u;
+        // THE BOUND, DERIVED as letter 2's far blasts are (its want and
+        // tol_c, docs/stm32g0/usart.md, "The rates across the wire"): the
+        // ruler reads the far divisor's rate on the far crystal, less this
+        // HSI's error against this LSE over the window, less the crystals'
+        // offset the three runs above measured - which the far crystal's
+        // rate carries and this LSE's does not. The figure errs by the
+        // span's own error at this end (run_err_ppm over the blast's
+        // frames, here_end_ns), the offset's (crystal_offset_err) and
+        // three whole ppm (this figure, the far's, the HSI's): 73 ppm
+        // over the 40 ms blast, 101 on the 8 KB part, whose shorter runs
+        // leave the offset less sure.
+        const int32_t want = far - hsi.value_or(0) - crystal_offset_ppm;
+        const int32_t tol = run_err_ppm(calib_rate, dr.frames > 1u ? (dr.frames - 1u) * 20u : 0u, here_end_ns) +
+                            3 + crystal_offset_err;
         print(serial, "  the far crystal's 1 Mbaud on this HSI: ", dr.frames, " frames, ");
         print_ppm(ppm);
-        print(serial, "; the far divisor's own ", far, " ppm, this HSI's ", hsi.value_or(0), " over the window",
+        print(serial, "; the far divisor's own ", far, " ppm, this HSI's ", hsi.value_or(0),
+              " over the window, the crystals' ", crystal_offset_ppm, ": ", ppm - want, " ppm off, within ", tol,
               crlf);
-        bench.verdict("the far blast arrives whole, and this ruler reads its rate within 100 ppm of the far "
-                      "divisor's less the HSI's",
+        bench.verdict(SRAM_SIZE_MAX >= 0x4000UL
+                          ? "the far blast arrives whole, and this ruler reads its rate within 73 ppm (derived) "
+                            "of the far divisor's less the HSI's and the crystals' offset"
+                          : "the far blast arrives whole, and this ruler reads its rate within 101 ppm (derived) "
+                            "of the far divisor's less the HSI's and the crystals' offset",
                       up && have && stated && dr.frames == calib_frames && dr.fe == 0u && hsi.has_value() &&
-                          near(ppm, far - *hsi, 100));
+                          crystal_offset_known && quiet && near(ppm, want, tol));
     }
     link_release();
 }
