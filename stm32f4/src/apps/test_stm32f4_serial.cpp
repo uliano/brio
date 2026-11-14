@@ -33,7 +33,8 @@
 //      11.25 Mbaud, timed against the wire - a loop alone cannot tell a
 //      wrong rate; and the open drain's ceiling, where it gives out
 //   b  the frame formats on the loop: 8N1, 8E1, 8O1, 7E1, 7O1, 8N2,
-//      byte-exact through the receive engine
+//      byte-exact through the receive engine; the four with parity through
+//      the interrupt receiver too, which judges each word's parity itself
 //   c  ONEBIT and OVER8 together at 2 Mbaud, timed against the wire, and
 //      the error counters at zero
 //   d  ERRORS UNDER THE ENGINE: breaks injected into a stream through the
@@ -88,7 +89,8 @@
 //      without LIN
 //   5  ES0298 2.13.2 staged: odd parity in while this end transmits, in
 //      the erratum's order (its PE count printed, not judged), the
-//      workaround's and through the task
+//      workaround's and through the task, both judging the word's parity
+//      as well as PE
 //   6  the far engine's shapes: where a start is believed, the operational
 //      range of a gapped frame, one stretched cell
 //   7  ES0298 2.13.1 staged: IDLE and the receive engine's edge from a
@@ -125,7 +127,8 @@
 //   p  ES0298 2.13.2's window measured: PE's lead over RXNE with nothing
 //      written, the workaround's loop with its SR-to-write window widened
 //      by a swept spin, the erratum's order with its write delayed by the
-//      same spins, and the task over 4000 frames - the counts printed
+//      same spins - the counts printed - and the task over 4000 frames,
+//      judged: every parity error counted, none delivered
 //
 // build: boards = f446re
 // build: monitor_speed = 115200
@@ -475,6 +478,22 @@ void tb_formats() {
               LoopDma::parity_errors(), crlf);
         bench.verdict("byte-exact on the loop at 1 Mbaud: ", l.name,
                       ok_up && ok && LoopDma::frame_errors() == 0u && LoopDma::parity_errors() == 0u);
+    }
+    // The interrupt receiver judges each word's parity itself (usart.hpp's
+    // isr()), with the parity bit at bit 8 on an eight-bit frame and at bit
+    // 7 on a seven-bit one: a frame of the right parity is delivered and
+    // counts nothing, at both positions and both senses.
+    for (const Leg& l : legs) {
+        if (l.f.parity == UartParity::none) {
+            continue;
+        }
+        const bool ok_up = up<LoopIrq>(1, 1'000'000, l.f);
+        uint32_t got = 0;
+        const bool ok = round_trip<LoopIrq>(200, got, l.mask);
+        print(serial, "  ", l.name, " through the interrupt receiver: ", got, " of 200 back, FE ",
+              LoopIrq::frame_errors(), " PE ", LoopIrq::parity_errors(), crlf);
+        bench.verdict("byte-exact through the interrupt receiver at 1 Mbaud, no parity error: ", l.name,
+                      ok_up && ok && LoopIrq::frame_errors() == 0u && LoopIrq::parity_errors() == 0u);
     }
     down();
 }
@@ -2771,13 +2790,17 @@ std::optional<uint16_t> wire_word(uint32_t us, uint32_t& err) {
 // back to back, three ways: the polled loop in the ERRATUM'S ORDER (an SR
 // read and a DR write every turn, then the SR read for the receive); the
 // polled loop in the WORKAROUND'S (one SR read, DR read, then the write);
-// and the Uart task (one SR read in its vector decides both). A half
-// duplex loop never transmits while it receives, which is why the parity
-// legs of the loop letters could not reach it.
+// and the Uart task (one SR read in its vector decides both). The last two
+// judge parity from the received word as well as from SR.PE, as the task's
+// vector does: letter p measured PE cleared in the workaround's order too,
+// about one frame in 10000, with the word whole. A half duplex loop never
+// transmits while it receives, which is why the parity legs of the loop
+// letters could not reach it.
 
 struct PeLeg {
     bool up = false;
     uint16_t frames = 0, pe = 0;
+    uint16_t by_word = 0;   ///< parity errors the word's check found with SR.PE clear
 };
 
 PeLeg pe_polled(bool erratum_order) {
@@ -2791,6 +2814,7 @@ PeLeg pe_polled(bool erratum_order) {
     a.pattern = link::pattern_fixed;
     link::Cfg dc = a.cfg;
     dc.parity = 1;
+    constexpr uint32_t word_check = uart_parity_check({.bits = UartBits::eight, .parity = UartParity::even});
     const bool acted = peer_act(link::Op::send, a);
     l.up = acted && dut_link(dc);
     USART_TypeDef& u = U1::regs();
@@ -2813,10 +2837,16 @@ PeLeg pe_polled(bool erratum_order) {
                 last = Ticker::millis();
             }
         } else {
+            // The task's own judgment: SR.PE, or the word's parity
+            // (usart.hpp's isr(): 2.13.2 can clear PE in this order too),
+            // one count for either.
             const uint32_t st = u.SR;
             if ((st & UsartFlag::rxne) != 0u) {
-                if ((st & UsartFlag::pe) != 0u) ++l.pe;
-                (void)u.DR;
+                const uint32_t word = u.DR;
+                const bool flag = (st & UsartFlag::pe) != 0u;
+                const bool wrong = uart_parity_wrong(word_check, word);
+                if (flag || wrong) ++l.pe;
+                if (wrong && !flag) ++l.by_word;
                 ++l.frames;
                 last = Ticker::millis();
             }
@@ -2843,8 +2873,10 @@ void t5_parity_full_duplex() {
     const PeLeg wrong = pe_polled(true);
     const PeLeg right = pe_polled(false);
     print(serial, "  64 odd-parity frames into 8E1 while transmitting: the erratum's order counted ", wrong.pe,
-          " PE in ", wrong.frames, " frames, the workaround's ", right.pe, " in ", right.frames, crlf);
-    judge("the workaround's order (SR once, DR read, then the write) counts every parity error",
+          " PE in ", wrong.frames, " frames, the workaround's ", right.pe, " in ", right.frames, " (", right.by_word,
+          " by the word with PE clear)", crlf);
+    judge("the workaround's order (SR once, DR read, then the write) with the word's parity counts every parity "
+          "error",
           right.up && right.frames == 64u && right.pe == 64u);
     // The erratum's half is PRINTED above, not judged: an erratum that
     // must reproduce is a behaviour of the die (ES0298 2.13.2 says the
@@ -2891,9 +2923,10 @@ void t5_parity_full_duplex() {
 // p - ES0298 2.13.2's window, measured (by name): where a parity error is lost
 // ---------------------------------------------------------------------------
 //
-// Letter 5's polled loop in the workaround's order and the task have each
-// missed one parity error of 64 in about one run of 40. Two mechanisms could
-// do it, and they predict different things:
+// Judged by SR.PE alone, letter 5's polled loop in the workaround's order and
+// the task each miss one parity error of 64 in about one run of 40 (both
+// judge the word's parity as well, which the task leg below shows closing
+// it). Two mechanisms could do it, and they predict different things:
 //  (A) a frame completes between the loop's SR read and its DR write, and the
 //      write - an SR read followed by a DR access is PE's clearing sequence
 //      (RM0390 25.6.1) - clears the flag before anything has read it. The
@@ -2917,7 +2950,9 @@ void t5_parity_full_duplex() {
 // transmitter's eleven back to back, so the arrival phase walks through the
 // transmit period frame after frame. What the die does is PRINTED (an
 // erratum is a behaviour of the die, one board of the part on the desk);
-// the controls - every frame read, every one the far end sent - are judged.
+// the controls - every frame read, every one the far end sent - are judged,
+// and so is the task, whose vector judges the word's parity as well as PE:
+// every one of its frames counted as a parity error, none delivered.
 
 constexpr uint16_t pe_window_frames = 1024;   ///< one far `send`; the protocol's count is 16 bits
 /// One 8E1 frame at 115200 in core cycles: eleven bits of 1562.5 at 180 MHz.
@@ -3272,6 +3307,11 @@ void tp_pe_window() {
               " parity errors missed (delivered as bytes) of ", frames, " (NE ", ne, ", FE ", fe, ")", crlf);
         judge("the control: sixteen legs of 250 frames through the task, each frame counted or delivered",
               task_whole);
+        // The task judges the word's parity as well as SR.PE (usart.hpp's
+        // isr()): every frame here has the wrong parity, so none may come
+        // out as a byte, whatever the race in the status read does to PE.
+        judge("the task's vector, SR.PE or the word's parity: every parity error counted, none delivered",
+              task_whole && pe == frames);
     }
     link_release();
 }

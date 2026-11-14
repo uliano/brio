@@ -108,6 +108,9 @@
  * A byte that arrived with an error is dropped rather than pushed: a
  * corrupted byte in a line assembler is worse than a gap, and the
  * counter says it happened. Noise alone (NE) keeps the byte and counts.
+ * With parity on, the interrupt receiver judges each word's parity
+ * itself as well as by SR.PE, which ES0298 2.13.2 can clear while the
+ * port transmits (isr() below).
  *
  * Full and not. UART4, UART5, UART7 and UART8 have no synchronous mode,
  * no smartcard and no hardware flow control (30.5 table 148), and the
@@ -283,6 +286,50 @@ constexpr uint32_t usart_cr2_stop(UartStop s) {
 constexpr uint16_t uart_data_mask(const UartFormat& f) {
     return f.bits == UartBits::nine ? 0x1FFu : f.bits == UartBits::eight ? 0xFFu : 0x7Fu;
 }
+
+/// The interrupt receiver's parity check of the received word, decided
+/// once from the format (Uart's isr() says why it exists): 0 with parity
+/// off, otherwise one word - the received word's mask in the high half
+/// (the data bits and the parity bit, which takes the word's most
+/// significant bit, RM0390 25.6.2: bit 8 with M = 1, bit 7 with M = 0)
+/// and, in the low half, a table indexed by the word folded to a nibble
+/// whose bit is 1 where the parity is wrong. 0x6996 has bit k set exactly
+/// where k has an odd count of ones: even parity is wrong there, odd
+/// parity everywhere else (0x9669).
+constexpr uint32_t uart_parity_check(const UartFormat& f) {
+    if (f.parity == UartParity::none) {
+        return 0u;
+    }
+    const uint32_t word_mask = f.bits == UartBits::eight ? 0x1FFu : 0xFFu;
+    const uint32_t wrong = f.parity == UartParity::even ? 0x6996u : 0x9669u;
+    return (word_mask << 16) | wrong;
+}
+
+/// Whether the received word `word` has the wrong parity under `check`
+/// (uart_parity_check(), nonzero). The word masked, folded to a nibble
+/// by two shifts and exclusive ORs - the nibble's ones count has the
+/// parity of the word's - and the table's bit for that nibble: no loop,
+/// no call.
+[[gnu::always_inline]] constexpr bool uart_parity_wrong(uint32_t check, uint32_t word) {
+    uint32_t x = word & (check >> 16);
+    x ^= x >> 8;
+    x ^= x >> 4;
+    return ((check >> (x & 0xFu)) & 1u) != 0u;
+}
+
+// 0x5A has four ones: with its parity bit (the word's MSB) clear it is
+// even, set it is odd; a seven-bit word ignores DR's bit 8.
+static_assert(uart_parity_check({}) == 0u);
+static_assert(!uart_parity_wrong(uart_parity_check({.parity = UartParity::even}), 0x05Au));
+static_assert(uart_parity_wrong(uart_parity_check({.parity = UartParity::even}), 0x15Au));
+static_assert(!uart_parity_wrong(uart_parity_check({.parity = UartParity::odd}), 0x15Au));
+static_assert(uart_parity_wrong(uart_parity_check({.parity = UartParity::odd}), 0x05Au));
+static_assert(uart_parity_wrong(uart_parity_check({.parity = UartParity::odd}), 0x1FEu));
+static_assert(!uart_parity_wrong(uart_parity_check({.bits = UartBits::seven, .parity = UartParity::even}), 0x05Au));
+static_assert(uart_parity_wrong(uart_parity_check({.bits = UartBits::seven, .parity = UartParity::even}), 0x0DAu));
+static_assert(!uart_parity_wrong(uart_parity_check({.bits = UartBits::seven, .parity = UartParity::even}), 0x15Au));
+static_assert(!uart_parity_wrong(uart_parity_check({.bits = UartBits::seven, .parity = UartParity::odd}), 0x0DAu));
+static_assert(uart_parity_wrong(uart_parity_check({.bits = UartBits::seven, .parity = UartParity::odd}), 0x05Au));
 
 // ---- the divisor (30.3.4, 30.6.3) ----------------------------------------------------
 
@@ -970,6 +1017,10 @@ class Uart {
     static inline volatile uint8_t m_noise_errors = 0;  // NE: byte kept, line suspect
     static inline volatile uint8_t m_hw_overruns = 0;   // ORE: a byte lost in silicon
     static inline volatile uint8_t m_dma_faults = 0;    // blocks a dead stream lost
+    // The interrupt receiver's parity check of the word (uart_parity_check()),
+    // 0 with parity off: written by init() before the vector is enabled,
+    // read by isr() on every received frame.
+    static inline uint32_t m_parity_check = 0;
     // The transmit edge: set where the transmitter finds the ring dry (the
     // TXE entry that disarms, or a transmit block's completion that leaves
     // the ring empty), cleared by tx_drained()'s read.
@@ -1097,6 +1148,9 @@ public:
         }
         if (!S::configure(format, *reg)) {
             return false;
+        }
+        if constexpr (!has_rx_engine) {
+            m_parity_check = uart_parity_check(format);   // the vector's word check, decided once
         }
         if constexpr (opts.one_bit) {
             S::one_bit_sampling(true);
@@ -1348,6 +1402,24 @@ public:
     /// edge signal for kernel glue ("post RxActivity on true"). Every
     /// empty->non-empty transition reports true and the consumer only
     /// empties the ring by draining it, so no wakeup is ever lost.
+    ///
+    /// THE INTERRUPT RECEIVER JUDGES PARITY FROM THE WORD AS WELL. With
+    /// parity on, DR's word carries the received parity bit in its most
+    /// significant bit (RM0390 25.6.2: bit 8 with M = 1, bit 7 with
+    /// M = 0), and the vector recomputes the parity of the data bits and
+    /// that bit; a mismatch is a parity error exactly as SR.PE is - counted
+    /// once whichever of the two (or both) said it, the byte dropped and
+    /// reported to the ring. On the F446, ES0298 2.13.2 clears PE while the
+    /// port transmits, and measured, it still happens in the vector's own
+    /// order (one SR read, the DR read, then the write): about one frame in
+    /// 10000 came out of a parity error with DR whole and PE clear, a race
+    /// inside the status read that no order of reads and writes closes
+    /// (docs/stm32f4/usart.md). On every frame the race spares the check
+    /// agrees with SR.PE and adds nothing. Its cost per received frame is
+    /// one load and one test of a value init() stored with parity off,
+    /// a few instructions more with it on. Under a receive engine the
+    /// stream moves DR a byte at a time and the vector never reads it, so
+    /// this check is the interrupt receiver's alone.
     [[gnu::always_inline]] static bool isr() {
         USART_TypeDef& r = S::regs();
         const uint32_t st = r.SR;   // ONE read; the DR read below completes the clears
@@ -1362,8 +1434,17 @@ public:
             // NE, FE, PE and IDLE (30.6.1). An overrun without RXNE is
             // the case where the byte was already taken but ORE stands:
             // the read clears it, the byte is noise.
-            const uint8_t b = static_cast<uint8_t>(r.DR);
-            const uint32_t err = st & UsartFlag::receive_errors;
+            const uint32_t word = r.DR;
+            const uint8_t b = static_cast<uint8_t>(word);
+            uint32_t err = st & UsartFlag::receive_errors;
+            // The word's parity, on a frame that arrived (RXNE): an overrun
+            // without RXNE reads a word already judged when it was taken.
+            if ((st & UsartFlag::rxne) != 0u) {
+                const uint32_t check = m_parity_check;
+                if (check != 0u && uart_parity_wrong(check, word)) {
+                    err |= UsartFlag::pe;
+                }
+            }
             if (err != 0u) {
                 if ((err & UsartFlag::fe) != 0u) {
                     bump(m_frame_errors);
