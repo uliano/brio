@@ -21,7 +21,7 @@
  * vectors, the thread entry, the request, the scheduler and its queues'
  * verbs - in SRAM or leaves it in the flash (ch32x035/ld/scheduler_ram/
  * names the sections), and the build tells this file which with
- * BRIO_CH32_SCHEDULER_IN_RAM, 1 or 0 (ch32x035/CMakeLists.txt; a unit
+ * BRIO_CH32_SCHEDULER_IN_RAM, 1 or 0 (ch32x035/cmake/family.cmake; a unit
  * compiled outside the project, with the macro undefined, is taken as 0).
  * Two facts follow it here.
  *

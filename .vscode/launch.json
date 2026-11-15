@@ -6,7 +6,7 @@
     // must be the active one so the ELF has -Og -g3 -fno-inline debug info.
     //
     // Mirrors PyAvrOCD's wiring 1:1 (see cmake/toolchain-avr.cmake and
-    // CMakeLists.txt's AVR_PROBE_SERIAL): hardware breakpoints only (no
+    // cmake/family.cmake's AVR_PROBE_SERIAL): hardware breakpoints only (no
     // flash wear - the UPDI OCD has 2, GDB borrows one for its own
     // temporaries, so budget ONE user breakpoint), board = avr128db48 over
     // UPDI via Atmel-ICE. Verified end-to-end by driving avr-gdb against

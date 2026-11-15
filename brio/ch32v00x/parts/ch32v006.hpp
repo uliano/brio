@@ -101,7 +101,7 @@ inline constexpr const char* package_name = "QFN20/TSSOP20";
 inline constexpr Ch32Package package = Ch32Package::pins12;
 inline constexpr const char* package_name = "QFN12";
 #else
-#error "brio ch32v00x: the build must name the CH32V006's package - CH32V006K8, E8, F8 or D8 (ch32v00x/CMakeLists.txt derives it from CH32V00X_MCU)"
+#error "brio ch32v00x: the build must name the CH32V006's package - CH32V006K8, E8, F8 or D8 (ch32v00x/cmake/family.cmake derives it from CH32V00X_MCU)"
 #endif
 
 /// Which pins of each port the package brings out, as a mask (bit n =

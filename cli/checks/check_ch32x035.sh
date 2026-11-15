@@ -45,7 +45,7 @@ fail=0
 
 # The part's own flags: the part DEFINITION, which is what device.hpp asks
 # for its table, and the ISA and ABI - the three things
-# ch32x035/CMakeLists.txt derives from CH32X035_MCU that the compiler sees
+# ch32x035/cmake/family.cmake derives from CH32X035_MCU that the compiler sees
 # (cmake/ch32x035-parts.cmake is the table).
 part_flags() {
     case "$1" in

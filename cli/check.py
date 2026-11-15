@@ -24,9 +24,24 @@ guard walks every such body's call graph in the linked image and fails
 the check on one; a vector bound leaf must be one, a float trampoline
 must save the twenty and fcsr, any other binding but the crt's default
 handler fails, and a trampoline whose body is a leaf is reported as a
-candidate for the leaf form."""
+candidate for the leaf form.
 
+LAST, THE EXTERNAL GUARD, when no filter is given: the fixture
+test/external_app/ - a project written as an application kept outside
+brio's tree, built through cmake/brio.cmake - builds one app of the
+family from its in-tree source (blink where the family has one, else
+console) for the part of every release preset on which the link guard
+built that app, under <fit dir>/external-<preset>, and its image must be
+byte-identical to the in-tree image of the same app on the same preset,
+or the check fails naming the preset. The part and the family's further
+variables are the preset's own cacheVariables (CMakePresets.json); the
+board type, when the in-tree build put a board file on the app's include
+path, is read off that build's compile_commands.json."""
+
+import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 
@@ -53,9 +68,110 @@ def vector_guard(project):
     project (the guard itself passes over an image without F)."""
     import glob
     from cli import fit, vector_guard as vg
-    into = os.environ.get("BRIO_FIT_INTO") or os.path.join(ROOT, "build-cmake", "fit")
+    into = fit_dir()
     elfs = sorted(e for preset in fit.presets(project) for e in glob.glob(os.path.join(into, preset, "*.elf")))
     return vg.run(elfs, quiet=True)
+
+
+def fit_dir():
+    """Where the link guard builds (cli/fit.py): $BRIO_FIT_INTO, else
+    build-cmake/fit/."""
+    return os.environ.get("BRIO_FIT_INTO") or os.path.join(ROOT, "build-cmake", "fit")
+
+
+def external_definitions(project, cache):
+    """The fixture's -D arguments for one preset, from the preset's own
+    cacheVariables. The part variable (<FAMILY>_MCU) becomes BRIO_MCU; a
+    family whose part is the package of its one chip (the RP2350) names
+    the part as the project plus the package letter (<FAMILY>_PACKAGE); a
+    family of one chip and one package (the RP2040) names it as the
+    project. Every other variable - the build type, the RP2350's
+    architecture, the RP2040's flash size and boot stage - passes through
+    as it is."""
+    mcu = next((k for k in cache if k.endswith("_MCU")), None)
+    package = next((k for k in cache if k.endswith("_PACKAGE")), None)
+    if mcu:
+        part, used = cache[mcu], {mcu}
+    elif package:
+        part, used = project + cache[package], {package}
+    else:
+        part, used = project, set()
+    return ["-DBRIO_MCU=" + part] + ["-D%s=%s" % (k, v) for k, v in cache.items() if k not in used]
+
+
+def board_of(bdir, source):
+    """The board type whose board file the in-tree build in `bdir` put on
+    the include path of `source`, or None."""
+    try:
+        with open(os.path.join(bdir, "compile_commands.json"), encoding="utf-8") as f:
+            entries = json.load(f)
+    except (OSError, ValueError):
+        return None
+    for e in entries:
+        if os.path.realpath(e["file"]) == os.path.realpath(source):
+            command = e.get("command") or " ".join(e.get("arguments", []))
+            m = re.search(r"-I\S*/boards/([^/\s]+)(\s|$)", command)
+            return m.group(1) if m else None
+    return None
+
+
+def external_guard(project):
+    """The fixture test/external_app/ built for every release preset on
+    which the link guard built its app, each image compared byte for byte
+    with the in-tree one; 0 when every one is identical."""
+    from cli import fit
+    into = fit_dir()
+    apps = os.path.join(ROOT, project, "src", "apps")
+    app = "blink" if os.path.isfile(os.path.join(apps, "blink.cpp")) else "console"   # the fixture's own choice
+    source = os.path.join(apps, app + ".cpp")
+    ext = ".hex" if project == "avrxt" else ".bin"
+    with open(os.path.join(ROOT, project, "CMakePresets.json"), encoding="ascii") as f:
+        caches = {c["name"]: c.get("cacheVariables", {}) for c in json.load(f)["configurePresets"]}
+    same, failed, skipped = [], [], []
+    for preset in fit.presets(project):
+        bdir = os.path.join(into, preset)
+        if app not in fit.elf_targets(bdir):
+            skipped.append(preset)
+            continue
+        inside = os.path.join(bdir, app + ext)
+        if not os.path.isfile(inside):
+            failed.append((preset, "no in-tree image to compare (the link guard did not build it)"))
+            continue
+        # Every configure from the preset's variables alone: no cache kept.
+        odir = os.path.join(into, "external-" + preset)
+        os.makedirs(odir, exist_ok=True)
+        for stale in ("CMakeCache.txt", "CMakeFiles"):
+            path = os.path.join(odir, stale)
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            elif os.path.exists(path):
+                os.remove(path)
+        defs = external_definitions(project, caches[preset])
+        board = board_of(bdir, source)
+        if board:
+            defs.append("-DBRIO_BOARD=" + board)
+        cfg = subprocess.run(["cmake", "-S", os.path.join(ROOT, "test", "external_app"), "-B", odir,
+                              "-G", "Ninja"] + defs, capture_output=True, text=True)
+        if cfg.returncode != 0:
+            failed.append((preset, "the fixture does not configure: " + cfg.stderr.strip()[-300:]))
+            continue
+        res = subprocess.run(["cmake", "--build", odir], capture_output=True, text=True)
+        outside = os.path.join(odir, app + ext)
+        if res.returncode != 0 or not os.path.isfile(outside):
+            failed.append((preset, "the fixture does not build: " + (res.stdout + res.stderr).strip()[-300:]))
+            continue
+        with open(inside, "rb") as a, open(outside, "rb") as b:
+            if a.read() == b.read():
+                same.append(preset)
+            else:
+                failed.append((preset, "%s%s built outside the tree differs from the in-tree image" % (app, ext)))
+    for preset, why in failed:
+        print("brio check: external guard FAILED %s: %s" % (preset, why))
+    print("brio check: external guard (test/external_app, %s) - %d byte-identical to the in-tree image%s, "
+          "%d failed%s"
+          % (app, len(same), " (%s)" % ", ".join(same) if same else "", len(failed),
+             "; %s not built on %s" % (app, ", ".join(skipped)) if skipped else ""))
+    return 1 if failed or not same else 0
 
 
 def main(argv):
@@ -76,6 +192,7 @@ def main(argv):
             status |= fit.run([n], quiet=True)
             if n in GUARDED:
                 status |= vector_guard(n)
+            status |= external_guard(n)
             sys.stdout.flush()   # before the next script writes to the same stream
     return status
 

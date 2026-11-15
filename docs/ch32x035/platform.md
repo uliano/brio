@@ -508,7 +508,7 @@ lines of its header comment that the project's build reads
 ram` or `// build: scheduler = flash`. A file without the line is `ram`;
 any other value stops the configure with the app's name. The line sets
 two things for the image
-([ch32x035/CMakeLists.txt](../../ch32x035/CMakeLists.txt)). One is the
+([ch32x035/cmake/family.cmake](../../ch32x035/cmake/family.cmake)). One is the
 definition `BRIO_CH32_SCHEDULER_IN_RAM`, 1 or 0, from which this
 family's schedule.hpp takes the request's `fence.i` and
 `scheduler_init()`'s step. The other is which placement fragment the

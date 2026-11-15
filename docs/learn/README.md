@@ -22,6 +22,13 @@ who want the LED blinking before they read:
 | [Build, flash and debug from the command line](command-line.md) | The terminal route: prerequisites, configure, build, flash, observe, gdb, the host tests, with what has been verified stated once at the top |
 | [Working in VS Code](vscode.md) | The graphical route with the same steps, and for each step whether it is verified, configured, terminal-only or blocked |
 
+A program of your own need not live inside brio's tree; it can have a
+directory of its own:
+
+| Page | What you get from it |
+|---|---|
+| [An application in a directory of its own](own-application.md) | A `CMakeLists.txt` of five lines that builds a program kept outside brio's tree with the same recipe as brio's own applications: the part, one build directory per part, a board file of brio's or of your own, presets of your own, the `-upload` target, and what `brio check` does not do for it |
+
 The documented board is the ST Nucleo-G0B1RE, chosen because `blink`
 builds for it, its page names the LED, and its debugger configuration
 exists in the repository. The same application exists for the AVR,

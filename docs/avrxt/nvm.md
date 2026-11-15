@@ -454,7 +454,7 @@ inside BOOT whatever the fuses say** - under the bench geometry
 (BOOTSIZE = 128) all the code is in BOOT anyway, so the boundary is
 what the zone starts at.
 
-**The build id** is a link-time constant: `CMakeLists.txt`'s
+**The build id** is a link-time constant: `cmake/family.cmake`'s
 `avr_add_app()` passes `-Wl,--defsym,__nvheap_build_id=<epoch>` to
 every image, the way it locks FLMAP. It is read as the symbol's four
 relocation bytes and never dereferenced - the value is a number, and a
@@ -490,7 +490,7 @@ left to each app:
   with `BOOTSIZE != 0` reset-loops on its first interrupt.
   `Nvm::vectors_in_boot()` is the same store as a run-time verb and
   `vectors_in_boot_armed()` is the readback the suite asserts.
-- **FLMAPLOCK is set at startup**: `avr_add_app()` (`CMakeLists.txt`)
+- **FLMAPLOCK is set at startup**: `avr_add_app()` (`cmake/family.cmake`)
   appends `-Wl,--defsym,__flmap_lock=1` to the link, which makes the linker
   script's `__flmap_value_with_lock` carry the lock bit into the
   FLMAP write the C runtime already emits. The window is a mode that

@@ -220,6 +220,12 @@ route is [docs/learn/vscode.md](docs/learn/vscode.md). Every other
 family follows the same shape with its own project directory, presets
 and probe, documented in its guide.
 
+An application of your own need not live inside brio's tree: a
+`CMakeLists.txt` of five lines that includes `cmake/brio.cmake` and
+names the part builds it from a directory of its own with the same
+recipe as brio's own applications, `-upload` target included
+([docs/learn/own-application.md](docs/learn/own-application.md)).
+
 `bin/brio` is the repository's one command for the bench and the checks
 (put `bin/` on the PATH): `brio flash <board> <app>` builds for a board
 and flashes it whatever its probe, `brio run` drives a test suite's

@@ -62,7 +62,7 @@
  *    saving and restoring registers around a handler), each project's
  *    option - CH32V00X_HPE, CH32VX03_HPE, CH32X035_HPE, chosen at
  *    configure and on by default in all three (the projects'
- *    CMakeLists.txt) - which the build passes to the compiler as
+ *    cmake/family.cmake) - which the build passes to the compiler as
  *    BRIO_CH32_HPE. With it on, the crt has set INTSYSCR.HWSTKEN and the
  *    handler attribute is WCH's "WCH-Interrupt-fast": gcc emits no
  *    prologue for the registers the hardware saves and ends the function

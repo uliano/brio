@@ -7,7 +7,9 @@
 #  kept in this tree) and by ../../cmake/brio.cmake (an application kept
 #  outside it): both are built by stm32_add_app() below, so the same source
 #  gives the same image in both. Every path is taken from this file's own
-#  place, never from the including project's.
+#  place, never from the including project's. BRIO_BOARD_DIR, when whoever
+#  includes this file sets it, is the directory of the board file an image
+#  reads as "board.hpp".
 #
 #  THE DEVICE SELECT is ST's convention: the umbrella header stm32g0xx.h
 #  dispatches on a -DSTM32G0B1xx define, so the define is the part number's
@@ -109,6 +111,11 @@ function(stm32_add_app name)
         ${BRIO_ROOT}/third_party/cmsis-device-g0/Include
         ${BRIO_ROOT}/third_party/cmsis-core
     )
+    # A board file, when the includer names one: an app writes
+    # #include "board.hpp" and reads the facts of that assembly.
+    if(BRIO_BOARD_DIR AND EXISTS ${BRIO_BOARD_DIR})
+        target_include_directories(${name} PRIVATE ${BRIO_BOARD_DIR})
+    endif()
 
     target_compile_options(${name} PRIVATE
         ${BRIO_COMMON_FLAGS}

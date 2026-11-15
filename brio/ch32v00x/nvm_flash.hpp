@@ -99,7 +99,7 @@
 #include "util/nv_heap.hpp"
 
 extern "C" {
-/// The epoch of the link, injected by ch32v00x/CMakeLists.txt. Declared
+/// The epoch of the link, injected by ch32v00x/cmake/family.cmake. Declared
 /// as an array so that no code can be tempted to dereference it: it is
 /// a value, and only its address bits are ever read.
 extern const char __nvheap_build_id[];

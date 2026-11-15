@@ -11,7 +11,7 @@ graphical route with the same steps is [Working in VS Code](vscode.md).
 ## What has been verified
 
 Every step describes the mechanism the repository's build and bench
-tools use (`stm32g0/CMakeLists.txt`, `cli/bench/flash.py`,
+tools use (`stm32g0/CMakeLists.txt`, `stm32g0/cmake/family.cmake`, `cli/bench/flash.py`,
 [docs/stm32g0/README.md](../stm32g0/README.md)). A step is verified
 when it was performed on the named configuration, configured when the
 files set it up and the check on this board is still owed:

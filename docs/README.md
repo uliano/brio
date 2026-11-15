@@ -24,6 +24,7 @@ example by the route you prefer.
 | [learn/cpp-notation.md](learn/cpp-notation.md) | The C++ the example uses, explained through its own lines; a companion to the first program |
 | [learn/command-line.md](learn/command-line.md) | Build, flash, observe and debug `blink` on the ST Nucleo-G0B1RE from a terminal, and the host tests |
 | [learn/vscode.md](learn/vscode.md) | The same steps in VS Code, each marked verified, configured, terminal-only or blocked |
+| [learn/own-application.md](learn/own-application.md) | An application kept in a directory of its own, outside brio's tree, built through `cmake/brio.cmake` with the same recipe as brio's own applications |
 
 The reference mirrors the strata of `brio/`: `design/` is the
 target-independent framework; one folder per target (`avrxt/`,

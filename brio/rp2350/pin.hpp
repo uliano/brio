@@ -529,7 +529,7 @@ struct Pin {
     static_assert(!package_known || n < gpio_count,
                   "this pin is not bonded in the package this image is built for: the "
                   "QFN-60 brings out GPIO0..GPIO29, the QFN-80 GPIO0..GPIO47 "
-                  "(rp2350/CMakeLists.txt states which)");
+                  "(rp2350/cmake/family.cmake states which)");
 
     static constexpr uint8_t number = n;
     /// The pin's bit in ITS OWN half of the SIO registers.

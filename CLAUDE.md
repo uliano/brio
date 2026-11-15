@@ -531,12 +531,17 @@ brio check stm32f4 [name]       # same for the stm32f4 stratum (ALL TWENTY-THREE
 brio check rp2350 [name]        # same for the rp2350 stratum - the one fixture that crosses TWO
                                 # COMPILERS: every TU built four times (Cortex-M33 and Hazard3, each
                                 # for the QFN-80 and the QFN-60), util_all.cpp through both
-brio check all                  # every stratum above, in a row; each check ends with the
-                                # LINK GUARD: every app built on every release preset of
-                                # the stratum's project (build-cmake/fit/), a failure fatal;
-                                # ch32vx03's adds the VECTOR GUARD (cli/vector_guard.py): on
-                                # the F images every naked vector's body walked in the ELF,
-                                # any f-register instruction or unresolved indirect call fatal
+brio check all                  # every stratum above, in a row; after its fixtures each
+                                # check runs the LINK GUARD: every app built on every release
+                                # preset of the stratum's project (build-cmake/fit/), a
+                                # failure fatal; ch32vx03's adds the VECTOR GUARD
+                                # (cli/vector_guard.py): on the F images every naked vector's
+                                # body walked in the ELF, any f-register instruction or
+                                # unresolved indirect call fatal; and each ends with the
+                                # EXTERNAL GUARD: test/external_app/ builds the family's blink
+                                # (else console) through cmake/brio.cmake for every release
+                                # preset that builds it in the tree, under fit/external-<preset>,
+                                # an image not byte-identical to the in-tree one fatal
 brio fit [stratum|all]          # that build alone, and the census: each image's flash and
                                 # RAM against its linker script's regions (or the smaller
                                 # tier its project holds it to), by margin
@@ -574,6 +579,7 @@ brio gate --tokens [--strings] FILE...   # a source token-identical to REF? (--s
 (cd rp2350 && cmake --build --preset rp2350-arm-release --target <app>-upload)   # flash via Raspberry Pi's OpenOCD fork: a
                                                                                  # rescue over the debug port, then program as
                                                                                  # core 0 of the Arm pair, then reset run
+# an app kept OUTSIDE the tree: its CMakeLists.txt sets BRIO_MCU, includes cmake/brio.cmake before project(), calls brio_add_app() (docs/learn/own-application.md)
 # apps are auto-discovered from <project>/src/apps/*.cpp - plus
 # experiments/*/{avrxt,samc21}/*.cpp, each experiment's per-arch app
 # halves - at every configure; no generation step; a new/removed app
@@ -659,7 +665,7 @@ brio fuses adb.1 bootsize=128  # read/write fuses over UPDI (fuses are
   40044); effectively ONE free hardware breakpoint (GDB borrows the
   second); `--breakpoints hardware` refuses extras instead of wearing
   flash; line breakpoints need `-fno-inline` (GCC 16 DWARF caveat) -
-  hence the Debug config's flags in `CMakeLists.txt`'s `avr_add_app()`.
+  hence the Debug config's flags in `avrxt/cmake/family.cmake`'s `avr_add_app()`.
   `monitor ioregister <name>` reads/writes peripheral registers; the
   same SVD also drives the mcu-debug Peripheral Viewer extension's
   panel (`svdPath` in `launch.json`).
@@ -676,9 +682,13 @@ The repo root is not a CMake project: the builds are sibling CMake
 projects, PEERS, one per target plus `test/` and `host/`. Every CROSS
 project has the same shape - `CMakeLists.txt` (app auto-discovery:
 one `main()` per `src/apps/<app>.cpp`, each app's `// build: <option> =
-<value>` header lines read at configure, `<project>_add_app()` with
+<value>` header lines read at configure, the roster),
+`cmake/family.cmake` (the image recipe, which `CMakeLists.txt` includes
+and an application outside the tree reaches through
+`cmake/brio.cmake`: the part's variables, `<project>_add_app()` with
 the flags, the `.hex`/`.lst`/`.map` post-build and a per-app `-upload`
-target), `CMakePresets.json` (one configure+build preset pair per bench
+target, and `brio_add_app()`, the one name an outside application
+calls), `CMakePresets.json` (one configure+build preset pair per bench
 chip x {release, debug}, binaryDir under the shared `build-cmake/`),
 `cmake/toolchain-*.cmake` (the cross toolchain by absolute path),
 `ld/<part>.ld`, `src/apps/`, `src/glue/` (the crt and what every image
@@ -693,7 +703,8 @@ part, the AVR64EA48) and
 | path | what it holds |
 |---|---|
 | `brio/` | the framework, one directory per stratum (the roster above); the headers' comments are the reference, `docs/<stratum>/README.md` the map. `brio/.clangd` routes each stratum to its own compile database; a fragment in each stratum and each project beside it |
-| `boards/` | the board files, one directory per board type that has a board (`boards/<type>/board.hpp`): the assembly's facts - LEDs, crystals, the console's route, jumpers, nets - as constants in namespace `board`, with `board::type` and a `static_assert` that the build's part is the one fitted; above the target strata, beside the apps, never included from `brio/`; a project adds the configured type's directory to every app's include path when it exists (avrxt and ch32v00x today); a `.clangd` in each directory routes the file to its preset's compile database |
+| `boards/` | the board files, one directory per board type that has a board (`boards/<type>/board.hpp`): the assembly's facts - LEDs, crystals, the console's route, jumpers, nets - as constants in namespace `board`, with `board::type` and a `static_assert` that the build's part is the one fitted; above the target strata, beside the apps, never included from `brio/`; a project adds the configured type's directory to every app's include path when it exists (avrxt, ch32v00x and rp2350 today), and an application outside the tree names its type with `BRIO_BOARD`; a `.clangd` in each directory routes the file to its preset's compile database |
+| `cmake/` | `brio.cmake`, the entry point of an application kept OUTSIDE the tree: from `BRIO_MCU` it finds the family, names the family's toolchain file before `project()` and has `project()` load the family's `cmake/family.cmake`; `BRIO_BOARD` names one of `boards/` (docs/learn/own-application.md) |
 | `avrxt/` | the AVR project: `cmake/avr-mcus.cmake` (package -> mcu), `cmake/avr-refused-libc.rsp` (the linker's --wrap list refusing avr-libc's heap and stdio), `src/glue/ivsel_boot.cpp` in every image (vectors at BOOT start), the FLMAPLOCK and build-id defsyms; presets for the AVR128DB's three packages, the AVR128DA48 and the AVR64EA48; the GROUP axis on the AVR64EA48, every image there held after its link to the SPLIT TIER, the ATmega4809's 48 KB and 6 KB (`cmake/avr-tier-guard.cmake`) |
 | `samc21/`, `stm32g0/` | the SAM C21 and STM32G0 projects in the shared shape; the G0's presets for the G0B1RE, G071RB and G031K8 with one ld and crt per part; the GROUP axis on the G031K8 (and per board type) and the SAM's one part |
 | `stm32f4/` | a PART TABLE (`cmake/stm32f4-parts.cmake`: part -> ST's device define, crt stem, board type), presets for the F429ZI, F446RE, F411CE and F469NI, the hard-float flags |
@@ -703,7 +714,7 @@ part, the AVR64EA48) and
 | `rp2040/` | the RP2040 project: the boot stage checked in as bytes, its own crt, `ld/` with `.ram_text` carried by `.data` (the flash engine and the PL022 host's hot path); the WeAct board's flash wants the OpenOCD built from git |
 | `rp2350/` | THE ONLY PROJECT WHOSE AXIS IS THE COMPILER: `cmake/toolchain-arm.cmake` and `cmake/toolchain-riscv.cmake` are two configures of the same sources, each setting `RP2350_ARCH`; a flash geometry and a PACKAGE (QFN-60 or QFN-80, a pad the package has not got a compile error) per configure; two crts binding the same handler names, each placing the IMAGE_DEF block - there is no second stage; the `-upload` target a rescue over the debug port, then programming as core 0 of the Arm pair, then a reset |
 | `host/` | the host's own programs, which RUN rather than run and exit (first: `supply_panel`); the same `// build:` grammar, nothing registered with ctest; flags identical to `test/`'s |
-| `test/` | the host test project (native g++, non-recovering UBSan): one executable and ctest entry per `test_*/main.cpp` - the kernel, util, gfx, devices and IP strata against their simulated chips, the runtime's cases (`test_rt`); and the family compile fixtures `family_<stratum>/` with their `neg/` TUs (`brio check`) - every fixture directory of a family with an SpiHost compiles the DCS link and the panel over that host |
+| `test/` | the host test project (native g++, non-recovering UBSan): one executable and ctest entry per `test_*/main.cpp` - the kernel, util, gfx, devices and IP strata against their simulated chips, the runtime's cases (`test_rt`); and the family compile fixtures `family_<stratum>/` with their `neg/` TUs (`brio check`) - every fixture directory of a family with an SpiHost compiles the DCS link and the panel over that host; `external_app/`, a project written as an application outside the tree, which `brio check` builds through `cmake/brio.cmake` and compares byte for byte with the in-tree image |
 | `third_party/` | vendored, licensed: doctest, the SAM C21 DFP, ST's cmsis-device-g0 and -f4, ARM's CMSIS-Core, the pico-sdk's device descriptions in TWO include roots (the RP2040's and the RP2350's, same file names) with a stub core header for the RISC-V build - never the SDK runtime |
 | `bin/brio`, `cli/` | THE ONE COMMAND of the bench and the repository, dispatching on its verb: `gate.py` (the byte-identity gate over the images and the token-identity check over sources), `prose.py` (the prose net), `vector_guard.py` (the CH32V303's naked vectors kept float-free), `check.py` over `cli/checks/` (the family compile fixtures as shell scripts, each 32-bit one ending with the runtime's checks); `cli/bench/` the verbs that need a board - `verbs.py`, `common.py` (BOARD_TYPES: a board type -> its project, preset, mcu and flash mechanism; the app rosters `build-cmake/apps_<project>.json`), `manifest.py` (private/bench_boards.py before the public example), `bench_boards.py`, `flash.py` (build, then avrdude / OpenOCD / the ST-LINK by board type, the RP2350's two sessions), `fuses.py`, `console.py` (the suites' console protocol: run, console, duo), `stress.py` (the host end of the UART suites) |
 | `experiments/` | one self-contained directory per cross-cutting bench experiment (app halves per architecture globbed by the projects, the wire protocol, its own README, a python driver, logs git-ignored); `docs/` never references one |

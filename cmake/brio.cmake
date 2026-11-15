@@ -81,14 +81,12 @@ elseif(_brio_mcu MATCHES "^ch32x03")
 elseif(_brio_mcu STREQUAL "rp2040")
     set(BRIO_FAMILY rp2040)
     set(_brio_toolchain toolchain-arm.cmake)
-elseif(_brio_mcu MATCHES "^rp2350([ab])?$")
+elseif(_brio_mcu MATCHES "^rp2350([ab])$")
     set(BRIO_FAMILY rp2350)
     # The package is the part's letter (rp2350a the QFN-60, rp2350b the
     # QFN-80); the architecture is the family's own variable, and it
     # decides the compiler.
-    if(CMAKE_MATCH_1)
-        set(RP2350_PACKAGE "${CMAKE_MATCH_1}")
-    endif()
+    set(RP2350_PACKAGE "${CMAKE_MATCH_1}")
     if(RP2350_ARCH STREQUAL "riscv")
         set(_brio_toolchain toolchain-riscv.cmake)
     else()

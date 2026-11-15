@@ -79,7 +79,7 @@ enum class Ch32Package : uint8_t { pins32, pins24, pins20, pins16, pins12, pins8
 #elif defined(CH32V006)
 #include "ch32v00x/parts/ch32v006.hpp"
 #else
-#error "brio ch32v00x: the build must define the part, CH32V003 or CH32V006 (ch32v00x/CMakeLists.txt derives it from CH32V00X_MCU)"
+#error "brio ch32v00x: the build must define the part, CH32V003 or CH32V006 (ch32v00x/cmake/family.cmake derives it from CH32V00X_MCU)"
 #endif
 
 namespace brio {

@@ -87,7 +87,7 @@ inline constexpr const char* package_name = "SOP16";
 inline constexpr Ch32Package package = Ch32Package::pins8;
 inline constexpr const char* package_name = "SOP8";
 #else
-#error "brio ch32v00x: the build must name the CH32V003's package - CH32V003F4, A4 or J4 (ch32v00x/CMakeLists.txt derives it from CH32V00X_MCU)"
+#error "brio ch32v00x: the build must name the CH32V003's package - CH32V003F4, A4 or J4 (ch32v00x/cmake/family.cmake derives it from CH32V00X_MCU)"
 #endif
 
 /// Which pins of each port the package brings out, as a mask (bit n =

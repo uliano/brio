@@ -15,7 +15,7 @@
  *     { brio::InterruptGuard guard; ... }         // a critical section, any context
  *
  * This family's facts: the hardware prologue is the project's
- * CH32X035_HPE option (ch32x035/CMakeLists.txt, on by default), with
+ * CH32X035_HPE option (ch32x035/cmake/family.cmake, on by default), with
  * which the crt (ch32x035/src/glue/startup_ch32x035.S) sets
  * INTSYSCR.HWSTKEN and the QingKe V4C saves the sixteen caller-saved
  * integer registers itself, two levels deep; the core has no

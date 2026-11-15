@@ -123,7 +123,7 @@
 #include "rp2040/device.hpp"
 
 #ifndef BRIO_RP2040_FLASH_KB
-#error "BRIO_RP2040_FLASH_KB names the board's flash size in KB (rp2040/CMakeLists.txt passes it)"
+#error "BRIO_RP2040_FLASH_KB names the board's flash size in KB (rp2040/cmake/family.cmake passes it)"
 #endif
 
 namespace brio {

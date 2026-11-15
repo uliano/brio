@@ -103,7 +103,7 @@
  * PROGERR back unedited.
  *
  * The build id is a link-time constant:
- * stm32g0/CMakeLists.txt passes -Wl,--defsym,__nvheap_build_id=<newest
+ * stm32g0/cmake/family.cmake passes -Wl,--defsym,__nvheap_build_id=<newest
  * source mtime> to every image, so an unchanged tree relinks to the same
  * bytes. A pointer is 32 bits here, so the symbol's address is the value.
  * It is recorded in every map version and nothing decides on it - a
@@ -121,7 +121,7 @@
 #include "util/nv_heap.hpp"
 
 extern "C" {
-/// The epoch of the link, injected by stm32g0/CMakeLists.txt. Declared
+/// The epoch of the link, injected by stm32g0/cmake/family.cmake. Declared
 /// as an array so that no code can be tempted to dereference it: it is a
 /// VALUE, and only its address bits are ever read.
 extern const char __nvheap_build_id[];

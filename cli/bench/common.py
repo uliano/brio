@@ -140,7 +140,7 @@ BOARD_TYPES = {
     # this chip the ARCHITECTURE is a build axis - the same silicon runs
     # a Cortex-M33 pair or a Hazard3 RISC-V pair, and which one is
     # decided by the IMAGE_DEF in the image that is flashed (rp2350/
-    # CMakeLists.txt). So a board type here names a board AND an
+    # cmake/family.cmake). So a board type here names a board AND an
     # architecture: weact2350b is the WeAct RP2350B core board built for
     # Arm, weact2350b-rv the same board built for RISC-V - in the
     # manifest one board with an "rv" view (board_entry below). Both are

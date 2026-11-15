@@ -141,7 +141,7 @@
 #include "rp2350/device.hpp"
 
 #ifndef BRIO_RP2350_FLASH_KB
-#error "BRIO_RP2350_FLASH_KB names the board's flash size in KB (rp2350/CMakeLists.txt passes it)"
+#error "BRIO_RP2350_FLASH_KB names the board's flash size in KB (rp2350/cmake/family.cmake passes it)"
 #endif
 
 namespace brio {

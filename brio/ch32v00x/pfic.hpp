@@ -14,7 +14,7 @@
  *     brio::enable_interrupts();                     // in main, before Tenuto's run()
  *
  * This family's facts: the hardware prologue is the project's
- * CH32V00X_HPE option (ch32v00x/CMakeLists.txt, on by default), with
+ * CH32V00X_HPE option (ch32v00x/cmake/family.cmake, on by default), with
  * which the crt (ch32v00x/src/glue/startup_ch32v00x.S) sets
  * INTSYSCR.HWSTKEN and the QingKe V2 pushes the ten caller-saved
  * registers to the user stack (QingKe V2 manual 3.4); the core has no

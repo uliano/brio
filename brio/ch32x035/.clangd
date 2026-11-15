@@ -5,7 +5,7 @@
 CompileFlags:
   CompilationDatabase: ../../build-cmake/ch32x035f8-release
   # clangd's clang knows no WCH extension: the database's -march (the
-  # part's full ISA under WCH's gcc, CMakeLists.txt) would make every TU
+  # part's full ISA under WCH's gcc, cmake/family.cmake) would make every TU
   # fail to parse, so the editor sees the standard subset instead. The
   # compiler still builds with xw; only the parse is narrowed.
   Remove: [-march=*]

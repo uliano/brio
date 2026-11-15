@@ -72,7 +72,7 @@
  * start at 0x00400000 / 256 = 16384 rather than at 0 - which is exactly
  * why the index is a page number and not an offset.
  *
- * The build id is a link-time constant: samc21/CMakeLists.txt passes
+ * The build id is a link-time constant: samc21/cmake/family.cmake passes
  * -Wl,--defsym,__nvheap_build_id=<newest source mtime> to every image. A
  * wall-clock id would make every relink a different image; the newest
  * source timestamp keeps an unchanged tree relinking to the same bytes.
@@ -92,7 +92,7 @@
 #include "util/nv_heap.hpp"
 
 extern "C" {
-/// The epoch of the link, injected by samc21/CMakeLists.txt. Declared as an
+/// The epoch of the link, injected by samc21/cmake/family.cmake. Declared as an
 /// array so that no code can be tempted to dereference it: it is a VALUE,
 /// and only its address bits are ever read.
 extern const char __nvheap_build_id[];

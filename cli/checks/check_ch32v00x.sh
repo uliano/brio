@@ -40,7 +40,7 @@ PARTS="ch32v006k8 ch32v006e8 ch32v006f8 ch32v006d8 ch32v003f4 ch32v003a4 ch32v00
 FILTER="${1:-}"
 fail=0
 
-# The part's own flags: the same three facts ch32v00x/CMakeLists.txt
+# The part's own flags: the same three facts ch32v00x/cmake/family.cmake
 # derives from CH32V00X_MCU - the chip's definition, the package's (the
 # part number upper-cased) and the chip's ISA.
 part_flags() {

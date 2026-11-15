@@ -82,7 +82,7 @@ The toolchain ships the freestanding libstdc++ (type_traits, concepts,
 bit, span, optional, expected, variant; no chrono, charconv or
 iostream), and brio uses it instead of hand-rolled traits.
 
-`-std=gnu++23` is set once, explicitly, in `CMakeLists.txt`'s
+`-std=gnu++23` is set once, explicitly, in `cmake/family.cmake`'s
 `avr_add_app()`; nothing else in this build adds a competing `-std`
 flag, so there is no "last one wins" hazard to guard against.
 
@@ -351,7 +351,7 @@ the EA lacks several the DA/DB have (`USART3..5_*`, `TCD0_*`, `ZCD*`,
 build (`-Werror=misspelled-isr`), so an app is built for `ea48` only
 once it binds the EA's names.
 
-`F_CPU` is not defined in this project: nothing in `CMakeLists.txt`
+`F_CPU` is not defined in this project: nothing in `cmake/family.cmake`
 ever adds a `-DF_CPU`, since the flags are built up from scratch rather
 than inherited from a framework default that would produce one. The
 rate has one truth, `Clock::hz`; avr-libc's `util/delay.h` and
@@ -395,7 +395,7 @@ drivers expose `[[gnu::always_inline]]` handler bodies (`rxc()`,
 ## Upload (Atmel-ICE, UPDI)
 
 `cmake --build --preset <pkg>-release --target <app>-upload` drives
-avrdude 8.1 through the Atmel-ICE (`avr_add_app()` in `CMakeLists.txt`;
+avrdude 8.1 through the Atmel-ICE (`avr_add_app()` in `cmake/family.cmake`;
 `-P usb:<serial>` disambiguates when more than one Atmel-ICE is
 attached, through `AVR_PROBE_SERIAL`). `brio flash <board> <app>` does
 the same, resolved against the bench manifest; the probe page

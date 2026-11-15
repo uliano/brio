@@ -54,7 +54,7 @@ def openocd_args(prog, elffile, target_cfg):
     = an Atmel-ICE or a Raspberry Pi Debug Probe, "openocd_stlink" = a
     Nucleo's on-board ST-LINK), the target script the board TYPE's
     (BOARD_TYPES). Otherwise the same invocation
-    samc21/CMakeLists.txt's <app>-upload target uses - except that the probe
+    samc21/cmake/family.cmake's <app>-upload target uses - except that the probe
     is named by THE MANIFEST, not by the CMake cache. Identity is the
     manifest's concern (a second SAM board means a second probe), and this
     mirrors the AVR path, which calls avrdude itself rather than leaning on
@@ -185,7 +185,7 @@ def wch_openocd_args(prog, elffile):
     binary from the SWD paths' 0.12.0 release, named by the manifest's
     WCH_OPENOCD. Its target script is the vendor's own wch-riscv.cfg,
     which lives beside the binary and not in a scripts tree. The same
-    invocation ch32v00x/CMakeLists.txt's <app>-upload target uses.
+    invocation ch32v00x/cmake/family.cmake's <app>-upload target uses.
 
     `program ... verify` then `reset halt` AND `resume` leaves the chip
     running, the end state of every other path. Not `reset run`: in this

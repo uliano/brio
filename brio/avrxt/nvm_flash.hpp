@@ -71,7 +71,7 @@
  * part and would silently lose the top of the memory.
  *
  * The build id is a link-time constant, not a compile-time one:
- * CMakeLists.txt's avr_add_app() passes -Wl,--defsym,__nvheap_build_id=<newest
+ * avrxt/cmake/family.cmake's avr_add_app() passes -Wl,--defsym,__nvheap_build_id=<newest
  * source mtime> to every image, the same way it locks FLMAP (a
  * wall-clock id would make every relink a different image and defeat
  * reflashing an unchanged one). It is read as a 32-bit immediate (the
@@ -104,7 +104,7 @@ static_assert(!brio::has_nvm_page_buffer,
 
 extern "C" {
 /// The build id, the newest source timestamp as an epoch, injected by
-/// CMakeLists.txt's avr_add_app(). Declared as an array so that no code
+/// avrxt/cmake/family.cmake's avr_add_app(). Declared as an array so that no code
 /// can be tempted to dereference it: it is a value, and only its
 /// relocation bytes are ever read.
 extern const char __nvheap_build_id[];

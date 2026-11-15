@@ -22,7 +22,7 @@
  * `P` is the program's platform type (`using P =
  * brio::Ch32vx03Platform<>;`, platform.hpp). This family's facts: the
  * hardware prologue is the project's CH32VX03_HPE option
- * (ch32vx03/CMakeLists.txt, on by default), with which the crt
+ * (ch32vx03/cmake/family.cmake, on by default), with which the crt
  * (ch32vx03/src/glue/startup_ch32vx03.S) sets INTSYSCR.HWSTKEN; the
  * CH32V303's images are built with F (the project's part table,
  * ch32vx03/cmake/ch32vx03-parts.cmake), so there every vector bound with

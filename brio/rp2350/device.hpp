@@ -59,7 +59,7 @@
  * 30 GPIO and four ADC inputs, QFN-80 brings out 48 and eight (1.2). The
  * die is one, so every register of every pin exists on both; what does
  * not exist is the pad. A build states the package it is for
- * (BRIO_RP2350_PACKAGE_PINS, rp2350/CMakeLists.txt, which derives it
+ * (BRIO_RP2350_PACKAGE_PINS, rp2350/cmake/family.cmake, which derives it
  * from the project's RP2350_PACKAGE) and then a pin the package has not
  * got is a compile error; a build that states nothing compiles for the
  * larger package and the refusal happens at run time, against
