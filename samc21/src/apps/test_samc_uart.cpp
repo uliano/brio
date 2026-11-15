@@ -1458,13 +1458,40 @@ bool wire_rungs(std::initializer_list<uint32_t> rates) {
 //    transmitter still off - driven, not floating. THE CONDITION: the pad
 //    meets the far board's RxD, which must hold no pull - its dark
 //    console, or its USART peer while that SEARCHES (no pull on any link
-//    pad, usart_link.hpp's dark discipline), both qualify; a far board
-//    pulling its RxD up would make the reading its pull's;
+//    pad, usart_link.hpp's dark discipline), both qualify, and the letter
+//    waits out the peer's rediscovery time first (wait_far_pull_gone());
+//    a far board pulling its RxD up would make the reading its pull's;
 //  - the IrDA coder's pulse sense, which the loop cannot hear (31.6.3.3:
 //    "the polarity of the transmitter and receiver are opposite"): the
 //    pad's idle level read, and a 0x00 frame sampled, high in its pulses.
 
 using LoopPad = Pin<'A', 18>;
+
+extern uint32_t last_answer_ms;   // the link's section, below
+
+/// THE CONDITION above, waited for: the far peer pulls its RxD up while it
+/// believes the crossed pair it last proved, and lets every link pad go
+/// once it has heard no frame from this board for link::rediscover_ms
+/// (usart_link.hpp) - so a pad read under its pull-down sooner after a
+/// two-board letter reads the peer's pull (measured: a z started within
+/// those 3 s of letter O failed two verdicts of g in each of three runs,
+/// 5 s later passed in each). Counted from the last answer heard, every
+/// frame of this board's coming before its answer, or from the boot when
+/// none was (the peer may still believe a link the image before proved),
+/// with wait_rediscovery()'s 600 ms over it; never by a command, which
+/// would start the count again. A dark far board passes at once or after
+/// the same wait, the condition holding either way.
+void wait_far_pull_gone() {
+    const uint32_t quiet = static_cast<uint32_t>(link::rediscover_ms) + 600u;
+    const uint32_t from = last_answer_ms;
+    const uint32_t waited = Ticker::millis() - from;
+    if (waited < quiet) {
+        print(plain, "  (the far peer's pull: ", quiet - waited, " ms waited for its search)",
+              crlf);
+    }
+    while (Ticker::millis() - from < quiet) {
+    }
+}
 
 /// The resource up on the loop's pad under `c`, polled: no interrupt.
 bool resource_up(const SercomUartConfig& c) {
@@ -1665,6 +1692,7 @@ void tg_resource() {
     // SERCOM's pull-down (31.5.1); a write while off sends nothing. The
     // pull itself is proven first, on the pad with the instance disabled.
     {
+        wait_far_pull_gone();
         bool up = resource_up(plain_cfg);
         LoopPad::function(PinFunction::c, {.input_enable = true, .pull = PinPull::down});
         (void)Sc1::enable(false);
