@@ -37,6 +37,9 @@ part class, keyed in `stm32f4/device_tables.hpp`.
 | STM32F446xC/xE device errata | **ES0298 Rev 8** | `es0298-*.pdf` | revisions A and 1 share REV_ID 0x1000 (table 2); the Nucleo-F446RE's part reads it |
 | STM32F411xC/xE device errata | **ES0287 Rev 6** | `es0287-*.pdf` | revisions A, 1 and 2 share REV_ID 0x1000; the black pill's part reads it |
 | STM32F469xx/F479xx device errata | **ES0321 Rev 14** | `es0321-*.pdf` | revisions A and 1 share REV_ID 0x1000 (table 2); the 32F469IDISCOVERY's part reads it; its bxCAN item is 2.15.1, its RTC items 2.11.x, its OTG_FS items 2.16.x, its QUADSPI items 2.4.x, its DSI items 2.8.1 .. 2.8.3 |
+| STM32F405/407xx and F415/417xx device errata | **ES0182 Rev 19** | `dm00037591-*.pdf` | no part on the bench; read for its USART items alone |
+| STM32F401xD/xE device errata | **ES0299 Rev 6** | `es0299-*.pdf` | no part on the bench; read for its USART items alone |
+| STM32F413/F423 device errata | **ES0372 Rev 8** | `es0372-*.pdf` | no part on the bench; read for its USART items alone |
 | STM32 Cortex-M4 programming manual | **PM0214 Rev 10** | `pm0214-*.pdf` | the core: PRIMASK/BASEPRI, SysTick, the NVIC, the FPU's CPACR and lazy stacking, the ISB the pending-interrupt test needs |
 | ARMv7-M Architecture Reference Manual | ARM DDI 0403E.e | `DDI0403E_e_armv7m_arm.pdf` | the architecture behind PM0214; B1.5.19 (the WFI's wake-up events, PRIMASK ignored in deciding one), B3.3.1 (SysTick's reload after a write to its current value) |
 | Cortex-M4 Technical Reference Manual | ARM DDI 0439B | `DDI0439B_cortex_m4_r0p0_trm.pdf` | 3.9.1: the exception entry's and return's twelve cycles at zero wait states, the tail chain's six |
@@ -45,6 +48,12 @@ part class, keyed in `stm32f4/device_tables.hpp`.
 | STM32F429I-DISC1 user manual | UM1670 Rev 6 | `um1670-*.pdf` | + the MB1075 schematics B01/C01/D02/E01 beside it |
 | STM32 Nucleo-64 boards (MB1136) user manual | UM1724 Rev 17 | `um1724-*.pdf` | + the MB1136 schematics C03/C04 |
 | 32F469IDISCOVERY user manual | UM1932 Rev 5 | `um1932-*.pdf` | + the MB1189 schematics B-07/B-08/C-01 (the MCU sheet is where the SDRAM's pads come from) and the display board's MB1166 A-08/A-09/A-10 beside it |
+
+The USART's full-duplex parity item ("the Parity Error (PE) flag can be
+cleared by writing to the data register") is the same text, status A on
+every revision, in all seven errata sheets above, under a different
+section number in each: ES0182 2.11.2, ES0206 2.11.2, ES0287 2.10.2,
+ES0298 2.13.2, ES0299 2.10.2, ES0321 2.13.2, ES0372 2.13.2.
 
 The black pill's own documents (WeAct's schematic) are the board
 page's business ([../../boards/blackpill-f411ce.md](../../boards/blackpill-f411ce.md)).
