@@ -115,16 +115,21 @@ the errata's USART items - ES0206 2.11.x, ES0298 2.13.x, ES0287 2.10.x:
 respected when data are sent on TXE events", "RTS is active while RE
 or UE = 0", and their siblings. Two reach the transport: the first,
 because the receive engine's burst edge is the line's IDLE (below) and
-the erratum has no workaround, and on the F446 ES0298 2.13.2 (PE
-cleared by a write of DR in full duplex), because the task counts
-parity errors while it may be transmitting - both staged from a foreign
-sender ("Against a far board": the first seen on the desk's die in its
-own case, one idle frame from a faster sender, and read entry for entry
-the same on the far STM32G0, whose sheet lists no such item, the receive
-engine then telling the two bursts as one; the second seen in the
-erratum's order, and about one parity error in 10000 frames missed by
-SR.PE in the workaround's order too - which is why the interrupt
-receiver judges parity from the received word as well, below).
+the erratum has no workaround, and the full-duplex parity item, the same
+text in every F4 sheet under its own number - "the Parity Error (PE)
+flag can be cleared by writing to the data register" (ES0182 2.11.2,
+ES0206 2.11.2, ES0287 2.10.2, ES0298 2.13.2, ES0299 2.10.2, ES0321
+2.13.2, ES0372 2.13.2; [vendor/README.md](vendor/README.md)) - because
+the task counts parity errors while it may be transmitting. Both are
+staged from a foreign sender on the STM32F446RE ("Against a far board":
+the first seen on the desk's die in its own case, one idle frame from a
+faster sender, and read entry for entry the same on the far STM32G0,
+whose sheet lists no such item, the receive engine then telling the two
+bursts as one; the second, ES0298 2.13.2 there, seen in the erratum's
+order, and about one parity error in 10000 frames missed by SR.PE in
+the workaround's order too - which is why a port that runs a parity
+format carries `UartOptions::parity`, whose interrupt receiver judges
+parity from the received word as well, below).
 ES0298 2.13.3
 (no PE for an address with a parity error that ends mute mode) is staged
 too, and showed after a software mute alone. What each erratum does on
@@ -145,8 +150,8 @@ family fixture is `test/family_stm32f4/usart.cpp` with the negatives
 that refuse an absent instance, flow control on a UART, an engine off
 the instance's cells of the request mapping, an engine on a part class
 whose manual was not read, a receive ring longer than one lap of the
-stream's count, a receive level on a port with no receive engine, and
-one pad twice. Bench: the console apps
+stream's count, a receive level on a port with no receive engine, the
+parity option on a port with a receive engine, and one pad twice. Bench: the console apps
 and the platform suite on the four boards, the engined console in
 `test_stm32f4_dma`, the transport on USART6's single-wire loop in
 `test_stm32f4_serial` (the Nucleo-F446RE; a letter of a suite is one
@@ -187,7 +192,7 @@ from those four measurements.
 | the chapter's offer | taken? | why |
 |---|---|---|
 | RDR, one level (25.4.3): no FIFO | the interrupt receiver takes every byte at RXNE, one entry a byte | the block has nothing deeper to batch; at 5.625 Mbaud a byte is 320 cycles and the interrupt receiver keeps up with the console's and the tick's handlers beside it, an overrun counted when a longer one holds it off |
-| the received parity bit, DR's most significant bit with PCE (25.6.2: bit 8 with M = 1, bit 7 with M = 0) | the interrupt receiver checks each word's parity itself, a mismatch counted and dropped as SR.PE is, once for either; not the receive engine | ES0298 2.13.2: PE can be cleared while the port transmits, and measured it is, in the vector's own order, about one frame in 10000 with the word whole ("Against a far board", `5`); the check is a load and a test of a value `init()` stored with parity off, seven instructions more with it on (the cost below); the stream moves DR a byte at a time, so an eight-bit frame's parity bit never reaches the engine's ring |
+| the received parity bit, DR's most significant bit with PCE (25.6.2: bit 8 with M = 1, bit 7 with M = 0) | under `UartOptions::parity`, the interrupt receiver checks each word's parity itself, a mismatch counted and dropped as SR.PE is, once for either; not the receive engine, which runs no parity format | every F4 sheet's full-duplex parity item: PE can be cleared while the port transmits, and measured on the STM32F446RE it is, in the vector's own order, about one frame in 10000 with the word whole ("Against a far board", `5`); the option costs four instructions a frame with a format without parity and eleven with one, nothing on a port without it (the cost below); the stream moves DR a byte at a time, so an eight-bit frame's parity bit never reaches the engine's ring |
 | DMAR and a circular stream (25.4.13, dma.md) | the receive engine | the bulk path: no entry a byte, no re-arm between laps |
 | IDLE and IDLEIE: an idle frame after a frame (25.6.1) | the engine's burst edge | the end of a burst one frame after its last stop bit; the stream's read finishes its clear, so the vector waits for the next frame with IDLEIE disarmed |
 | RXNEIE beside DMAR | the engine's wait for a frame | RXNE is the stream's request and the interrupt both: the stream still takes the byte and the vector learns one came - the only way to know the clear finished, and the edge of a burst of one frame; taken down over a stream that does not move |
@@ -273,14 +278,23 @@ TX and RX inside the chip and leaves the RX pad alone.
   `single_wire_push_pull`, which drives it push-pull while a frame goes
   out (the transmitter releases the pad between frames, 25.4.10, and the
   pull-up holds it): for a line with no other driver, because the open
-  drain rises on the pull-up alone (letter a) - and `rx_priority`, the
+  drain rises on the pull-up alone (letter a) - `rx_priority`, the
   receive engine's level in its controller's arbitration, `very_high` by
   default (below), refused at compile time on a port with no receive
-  engine.
+  engine - and `parity`, false by default: the port may be initialized
+  with a parity format, and its interrupt receiver then judges each
+  word's parity as well as SR.PE ("What the silicon does"). Without it
+  `init()` refuses a parity format; a port with a receive engine refuses
+  the option at compile time, because the stream moves DR a byte at a
+  time and an eight-bit frame's parity bit dies in the transfer (keeping
+  it would take half-word transfers, a ring twice the size, and a check
+  per byte in the consumer). A port with a transmit engine alone may
+  carry it: the transmitter makes the parity bit.
 - `Uart<n, pins, rx_size = 64, tx_size = 256, TxEngine = NoDmaEngine,
   RxEngine = NoDmaEngine, opts = {}>` - `init(clock, baud, format = 8N1)`
-  (the divisor from `apb_hz(clock, on_apb2)`, false when unreachable or
-  for nine data bits), `isr()` (the vector's body: the RX edge as its
+  (the divisor from `apb_hz(clock, on_apb2)`, false when unreachable,
+  for nine data bits, or for a parity format on a port without
+  `UartOptions::parity`, a refusal touching nothing), `isr()` (the vector's body: the RX edge as its
   return), `write_byte`, `write_bulk`, `read_byte`, `read_bulk`,
   `read_span` and `consume` (the receive run in place), `rx_pending`,
   `tx_idle` (THE WIRE IS IDLE: the ring empty - an engine's block holds
@@ -308,7 +322,8 @@ TX and RX inside the chip and leaves the RX pad alone.
   whose true is the receive edge as `isr()`'s), `harvest()` (the same
   edge asked from the consumer's side, below) and `dma_faults()`. Refused at compile time: invalid or coincident pads,
   an engine off the instance's request cells, flow control on a UART, a
-  flow pad missing, and with a receive engine a ring above 32768 bytes.
+  flow pad missing, and with a receive engine a ring above 32768 bytes
+  or `UartOptions::parity`.
 - `tx_room()` is the bytes `write_bulk()` would take now, the transmit
   ring's free count (util/stream.hpp's `RoomSink`,
   [design/serial.md](../design/serial.md)): it grows a byte at a time as
@@ -351,7 +366,11 @@ TX and RX inside the chip and leaves the RX pad alone.
   counts in `rx_overruns()` - one count a lap, up to a ring's worth of
   bytes skipped - and a consumer looking once a millisecond keeps up when
   the ring holds a millisecond of the line (92 bytes at 921600). The ring
-  must be read from one context, the consumer's.
+  must be read from one context, the consumer's. It runs no parity
+  format: the stream's byte transfers drop an eight-bit frame's parity
+  bit, so no word is left to judge against the errata's full-duplex
+  parity item, and `init()` refuses the format (`UartOptions::parity`
+  above).
 - THE RECEIVE ENGINE'S BURST EDGE IS THE USART'S VECTOR'S - and the
   CPU never reads DR while the stream owns it. `isr()` runs a two-state
   machine over the clears (the header's text, the measurements above):
@@ -465,6 +484,24 @@ extern "C" void DMA2_Stream1_IRQHandler() {
 extern "C" void DMA2_Stream6_IRQHandler() { (void)Link::dma_isr(); }      // transmit blocks
 ```
 
+A port that runs a parity format says so in its type, and its interrupt
+receiver then judges each received word's parity as well as SR.PE (the
+offer table above says why, "The cost" below what it costs). An excerpt,
+`link_pins` the program's pads, `clock` its clock task's tag and
+`Link::isr()` bound to USART1's vector as above:
+
+```cpp
+constexpr brio::UartOptions with_parity{.parity = true};
+using Link = brio::Uart<1, link_pins, 64, 256, brio::NoDmaEngine, brio::NoDmaEngine, with_parity>;
+
+if (!Link::init(clock, 115200, {.bits = brio::UartBits::eight, .parity = brio::UartParity::even})) {
+    return false;                                  // the rate is unreachable
+}
+```
+
+Without the option the same `init()` answers false for that format,
+and with a receive engine in the slot the type does not compile.
+
 A console whose lines go through a writer
 ([design/serial.md](../design/serial.md), "LineWriter": one writer of
 the port, for a program whose printers preempt one another) needs no
@@ -548,12 +585,13 @@ verbs on the same instance.
 bytes back whole and in order through both receivers at 115200, 1 Mbaud
 and 5.625 Mbaud (APB2 / 16), and through the engine at 11.25 Mbaud
 (OVER8 with ONEBIT, APB2 / 8 - BRR 0x10), 1024 frames leaving in their
-wire time; every frame format of the task - 8N1, 8E1, 8O1, 7E1, 7O1, 8N2
-- byte-exact at 1 Mbaud, a seven-bit frame's eighth bit being its parity
-bit as the stream stores it (DR's MSB, 25.6.2; the interrupt receiver
-hands it on too), and the four with parity byte-exact through the
-interrupt receiver as well, its check of the word counting no parity
-error at either position of the parity bit; the open drain on the internal pull-up alone whole at
+wire time; 8N1 and 8N2 byte-exact through the receive engine at 1
+Mbaud, which refuses the four parity formats at `init()`; 8E1, 8O1, 7E1
+and 7O1 byte-exact through the interrupt receiver with
+`UartOptions::parity`, a seven-bit frame's eighth bit being its parity
+bit as that receiver hands it on (DR's MSB, 25.6.2), its check of the
+word counting no parity error at either position of the parity bit, and
+the four refused by the same port without the option; the open drain on the internal pull-up alone whole at
 1 Mbaud and 31 of 64 at 2.8125, and whole at 2.8125 where the pad carries
 the bench's 2.2 kOhm I2C pull-up besides. The letter judges the internal
 pull-up only where it reads PC6 free of a pull-up of its own (the pad
@@ -649,20 +687,23 @@ takes 2 USART interrupts a burst and 1 stream interrupt a half lap; a
 16-byte burst at 115200 costs 1702 busy cycles (the BEFORE, a poll a tick, 1716 and the edge 0.51 ms after the last stop bit), the
 edge comes 15904 cycles after it (1.0 frame), 2000 at 1 Mbaud (1.1),
 508 at 5.625 Mbaud (1.6, the handler's 197 cycles six tenths of a frame
-there). The interrupt receiver is one entry a byte, about 105 cycles
-each between the stamps with parity off, ten of them the check of the
-word's parity (95 without it, the same vector built without the check,
-three runs each): in the release listing that check is four
-instructions with parity off - the stored check's address from the
-literal pool, its load, a compare and a taken branch - and seven more
-with parity on (a mask, two shift-and-XORs, a nibble mask, the table's
-shift, the bit's test), no call; the listing's four cycles at zero wait
-measure ten, which fits a literal and branch targets fetched through the
-flash's wait states (inferred, not isolated). At 5.625 Mbaud (320 cycles
-a frame) the interrupt receiver keeps up in the suite's unmetered loop,
-and in the bench app, whose metered handlers sit beside it, takes a
-hardware overrun - one byte of 256 - in every run of six (two of three
-without the check). Each
+there). The interrupt receiver is one entry a byte, 95 cycles each
+between the stamps at 115200 and about 100 at 1 Mbaud, six runs alike.
+`UartOptions::parity` adds the check of the word's parity: in the release
+listing four instructions a frame with a format without parity - the
+stored check's address from the literal pool, its load, a compare and a
+taken branch - and seven more with a parity format (a mask, two
+shift-and-XORs, a nibble mask, the table's shift, the bit's test), no
+call; the clean frame's receive branch is 23 instructions without the
+option, 27 and 34 with it. Measured with a format without parity, the
+same vector with the check takes about 105 cycles an entry: the
+listing's four cycles at zero wait measure ten, which fits a literal and
+branch targets fetched through the flash's wait states (inferred, not
+isolated); with a parity format it is not measured. At 5.625 Mbaud (320
+cycles a frame) the interrupt receiver keeps up in the suite's unmetered
+loop, and in the bench app, whose metered handlers sit beside it, takes
+a hardware overrun - one byte of 256 - in three runs of six without the
+option (in every run of six with the check). Each
 of the engine's two entries is about 197 cycles between the bench's
 stamps, the app's glue included: the idle-line one about 60 instructions
 and seven register accesses (SR, SxNDTR twice, CR1 and CR3 read and
@@ -792,40 +833,46 @@ three frames this USART has no word for and RS-485 (no driver enable).
   with FE and data 0x00, and LBD set with LIN mode off as well as on
   (printed, not judged: 25.6.1's description of the bit ties it to no
   mode, and 25.4.8 says nothing of the flag with LINEN clear).
-- **ES0298 2.13.2 STAGED** (`5`): 64 odd-parity frames into this end at
-  8E1 while it transmits back to back. Polled in the ERRATUM'S ORDER - an
-  SR read and a DR write every turn, then the SR read the receive is
-  decided on - PE was seen on 8 to 20 of 64 over 51 runs, printed and
-  not judged (the control judged: that order reads all 64 frames); in the
-  WORKAROUND'S (one SR read, the DR read, then the write), judged by SR.PE
-  or the word's parity as the task's vector judges, 64 of 64. THROUGH THE
-  TASK, transmitting the whole time, every one of the 64 counted and none
-  delivered: the vector's one SR read decides the receive before the
-  transmit writes DR, which is the workaround's order by construction,
-  and it checks the word's parity besides. Both are judged. Letter `p`
-  (by name) measures why the order alone is not enough: over 18 runs,
-  with 1024-frame legs whose arrival phase walks through the transmit
-  period. PE never led RXNE (0 of 73728 frames, SR polled with nothing
-  written, at the poll's turn). The workaround's loop judged by SR.PE
-  alone, with a spin of N cycles WIDENED on purpose between its SR read
-  and its write, missed 9 of 147456 frames at N = 0, 8 of 73728 at 200,
-  11 at 1000 and 6 at 5000 - flat, where a write clearing a flag raised
-  after the read would have missed N / 17187 of them (858, 4290 and
-  21449). The converse shows why: the erratum's order with its write
-  delayed by N kept PE on 64, 894, 4353 and 21543 of 73728 frames,
-  against 0, 858, 4290 and 21449 for the frames finishing between the
-  poll's last read and the write - the write clears only a PE an SR read
-  before it SAW. A second SR read just before the write, a frame it
-  shows served first, missed 10 of 147456, no fewer. What is left fits a
-  race inside the status read itself, a read that meets the flags' rise
-  beginning PE's clear without showing PE - 34 of 368640 frames over the
-  four spins, some 1.6 cycles of each 17187-cycle transmit period, about
-  one APB2 clock: inferred from the numbers, not observable from the
-  core. Every frame SR.PE missed (44 captured) read 0x15A, the data whole
-  with its odd parity bit in DR's bit 8 (25.6.2) - a wrong parity for
-  this 8E1 receiver, which the word's check finds. Through the task,
-  whose vector checks it, 0 of 72000 frames came out as bytes (judged),
-  where the polled loop's SR.PE-alone rate predicts some six.
+- **THE FULL-DUPLEX PARITY ITEM STAGED** (`5`; ES0298 2.13.2 on this
+  part): 64 odd-parity frames into this end at 8E1 while it transmits
+  back to back. Polled in the ERRATUM'S ORDER - an SR read and a DR
+  write every turn, then the SR read the receive is decided on - PE was
+  seen on 9 to 20 of 64 over 51 runs, printed and not judged
+  (the control judged: that order reads all 64 frames); in the
+  WORKAROUND'S (one SR read, the DR read, then the write), judged by
+  SR.PE or the word's parity as the task's vector judges, 64 of 64.
+  THROUGH THE TASK with `UartOptions::parity`, transmitting the whole
+  time, every one of the 64 counted and none delivered: the vector's one
+  SR read decides the receive before the transmit writes DR, which is
+  the workaround's order by construction, and it checks the word's
+  parity besides. Both are judged. Letter `p` (by name) measures why the
+  order alone is not enough: over 18 runs, with 1024-frame legs whose
+  arrival phase walks through the transmit period. PE never led RXNE (0
+  of 73728 frames, SR polled with nothing written, at the poll's turn).
+  The workaround's loop judged by SR.PE alone, with a spin of N cycles
+  WIDENED on purpose between its SR read and its write, missed 15 of
+  147456 frames at N = 0, 9 of 73728 at 200, 10 at 1000 and 6 at 5000 -
+  flat, where a write clearing a flag raised after the read would have
+  missed N / 17187 of them (858, 4290 and 21449). The same loop with the
+  transmitter IDLE - the same legs, no DR write at all - missed 0 of
+  147456 (printed, not judged): what is missed needs the write. The
+  converse shows why the order does not help: the erratum's order with
+  its write delayed by N kept PE on 58, 983, 4429 and 21576 of 73728
+  frames, against 0, 858, 4290 and 21449 for the frames finishing
+  between the poll's last read and the write - the write clears only a
+  PE an SR read before it SAW. A second SR read just before the write, a
+  frame it shows served first, missed 18 of 147456, no fewer. What is
+  left fits a race inside the status read itself, a read that meets the
+  flags' rise beginning PE's clear without showing PE, which the DR
+  write behind it completes - 40 of 368640 frames over the four spins,
+  some 1.9 cycles of each 17187-cycle transmit period, about one APB2
+  clock: inferred from the numbers, not observable from the core. Every
+  frame SR.PE missed (58 captured) read 0x15A, the data whole with its
+  odd parity bit in DR's bit 8 (25.6.2) - a wrong parity for this 8E1
+  receiver, which the word's check finds. Through the task, whose vector
+  checks it, 0 of 72000 frames came out as bytes (judged), where the
+  polled loop's SR.PE-alone rate predicts some eight. All of this is the
+  STM32F446RE's: no other F4 part has been measured.
 - **The far engine's shapes** (`6`), the STM32G0B1RE's TIM1: where a
   start is believed - eight low pulses a width at 115200, nothing under
   half a bit, 5 of 8 taken at 110 ticks (8.4 sixteenths) with NE, every
@@ -1030,7 +1077,7 @@ chapter's:
 
 | the chapter's offer | in the peer |
 |---|---|
-| one data register and the shifter | the echo and the sink polled a character at a time: SR read once a turn, then DR, THEN the echo's DR write - ES0298 2.13.2's own order (a DR write between the SR and the DR read clears PE in full duplex) |
+| one data register and the shifter | the echo and the sink polled a character at a time: SR read once a turn, then DR, THEN the echo's DR write - the order the errata's full-duplex parity item asks (a DR write between the SR and the DR read clears PE in full duplex; ES0298 2.13.2 on the F446, its twins in [vendor/README.md](vendor/README.md)) |
 | transmit and receive DMA | DECLINED: the polled loop costs a fraction of a frame (below), and a blast is a TXE poll and a store, gapless at 6.4 Mbaud |
 | OVER8 | USED where it is closer to the rate (eighths: 90 MHz / k, k >= 8), and alone under the protocol's clk2x flag; 11.25 Mbaud is the ceiling |
 | TIM1_CH2 / TIM1_CH3 on PA9 / PA10 (AF1) | USED: THE WAVEFORM ENGINE - the stm32g0 peer's shape on this chip's parts: TIM1 at 180 MHz (APB2's timer clock), DMA2 stream 6 channel 0 (TIM1_CH1/2/3 share it, table 29, one CCxDE at a time), direct mode on half-words, the absolute compares, the pad sampled and the run timed whole; the `stage` op its widest user - a train of frames drawn cell by cell, a pulse inside each, the gaps in sixteenths of a bit |
@@ -1075,14 +1122,11 @@ Driver gaps:
 - Bytes out of order under a ring armed low: a consumer reading during a starved leg saw them in one
   control leg, on an image before the wait for a frame came down; 0 of 30 such legs on the final image.
   The cause is not known, so that is a rate and not a proof.
-- A parity error the receive engine can miss while the port transmits
-  (ES0298 2.13.2): unmeasured. The engine delivers a PE frame anyway (the
-  stream moves it) and counts PE from SR in its vector, so what the race
-  in the status read can cost there is a count, not a byte; the word's
-  check cannot follow it, because the stream moves DR a byte at a time
-  and an eight-bit frame's parity bit never reaches the ring (a seven-bit
-  frame's does, in the byte's bit 7, for a consumer that checks it).
-  Waiting for a letter that stages 2.13.2 under the engine.
+- A parity format through the receive engine - declined: the stream
+  moves DR a byte at a time, so an eight-bit frame's parity bit never
+  reaches the ring and the errata's full-duplex parity item could not be
+  answered from the word; keeping it would take half-word transfers, a
+  ring twice the size, and a check per byte in the consumer.
 - A wake from Stop: this USART has no wake unit (the G0's WUF); the
   power chapter says what a Stop does to a pending receive.
 - The receive errors' COUNTS under the engine are bounded, not exact
@@ -1099,8 +1143,11 @@ pad, PA11, reaches nothing on this desk), the instances beyond USART1,
 USART2 and USART6 driven on the F446 and the consoles' USART1 and USART3
 (UART4/5/7/8 compiled on every header that has them, none driven), the
 OVER8 and frame-format legs on the other three boards (the loop's pad is
-surveyed on the Nucleo-F446RE alone), and `tx_room()`, `tx_drained()`
-and `in_handler()` (letter h, run on the Nucleo-F446RE alone).
+surveyed on the Nucleo-F446RE alone), `tx_room()`, `tx_drained()`
+and `in_handler()` (letter h, run on the Nucleo-F446RE alone), and the
+word's parity check against the residual race of the full-duplex parity
+item on the F429, F411 and F469 - the race is measured on the
+STM32F446RE alone; letter `p` on that part's pair would measure it.
 
 Implemented, not bench-verified, in the peer: the half stop codes as a
 SENDER, which no letter judges (its `send_mpcm`, `stage`, `autobaud_tx`,

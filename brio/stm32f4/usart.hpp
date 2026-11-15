@@ -108,9 +108,12 @@
  * A byte that arrived with an error is dropped rather than pushed: a
  * corrupted byte in a line assembler is worse than a gap, and the
  * counter says it happened. Noise alone (NE) keeps the byte and counts.
- * With parity on, the interrupt receiver judges each word's parity
- * itself as well as by SR.PE, which ES0298 2.13.2 can clear while the
- * port transmits (isr() below).
+ * A port that runs a parity format says so in its type
+ * (UartOptions::parity), and its interrupt receiver then judges each
+ * word's parity itself as well as by SR.PE, which every F4 errata sheet
+ * lets a write of DR clear while the port transmits (isr() below); a port
+ * without the option refuses a parity format at init(), and a port with
+ * a receive engine cannot have it.
  *
  * Full and not. UART4, UART5, UART7 and UART8 have no synchronous mode,
  * no smartcard and no hardware flow control (30.5 table 148), and the
@@ -915,6 +918,25 @@ struct UartOptions {
     /// that ranks another stream above its ring says so here; refused on a
     /// port with no receive engine, which has no stream to rank.
     DmaPriority rx_priority = DmaPriority::very_high;
+    /// This port may be initialized with a parity format; without it,
+    /// init() refuses one (returns false). What it buys: the interrupt
+    /// receiver judges each received word's parity itself as well as by
+    /// SR.PE, which the full-duplex parity item of every F4 errata sheet
+    /// lets a write of DR clear while the port transmits (ES0182 2.11.2,
+    /// ES0206 2.11.2, ES0287 2.10.2, ES0298 2.13.2, ES0299 2.10.2,
+    /// ES0321 2.13.2, ES0372 2.13.2; isr() below). What it costs: on
+    /// every received frame, four instructions with a format without
+    /// parity and eleven with one (the stored check's address, its load,
+    /// a test, and with parity the fold of the word), measured on the
+    /// STM32F446RE at about ten cycles a frame with a format without
+    /// parity (docs/stm32f4/usart.md, "The cost"); nothing without it.
+    /// Refused at compile time on a port with a receive engine: the
+    /// stream moves DR a byte at a time, so an eight-bit frame's parity
+    /// bit dies in the transfer, and keeping it would take half-word
+    /// transfers (a ring twice the size) and a check per byte in the
+    /// consumer. A port with a transmit
+    /// engine alone may carry it: the transmitter makes the parity bit.
+    bool parity = false;
 };
 
 /**
@@ -980,6 +1002,12 @@ class Uart {
     static_assert(RxEngine::present || opts.rx_priority == DmaPriority::very_high,
                   "brio Uart: rx_priority ranks the receive engine's stream - this port has "
                   "no receive engine");
+    static_assert(!(opts.parity && RxEngine::present),
+                  "brio Uart: UartOptions::parity is the interrupt receiver's - the receive "
+                  "engine's stream moves DR a byte at a time and an eight-bit frame's parity "
+                  "bit dies in the transfer, so no word is left to judge (keeping it would "
+                  "take half-word transfers, a ring twice the size, and a check per byte in "
+                  "the consumer); a port with a receive engine runs no parity format");
     static_assert(!RxEngine::present || rx_size <= 32768u,
                   "brio Uart: with a receive engine the ring is the circular stream's whole "
                   "storage, and SxNDTR counts 65535 at most - the largest power of two that "
@@ -1018,8 +1046,9 @@ class Uart {
     static inline volatile uint8_t m_hw_overruns = 0;   // ORE: a byte lost in silicon
     static inline volatile uint8_t m_dma_faults = 0;    // blocks a dead stream lost
     // The interrupt receiver's parity check of the word (uart_parity_check()),
-    // 0 with parity off: written by init() before the vector is enabled,
-    // read by isr() on every received frame.
+    // 0 with a format without parity: written by init() before the vector
+    // is enabled, read by isr() on every received frame - named only under
+    // UartOptions::parity, so a port without the option has none of it.
     static inline uint32_t m_parity_check = 0;
     // The transmit edge: set where the transmitter finds the ring dry (the
     // TXE entry that disarms, or a transmit block's completion that leaves
@@ -1115,9 +1144,11 @@ public:
     /// SYSCLK by assumption. Nothing reads the hardware's rate back, so a
     /// call before the clock task's init() programs a divisor for a bus
     /// that is not running yet. False when the rate cannot be produced at
-    /// that clock, or for nine data bits (the rings carry bytes): the
-    /// caller then knows the transport is not up, rather than printing
-    /// into a ring nothing will drain.
+    /// that clock, for nine data bits (the rings carry bytes), or for a
+    /// format with parity on a port without UartOptions::parity (which a
+    /// port with a receive engine cannot have): the caller then knows the
+    /// transport is not up, rather than printing into a ring nothing will
+    /// drain. A refusal touches nothing: the block stays as it was.
     template <typename Clock>
     static bool init(Clock clock, uint32_t baud, const UartFormat& format = {}) {
         static_assert(clock_follows<Clock, Uart>(),
@@ -1126,6 +1157,11 @@ public:
                       "a clock change");
         if (format.bits == UartBits::nine) {
             return false;   // the rings carry bytes; the resource's word verbs speak nine
+        }
+        if constexpr (!opts.parity) {
+            if (format.parity != UartParity::none) {
+                return false;   // never SR.PE alone: the option is what judges the word
+            }
         }
 
         const uint32_t fck = apb_hz(clock, S::on_apb2);
@@ -1149,7 +1185,7 @@ public:
         if (!S::configure(format, *reg)) {
             return false;
         }
-        if constexpr (!has_rx_engine) {
+        if constexpr (opts.parity) {
             m_parity_check = uart_parity_check(format);   // the vector's word check, decided once
         }
         if constexpr (opts.one_bit) {
@@ -1403,23 +1439,27 @@ public:
     /// empty->non-empty transition reports true and the consumer only
     /// empties the ring by draining it, so no wakeup is ever lost.
     ///
-    /// THE INTERRUPT RECEIVER JUDGES PARITY FROM THE WORD AS WELL. With
-    /// parity on, DR's word carries the received parity bit in its most
-    /// significant bit (RM0390 25.6.2: bit 8 with M = 1, bit 7 with
-    /// M = 0), and the vector recomputes the parity of the data bits and
-    /// that bit; a mismatch is a parity error exactly as SR.PE is - counted
-    /// once whichever of the two (or both) said it, the byte dropped and
-    /// reported to the ring. On the F446, ES0298 2.13.2 clears PE while the
-    /// port transmits, and measured, it still happens in the vector's own
-    /// order (one SR read, the DR read, then the write): about one frame in
-    /// 10000 came out of a parity error with DR whole and PE clear, a race
-    /// inside the status read that no order of reads and writes closes
-    /// (docs/stm32f4/usart.md). On every frame the race spares the check
-    /// agrees with SR.PE and adds nothing. Its cost per received frame is
-    /// one load and one test of a value init() stored with parity off,
-    /// a few instructions more with it on. Under a receive engine the
-    /// stream moves DR a byte at a time and the vector never reads it, so
-    /// this check is the interrupt receiver's alone.
+    /// UNDER UartOptions::parity THE INTERRUPT RECEIVER JUDGES PARITY FROM
+    /// THE WORD AS WELL. With parity on, DR's word carries the received
+    /// parity bit in its most significant bit (RM0390 25.6.2: bit 8 with
+    /// M = 1, bit 7 with M = 0), and the vector recomputes the parity of
+    /// the data bits and that bit; a mismatch is a parity error exactly as
+    /// SR.PE is - counted once whichever of the two (or both) said it, the
+    /// byte dropped and reported to the ring. Every F4 errata sheet says a
+    /// write of DR can clear PE while the port transmits (the full-duplex
+    /// parity item: ES0298 2.13.2 on the F446, its twins listed at
+    /// UartOptions::parity), and on the STM32F446RE, measured, it still
+    /// happens in the vector's own order (one SR read, the DR read, then
+    /// the write): about one frame in 10000 came out of a parity error
+    /// with DR whole and PE clear, a race inside the status read that no
+    /// order of reads and writes closes (docs/stm32f4/usart.md). On every
+    /// frame the race spares the check agrees with SR.PE and adds nothing.
+    /// Its cost per received frame is one load and one test of a value
+    /// init() stored with a format without parity, a few instructions
+    /// more with one. Without the option none of it is compiled and
+    /// init() refuses a format with parity; a port with a receive engine
+    /// cannot carry the option (the stream moves DR a byte at a time and
+    /// the vector never reads it).
     [[gnu::always_inline]] static bool isr() {
         USART_TypeDef& r = S::regs();
         const uint32_t st = r.SR;   // ONE read; the DR read below completes the clears
@@ -1439,10 +1479,12 @@ public:
             uint32_t err = st & UsartFlag::receive_errors;
             // The word's parity, on a frame that arrived (RXNE): an overrun
             // without RXNE reads a word already judged when it was taken.
-            if ((st & UsartFlag::rxne) != 0u) {
-                const uint32_t check = m_parity_check;
-                if (check != 0u && uart_parity_wrong(check, word)) {
-                    err |= UsartFlag::pe;
+            if constexpr (opts.parity) {
+                if ((st & UsartFlag::rxne) != 0u) {
+                    const uint32_t check = m_parity_check;
+                    if (check != 0u && uart_parity_wrong(check, word)) {
+                        err |= UsartFlag::pe;
+                    }
                 }
             }
             if (err != 0u) {

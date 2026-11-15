@@ -24,9 +24,12 @@
 //  - ONE DATA REGISTER AND THE SHIFTER, no FIFO: the echo and the sink are
 //    polled a character at a time, which the core affords - a character
 //    at 7.5 Mbaud is 240 cycles of 180 MHz (the hot path's count below).
-//    THE ECHO READS SR, THEN DR, THEN WRITES DR: ES0298 2.13.2 (a PE flag
-//    cleared by a DR write that lands between the SR and the DR read, in
-//    full duplex) is avoided by that order, the erratum's own workaround.
+//    THE ECHO READS SR, THEN DR, THEN WRITES DR: the order ES0298 2.13.2
+//    asks (a PE flag cleared by a DR write that lands between the SR and
+//    the DR read, in full duplex). It narrows the erratum, it does not
+//    close it: measured on this part, about one parity error in 10000
+//    frames still reads PE clear in that order while the port transmits
+//    (docs/stm32f4/usart.md, "Against a far board").
 //    TRANSMIT DMA DECLINED for the same budget: a blast's loop is a TXE
 //    poll and a store, gapless at the link's top rung.
 //  - EVERY RATE FROM THE CRYSTAL: the core runs the ST-LINK's 8 MHz in

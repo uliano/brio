@@ -32,9 +32,11 @@
 //      both receivers at 115200, 1 Mbaud and 5.625 Mbaud, and at OVER8's
 //      11.25 Mbaud, timed against the wire - a loop alone cannot tell a
 //      wrong rate; and the open drain's ceiling, where it gives out
-//   b  the frame formats on the loop: 8N1, 8E1, 8O1, 7E1, 7O1, 8N2,
-//      byte-exact through the receive engine; the four with parity through
-//      the interrupt receiver too, which judges each word's parity itself
+//   b  the frame formats on the loop: 8N1 and 8N2 byte-exact through the
+//      receive engine, which refuses the four with parity at init(); those
+//      four byte-exact through the interrupt receiver with
+//      UartOptions::parity, which judges each word's parity itself, and
+//      refused by the same port without the option
 //   c  ONEBIT and OVER8 together at 2 Mbaud, timed against the wire, and
 //      the error counters at zero
 //   d  ERRORS UNDER THE ENGINE: breaks injected into a stream through the
@@ -126,9 +128,10 @@
 // By name only (in neither all-key), against the same peer:
 //   p  ES0298 2.13.2's window measured: PE's lead over RXNE with nothing
 //      written, the workaround's loop with its SR-to-write window widened
-//      by a swept spin, the erratum's order with its write delayed by the
-//      same spins - the counts printed - and the task over 4000 frames,
-//      judged: every parity error counted, none delivered
+//      by a swept spin, the same loop with the transmitter idle, the
+//      erratum's order with its write delayed by the same spins - the
+//      counts printed - and the task (UartOptions::parity) over 4000
+//      frames, judged: every parity error counted, none delivered
 //
 // build: boards = f446re
 // build: monitor_speed = 115200
@@ -194,6 +197,12 @@ using LoopIrq = Uart<6, loop_pins, 512, 512, NoDmaEngine, NoDmaEngine, loop_opts
 using LoopDma = Uart<6, loop_pins, ring, 512, TxEngine, RxEngine, loop_opts>;
 using LoopOd = Uart<6, loop_pins, 512, 512, NoDmaEngine, NoDmaEngine, loop_opts_od>;
 using LoopFast = Uart<6, loop_pins, 512, 512, TxEngine, RxEngine, loop_opts_fast>;
+/// Letter b's interrupt receiver for the parity formats: LoopIrq's port
+/// with UartOptions::parity, which a port without it, and every port with
+/// a receive engine, refuses at init().
+constexpr UartOptions loop_opts_parity{.half_duplex = true, .tx_speed = PinSpeed::very_high,
+                                       .single_wire_push_pull = true, .parity = true};
+using LoopPar = Uart<6, loop_pins, 512, 512, NoDmaEngine, NoDmaEngine, loop_opts_parity>;
 /// Letter g's two receivers: the receive engine alone (the transmitter is
 /// the thread's, so a starved stream cannot slow the line), over a ring
 /// that holds a whole leg, at the default level and ranked low.
@@ -208,7 +217,7 @@ using Res = Usart<6>;
 
 /// Who owns USART6 now: 0 nobody, 1 LoopIrq, 2 LoopDma, 3 LoopOd, 4 LoopFast,
 /// 5 RingHigh, 6 RingLow, 7 LoopIrq with letter h's glue (the transmit
-/// edge read in the vector, in_handler() asked there).
+/// edge read in the vector, in_handler() asked there), 8 LoopPar.
 volatile uint8_t owner = 0;
 volatile uint32_t tx_edges = 0;      ///< the transmit edges owner 7's glue read
 volatile uint8_t handler_said = 0;   ///< in_handler() in owner 7's vector: 0 unasked, 1 false, 2 true
@@ -232,6 +241,8 @@ void down() {
         RingHigh::release();
     } else if (was == 6u) {
         RingLow::release();
+    } else if (was == 8u) {
+        LoopPar::release();
     }
     owner = 0;   // after the release: a stopped stream raises its completion
 }
@@ -470,7 +481,18 @@ void tb_formats() {
         {"7O1", {UartBits::seven, UartParity::odd, UartStop::one}, 0x7Fu},
         {"8N2", {UartBits::eight, UartParity::none, UartStop::two}, 0xFFu},
     };
+    // The receive engine carries the formats without parity; one with
+    // parity it refuses at init() (a port with a receive engine cannot carry
+    // UartOptions::parity, usart.hpp), touching nothing.
     for (const Leg& l : legs) {
+        if (l.f.parity != UartParity::none) {
+            down();
+            const bool refused = !LoopDma::init(clock, 1'000'000, l.f);
+            print(serial, "  ", l.name, " through the receive engine: ", refused ? "refused" : "ACCEPTED",
+                  " by init()", crlf);
+            bench.verdict("a port with a receive engine refuses a parity format at init(): ", l.name, refused);
+            continue;
+        }
         const bool ok_up = up<LoopDma>(2, 1'000'000, l.f);
         uint32_t got = 0;
         const bool ok = round_trip<LoopDma>(200, got, l.mask);
@@ -479,23 +501,36 @@ void tb_formats() {
         bench.verdict("byte-exact on the loop at 1 Mbaud: ", l.name,
                       ok_up && ok && LoopDma::frame_errors() == 0u && LoopDma::parity_errors() == 0u);
     }
-    // The interrupt receiver judges each word's parity itself (usart.hpp's
-    // isr()), with the parity bit at bit 8 on an eight-bit frame and at bit
-    // 7 on a seven-bit one: a frame of the right parity is delivered and
-    // counts nothing, at both positions and both senses.
+    // The interrupt receiver with UartOptions::parity judges each word's
+    // parity itself (usart.hpp's isr()), with the parity bit at bit 8 on an
+    // eight-bit frame and at bit 7 on a seven-bit one: a frame of the right
+    // parity is delivered and counts nothing, at both positions and both
+    // senses.
     for (const Leg& l : legs) {
         if (l.f.parity == UartParity::none) {
             continue;
         }
-        const bool ok_up = up<LoopIrq>(1, 1'000'000, l.f);
+        const bool ok_up = up<LoopPar>(8, 1'000'000, l.f);
         uint32_t got = 0;
-        const bool ok = round_trip<LoopIrq>(200, got, l.mask);
+        const bool ok = round_trip<LoopPar>(200, got, l.mask);
         print(serial, "  ", l.name, " through the interrupt receiver: ", got, " of 200 back, FE ",
-              LoopIrq::frame_errors(), " PE ", LoopIrq::parity_errors(), crlf);
+              LoopPar::frame_errors(), " PE ", LoopPar::parity_errors(), crlf);
         bench.verdict("byte-exact through the interrupt receiver at 1 Mbaud, no parity error: ", l.name,
-                      ok_up && ok && LoopIrq::frame_errors() == 0u && LoopIrq::parity_errors() == 0u);
+                      ok_up && ok && LoopPar::frame_errors() == 0u && LoopPar::parity_errors() == 0u);
     }
     down();
+    // The same port without the option refuses every one of them: never
+    // SR.PE alone.
+    bool irq_refused = true;
+    for (const Leg& l : legs) {
+        if (l.f.parity != UartParity::none) {
+            irq_refused = !LoopIrq::init(clock, 1'000'000, l.f) && irq_refused;
+        }
+    }
+    print(serial, "  the four through the interrupt receiver without UartOptions::parity: ",
+          irq_refused ? "refused" : "NOT ALL REFUSED", " by init()", crlf);
+    bench.verdict("an interrupt port without UartOptions::parity refuses the four parity formats at init()",
+                  irq_refused);
 }
 
 // ---- c  ONEBIT and OVER8 -----------------------------------------------------------
@@ -1605,10 +1640,16 @@ using LinkDma = Uart<1, link_pins, 2048, 64, NoDmaEngine, LinkRxEngine, link_opt
 constexpr UartOptions link_opts8{.over8 = true, .tx_speed = PinSpeed::very_high};
 using LinkIrq8 = Uart<1, link_pins, 2048, 64, NoDmaEngine, NoDmaEngine, link_opts8>;
 using LinkDma8 = Uart<1, link_pins, 2048, 64, NoDmaEngine, LinkRxEngine, link_opts8>;
+/// Letters 5 and p's task: the interrupt receiver with UartOptions::parity,
+/// for their 8E1 legs.
+constexpr UartOptions link_opts_parity{.tx_speed = PinSpeed::very_high, .parity = true};
+using LinkPar = Uart<1, link_pins, 2048, 64, NoDmaEngine, NoDmaEngine, link_opts_parity>;
 /// Who owns USART1's vector: 0 nobody (the resource, polled), 1 LinkIrq,
 /// 2 LinkDma, 3 LinkIrq8, 4 LinkDma8; letter 8's rings 5 LinkRing, 6
-/// LinkRing8, 7 LinkRingLow, 8 LinkRingLow8; letter u's probe 9.
+/// LinkRing8, 7 LinkRingLow, 8 LinkRingLow8; letter u's probe 9; 10
+/// LinkPar.
 volatile uint8_t link_owner = 0;
+constexpr uint8_t owner_parity = 10;   ///< LinkPar's
 
 void link_rings_down(uint8_t o);
 
@@ -1621,6 +1662,8 @@ void link_task_down() {
         LinkIrq8::release();
     } else if (link_owner == 4u) {
         LinkDma8::release();
+    } else if (link_owner == owner_parity) {
+        LinkPar::release();
     } else if (link_owner >= 5u) {
         link_rings_down(link_owner);
     }
@@ -2899,15 +2942,15 @@ void t5_parity_full_duplex() {
         a.pattern = link::pattern_fixed;
         const bool acted = peer_act(link::Op::send, a);
         link_task_down();
-        link_owner = 1;
-        const bool up = acted && LinkIrq::init(clock, 115'200, {.bits = UartBits::eight, .parity = UartParity::even});
+        link_owner = owner_parity;
+        const bool up = acted && LinkPar::init(clock, 115'200, {.bits = UartBits::eight, .parity = UartParity::even});
         static const uint8_t fill[64] = {};
         const uint32_t t0 = Ticker::millis();
         while (up && Ticker::millis() - t0 < 30u) {
-            (void)LinkIrq::write_bulk(std::span<const uint8_t>(fill, sizeof fill));
+            (void)LinkPar::write_bulk(std::span<const uint8_t>(fill, sizeof fill));
         }
-        const uint32_t pending = LinkIrq::rx_pending();
-        const uint8_t pe = LinkIrq::parity_errors();
+        const uint32_t pending = LinkPar::rx_pending();
+        const uint8_t pe = LinkPar::parity_errors();
         link_task_down();
         link::Report r{};
         (void)peer_report(r, 0);
@@ -2942,6 +2985,8 @@ void t5_parity_full_duplex() {
 // workaround's loop with a spin of N cycles put on purpose between its SR
 // read and its DR write, N swept: (A) predicts misses in proportion to N
 // plus the loop's own window, (B) a floor that does not move with N. Then
+// the same loop with the transmitter idle - no DR write at all - which
+// says whether what is missed at N = 0 needs the write. Then
 // a second SR read just before the write, a frame it shows served first;
 // then the converse, the erratum's order with its write delayed by the same N:
 // what a write clears when the SR read before it did not see the flag.
@@ -3048,7 +3093,10 @@ void pe_note_miss(PeWindowLeg& l, uint32_t st, uint16_t word) {
 /// The workaround's loop (one SR read, DR read on RXNE, then the write on
 /// TXE), a spin of `spin` cycles between that SR read and the write. With
 /// `reread`, SR is read again just before the write and a frame it shows
-/// is served first, its PE judged from that read.
+/// is served first, its PE judged from that read. With `transmit` false
+/// the write and everything around it is compiled out: the transmitter
+/// idle for the whole leg, the same SR read, DR read and counts.
+template <bool transmit = true>
 PeWindowLeg pe_window_leg(uint32_t spin, bool reread = false) {
     PeWindowLeg l{};
     const link::Params a = pe_window_params(pe_window_frames);
@@ -3073,26 +3121,28 @@ PeWindowLeg pe_window_leg(uint32_t spin, bool reread = false) {
             ++l.frames;
             last = Ticker::millis();
         }
-        if ((st & UsartFlag::txe) != 0u) {
-            if (spin != 0u) {
-                const uint32_t c0 = CycleCounter::now();
-                while (CycleCounter::now() - c0 < spin) {
-                }
-            }
-            if (reread) {
-                const uint32_t st2 = u.SR;
-                if ((st2 & UsartFlag::rxne) != 0u) {
-                    const uint16_t word = static_cast<uint16_t>(u.DR & 0x1FFu);
-                    if ((st2 & UsartFlag::pe) != 0u) {
-                        ++l.pe;
-                    } else {
-                        pe_note_miss(l, st2, word);
+        if constexpr (transmit) {
+            if ((st & UsartFlag::txe) != 0u) {
+                if (spin != 0u) {
+                    const uint32_t c0 = CycleCounter::now();
+                    while (CycleCounter::now() - c0 < spin) {
                     }
-                    ++l.frames;
-                    last = Ticker::millis();
                 }
+                if (reread) {
+                    const uint32_t st2 = u.SR;
+                    if ((st2 & UsartFlag::rxne) != 0u) {
+                        const uint16_t word = static_cast<uint16_t>(u.DR & 0x1FFu);
+                        if ((st2 & UsartFlag::pe) != 0u) {
+                            ++l.pe;
+                        } else {
+                            pe_note_miss(l, st2, word);
+                        }
+                        ++l.frames;
+                        last = Ticker::millis();
+                    }
+                }
+                u.DR = 0x33u;
             }
-            u.DR = 0x33u;
         }
         if (l.frames >= pe_window_frames || (l.frames != 0u && Ticker::millis() - last > 5u)) {
             break;
@@ -3162,15 +3212,15 @@ PeWindowLeg pe_task_leg(uint16_t count) {
     const link::Params a = pe_window_params(count);
     const bool acted = peer_act(link::Op::send, a);
     link_task_down();
-    link_owner = 1;
-    l.up = acted && LinkIrq::init(clock, 115'200, {.bits = UartBits::eight, .parity = UartParity::even});
+    link_owner = owner_parity;
+    l.up = acted && LinkPar::init(clock, 115'200, {.bits = UartBits::eight, .parity = UartParity::even});
     static const uint8_t fill[64] = {};
     const uint32_t t0 = Ticker::millis();
     uint32_t last = t0;
     uint32_t seen = 0;
     while (l.up && Ticker::millis() - t0 < a.ms) {
-        (void)LinkIrq::write_bulk(std::span<const uint8_t>(fill, sizeof fill));
-        const uint32_t now_seen = LinkIrq::parity_errors() + LinkIrq::rx_pending();
+        (void)LinkPar::write_bulk(std::span<const uint8_t>(fill, sizeof fill));
+        const uint32_t now_seen = LinkPar::parity_errors() + LinkPar::rx_pending();
         if (now_seen != seen) {
             seen = now_seen;
             last = Ticker::millis();
@@ -3179,11 +3229,11 @@ PeWindowLeg pe_task_leg(uint16_t count) {
             break;
         }
     }
-    l.pe = LinkIrq::parity_errors();
-    l.ne = LinkIrq::noise_errors();
-    l.fe = LinkIrq::frame_errors();
-    l.frames = static_cast<uint16_t>(l.pe + LinkIrq::rx_pending());
-    for (uint8_t b = 0; l.misses < 4u && LinkIrq::read_byte(b);) {
+    l.pe = LinkPar::parity_errors();
+    l.ne = LinkPar::noise_errors();
+    l.fe = LinkPar::frame_errors();
+    l.frames = static_cast<uint16_t>(l.pe + LinkPar::rx_pending());
+    for (uint8_t b = 0; l.misses < 4u && LinkPar::read_byte(b);) {
         pe_note_miss(l, 0u, b);
     }
     link_task_down();
@@ -3252,6 +3302,31 @@ void tp_pe_window() {
               (frames * spins[i] + pe_frame_cycles / 2u) / pe_frame_cycles, " under (A)", crlf);
     }
     judge("the control: every leg of the sweep read its 1024 frames whole, all the far end sent", whole);
+    // 2c. The same loop with the transmitter IDLE: no DR write for the
+    //     whole leg, the same far `send` and the same counts. The far
+    //     frames' period (about thirteen bits) is no multiple of the poll's
+    //     turn (some tens of cycles), so their arrival walks through the
+    //     turn as it walks through the transmit period above. What it
+    //     misses by SR.PE alone is PRINTED beside the sweep's N = 0: a
+    //     measurement of the silicon (does the residual need the write?),
+    //     not a verdict on the driver.
+    {
+        uint32_t frames = 0, pe = 0, ne = 0, fe = 0;
+        bool idle_whole = true;
+        for (uint8_t k = 0; k < legs[0]; ++k) {
+            const PeWindowLeg l = pe_window_leg<false>(0);
+            idle_whole = idle_whole && l.up && l.sent == pe_window_frames && l.frames == pe_window_frames;
+            frames += l.frames;
+            pe += l.pe;
+            ne += l.ne;
+            fe += l.fe;
+            pe_print_misses(l);
+        }
+        print(serial, "  the same loop with the transmitter idle (no DR write): ", frames - pe,
+              " parity errors missed of ", frames, " frames (NE ", ne, ", FE ", fe, ")", crlf);
+        judge("the control: every leg with the transmitter idle read its 1024 frames whole, all the far end sent",
+              idle_whole);
+    }
     // 2a. The workaround's loop with SR read AGAIN just before the write, a
     //     frame that read shows served first: what a second read buys when
     //     the window is not the span from the first read to the write.
@@ -5052,6 +5127,8 @@ extern "C" void USART1_IRQHandler() {
         edge = LinkRingLow::isr();
     } else if (o == 8u) {
         edge = LinkRingLow8::isr();
+    } else if (o == owner_parity) {
+        edge = LinkPar::isr();
     }
     if (edge) {
         link_edges = link_edges + 1u;
@@ -5100,6 +5177,8 @@ extern "C" void USART6_IRQHandler() {
         if (LoopIrq::tx_drained()) {
             tx_edges = tx_edges + 1u;
         }
+    } else if (owner == 8u) {
+        edge = LoopPar::isr();
     }
     if (edge) {
         edge_at = CycleCounter::now();

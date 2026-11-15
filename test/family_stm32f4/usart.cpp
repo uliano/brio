@@ -5,6 +5,7 @@
 // FULL-only ones on USART1 (full everywhere) and, where the part has it,
 // refused on UART4.
 #include "stm32f4/clock.hpp"
+#include "stm32f4/dma.hpp"
 #include "stm32f4/usart.hpp"
 
 using namespace brio;
@@ -71,7 +72,12 @@ constexpr UartPins pins2{.tx = {'A', 2, PinFunction::af7}, .rx = {'A', 3, PinFun
 constexpr UartPins pins6{.tx = {'C', 6, PinFunction::af8}, .rx = {'C', 7, PinFunction::af8}};
 
 using Serial1 = Uart<1, pins1>;
-using Serial2 = Uart<2, pins2, 128, 512>;
+// A port that runs a parity format says so (UartOptions::parity): its
+// interrupt receiver judges each word's parity too; without it init()
+// refuses the format.
+constexpr UartOptions parity_port{.parity = true};
+using Serial2 = Uart<2, pins2, 128, 512, NoDmaEngine, NoDmaEngine, parity_port>;
+static_assert(Serial2::options.parity && !Serial1::options.parity);
 constexpr UartOptions fast{.over8 = true, .one_bit = true, .tx_speed = PinSpeed::high};
 // The over8 option on the instance every part but the F410Tx has.
 #if defined(USART6_BASE)
@@ -124,6 +130,26 @@ void task_verbs() {
     (void)Serial1::min_hz_for(115'200u);
     Serial1::release();
 }
+
+// The option on a port with a transmit engine alone: the transmitter makes
+// the parity bit, so nothing is lost there (a receive engine refuses the
+// option: neg/uart_parity_with_rx_engine.cpp). A template, so the branch
+// is not instantiated on a part class with no request table (dma.cpp's
+// engined_console says why).
+template <bool mapped, typename TxE = DmaTxEngine<2, 7, 4>>
+void parity_with_tx_engine() {
+    if constexpr (mapped) {
+        using Port = Uart<1, pins1, 64, 256, TxE, NoDmaEngine, parity_port>;
+        static_assert(Port::has_tx_engine && !Port::has_rx_engine && Port::options.parity);
+        (void)Port::init(SysClock{}, 115'200, UartFormat{UartBits::seven, UartParity::odd});
+        (void)Port::isr();
+        (void)Port::dma_isr();
+        (void)Port::write_byte('x');
+        Port::release();
+    }
+}
+
+void parity_ports() { parity_with_tx_engine<usart_dma_placements(1, true).known>(); }
 
 void resource_verbs() {
     using U = Usart<1>;
