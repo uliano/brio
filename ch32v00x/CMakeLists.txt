@@ -1,37 +1,20 @@
 # ============================================================================
 #  ch32v00x/CMakeLists.txt - the CH32V00x build: brio's fourth hardware
 #  target and its first RISC-V one, a SIBLING CMake project (own
-#  toolchain file, own presets) exactly like avrxt/, samc21/ and
-#  stm32g0/ - nothing shared, one configure = one compiler.
+#  toolchain file, own presets) like the other families' - one configure
+#  = one compiler.
 #
 #  One executable target per app: every ch32v00x/src/apps/*.cpp with a
 #  main() is discovered at configure time (CONFIGURE_DEPENDS) from its
 #  own "// build:" header comment, the same grammar as the other three
 #  projects.
 #
-#  WHAT THIS PROJECT HAS NOT GOT, and the other three have: a device
-#  header. WCH ships its register definitions inside the EVT package,
-#  whose licence is written for software running on WCH parts, so this
-#  target compiles against brio/ch32v00x/device.hpp instead - the map
-#  read off the reference manual. The part is therefore a definition of
-#  THIS build's making (CH32V006 or CH32V003, from the part number),
-#  asked once in device.hpp, which includes the part's own table.
-#
-#  THE ARCHITECTURE STRING IS THE PART'S FULL ISA UNDER WCH'S GCC. The
-#  core is RV32EC with the multiply-only "m" (misa reads 0x40801014: E,
-#  C, M and one non-standard extension); the non-standard extension is
-#  WCH's "xw" compressed set, which only their compiler emits, and the
-#  default below asks for all of it: rv32ec_zmmul_xw. xw is worth one
-#  to two per cent of every image (measured over the suites: 72 to 516
-#  bytes each), and the family's smallest part - the CH32V003, 16 KB of
-#  flash and 2 KB of RAM - turns those bytes into the choice: this
-#  family is built with the vendor compiler and its extension, and an upstream
-#  gcc, which has no xw, is not a drop-in here. The part number selects
-#  the string: rv32ec_xw on the CH32V003, whose core has no multiplier.
-#
-#  Flash/debug: WCH's OpenOCD fork at /sw/wch-openocd, the only OpenOCD
-#  that speaks the WCH-Link's SDI transport. The probe's own serial
-#  pins are the console on this bench, so one cable carries both.
+#  WHAT THIS FILE HOLDS is the discovery of the apps kept in this tree.
+#  How one image is built - the part's definitions and ISA, the flags,
+#  the crt, the link, the upload - is cmake/family.cmake, the family's
+#  recipe, which this file includes and which an application kept outside
+#  the tree gets through ../cmake/brio.cmake: one recipe, so both are
+#  built alike.
 # ============================================================================
 
 cmake_minimum_required(VERSION 3.21)
@@ -42,205 +25,12 @@ endif()
 
 project(brio_ch32v00x CXX C ASM)
 
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
-endif()
+include(cmake/family.cmake)   # the recipe: flags, crt, link, ch32_add_app()
 
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
-foreach(lang C CXX)
-    set(CMAKE_${lang}_FLAGS_RELEASE "" CACHE STRING "" FORCE)
-    set(CMAKE_${lang}_FLAGS_DEBUG "" CACHE STRING "" FORCE)
-endforeach()
-
-# --- Which part this configure targets: the part number in lower case,
-#     with its package letter and memory code and without the package
-#     type and temperature suffix (ch32v006k8, ch32v006f8, ch32v003f4).
-#     It picks the linker script ld/<part>.ld, two DEFINITIONS the
-#     stratum's device.hpp asks - the chip (CH32V006 / CH32V003: the
-#     family has no vendor header, so the build states the part) and the
-#     package (CH32V006F8 and the like: the pads it bonds, parts/<chip>.hpp)
-#     - and, unless overridden, the ISA: the CH32V006's QingKe V2C has the
-#     multiplier, the CH32V003's V2A has not. A part number whose letter
-#     the chip's table does not know is refused by device.hpp.
-set(CH32V00X_MCU "ch32v006k8" CACHE STRING "target CH32V00x part: ch32v006k8, ch32v006f8 or ch32v003f4")
-string(SUBSTRING "${CH32V00X_MCU}" 0 8 _ch32_part)
-string(TOUPPER "${_ch32_part}" CH32V00X_PART_DEFINE)                  # CH32V006 / CH32V003
-string(TOUPPER "${CH32V00X_MCU}" CH32V00X_PACKAGE_DEFINE)             # CH32V006K8 / CH32V006F8 / CH32V003F4
-if(NOT CH32V00X_PART_DEFINE MATCHES "^CH32V00[36]$")
-    message(FATAL_ERROR "CH32V00X_MCU '${CH32V00X_MCU}': the part must be a CH32V006 or a CH32V003")
-endif()
-if(NOT CH32V00X_PACKAGE_DEFINE MATCHES "^CH32V00[36][A-Z][0-9]$")
-    message(FATAL_ERROR "CH32V00X_MCU '${CH32V00X_MCU}': the part number must carry its package letter and memory code (ch32v006f8)")
-endif()
-# The board type: the part number without "ch32" (v006k8), which names
-# the ASSEMBLY the build is for, and its board file's directory.
-string(SUBSTRING "${CH32V00X_MCU}" 4 6 CH32V00X_BOARD)          # v006k8
-set(CH32V00X_BOARD_DIR "${CMAKE_SOURCE_DIR}/../boards/${CH32V00X_BOARD}")
-if(CH32V00X_PART_DEFINE STREQUAL "CH32V003")
-    set(_ch32_arch_default "rv32ec_xw")
-else()
-    set(_ch32_arch_default "rv32ec_zmmul_xw")
-endif()
-# THE ISA AND THE ABI ARE DERIVED, NEVER CACHED: the two cache entries
-# are OVERRIDES, empty by default, so every configure re-derives from
-# the part (a changed default and a changed CH32V00X_MCU on an existing
-# cache both take effect), and an override that is set wins and says so.
-# An entry equal to the derived value is no override, and is cleared
-# (which is what a cache written while these entries held the default
-# carries).
-set(CH32V00X_ARCH "" CACHE STRING "-march override; empty (the default) = the part's own ISA under WCH's gcc, derived at every configure")
-set(CH32V00X_ABI "" CACHE STRING "-mabi override; empty (the default) = the family's ilp32e")
-set(_ch32_abi_default "ilp32e")
-if(CH32V00X_ARCH STREQUAL "${_ch32_arch_default}")
-    set(CH32V00X_ARCH "" CACHE STRING "-march override; empty (the default) = the part's own ISA under WCH's gcc, derived at every configure" FORCE)
-endif()
-if(CH32V00X_ARCH STREQUAL "")
-    set(_ch32_arch "${_ch32_arch_default}")
-else()
-    set(_ch32_arch "${CH32V00X_ARCH}")
-    message(STATUS "CH32V00X_ARCH override: -march=${_ch32_arch} (the part's own is ${_ch32_arch_default})")
-endif()
-if(CH32V00X_ABI STREQUAL "${_ch32_abi_default}")
-    set(CH32V00X_ABI "" CACHE STRING "-mabi override; empty (the default) = the family's ilp32e" FORCE)
-endif()
-if(CH32V00X_ABI STREQUAL "")
-    set(_ch32_abi "${_ch32_abi_default}")
-else()
-    set(_ch32_abi "${CH32V00X_ABI}")
-    message(STATUS "CH32V00X_ABI override: -mabi=${_ch32_abi} (the family's is ${_ch32_abi_default})")
-endif()
-
-# --- The core's hardware prologue/epilogue (HPE): with it on, the crt
-#     sets INTSYSCR.HWSTKEN and every handler is declared with WCH's
-#     `interrupt("WCH-Interrupt-fast")` attribute (through pfic.hpp's
-#     BRIO_CH32_VECTOR), so the ten caller-saved registers are pushed
-#     and popped by the hardware instead of by each handler's prologue.
-#     ONE SWITCH FOR THE WHOLE IMAGE, on purpose: a fast handler under
-#     an HPE that is off corrupts the interrupted program, so the crt
-#     bit and the attribute must never disagree. Interrupt NESTING stays
-#     off either way (the kernel's rule, docs/design/kernel.md). Needs
-#     WCH's gcc, or an upstream gcc with the fast-interrupt patch.
-option(CH32V00X_HPE "hardware prologue/epilogue for every interrupt handler" ON)
-if(CH32V00X_HPE)
-    set(CH32V00X_HPE_DEFINE -DBRIO_CH32_HPE=1)
-else()
-    set(CH32V00X_HPE_DEFINE "")
-endif()
-
-set(BRIO_COMMON_FLAGS
-    -march=${_ch32_arch}
-    -mabi=${_ch32_abi}
-    -D${CH32V00X_PART_DEFINE}
-    -D${CH32V00X_PACKAGE_DEFINE}
-    ${CH32V00X_HPE_DEFINE}
-    -Wall -Wextra -Werror
-    -ffunction-sections -fdata-sections
-)
-
-find_program(RISCV_OBJCOPY riscv32-wch-elf-objcopy PATHS "${RISCV_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
-find_program(RISCV_SIZE riscv32-wch-elf-size PATHS "${RISCV_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
-find_program(RISCV_OBJDUMP riscv32-wch-elf-objdump PATHS "${RISCV_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
-
-# The NVHEAP build-id defsym, as on the other three projects: a property
-# of util/nv_heap.hpp (the media record it in every map version), the
-# newest source mtime, so an unchanged tree relinks to the same bytes;
-# an image that never names an NvHeap never references the symbol.
-set(CH32V00X_NVHEAP_BUILD_ID 0)
-file(GLOB_RECURSE _nvheap_id_sources CONFIGURE_DEPENDS
-    "${CMAKE_SOURCE_DIR}/../brio/*.cpp" "${CMAKE_SOURCE_DIR}/../brio/*.hpp"
-    "${CMAKE_SOURCE_DIR}/../brio/*.c"   "${CMAKE_SOURCE_DIR}/../brio/*.h"
-    "${CMAKE_SOURCE_DIR}/../brio/*.S"
-    "${CMAKE_SOURCE_DIR}/src/*.cpp" "${CMAKE_SOURCE_DIR}/src/*.hpp"
-    "${CMAKE_SOURCE_DIR}/src/*.c"   "${CMAKE_SOURCE_DIR}/src/*.h"
-    "${CMAKE_SOURCE_DIR}/src/*.S"
-    "${CMAKE_SOURCE_DIR}/../boards/*.hpp"
-)
-foreach(_f IN LISTS _nvheap_id_sources)
-    file(TIMESTAMP "${_f}" _ts "%s")
-    if(_ts GREATER CH32V00X_NVHEAP_BUILD_ID)
-        set(CH32V00X_NVHEAP_BUILD_ID "${_ts}")
-    endif()
-endforeach()
-
-set(CH32V00X_OPENOCD "/sw/wch-openocd/bin/openocd" CACHE FILEPATH "WCH's OpenOCD fork (SDI transport)")
-set(CH32V00X_OPENOCD_CFG "/sw/wch-openocd/bin/wch-riscv.cfg" CACHE FILEPATH "its RISC-V target config")
-
-# --- One app -> one executable target, one .bin/.hex, one -upload target.
-function(ch32_add_app name)
-    add_executable(${name}
-        src/glue/startup_ch32v00x.S
-        ${CMAKE_SOURCE_DIR}/../brio/rt/rt.cpp
-        ${ARGN}
-    )
-
-    target_include_directories(${name} PRIVATE
-        ${CMAKE_SOURCE_DIR}/../brio
-    )
-    # The board file of the board type this configure builds for,
-    # ../boards/<type>/board.hpp, on the include path when the type has
-    # one: an app writes #include "board.hpp" and reads the facts of that
-    # assembly (the LED, the crystal, the pads the board's circuits load) -
-    # facts of the PCB and what is fitted on it, which the part cannot know.
-    if(EXISTS ${CH32V00X_BOARD_DIR})
-        target_include_directories(${name} PRIVATE ${CH32V00X_BOARD_DIR})
-    endif()
-
-    target_compile_options(${name} PRIVATE
-        ${BRIO_COMMON_FLAGS}
-        $<$<CONFIG:Release>:-Os -g -DNDEBUG>  # NDEBUG: no debug check (util/stream.hpp)
-        $<$<CONFIG:Debug>:-Og -g3 -ggdb3 -fno-inline>
-        $<$<COMPILE_LANGUAGE:C>:-std=gnu11>
-        $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++23>
-        $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions>
-        $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>
-        $<$<COMPILE_LANGUAGE:CXX>:-fno-threadsafe-statics>
-        $<$<COMPILE_LANGUAGE:CXX>:-fno-use-cxa-atexit>
-    )
-
-    # The link takes brio's runtime and libgcc and nothing else
-    # (design/runtime.md): -nostartfiles because the crt is ours,
-    # -nodefaultlibs so that no C library and no syscall layer reach the
-    # link - an accidental printf or malloc fails here with its own name -
-    # and libgcc named below, after the objects.
-    target_link_options(${name} PRIVATE
-        ${BRIO_COMMON_FLAGS}
-        $<$<CONFIG:Release>:-Os -g>
-        -nostartfiles
-        -nodefaultlibs
-        -T${CMAKE_SOURCE_DIR}/ld/${CH32V00X_MCU}.ld
-        -Wl,--gc-sections
-        -Wl,--no-warn-rwx-segments   # .data carries the code placed in SRAM, .fast_text and .ram_text (ld/)
-        -Wl,-Map,$<TARGET_FILE_DIR:${name}>/firmware-${name}.map
-        -Wl,--defsym,__nvheap_build_id=${CH32V00X_NVHEAP_BUILD_ID}
-    )
-    target_link_libraries(${name} PRIVATE gcc)
-    set_property(TARGET ${name} APPEND PROPERTY LINK_DEPENDS
-        ${CMAKE_SOURCE_DIR}/ld/${CH32V00X_MCU}.ld)
-
-    set_target_properties(${name} PROPERTIES SUFFIX ".elf")
-
-    add_custom_command(TARGET ${name} POST_BUILD
-        COMMAND ${RISCV_OBJCOPY} -O binary
-            $<TARGET_FILE:${name}> $<TARGET_FILE_DIR:${name}>/${name}.bin
-        COMMAND ${RISCV_OBJCOPY} -O ihex
-            $<TARGET_FILE:${name}> $<TARGET_FILE_DIR:${name}>/${name}.hex
-        COMMAND ${RISCV_SIZE} -A -d $<TARGET_FILE:${name}>
-        COMMAND ${RISCV_OBJDUMP} -h -S $<TARGET_FILE:${name}> > $<TARGET_FILE_DIR:${name}>/${name}.lst
-        COMMENT "${name}.bin/.hex + size + ${name}.lst"
-        VERBATIM
-    )
-
-    add_custom_target(${name}-upload
-        COMMAND ${CH32V00X_OPENOCD}
-            -f ${CH32V00X_OPENOCD_CFG}
-            -c "program $<TARGET_FILE:${name}> verify"
-            -c "reset run"
-            -c "exit"
-        DEPENDS ${name}
-        VERBATIM
-    )
-endfunction()
+# The board file of the board type this configure builds for,
+# ../boards/<type>/board.hpp: the recipe puts the directory on every
+# image's include path when it exists.
+set(BRIO_BOARD_DIR "${BRIO_ROOT}/boards/${CH32V00X_BOARD}")
 
 # --- App discovery: every ch32v00x/src/apps/<app>.cpp - plus every
 #     ../experiments/*/ch32v00x/<app>.cpp - becomes a target, gated by
