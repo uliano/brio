@@ -397,7 +397,9 @@ drivers expose `[[gnu::always_inline]]` handler bodies (`rxc()`,
 `cmake --build --preset <pkg>-release --target <app>-upload` drives
 avrdude 8.1 through the Atmel-ICE (`avr_add_app()` in `cmake/family.cmake`;
 `-P usb:<serial>` disambiguates when more than one Atmel-ICE is
-attached, through `AVR_PROBE_SERIAL`). `brio flash <board> <app>` does
+attached, through `BRIO_PROBE_SERIAL`, and `BRIO_PROBE` names another
+probe: [../probes/README.md](../probes/README.md), "The probe of an
+-upload target"). `brio flash <board> <app>` does
 the same, resolved against the bench manifest; the probe page
 ([../probes/atmel-ice.md](../probes/atmel-ice.md)) says what each erase
 regime leaves in the chip.

@@ -137,7 +137,7 @@ left with halting debug enabled halts on a BKPT instruction instead of
 faulting, and every `panic()` ends in one. OpenOCD, the 0.12.0 release
 at `/sw/openocd`, drives all four probes; another path is named with
 the cache variable `STM32F4_OPENOCD`. Each probe carries a real USB
-serial, so `adapter serial` names it (`-DSTM32F4_PROBE_SERIAL=<serial>`
+serial, so `adapter serial` names it (`-DBRIO_PROBE_SERIAL=<serial>`
 at configure time) and the same serial names the console under
 `/dev/serial/by-id`. The probe serves one client at a time: close the
 debug session before flashing.

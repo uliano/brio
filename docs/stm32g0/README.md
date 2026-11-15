@@ -177,7 +177,7 @@ tarball into `/sw/openocd-0.12.0` and reached as `/sw/openocd`
 is named with the cache variable `STM32G0_OPENOCD`. It drives the
 ST-LINK (firmware V2J46M31) without incident. The probe carries a real
 USB serial number, so `adapter serial` names one probe among several
-(`-DSTM32G0_PROBE_SERIAL=<serial>` at configure time), and the same
+(`-DBRIO_PROBE_SERIAL=<serial>` at configure time), and the same
 serial names the console under `/dev/serial/by-id`. The probe serves one
 client at a time: close the debug session before flashing.
 

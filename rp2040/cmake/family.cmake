@@ -29,10 +29,11 @@
 #  The crt is src/glue/startup_rp2040.cpp: the vector table the stage
 #  vectors into at flash offset 0x100, with the SDK's own handler names.
 #
-#  Flash/debug: OpenOCD over a CMSIS-DAP probe - the Raspberry Pi Debug
-#  Probe, CMSIS-DAP v2 on the USB bulk backend - through target/rp2040.cfg
-#  (the multidrop SWD that reaches both cores, the rp2040 flash driver);
-#  `adapter serial` names the probe, which HAS a real USB serial.
+#  Flash/debug: OpenOCD through target/rp2040.cfg (the multidrop SWD that
+#  reaches both cores, the rp2040 flash driver), over the Raspberry Pi
+#  Debug Probe - CMSIS-DAP v2 on the USB bulk backend - unless BRIO_PROBE
+#  names another probe; the probe and its USB serial are
+#  cmake/probe.cmake's.
 #
 #  The NVHEAP build-id defsym is a property of util/nv_heap.hpp: an image
 #  that never names an NvHeap never references the symbol.
@@ -85,16 +86,24 @@ set(BRIO_COMMON_FLAGS
 find_program(ARM_OBJCOPY arm-none-eabi-objcopy PATHS "${ARM_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
 find_program(ARM_SIZE arm-none-eabi-size PATHS "${ARM_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
 find_program(ARM_OBJDUMP arm-none-eabi-objdump PATHS "${ARM_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
+find_program(ARM_GDB arm-none-eabi-gdb PATHS "${ARM_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
 
 set(RP2040_OPENOCD "/sw/openocd/bin/openocd" CACHE FILEPATH "OpenOCD with CMSIS-DAP (USB bulk) + rp2040 support")
-# `adapter serial` disambiguates which probe when more than one CMSIS-DAP
-# device is attached; empty = the only one (bin/brio takes the serial from
-# its manifest instead).
-set(RP2040_PROBE_SERIAL "" CACHE STRING "CMSIS-DAP probe serial to flash/debug through (empty: the only one attached)")
-if(RP2040_PROBE_SERIAL STREQUAL "")
-    set(RP2040_ADAPTER_SERIAL "")
+# The probe is cmake/probe.cmake's: BRIO_PROBE picks its kind (the
+# Raspberry Pi Debug Probe when empty), BRIO_PROBE_SERIAL one probe of
+# several, and RP2040_INTERFACE is the interface part of the OpenOCD
+# command line, the CMSIS-DAP backend included. The OpenOCD binary above
+# and the target script, target/rp2040.cfg, are this family's. bin/brio
+# names the probe from its manifest instead. A Black Magic Probe (bmp) is
+# driven by the toolchain's gdb, not by OpenOCD.
+include("${BRIO_ROOT}/cmake/probe.cmake")
+brio_probe_select(DEFAULT debugprobe KINDS cmsis-dap atmelice bmp)
+if(BRIO_PROBE_KIND STREQUAL "bmp")
+    if(NOT ARM_GDB)
+        message(FATAL_ERROR "brio: BRIO_PROBE=bmp needs arm-none-eabi-gdb, not found in ${ARM_TOOLCHAIN_DIR}/bin")
+    endif()
 else()
-    set(RP2040_ADAPTER_SERIAL -c "adapter serial ${RP2040_PROBE_SERIAL}")
+    brio_probe_openocd(RP2040_INTERFACE)
 endif()
 
 set(RP2040_NVHEAP_BUILD_ID 0)
@@ -191,24 +200,32 @@ function(rp2040_add_app name)
     # USE_CORE 0 keeps OpenOCD off core 1 altogether (the target script's
     # default takes both cores as an SMP pair, halts both to program and
     # leaves core 1 debug-enabled and reset a second time - cli/bench/
-    # flash.py says what that did to a two-kernel program). The probe is
-    # a CMSIS-DAP v2 device: the USB bulk backend, not the Atmel-ICE's
-    # HID one.
-    add_custom_target(${name}-upload
-        COMMAND ${RP2040_OPENOCD}
-            -f interface/cmsis-dap.cfg
-            -c "cmsis_dap_backend usb_bulk"
-            ${RP2040_ADAPTER_SERIAL}
-            -c "set USE_CORE 0"
-            -c "adapter speed 5000"
-            -f target/rp2040.cfg
-            -c "program $<TARGET_FILE:${name}> verify"
-            -c "reset run"
-            -c "mww 0xE000EDF0 0xA05F0000"
-            -c "exit"
-        DEPENDS ${name}
-        VERBATIM
-    )
+    # flash.py says what that did to a two-kernel program). On a Black
+    # Magic Probe the upload target is gdb's scripted load (cmake/probe.cmake,
+    # brio_probe_bmp()), and none of the OpenOCD steps below runs: no
+    # USE_CORE, no target script, no `reset run`, no DHCSR write.
+    if(BRIO_PROBE_KIND STREQUAL "bmp")
+        brio_probe_bmp(_upload "${ARM_GDB}" "$<TARGET_FILE:${name}>")
+        add_custom_target(${name}-upload
+            COMMAND ${_upload}
+            DEPENDS ${name}
+            VERBATIM
+        )
+    else()
+        add_custom_target(${name}-upload
+            COMMAND ${RP2040_OPENOCD}
+                ${RP2040_INTERFACE}
+                -c "set USE_CORE 0"
+                -c "adapter speed 5000"
+                -f target/rp2040.cfg
+                -c "program $<TARGET_FILE:${name}> verify"
+                -c "reset run"
+                -c "mww 0xE000EDF0 0xA05F0000"
+                -c "exit"
+            DEPENDS ${name}
+            VERBATIM
+        )
+    endif()
 endfunction()
 
 # The name every family's recipe answers to, which is the one an

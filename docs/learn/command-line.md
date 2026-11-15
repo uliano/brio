@@ -18,7 +18,7 @@ files set it up and the check on this board is still owed:
 
 | Step | Status |
 |---|---|
-| 1. Configure | verified on the Nucleo-G0B1RE as written, with `-DSTM32G0_PROBE_SERIAL` because two ST-LINKs were attached; not from a fresh checkout |
+| 1. Configure | verified on the Nucleo-G0B1RE as written, with a probe serial given at the configure because two ST-LINKs were attached; not from a fresh checkout. With `-DBRIO_PROBE_SERIAL` the configure generates the `-upload` command of that run (compared in `build.ninja`), and the step was not performed again with it |
 | 2. Build | verified on the Nucleo-G0B1RE as written; the size figures quoted are from one debug build, another build of the same code measured `.text` 6252 |
 | 3. Flash with the `-upload` target | verified on the Nucleo-G0B1RE as written: the probe's firmware version, the part, the programming and the verification printed, the LED changing state at once |
 | The bench tool | verified on this board with the desk's own manifest entry: how every STM32G0 suite reaches the Nucleo-G0B1RE; writing a first manifest entry not walked through |
@@ -143,7 +143,7 @@ then faster. The three rates cycle with a period of nine seconds.
 
 With more than one ST-LINK attached, OpenOCD takes the first it
 enumerates; name the right one with
-`-DSTM32G0_PROBE_SERIAL=<serial>` at configure time (the `-upload`
+`-DBRIO_PROBE_SERIAL=<serial>` at configure time (the `-upload`
 target then passes `adapter serial`).
 
 One thing this leaves behind, of no consequence for `blink`: the

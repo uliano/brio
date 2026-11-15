@@ -79,8 +79,9 @@
 #  the USB location it is plugged into (the by-path of macOS).
 #
 #  PROGRAMMERS, by "type":
-#    atmelice_updi / pickit4_updi   an EDBG-class probe over UPDI (avrdude);
-#                       "serial" only when two probes of the kind are attached
+#    atmelice_updi / pickit4_updi / pickit5_updi   a probe over UPDI
+#                       (avrdude, which takes the type as its -c); "serial"
+#                       only when two probes of the kind are attached
 #    serialupdi         {"type": "serialupdi", "port": ..., "baud": ...}
 #    openocd_cmsisdap   OpenOCD driving an Atmel-ICE (or any CMSIS-DAP probe)
 #                       over SWD; "serial" = the probe's USB serial; "backend"
@@ -91,6 +92,11 @@
 #                       whose flash chip the 0.12.0 release does not know)
 #    openocd_stlink     OpenOCD driving an ST-LINK; "serial" = its USB serial
 #                       (the same device carries the Nucleo's console)
+#    openocd_jlink      OpenOCD driving a SEGGER J-Link over SWD; "serial" =
+#                       its USB serial
+#    bmp                a Black Magic Probe, its own gdb server driven by
+#                       ARM_GDB below: {"type": "bmp", "port": ...}, the
+#                       probe's first serial port (its gdb server), by-id
 #    stlink_msd         the ST-LINK's mass-storage flasher, the fallback when
 #                       its debug port does not answer: {"type": "stlink_msd",
 #                       "label": "NODE_G031K8"} (the drive's volume label)
@@ -210,6 +216,8 @@ DEFAULT_MONITOR_SPEED = 460800
 # (docs/avrxt/README.md, docs/samc21/README.md), never a distribution's.
 AVRDUDE = "/sw/avr/bin/avrdude"
 OPENOCD = "/sw/openocd/bin/openocd"
+# The toolchain's gdb, which loads an image through a Black Magic Probe.
+ARM_GDB = "/sw/arm-none-eabi/bin/arm-none-eabi-gdb"
 # WCH's OpenOCD fork for the WCH-Link (docs/ch32v00x/README.md): a
 # different program from the one above, kept apart under /sw.
 WCH_OPENOCD = "/sw/wch-openocd/bin/openocd"

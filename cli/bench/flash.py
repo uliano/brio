@@ -1,6 +1,7 @@
 """brio flash: build an app for a board and put it in, by the board type -
-avrdude over UPDI, OpenOCD over SWD or an ST-LINK, or the ST-LINK's own
-mass-storage flasher - with the flash-heap preflight on the AVR. Or, with
+avrdude over UPDI, OpenOCD over SWD or an ST-LINK, the ST-LINK's own
+mass-storage flasher, or gdb through a Black Magic Probe - with the
+flash-heap preflight on the AVR. Or, with
 --elf, put in an ELF kept outside the tree as it is (a reference image, a
 bisect step), through the same programmer path and with the same resets
 a built app gets - the probe's reset above all: a WCH-Link left unreset
@@ -52,7 +53,8 @@ def avrdude_args(prog, mcu, hexfile, chip_erase=False):
 def openocd_args(prog, elffile, target_cfg):
     """OpenOCD over SWD: the probe KIND is the manifest's ("openocd_cmsisdap"
     = an Atmel-ICE or a Raspberry Pi Debug Probe, "openocd_stlink" = a
-    Nucleo's on-board ST-LINK), the target script the board TYPE's
+    Nucleo's on-board ST-LINK, "openocd_jlink" = a SEGGER J-Link;
+    openocd_interface), the target script the board TYPE's
     (BOARD_TYPES). Otherwise the same invocation
     samc21/cmake/family.cmake's <app>-upload target uses - except that the probe
     is named by THE MANIFEST, not by the CMake cache. Identity is the
@@ -333,9 +335,12 @@ NO_SERVER_PORTS = ["-c", "gdb_port disabled",
 
 def openocd_interface(prog):
     """The `-f interface/... -c adapter serial ...` half of an OpenOCD
-    command line, from the manifest's programmer entry. The HID backend
-    is the Atmel-ICE's (see openocd_args); an ST-LINK has one transport
-    and is addressed by its real USB serial."""
+    command line, from the manifest's programmer entry, with the server
+    ports disabled. Three kinds: "openocd_cmsisdap" (the HID backend is
+    the Atmel-ICE's, see openocd_args), "openocd_stlink" (one transport,
+    addressed by its real USB serial) and "openocd_jlink" (a SEGGER
+    J-Link, which speaks JTAG too and so is told SWD). Each is addressed
+    by the entry's "serial" when it gives one."""
     kind = prog["type"]
     if kind == "openocd_cmsisdap":
         # The backend is the probe's: "hid" (the default, the Atmel-ICE's
@@ -345,11 +350,76 @@ def openocd_interface(prog):
                 "-c", "cmsis_dap_backend %s" % prog.get("backend", "hid")]
     elif kind == "openocd_stlink":
         argv = ["-f", "interface/stlink.cfg"]
+    elif kind == "openocd_jlink":
+        argv = ["-f", "interface/jlink.cfg", "-c", "transport select swd"]
     else:
         die("programmer type '%s' is not an OpenOCD probe" % kind)
     if prog.get("serial"):
         argv += ["-c", "adapter serial %s" % prog["serial"]]
     return argv + NO_SERVER_PORTS
+
+
+def bmp_args(prog, elffile):
+    """A Black Magic Probe (programmer type "bmp"): the probe runs a gdb
+    server of its own on its first serial port, so no OpenOCD takes part
+    and the command is the toolchain's gdb (the manifest's ARM_GDB) on
+    the entry's "port" - the same command cmake/probe.cmake's
+    brio_probe_bmp() gives an <app>-upload target. gdb connects, scans
+    the SWD port, attaches to the first target found, loads the image,
+    compares every loaded section with the target's memory and ends the
+    session with `kill`. This is the sequence the probe's own
+    documentation gives for a scripted load. gdb's exit status tells the
+    last command only, so what it prints - compare-sections' "matched" or
+    "MIS-MATCHED" for each section - is the verdict, which bmp_flash()
+    reads. No target script, no reset sequence and no DHCSR write of the
+    OpenOCD path runs here."""
+    port = prog.get("port")
+    if not port:
+        die("bmp programmer without a 'port' in the manifest")
+    if not os.path.exists(port):
+        die("bmp port %s does not exist (brio list)" % port)
+    gdb = getattr(manifest, "ARM_GDB", "/sw/arm-none-eabi/bin/arm-none-eabi-gdb")
+    return [gdb, "-nx", "--batch",
+            "-ex", "target extended-remote %s" % port,
+            "-ex", "monitor swd_scan",
+            "-ex", "attach 1",
+            "-ex", "load",
+            "-ex", "compare-sections",
+            "-ex", "kill",
+            elffile]
+
+
+def bmp_flash(prog, elffile):
+    """Run bmp_args()'s command and judge it: 0 only when gdb exits 0,
+    compare-sections printed at least one section as matched and none as
+    MIS-MATCHED. gdb's own status is not enough (measured, gdb 17.2, with
+    no probe: in batch mode it is the last command's alone): it is not 0
+    when `kill` finds nothing attached - no probe on the port, no target,
+    a refused attach - and it is 0 after a section that did not match,
+    which compare-sections reports as a warning. The lines it prints are
+    "Section <name>, range <from> -- <to>: matched." and the same ending
+    in "MIS-MATCHED!"; gdb's output goes to the terminal as it comes."""
+    argv = bmp_args(prog, elffile)
+    print("bench: " + " ".join(argv))
+    gdb = subprocess.Popen(argv, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           text=True, errors="replace")
+    matched = mismatched = 0
+    for line in gdb.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        if line.startswith("Section "):
+            if "MIS-MATCHED" in line:
+                mismatched += 1
+            elif line.rstrip().endswith(": matched."):
+                matched += 1
+    rc = gdb.wait()
+    if rc != 0:
+        return rc
+    if mismatched or not matched:
+        print("bench: gdb compared %d section(s) as matched and %d as MIS-MATCHED: "
+              "the image is not in the chip as the file has it" % (matched, mismatched))
+        return 1
+    return 0
 
 
 def msd_flash(prog, binfile, app):
@@ -498,6 +568,13 @@ def cmd_flash(args):
             "... verify` erases exactly the sectors it writes, and there is "
             "no NvHeap on the SAM or the STM32 yet to protect from a chip "
             "erase")
+    if board_entry(args.name)["programmer"]["type"] == "bmp" and spec["flash"] != "openocd":
+        # The Black Magic Probe loads through gdb over SWD: an avrdude or a
+        # WCH board has no SWD port, and the RP2350's verb is a rescue over
+        # its debug port that only OpenOCD performs (rp2350_openocd_argvs).
+        die("a bmp programmer drives the SWD board types written by OpenOCD "
+            "(\"openocd\" in BOARD_TYPES); board type %s is written by %s"
+            % (btype, spec["flash"]))
     if args.elf:
         elffile = elf_image(args, spec)
         app = elf_app_name(args, spec, btype)
@@ -546,6 +623,13 @@ def cmd_flash(args):
             if rc != 0:
                 return rc
         if app:
+            state_write(args.name, app)
+        return rc
+    if spec["flash"] == "openocd" and prog["type"] == "bmp":
+        # gdb's load through the probe, judged by what gdb prints; the
+        # RP2040's rescue below is an OpenOCD session and is not run.
+        rc = bmp_flash(prog, elffile)
+        if rc == 0 and app:
             state_write(args.name, app)
         return rc
     if spec["flash"] == "openocd":

@@ -66,19 +66,25 @@ set(BRIO_COMMON_FLAGS
 find_program(ARM_OBJCOPY arm-none-eabi-objcopy PATHS "${ARM_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
 find_program(ARM_SIZE arm-none-eabi-size PATHS "${ARM_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
 find_program(ARM_OBJDUMP arm-none-eabi-objdump PATHS "${ARM_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
+find_program(ARM_GDB arm-none-eabi-gdb PATHS "${ARM_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
 
-# --- Flash/debug over SWD: OpenOCD driving the Atmel-ICE as a CMSIS-DAP
-#     probe (the at91samd flash driver auto-probes the geometry from the
-#     DSU DID). `adapter serial` disambiguates which Atmel-ICE when more
-#     than one is attached - same concern as the AVR project's
-#     AVR_PROBE_SERIAL. Empty = the only probe attached (bin/brio takes
-#     the serial from its manifest instead).
+# --- Flash over SWD. The probe is cmake/probe.cmake's: BRIO_PROBE picks
+#     its kind (the Atmel-ICE as a CMSIS-DAP probe when empty),
+#     BRIO_PROBE_SERIAL one probe of several, and SAMC21_INTERFACE is the
+#     interface part of the OpenOCD command line. The OpenOCD binary and
+#     the target script are this family's: target/at91samdXX.cfg, whose
+#     at91samd flash driver auto-probes the geometry from the DSU DID.
+#     bin/brio names the probe from its manifest instead. A Black Magic
+#     Probe (bmp) is driven by the toolchain's gdb, not by OpenOCD.
 set(SAMC21_OPENOCD "/sw/openocd/bin/openocd" CACHE FILEPATH "OpenOCD with CMSIS-DAP + at91samd support")
-set(SAMC21_PROBE_SERIAL "" CACHE STRING "Atmel-ICE serial to flash/debug through (empty: the only one attached)")
-if(SAMC21_PROBE_SERIAL STREQUAL "")
-    set(SAMC21_ADAPTER_SERIAL "")
+include("${BRIO_ROOT}/cmake/probe.cmake")
+brio_probe_select(DEFAULT atmelice KINDS cmsis-dap jlink bmp)
+if(BRIO_PROBE_KIND STREQUAL "bmp")
+    if(NOT ARM_GDB)
+        message(FATAL_ERROR "brio: BRIO_PROBE=bmp needs arm-none-eabi-gdb, not found in ${ARM_TOOLCHAIN_DIR}/bin")
+    endif()
 else()
-    set(SAMC21_ADAPTER_SERIAL -c "adapter serial ${SAMC21_PROBE_SERIAL}")
+    brio_probe_openocd(SAMC21_INTERFACE)
 endif()
 
 # --- The build id every image carries: samc21/nvm_flash.hpp records it in
@@ -177,15 +183,26 @@ function(sam_add_app name)
         VERBATIM
     )
 
-    add_custom_target(${name}-upload
-        COMMAND ${SAMC21_OPENOCD}
-            -f interface/cmsis-dap.cfg
-            ${SAMC21_ADAPTER_SERIAL}
-            -f target/at91samdXX.cfg
-            -c "program $<TARGET_FILE:${name}> verify reset exit"
-        DEPENDS ${name}
-        VERBATIM
-    )
+    # On a Black Magic Probe the upload target is gdb's scripted load
+    # (cmake/probe.cmake, brio_probe_bmp()), and OpenOCD's target script
+    # and its `program ... verify reset` are not run.
+    if(BRIO_PROBE_KIND STREQUAL "bmp")
+        brio_probe_bmp(_upload "${ARM_GDB}" "$<TARGET_FILE:${name}>")
+        add_custom_target(${name}-upload
+            COMMAND ${_upload}
+            DEPENDS ${name}
+            VERBATIM
+        )
+    else()
+        add_custom_target(${name}-upload
+            COMMAND ${SAMC21_OPENOCD}
+                ${SAMC21_INTERFACE}
+                -f target/at91samdXX.cfg
+                -c "program $<TARGET_FILE:${name}> verify reset exit"
+            DEPENDS ${name}
+            VERBATIM
+        )
+    endif()
 endfunction()
 
 # The name every family's recipe answers to, which is the one an

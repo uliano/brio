@@ -99,6 +99,8 @@ def cmd_list(args):
         prog = entry["programmer"]
         if prog["type"] == "serialupdi":
             how = "serialupdi %s @ %s" % (prog.get("port"), prog.get("baud"))
+        elif prog["type"] == "bmp":
+            how = "bmp %s" % prog.get("port")
         elif prog["type"] == "stlink_msd":
             how = "stlink_msd usb:%s drive %s (the probe's own flasher; no SWD)" \
                   % (prog.get("serial"), prog.get("label"))

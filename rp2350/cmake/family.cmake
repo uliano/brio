@@ -41,8 +41,10 @@
 #
 #  Flash/debug: Raspberry Pi's OpenOCD fork through a CMSIS-DAP probe -
 #  the one OpenOCD that examines this chip's four cores and flashes from
-#  either architecture. The upload target is THE STATE-INDEPENDENT VERB
-#  (see rp2350_add_app()): a rescue over the debug port alone, then
+#  either architecture; the probe (the Raspberry Pi Debug Probe unless
+#  BRIO_PROBE names another) and its USB serial are cmake/probe.cmake's.
+#  The upload target is THE STATE-INDEPENDENT VERB (see
+#  rp2350_add_app()): a rescue over the debug port alone, then
 #  programming as core 0 of the Arm pair, then a reset - which works
 #  whatever the image already in the flash was doing, and whichever
 #  architecture it was running.
@@ -164,12 +166,14 @@ set(RP2350_OBJCOPY "${RP2350_TOOL_PREFIX}objcopy")
 # Raspberry Pi's OpenOCD fork: the one that examines this chip (both Arm
 # cores AND both RISC-V harts) and flashes from either side.
 set(RP2350_OPENOCD "/sw/openocd-rpi-acff23f/bin/openocd" CACHE FILEPATH "Raspberry Pi's OpenOCD fork, the one that knows the RP2350")
-set(RP2350_PROBE_SERIAL "" CACHE STRING "CMSIS-DAP probe serial to flash/debug through (empty: the only one attached)")
-if(RP2350_PROBE_SERIAL STREQUAL "")
-    set(RP2350_ADAPTER_SERIAL "")
-else()
-    set(RP2350_ADAPTER_SERIAL -c "adapter serial ${RP2350_PROBE_SERIAL}")
-endif()
+# The probe is cmake/probe.cmake's: BRIO_PROBE picks its kind (the
+# Raspberry Pi Debug Probe when empty), BRIO_PROBE_SERIAL one probe of
+# several, and RP2350_INTERFACE is the interface part of both OpenOCD
+# sessions below, the CMSIS-DAP backend included. bin/brio names the probe
+# from its manifest instead.
+include("${BRIO_ROOT}/cmake/probe.cmake")
+brio_probe_select(DEFAULT debugprobe KINDS cmsis-dap)
+brio_probe_openocd(RP2350_INTERFACE)
 
 set(RP2350_NVHEAP_BUILD_ID 0)
 file(GLOB_RECURSE _nvheap_id_sources CONFIGURE_DEPENDS
@@ -279,9 +283,7 @@ function(rp2350_add_app name)
     # one running.
     set(_rescue
         ${RP2350_OPENOCD}
-            -f interface/cmsis-dap.cfg
-            -c "cmsis_dap_backend usb_bulk"
-            ${RP2350_ADAPTER_SERIAL}
+            ${RP2350_INTERFACE}
             -c "adapter speed 1000"
             -c "transport select swd"
             -c "swd newdap rp2350 cpu -expected-id 0x00040927"
@@ -292,9 +294,7 @@ function(rp2350_add_app name)
             -c "shutdown")
     set(_program
         ${RP2350_OPENOCD}
-            -f interface/cmsis-dap.cfg
-            -c "cmsis_dap_backend usb_bulk"
-            ${RP2350_ADAPTER_SERIAL}
+            ${RP2350_INTERFACE}
             -c "set USE_CORE cm0"
             -c "adapter speed 5000"
             -f target/rp2350.cfg

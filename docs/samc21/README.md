@@ -123,7 +123,7 @@ its tarball into `/sw/openocd-0.12.0` (reached as `/sw/openocd`) by
 `/sw/src/build-openocd.sh` the way the toolchains are, with the
 CMSIS-DAP adapter on its hidapi backend; it drives the ICE without
 incident. With more than one Atmel-ICE attached, `adapter serial` is
-what tells them apart (the `SAMC21_PROBE_SERIAL` cache variable, empty
+what tells them apart (the `BRIO_PROBE_SERIAL` cache variable, empty
 by default, which means the only one attached; `bin/brio` takes the
 serial from its manifest instead). The probe serves one client at a
 time: close the debug session before flashing.

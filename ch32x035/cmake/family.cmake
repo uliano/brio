@@ -148,6 +148,15 @@ endforeach()
 
 set(CH32X035_OPENOCD "/sw/wch-openocd/bin/openocd" CACHE FILEPATH "WCH's OpenOCD fork (SDI transport)")
 set(CH32X035_OPENOCD_CFG "/sw/wch-openocd/bin/wch-riscv.cfg" CACHE FILEPATH "its RISC-V target config")
+# The probe is cmake/probe.cmake's: a WCH-Link, the one kind this family
+# drives, which the target script above opens itself; BRIO_PROBE_SERIAL
+# picks one of several, and CH32X035_INTERFACE is then its `adapter serial`,
+# placed before the target script (WCH's fork honours it there:
+# cli/bench/flash.py, wch_openocd_args). With no serial it is empty. The
+# OpenOCD binary and the target script are this family's.
+include("${BRIO_ROOT}/cmake/probe.cmake")
+brio_probe_select(DEFAULT wchlink)
+brio_probe_openocd(CH32X035_INTERFACE)
 
 # --- One app -> one executable target, one .bin/.hex, one -upload target.
 #     `scheduler` is ram or flash - an in-tree app's "// build: scheduler"
@@ -246,6 +255,7 @@ function(ch32x035_add_app name scheduler)
     # program on both is the one written here.
     add_custom_target(${name}-upload
         COMMAND ${CH32X035_OPENOCD}
+            ${CH32X035_INTERFACE}
             -f ${CH32X035_OPENOCD_CFG}
             -c "program $<TARGET_FILE:${name}> verify"
             -c "reset halt"

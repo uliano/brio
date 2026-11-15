@@ -22,9 +22,9 @@
 #  of C++ runs, because under the hard ABI the compiler may put a float in
 #  s0 anywhere it likes.
 #
-#  Flash/debug: OpenOCD over an ST-LINK (the boards' own V2-1 / V2-B, or a
-#  standalone V3): interface/stlink.cfg + target/stm32f4x.cfg; `adapter
-#  serial` names the probe, which has a real USB serial on every ST-LINK.
+#  Flash/debug: OpenOCD and target/stm32f4x.cfg, over an ST-LINK (the
+#  boards' own V2-1 / V2-B, or a standalone V3) unless BRIO_PROBE names
+#  another probe; the probe and its USB serial are cmake/probe.cmake's.
 #
 #  The NVHEAP build-id defsym is a property of util/nv_heap.hpp: an image
 #  that never names an NvHeap never references the symbol.
@@ -67,16 +67,23 @@ set(BRIO_COMMON_FLAGS
 find_program(ARM_OBJCOPY arm-none-eabi-objcopy PATHS "${ARM_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
 find_program(ARM_SIZE arm-none-eabi-size PATHS "${ARM_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
 find_program(ARM_OBJDUMP arm-none-eabi-objdump PATHS "${ARM_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
+find_program(ARM_GDB arm-none-eabi-gdb PATHS "${ARM_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
 
 set(STM32F4_OPENOCD "/sw/openocd/bin/openocd" CACHE FILEPATH "OpenOCD with ST-LINK + stm32f4x support")
-# `adapter serial` disambiguates which ST-LINK when more than one board
-# is attached; empty = the only one (bin/brio takes the serial from its
-# manifest instead).
-set(STM32F4_PROBE_SERIAL "" CACHE STRING "ST-LINK serial to flash/debug through (empty: the only one attached)")
-if(STM32F4_PROBE_SERIAL STREQUAL "")
-    set(STM32F4_ADAPTER_SERIAL "")
+# The probe is cmake/probe.cmake's: BRIO_PROBE picks its kind (the
+# ST-LINK when empty), BRIO_PROBE_SERIAL one probe of several, and
+# STM32F4_INTERFACE is the interface part of the OpenOCD command line. The
+# OpenOCD binary above and the target script, target/stm32f4x.cfg, are this
+# family's. bin/brio names the probe from its manifest instead. A Black
+# Magic Probe (bmp) is driven by the toolchain's gdb, not by OpenOCD.
+include("${BRIO_ROOT}/cmake/probe.cmake")
+brio_probe_select(DEFAULT stlink KINDS cmsis-dap atmelice jlink bmp)
+if(BRIO_PROBE_KIND STREQUAL "bmp")
+    if(NOT ARM_GDB)
+        message(FATAL_ERROR "brio: BRIO_PROBE=bmp needs arm-none-eabi-gdb, not found in ${ARM_TOOLCHAIN_DIR}/bin")
+    endif()
 else()
-    set(STM32F4_ADAPTER_SERIAL -c "adapter serial ${STM32F4_PROBE_SERIAL}")
+    brio_probe_openocd(STM32F4_INTERFACE)
 endif()
 
 set(STM32F4_NVHEAP_BUILD_ID 0)
@@ -167,18 +174,29 @@ function(stm32_add_app name)
     # The DHCSR write after the reset is the samc21 lesson (a core left with
     # C_DEBUGEN set HALTS on BKPT instead of faulting): every panic ends in
     # a BKPT, and a flashing session must not leave the board deaf to it.
-    add_custom_target(${name}-upload
-        COMMAND ${STM32F4_OPENOCD}
-            -f interface/stlink.cfg
-            ${STM32F4_ADAPTER_SERIAL}
-            -f target/stm32f4x.cfg
-            -c "program $<TARGET_FILE:${name}> verify"
-            -c "reset run"
-            -c "mww 0xE000EDF0 0xA05F0000"
-            -c "exit"
-        DEPENDS ${name}
-        VERBATIM
-    )
+    # On a Black Magic Probe the upload target is gdb's scripted load
+    # (cmake/probe.cmake, brio_probe_bmp()), and none of the OpenOCD steps
+    # below runs: no target script, no `reset run`, no DHCSR write.
+    if(BRIO_PROBE_KIND STREQUAL "bmp")
+        brio_probe_bmp(_upload "${ARM_GDB}" "$<TARGET_FILE:${name}>")
+        add_custom_target(${name}-upload
+            COMMAND ${_upload}
+            DEPENDS ${name}
+            VERBATIM
+        )
+    else()
+        add_custom_target(${name}-upload
+            COMMAND ${STM32F4_OPENOCD}
+                ${STM32F4_INTERFACE}
+                -f target/stm32f4x.cfg
+                -c "program $<TARGET_FILE:${name}> verify"
+                -c "reset run"
+                -c "mww 0xE000EDF0 0xA05F0000"
+                -c "exit"
+            DEPENDS ${name}
+            VERBATIM
+        )
+    endif()
 endfunction()
 
 # The name every family's recipe answers to, which is the one an

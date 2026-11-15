@@ -31,7 +31,7 @@ owed:
 | 3. A board file | verified on the CH32V006K8 with a copy of `ch32v00x/src/apps/blink.cpp`: brio's `v006k8` board file through `BRIO_BOARD`, and a copy of it kept in the application's directory (the two images byte-identical); the refusal of an unknown board type and the compile error of a board file whose part is not the build's |
 | 4. Presets of your own | verified as written for the release and debug presets of the STM32G0B1RE, the release image byte-identical to step 1's |
 | 5. The build directory | verified: the files listed, after every build above |
-| 6. Flash with the `-upload` target | configured, not run: the target is the in-tree `-upload` target unchanged, and the command it generates with a probe serial was read in the build directory's `build.ninja`; no board was programmed from an application outside the tree |
+| 6. Flash with the `-upload` target | verified on an AVR128DB48 board through a PICkit 4, `-DBRIO_PROBE=pickit4` with and without `-DBRIO_PROBE_SERIAL`: the image written and read back by avrdude. On the STM32G0B1RE as written, and for every other family and probe kind, configured, not run: the command was read in the build directory's `build.ninja` |
 | What `brio check` does | verified: `brio check all` ends with the external guard on every family |
 
 "Expected" paragraphs describe what the tools print by design, not a
@@ -249,25 +249,63 @@ programs through OpenOCD and the Nucleo's ST-LINK, as step 3 of the
 cmake --build build/stm32g0b1re --target my_app-upload
 ```
 
-With more than one probe attached, the family's probe-serial variable,
-given at the configure, picks one:
+The probe is chosen at the configure by three cache variables, the
+same in every family (`cmake/probe.cmake` says what each does):
 
-| Family | Probe serial | Programmer |
+- `BRIO_PROBE`, the probe's kind; empty means the family's own probe,
+  the first of its row below.
+- `BRIO_PROBE_SERIAL`, the probe's USB serial, which picks one probe
+  when more than one of the kind is attached; empty means the only one.
+- `BRIO_PROBE_PORT`, the serial port of a probe that is one: the
+  SerialUPDI adapter (`serialupdi`, whose rate is `BRIO_PROBE_BAUD`,
+  230400 when empty) and the Black Magic Probe (`bmp`).
+
+| Family | Its own probe | Other kinds |
 |---|---|---|
-| AVR DA, DB, EA | `AVR_PROBE_SERIAL` | avrdude, the Atmel-ICE over UPDI |
-| SAM C21 | `SAMC21_PROBE_SERIAL` | OpenOCD, the Atmel-ICE over SWD |
-| STM32G0, STM32F4 | `STM32G0_PROBE_SERIAL`, `STM32F4_PROBE_SERIAL` | OpenOCD, the ST-LINK |
-| RP2040, RP2350 | `RP2040_PROBE_SERIAL`, `RP2350_PROBE_SERIAL` | OpenOCD, a CMSIS-DAP probe |
-| CH32V00x, CH32V203/CH32V303, CH32X035 | none | WCH's OpenOCD, the WCH-Link |
+| AVR DA, DB, EA | `atmelice`: avrdude, the Atmel-ICE over UPDI | `pickit4`, `pickit5`, `snap`, `nedbg`, `serialupdi` |
+| SAM C21 | `atmelice`: OpenOCD, the Atmel-ICE over SWD | `cmsis-dap`, `jlink`, `bmp` |
+| STM32G0, STM32F4 | `stlink`: OpenOCD, the ST-LINK | `cmsis-dap`, `atmelice`, `jlink`, `bmp` |
+| RP2040 | `debugprobe`: OpenOCD, the Raspberry Pi Debug Probe | `cmsis-dap`, `atmelice`, `bmp` |
+| RP2350 | `debugprobe`: Raspberry Pi's OpenOCD, the Raspberry Pi Debug Probe | `cmsis-dap` |
+| CH32V00x, CH32V203/CH32V303, CH32X035 | `wchlink`: WCH's OpenOCD, the WCH-Link | none |
+
+[The probes' index](../probes/README.md), "The probe of an -upload
+target", says what each kind is and what drives it. Every kind but a
+family's own and the PICkit 4 is configured, not run, through an
+`-upload` target: its command was read in `build.ninja`, and no board
+was programmed with it.
+
+A board on another probe names its kind at the configure, for example
+an AVR128DB48 on a PICkit 4:
+
+```bash
+cmake -S . -B build/avr128db48 -G Ninja -DBRIO_MCU=avr128db48 -DBRIO_PROBE=pickit4
+```
+
+or, when the board is always on that probe, in the `CMakeLists.txt`
+before the include of `cmake/brio.cmake`:
+
+```cmake
+set(BRIO_PROBE pickit4 CACHE STRING "")
+```
+
+A probe's serial belongs to the desk, not to the project: give
+`-DBRIO_PROBE_SERIAL=<serial>` on the configure line, or put it in a
+`CMakeUserPresets.json` beside the project's `CMakePresets.json` (the
+file CMake reserves for one developer's own presets, which is not
+committed), never in the `CMakeLists.txt` or the shared presets.
 
 OpenOCD's path is the family's `<FAMILY>_OPENOCD` variable
 (`STM32G0_OPENOCD` here), as for the in-tree applications.
 
-**This step has not been run from an application outside the tree.**
-The target and its command are the in-tree ones unchanged (the
-family's recipe is the one place both are written), and the command
-generated with `-DSTM32G0_PROBE_SERIAL=<serial>` was read in
-`build.ninja`; no board was programmed this way.
+**From an application outside the tree this step was run on one
+board**, an AVR128DB48 on a PICkit 4: `-DBRIO_PROBE=pickit4`, with and
+without `-DBRIO_PROBE_SERIAL`, wrote the image and avrdude read it
+back. On the STM32G0B1RE of this page the target and its command are
+the in-tree ones (the family's recipe is the one place both are
+written), and the command generated with
+`-DBRIO_PROBE_SERIAL=<serial>` was read in `build.ninja`; that board
+was not programmed this way.
 
 ## What brio check does for your application
 

@@ -108,17 +108,16 @@ find_program(AVR_OBJCOPY avr-objcopy PATHS "${AVR_TOOLCHAIN_DIR}/bin" NO_DEFAULT
 find_program(AVR_SIZE avr-size PATHS "${AVR_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
 find_program(AVR_OBJDUMP avr-objdump PATHS "${AVR_TOOLCHAIN_DIR}/bin" NO_DEFAULT_PATH)
 
-# --- Flash over UPDI (Atmel-ICE). -P usb:<serial> disambiguates which
-#     Atmel-ICE when more than one is attached (bin/brio does the same
-#     from its manifest, which is the way to flash a desk with several
-#     boards). Empty = the only probe attached; set it with
-#     -DAVR_PROBE_SERIAL=<serial> (bin/brio list prints them).
-set(AVR_PROBE_SERIAL "" CACHE STRING "Atmel-ICE serial to flash/debug through (empty: the only one attached)")
-if(AVR_PROBE_SERIAL STREQUAL "")
-    set(AVR_PROBE_PORT "usb")
-else()
-    set(AVR_PROBE_PORT "usb:${AVR_PROBE_SERIAL}")
-endif()
+# --- Flash over UPDI with the avrdude in the toolchain's directory. The
+#     probe is cmake/probe.cmake's: BRIO_PROBE picks its kind (the
+#     Atmel-ICE when empty), BRIO_PROBE_SERIAL one probe of several, and
+#     AVR_PROBE_ARGS is the programmer's part of the command line (-c,
+#     -P and the UPDI clock); the part, -p, is this family's.
+#     bin/brio names the probe from its manifest instead, which is the
+#     way to flash a desk with several boards.
+include("${BRIO_ROOT}/cmake/probe.cmake")
+brio_probe_select(DEFAULT atmelice KINDS pickit4 pickit5 snap nedbg serialupdi)
+brio_probe_avrdude(AVR_PROBE_ARGS)
 
 # --- The build id every image carries: avrxt/nvm_flash.hpp records it in
 #     every map version of a flash NvHeap, where it is a DIAGNOSTIC and
@@ -237,8 +236,7 @@ function(avr_add_app name)
     )
 
     add_custom_target(${name}-upload
-        COMMAND ${AVR_TOOLCHAIN_DIR}/bin/avrdude -p ${AVR_MCU} -c atmelice_updi
-            -P ${AVR_PROBE_PORT}
+        COMMAND ${AVR_TOOLCHAIN_DIR}/bin/avrdude -p ${AVR_MCU} ${AVR_PROBE_ARGS}
             -U flash:w:$<TARGET_FILE_DIR:${name}>/${name}.hex:i
         DEPENDS ${name}
         VERBATIM
