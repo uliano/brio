@@ -118,7 +118,8 @@
 //      ENABLE set, Uart::release()), what the gated instance holds, and
 //      the same Uart's next init() and first block - every byte, in order,
 //      nothing more (the release contract, docs/design/dma.md)
-//   u  the both-engine pair on the loop at 115200, 1 and 3 Mbaud
+//   u  the both-engine pair on the loop at 115200, 1 and 2 Mbaud, and at
+//      3 Mbaud printed (the vector in the flash cannot hold it)
 //   2  the pair's shape for minutes, the console on its interrupt
 //   3  the console's transmit engine alone for minutes
 //
@@ -2539,23 +2540,43 @@ bool pair_clean(const PairResult& r, uint32_t total) {
 
 /**
  * u - THE PAIR AT THREE RATES: 16 KB through both engines at 115200 (half of
- * it: 0.7 s of wire), 1 Mbaud and 3 Mbaud, every byte checked, every class of
- * loss counted. The receive completion is served first in the DMAC's vector and
- * its re-arm is the race against the receiver's two levels and the shifter: at
- * 3 Mbaud two frames are 320 core cycles.
+ * it: 0.7 s of wire), 1 Mbaud and 2 Mbaud, every byte checked, every class of
+ * loss counted; then 3 Mbaud, printed and not judged.
+ *
+ * THE RECEIVE RE-ARM'S WINDOW. A filled receive block leaves its channel idle
+ * until dma_isr() hands it the next run, and the receiver's two levels and its
+ * shifter are what covers the gap (31.6.2.6): three frames from the block's
+ * last beat until a third character completes with no room - 480 core cycles
+ * at 3 Mbaud, 720 at 2 Mbaud, 1440 at 1 Mbaud. Measured on this image's vector,
+ * which sits in the flash behind two wait states: the transmit completion's
+ * work some 270 cycles and the receive completion's some 280, beyond the
+ * entry's own (docs/samc21/sercom.md, Bench findings). A receive completion
+ * that rises just after the vector asked for it - the loop's transmit block
+ * ends two or three frames before the receive block it feeds, so they meet at
+ * every boundary they share - waits for the transmit work and then does its
+ * own up to the re-arm: about 500 cycles, the 3 Mbaud window and no less. So
+ * 3 Mbaud is not held by design from the flash (measured: 4 to 12 runs of 100
+ * lose one burst there, 11 bytes, one BUFOVF) and 2 Mbaud is, with a third of
+ * its window over (0 of 100). The vector placed in SRAM held 3 Mbaud in 100
+ * runs of 100; this image keeps its vector in the flash, the default a program
+ * gets.
  */
 void tu_pair() {
     const PairResult a = pair_run(115'200u, 8192u);
     print_pair(115'200u, a);
     const PairResult b = pair_run(1'000'000u, 16384u);
     print_pair(1'000'000u, b);
-    const PairResult c = pair_run(3'000'000u, 16384u);
-    print_pair(3'000'000u, c);
+    const PairResult c = pair_run(2'000'000u, 16384u);
+    print_pair(2'000'000u, c);
+    const PairResult d = pair_run(3'000'000u, 16384u);
+    print_pair(3'000'000u, d);
+    print(plain, "  (3 Mbaud printed, not judged: the receive re-arm's three frames are 480 "
+                 "cycles, the vector's path from the flash about 500)", crlf);
     bench.verdict("the both-engine Uart on the loop at 115200: every byte exact, nothing lost or "
                   "abandoned",
                   pair_clean(a, 8192u));
     bench.verdict("at 1 Mbaud: every byte exact, nothing lost or abandoned", pair_clean(b, 16384u));
-    bench.verdict("at 3 Mbaud: every byte exact, nothing lost or abandoned", pair_clean(c, 16384u));
+    bench.verdict("at 2 Mbaud: every byte exact, nothing lost or abandoned", pair_clean(c, 16384u));
 }
 
 /// The marked line the shape letter prints each second, read by bin/brio's
@@ -3206,8 +3227,8 @@ bool peer_act(link::Op op, const link::Params& a) {
 /// (usart_peer's settle()), on a millisecond count that may make that 4 ms;
 /// a receiver brought up settle_ms after the ack, as peer_act()'s callers
 /// do, meets the break with a millisecond to spare, or a part of it - at
-/// half the rate a break of 26 far bits is 13 here, two past the 11 it
-/// needs. One millisecond after the ack is past the peer's
+/// three fifths of the rate a break of 26 far bits is 15.6 here, against
+/// the 11 it needs. One millisecond after the ack is past the peer's
 /// reconfiguration and three before its first edge.
 bool peer_command_listen_first(link::Op op, const link::Params& a) {
     if (!peer_command(op, a)) {
@@ -4441,6 +4462,22 @@ struct AbRun {
     Drain d{};
 };
 
+/// THE LISTEN'S OWN RECORD, printed beside a leg of section 1 that fails: the
+/// level of PA16 (the far TxD, read under the mux) at each change, and the
+/// turn of the poll at which RXBRK, ISF or a received frame was seen - all
+/// in turns of one masked poll, read in bits of the far rate against the
+/// sync field's own nine bits (its start bit's fall to its stop bit's
+/// rise). It times the far end's break, the delimiter after it and where
+/// in them the receiver raised its flags; a diagnosis, judged by nothing.
+struct AbTrace {
+    static constexpr uint8_t most = 64;
+    uint32_t turn[most] = {};
+    uint8_t what[most] = {};   ///< bit 0 the pad's level; 1 RXBRK, 2 ISF, 3 a frame
+    uint16_t data[most] = {};  ///< the frame taken at an entry with bit 3
+    uint8_t n = 0;
+    bool seen = false;         ///< the break's fall came within the wait
+};
+
 /// An auto-baud leg's listening window: the action's own deadline and
 /// 20 ms, plus the settle_ms the listen now spends before the peer's
 /// first edge (peer_command_listen_first()).
@@ -4448,35 +4485,142 @@ uint32_t listen_ms(uint32_t action_ms) {
     return action_ms + 20u + static_cast<uint32_t>(link::settle_ms);
 }
 
-AbRun autobaud_listen(uint32_t fallback, uint32_t ms) {
+/// One turn of the auto-baud poll: the flags and STATUS read, each raised
+/// one recorded and cleared, a received frame taken and counted. The same
+/// work in the masked first part of the listen and in the rest of it.
+[[gnu::always_inline]] inline uint8_t autobaud_poll(AbRun& r, uint16_t& data) {
+    uint8_t ev = 0;
+    const uint8_t f = Lk::flags();
+    if ((f & SercomFlag::rxbrk) != 0u) {
+        r.brk = true;
+        Lk::clear_flags(SercomFlag::rxbrk);
+        ev |= 2u;
+    }
+    if ((f & SercomFlag::error) != 0u) {
+        r.error = true;
+        Lk::clear_flags(SercomFlag::error);
+    }
+    if ((Lk::status() & SercomStatus::sync_field_error) != 0u) {
+        r.isf = true;
+        Lk::clear_status(SercomStatus::sync_field_error);
+        ev |= 4u;
+    }
+    const Got g = take();
+    if (g.any) {
+        count(r.d, g);
+        data = g.data;
+        ev |= 8u;
+    }
+    return ev;
+}
+
+/// The masked first part of the listen (AbTrace): wait for the far
+/// break's fall for at most `wait_turns`, then poll for `turns`, every turn
+/// storing into the next slot and only a change moving the index (as
+/// pad_log() does, so a turn costs the same whether or not it records).
+/// Under the mask the ticker stops: the turns bound the window, and the
+/// milliseconds that follow lag the wall by it.
+[[gnu::noinline]] void autobaud_traced(AbRun& r, AbTrace& tr, uint32_t wait_turns,
+                                       uint32_t turns) {
+    tr = AbTrace{};
+    SamPlatform::CriticalSection cs;
+    uint32_t w = wait_turns;
+    while ((LinkPort::in() & RxdPin::mask) != 0u && --w != 0u) {
+    }
+    if (w == 0u) {
+        return;
+    }
+    tr.seen = true;
+    uint8_t prev = 0;   // the fall just seen: level low
+    tr.turn[0] = 0;
+    tr.what[0] = 0;
+    uint32_t i = 1;
+    for (uint32_t t = 1; t < turns; ++t) {
+        uint16_t data = 0;
+        const uint8_t level = (LinkPort::in() & RxdPin::mask) != 0u ? 1u : 0u;
+        const uint8_t ev = static_cast<uint8_t>(level | autobaud_poll(r, data));
+        tr.turn[i] = t;
+        tr.what[i] = ev;
+        tr.data[i] = data;
+        const uint32_t diff = static_cast<uint32_t>((ev ^ prev) & 1u) | (ev & 0x0Eu);
+        i += static_cast<uint32_t>(diff != 0u) & static_cast<uint32_t>(i < AbTrace::most - 1u);
+        prev = ev;
+    }
+    tr.n = static_cast<uint8_t>(i);
+}
+
+AbRun autobaud_listen(uint32_t fallback, uint32_t ms, uint32_t rate, AbTrace& tr) {
     AbRun r{};
     const uint16_t reg = sercom_fractional_baud_reg(xtal_hz, fallback).value_or(0);
     r.up = reg != 0u && dut_up({.pads = link_pads, .baud = reg,
                                 .sampling = UartSampling::x16_fractional,
                                 .form = UartForm::auto_baud},
                                fallback);
+    // The traced part: the break's fall within 10 ms of turns of at least
+    // four cycles (the peer's first edge is 3 to 4 ms away,
+    // peer_command_listen_first()), then from that fall the leg's 26 low
+    // and 2 high bits and its five frames, 78 far bits, taken as 80 in
+    // turns of at least 64 cycles (a turn measured about 156: 32 a bit at
+    // 9600) - the window outlasts the leg, and a leg longer than it is
+    // polled on unmasked below, the trace then short of its end.
+    const uint32_t far_bits = 80u;
+    const uint32_t log_turns = static_cast<uint32_t>(
+        (static_cast<uint64_t>(far_bits) * SysClock::hz) / (64ull * (rate != 0u ? rate : 1u)));
+    autobaud_traced(r, tr, (SysClock::hz / 100u) / 4u, log_turns);
     const uint32_t t0 = Ticker::millis();
     while (Ticker::millis() - t0 < ms) {
-        const uint8_t f = Lk::flags();
-        if ((f & SercomFlag::rxbrk) != 0u) {
-            r.brk = true;
-            Lk::clear_flags(SercomFlag::rxbrk);
-        }
-        if ((f & SercomFlag::error) != 0u) {
-            r.error = true;
-            Lk::clear_flags(SercomFlag::error);
-        }
-        if ((Lk::status() & SercomStatus::sync_field_error) != 0u) {
-            r.isf = true;
-            Lk::clear_status(SercomStatus::sync_field_error);
-        }
-        const Got g = take();
-        if (g.any) {
-            count(r.d, g);
-        }
+        uint16_t data = 0;
+        (void)autobaud_poll(r, data);
     }
     r.reg = Lk::baud_reg();
     return r;
+}
+AbRun autobaud_listen(uint32_t fallback, uint32_t ms, uint32_t rate) {
+    AbTrace tr{};
+    return autobaud_listen(fallback, ms, rate, tr);
+}
+
+/// The trace in bits of the far rate: the break, the delimiter, RXBRK's
+/// turn from the break's fall, ISF's from the sync's start bit, and the
+/// frames taken (their value, their turn from the sync's start in bits).
+void print_trace(const AbTrace& tr) {
+    if (!tr.seen) {
+        print(plain, "    trace: no fall of PA16 within the wait", crlf);
+        return;
+    }
+    uint32_t e[12] = {};
+    uint8_t ne = 0;
+    uint8_t prev = 0;
+    for (uint8_t i = 0; i < tr.n && ne < 12u; ++i) {
+        if (i == 0u || ((tr.what[i] ^ prev) & 1u) != 0u) {
+            e[ne++] = tr.turn[i];
+        }
+        prev = tr.what[i];
+    }
+    if (ne < 12u) {
+        print(plain, "    trace: ", ne, " edges of PA16 (12 wanted), ", tr.n, " entries", crlf);
+        return;
+    }
+    const uint32_t bit_q8 = ((e[11] - e[2]) * 256u) / 9u;
+    print(plain, "    trace: a far bit ", bit_q8 / 256u, " turns; break ");
+    print_millibits(millibits(e[1] - e[0], bit_q8));
+    print(plain, ", delimiter ");
+    print_millibits(millibits(e[2] - e[1], bit_q8));
+    for (uint8_t i = 0; i < tr.n; ++i) {
+        if ((tr.what[i] & 2u) != 0u) {
+            print(plain, ", RXBRK at ");
+            print_millibits(millibits(tr.turn[i] - e[0], bit_q8));
+        }
+        if ((tr.what[i] & 4u) != 0u) {
+            print(plain, ", ISF at sync+");
+            print_millibits(millibits(tr.turn[i] > e[2] ? tr.turn[i] - e[2] : 0u, bit_q8));
+        }
+        if ((tr.what[i] & 8u) != 0u) {
+            print(plain, ", ", hex(tr.data[i]), " at sync+");
+            print_millibits(millibits(tr.turn[i] > e[2] ? tr.turn[i] - e[2] : 0u, bit_q8));
+        }
+    }
+    print(plain, crlf);
 }
 
 uint32_t eighths_of(uint16_t reg) {
@@ -4494,19 +4638,30 @@ void tO_autobaud() {
     }
     const DsuDeviceId id = Dsu::device_id();
 
-    // 1. A foreign rate learned, from the rate itself and from half of it.
+    // 1. A foreign rate learned, from the rate itself and from three fifths
+    //    of it. NOT FROM HALF: measured on this receiver, a sync is accepted
+    //    only when its bits outlast half of the receiver's own bit at the
+    //    BAUD it listens with - learned at 0.508 and 0.525 of the
+    //    fallback's bit in every leg, at 0.503 in half of them and at 0.482
+    //    and 0.487 in none, ISF raised instead (docs/samc21/sercom.md, Bench
+    //    findings) - so a fallback of exactly half the rate sits on that
+    //    step and its outcome is the two crystals' ratio. Three fifths
+    //    leaves a fifth of a bit over the step, past the fallback's
+    //    quantization (an eighth of a BAUD of 20 or more, under 0.65 %) and
+    //    the two crystals' disagreement (tens of ppm).
     const uint32_t rates[] = {9'600, 57'600, 115'200, 123'456};
     for (const uint32_t rate : rates) {
-        for (uint8_t half = 0; half < 2u; ++half) {
-            const uint32_t fallback = half ? rate / 2u : rate;
+        for (uint8_t slow = 0; slow < 2u; ++slow) {
+            const uint32_t fallback = slow ? (rate * 3u) / 5u : rate;
             link::Params a{};
             a.cfg.rate = rate;
             a.ms = bound_ms(rate, 40);
             a.value = 0x55;
-            a.aux16 = 26;   // 26 far bits: 13 at half the rate, past the 11 a break needs
+            a.aux16 = 26;   // 26 far bits: 15.6 at three fifths, past the 11 a break needs
             a.aux8 = 4;
             const bool sent = peer_command_listen_first(link::Op::autobaud_tx, a);
-            const AbRun r = sent ? autobaud_listen(fallback, listen_ms(a.ms)) : AbRun{};
+            AbTrace tr{};
+            const AbRun r = sent ? autobaud_listen(fallback, listen_ms(a.ms), rate, tr) : AbRun{};
             const uint32_t want = (8u * xtal_hz) / (16u * rate);
             const uint32_t got = eighths_of(r.reg);
             const bool payload = r.d.frames >= 4u && r.d.last == 0xA3u;
@@ -4517,10 +4672,15 @@ void tO_autobaud() {
             print_eighths(want);
             print(plain, "), frames ", r.d.frames, " last ", hex(r.d.last), " ferr ", r.d.ferr,
                   crlf);
-            judge(num(rate), half ? " baud learned from half its rate" : " baud learned",
-                  r.up && r.brk && !r.isf && (got > want ? got - want : want - got) <= 1u);
-            judge(num(rate), " baud: the payload read at the learned rate",
-                  payload && r.d.ferr == 0u);
+            const bool learned =
+                r.up && r.brk && !r.isf && (got > want ? got - want : want - got) <= 1u;
+            const bool read = payload && r.d.ferr == 0u;
+            if (!learned || !read) {
+                print_trace(tr);
+            }
+            judge(num(rate), slow ? " baud learned from three fifths of its rate" : " baud learned",
+                  learned);
+            judge(num(rate), " baud: the payload read at the learned rate", read);
         }
     }
 
@@ -4533,7 +4693,7 @@ void tO_autobaud() {
         a.aux16 = 20;
         a.aux8 = 2;
         const bool sent = peer_command_listen_first(link::Op::autobaud_tx, a);
-        const AbRun r = sent ? autobaud_listen(9'600, listen_ms(a.ms)) : AbRun{};
+        const AbRun r = sent ? autobaud_listen(9'600, listen_ms(a.ms), 9'600) : AbRun{};
         const uint16_t fallback = sercom_fractional_baud_reg(xtal_hz, 9'600).value();
         print(plain, "  sync 0x53: RXBRK ", r.brk ? 1 : 0, " ISF ", r.isf ? 1 : 0, " ERROR ",
               r.error ? 1 : 0, " BAUD ", hex(r.reg), " (the fallback ", hex(fallback), ")", crlf);
@@ -4554,7 +4714,7 @@ void tO_autobaud() {
             a.aux16 = lows[k];
             a.aux8 = 2;
             const bool sent = peer_command_listen_first(link::Op::autobaud_tx, a);
-            const AbRun r = sent ? autobaud_listen(9'600, listen_ms(a.ms)) : AbRun{};
+            const AbRun r = sent ? autobaud_listen(9'600, listen_ms(a.ms), 9'600) : AbRun{};
             brk[k] = r.brk;
             print(plain, "  a low of ", lows[k], " bit times: RXBRK ", r.brk ? 1 : 0, crlf);
         }
@@ -5557,7 +5717,7 @@ int main() {
     bench.letter('t', "the interrupt receiver at 3 Mbaud on the loop", tt_levels);
     bench.letter('w', "a released requester: what reaches the same Uart's next init()",
                  tw_released_requester);
-    bench.letter('u', "the both-engine Uart on the loop at 115200, 1 Mbaud and 3 Mbaud", tu_pair);
+    bench.letter('u', "the both-engine Uart on the loop at 115200, 1 Mbaud and 2 Mbaud", tu_pair);
     bench.letter('2', "the Uart pair's shape for minutes, the console on its interrupt", t2_pair_shape,
                  false);
     bench.letter('3', "the console alone on its transmit engine for minutes", t3_console_shape, false);

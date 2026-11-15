@@ -254,7 +254,10 @@ identifier written to DATA - and STATUS.TXE once it is out; and break
 detection with auto-baud (0x4, 0x5): a low of more than 11 nominal bit
 times raises INTFLAG.RXBRK, the 0x55 sync field after it is timed and the
 measured rate written into BAUD and FP, a sync that is not 0x55 raises
-STATUS.ISF with ERROR and leaves BAUD alone. Erratum 1.17.2: on revisions
+STATUS.ISF with ERROR and leaves BAUD alone - and so, measured, does a
+0x55 whose bits are under about half the receiver's bit, which the
+chapter does not say: a rate is learned from a fallback above half of
+it, and from half only by chance (Bench findings). Erratum 1.17.2: on revisions
 B to E of the E, G and J parts a missing stop bit in auto-baud mode is
 flagged neither as ISF nor as FERR (`sercom_autobaud_checks_stop()` asks
 the die's DID.REVISION).
@@ -569,18 +572,34 @@ The engines are a policy, not a feature of the task:
   console that wants it keeps the interrupt receiver. A full ring leaves
   the channel idle, counted in `rx_overruns()`, and the consumer's next
   release starts it again.
-- **The receive channel first.** A filled receive block leaves its channel
-  idle until the handler's re-arm, and the receiver's two levels and its
-  shifter are all that covers the gap: a third character completing
-  overflows (31.6.2.6). So `dma_isr()` asks the receive channel first and
-  again after each turn, a transmit completion's work never ahead of a
-  pending re-arm. Measured on the loop through PA18 (`test_samc_uart`
-  letter u): the pair exact at 115200 (8 KB), 1 Mbaud and 3 Mbaud (16 KB
-  each), no overrun, skip or fault, in ten runs; and for ten minutes at
-  1 Mbaud beside the console on its interrupt, 59,999,738 bytes exact
-  (letter 2). At 3 Mbaud two frames are 320 core cycles: with the receive
-  completion served after the transmit one, one byte was lost in each
-  1 KB block.
+- **The receive channel first, and the rate it holds.** A filled receive
+  block leaves its channel idle until the handler's re-arm, and the
+  receiver's two levels and its shifter are all that covers the gap: the
+  block's last beat empties the buffer, and a third character completing
+  with both levels full overflows (31.6.2.6) - three frames after that
+  beat, 480 core cycles at 3 Mbaud, 720 at 2 Mbaud, 1440 at 1 Mbaud. So
+  `dma_isr()` asks the receive channel first and again after each turn, a
+  transmit completion's work never ahead of a re-arm already pending. What
+  the order cannot help is a receive completion that rises while a
+  transmit completion's work runs, and on the loop it does at every
+  boundary the two blocks share: the transmit block ends two or three
+  frames before the receive block it feeds. Measured on the vector in the
+  flash (`test_samc_uart` letter u, each entry timed from the vector, the
+  timing's own loads in it): an entry that finds no flag 146 cycles, the
+  transmit completion's 411 to 413, the receive completion's 422 - some
+  270 and 280 cycles of work beyond the entry's own -, so a receive
+  completion behind a transmit one waits about 500 cycles for its
+  re-arm, the 3 Mbaud window and no less. Measured: from the flash the
+  pair is exact at 115200 (8 KB), 1 Mbaud and 2 Mbaud (16 KB each) in 100
+  runs of 100 and loses one burst at 3 Mbaud in 4 to 12 runs of 100 (one
+  BUFOVF and the stream 11 bytes short, the same in every such run), the
+  loss moving between block boundaries with a
+  few tens of cycles added to the vector; with `DMAC_Handler` placed in
+  SRAM (platform.md, "A handler in SRAM") 3 Mbaud was exact in 100 runs
+  of 100. For ten minutes at 1 Mbaud beside the console on its interrupt,
+  59,999,738 bytes exact (letter 2). With the receive completion served
+  after the transmit one, one byte was lost in each 1 KB block at
+  3 Mbaud.
 - **The standing request, and why nothing kicks.** DRE is a level -
   "my transmit buffer is free" (31.6.4.1) - and the channel serves it as
   it finds it: standing when the channel is enabled, or when `arm()`
@@ -1112,9 +1131,27 @@ by the signal's own bit edges - times this board's pads):
   synchronization 31.6.3.10's note allows each frame.
 - **Auto-baud from a foreign sender** (letter O): the far board's break,
   0x55 and four payload frames at 9600, 57600, 115200 and 123456 baud,
-  this receiver starting from the rate itself and from half of it: BAUD
-  and FP learned as 156.125, 26.0, 13.0 and 12.125 - 8 f_ref / (16 f_baud)
-  to the eighth below - and the payload read at the learned rate. A sync of
+  this receiver starting from the rate itself and from three fifths of
+  it: BAUD and FP learned as 156.125, 26.0, 13.0 and 12.125 - 8 f_ref /
+  (16 f_baud) to the eighth below - and the payload read at the learned
+  rate.
+- **What auto-baud can learn from below** (letter O's fallback swept, 20
+  legs a point at 9600, 57600 and 115200, then the far bit-banger's sync,
+  whose cells run long, read back through the BAUD it taught): the sync
+  is taken only when its bits outlast half of the receiver's bit at the
+  BAUD it listens with, a step that 31.6.3.4 does not state. Sync bits of
+  0.508 and 0.525 of the receiver's bit taught BAUD in every leg, 0.503 in
+  half of them, 0.482 and 0.487 in none: ISF and ERROR rose and BAUD kept
+  its fallback. The start bit alone does not decide it - lengthened by a
+  fifth under bits of 0.49 the sync is still refused, shortened by a tenth
+  under bits of 0.52 still taken - and a start bit shortened to 0.42 of the
+  receiver's bit fails half the legs, near the lone pulse's threshold in
+  the receiver's votes above. So a receiver can learn a rate up to just
+  under twice the one it listens with, and a fallback of exactly half the
+  far rate sits on the step: its outcome is the two crystals' ratio
+  (measured: 6 legs of 120 at half the rate failed). Below 0.42 of the
+  rate a 26-bit break is under 31.6.3.4's 11 nominal bits and RXBRK never
+  rises. A sync of
   0x53 raises ISF with ERROR and leaves BAUD at its fallback; a low of 10
   bit times is no break, 12 is. On this die (revision F) a sync whose stop
   bit is missing - the bit-banger's last data bit stretched over it -

@@ -2089,11 +2089,17 @@ public:
     ///
     /// THE RECEIVE CHANNEL FIRST. A filled receive block leaves its channel
     /// idle until this body's re-arm, and the receiver's two levels and the
-    /// shifter are all that covers the gap: a third character completing
-    /// overflows (31.6.2.6), two frames after the block's last beat. A
-    /// transmit block's end only leaves the line idle a while, so nothing of
-    /// it runs ahead of the re-arm. Both are asked again after each turn, the
-    /// two flags able to rise while the other is served.
+    /// shifter are all that covers the gap: the block's last beat empties
+    /// the buffer, and a third character completing with both levels full
+    /// overflows (31.6.2.6), three frames after that beat - 480 core cycles
+    /// at 3 Mbaud. A transmit block's end only leaves the line idle a while,
+    /// so nothing of it runs ahead of a re-arm already asked for. Both are
+    /// asked again after each turn, the two flags able to rise while the
+    /// other is served - and a receive completion that rises during a
+    /// transmit completion's work waits for it: from the flash the two make
+    /// about 500 cycles, so the pair holds 2 Mbaud there and not 3, which
+    /// this body in SRAM does (docs/samc21/sercom.md, "The receive channel
+    /// first").
     ///
     /// On the receive channel a completion means the block filled its run -
     /// half the ring at most - and this is the engine's edge: the run is
